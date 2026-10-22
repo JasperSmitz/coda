@@ -11,7 +11,7 @@
 | Queue | Coda exclusively owns queue state. mpv holds at most one playlist entry and plays one track at a time (ADR 0002). |
 | Playback boundary | `PlaybackCommand` in, `PlaybackEvent` out, over Tokio channels. One concrete mpv backend; no trait. |
 | Event loop | A single `tokio::select!` loop over terminal input, playback events, scan events, signals and a redraw tick. |
-| mpv launch | `--no-config --idle=yes --no-video --no-terminal --input-ipc-server=<socket>`, plus `--ytdl=no`. Spawned directly (no shell), stdio null. |
+| mpv launch | `--no-config --idle=yes --no-video --no-terminal --input-ipc-server=<socket>`, plus `--ytdl=no --access-references=no`. Spawned directly (no shell), stdio null. |
 | Platforms | Linux and macOS (Unix sockets). Windows out of scope. |
 | Missing mpv | Detected at startup, before the TUI starts; clear message with install hint; non-zero exit. |
 | Discovery | `walkdir` (no directory-symlink following) + `lofty`, on a blocking thread, results streamed in batches. |
@@ -72,25 +72,26 @@ Crates (latest stable at implementation time): `tokio`, `serde`, `serde_json`, `
 Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/position/duration/volume. Every user intent and every `PlaybackEvent` is a method returning `Vec<PlaybackCommand>`; no I/O.
 
 - Every load gets a fresh monotonic `LoadId`. `current_load` is set when `Load` is emitted.
-- **Auto-advance happens only on `TrackEnded { load, reason: Eof | Error }` where `load == current_load`.** Error also records a user-visible message.
+- **Auto-advance happens only on `TrackEnded { load, reason: Eof | Error }` where `load == current_load`.** Error also records a user-visible message. An Error at the end of the queue emits `Stop`, because a rejected load can leave mpv playing the previous track.
 - `TrackEnded` with any other `LoadId` is stale and ignored. This covers: the old track's EOF racing a user's Enter/n/p, and the `stop` end-file mpv emits when a track is replaced.
 - `TrackEnded { reason: Stopped }` for the current load (an external stop) sets stopped state without advancing.
 - Deliberate stop (quit, removing the current entry at end of queue) clears `current_load` *before* emitting `Stop`, so its end-file is stale by construction.
 - End of queue: state becomes stopped; `current` stays on the last entry so Space replays it.
-- `n`: play next entry; at end, no-op with message "End of queue".
-- `p`: if position > 3 s, seek to 0; else play previous entry; at the first entry, seek to 0.
+- `n`: play next entry; at end, no-op with message "End of queue"; with no current entry, no-op ("Nothing is playing").
+- `p`: if started and position > 3 s, seek to 0; else play previous entry; at the first entry, seek to 0 (no-op while stopped or loading).
 - Space: if loaded, toggle pause; if stopped with a current entry, play it; if no current and queue non-empty, play the first entry.
-- Seek/volume with nothing loaded: no-op. Volume is clamped to 0–100 in steps of 5.
+- Seeks act only after `Started` (mpv rejects seeks before `file-loaded`); during loading they are no-ops. Volume works whenever loaded, clamped to 0–100 in steps of 5.
 - Removing the current entry while loaded: behaves like `n`, then removes it; if there is no next entry, stop.
-- Position events between `Load` and `Started` for the current load are ignored so the old track's progress never flashes.
+- Position events between `Load` and `Started` for the current load are ignored so the old track's progress never flashes. `Duration` is accepted from `Load` onward (it can precede `Started`) and cleared when the load ends.
 - `BackendExited` (mpv crashed or its socket closed): clear `current_load`, stop playback, mark playback unavailable, and show a persistent error. Playback commands become no-ops with a message. No automatic mpv restart (owner decision).
 
 ### 3.4 Playback boundary (`playback/mod.rs`)
 - `PlaybackCommand`: `Load { load: LoadId, path }`, `SetPause(bool)`, `Stop`, `SeekRelative(f64)`, `SeekAbsolute(f64)`, `SetVolume(u8)`, `Shutdown`.
 - `PlaybackEvent`: `Started { load }`, `TrackEnded { load, reason }`, `Position(Duration)`, `Duration(Option<Duration>)`, `Paused(bool)`, `Volume(u8)`, `Error(String)`, `BackendExited(String)`.
-- `EndReason`: `Eof`, `Error(String)`, `Stopped`. mpv's `stop`/`quit`/`redirect`/`unknown` map to `Stopped`.
+- `Started` corresponds to mpv's `file-loaded` (attributed to the entry of the preceding `start-file`), not `start-file`.
+- `EndReason`: `Eof`, `Error(String)`, `Stopped`. mpv's `stop`/`quit`/`unknown` map to `Stopped`. `redirect` maps to `Error`: mpv detects playlists by content, so a "track" can expand into entries Coda never requested.
 - Contract: `Load` always starts unpaused (the backend sets `pause=no` first, because mpv's pause survives loading a new file).
-- Contract: `Load` for a path that no longer exists produces `TrackEnded { Error("file not found") }` without contacting mpv.
+- Contract: `Load` for a path that is missing or not a regular file produces `TrackEnded { Error }` without contacting mpv.
 - Commands go over an unbounded channel so the UI loop never awaits. Events use a bounded channel; `Position` is coalesced to at most 4/s.
 
 ### 3.5 mpv backend (`playback/mpv/`)
@@ -102,9 +103,12 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 - **Entry-id mapping (stale-event core):**
   1. Loads are serialized: one in flight; further `Load` commands queued meanwhile collapse to the latest.
   2. Send `set_property pause false`, `loadfile <path> replace`, then `get_property playlist/0/id`. Because Coda is the only playlist writer and `replace` leaves one entry, the reply is the new entry id. Map `entry_id -> LoadId`.
-  3. `start-file`/`end-file` carry `playlist_entry_id`. Mapped ids become `Started`/`TrackEnded` with the `LoadId`. Events for unmapped ids that arrive while a mapping is pending are buffered (bounded) and replayed once the id is known; otherwise dropped.
+  3. `start-file`/`end-file` carry `playlist_entry_id`. Mapped ids become `Started`/`TrackEnded` with the `LoadId`. Events for unmapped ids above the highest mapped id that arrive while a mapping is pending are buffered (bounded; overflow drops the newest) and replayed once the id is known; otherwise dropped.
   4. A failed `loadfile` reply becomes `TrackEnded { Error }` for that `LoadId`.
-- **Process lifecycle:** `kill_on_drop(true)`. `Shutdown` sends `quit`, waits up to 500 ms, then kills, reaps and removes the socket dir. Socket EOF or child exit produces `BackendExited`.
+  5. An unmapped `start-file` with nothing in flight means mpv is playing something Coda did not request: the backend sends `stop`.
+  6. `file-loaded` carries no entry id; it is attributed to the entry of the preceding `start-file` ("opening"), cleared by that entry's `end-file`.
+- **Socket writes:** a dedicated writer task owns the write half, so the driver loop never awaits a socket write (mpv stops reading requests while its replies are unread, which deadlocked a single-task design). Normal requests are FIFO; `quit` uses a priority path that overtakes only unwritten lines.
+- **Process lifecycle:** `kill_on_drop(true)`. `Shutdown` closes the event receiver, sends priority `quit`, drains mpv output for up to 500 ms, then kills if needed, reaps and removes the socket dir; it reports a `ShutdownOutcome`. Socket EOF or child exit produces `BackendExited`; if the event channel closes without one, `PlaybackHandle::recv` synthesizes it once.
 - **Missing binary:** spawn `NotFound` maps to a dedicated error. The program path is an internal parameter (default `mpv`) so tests can use a nonexistent one; it is not user configuration.
 
 ### 3.6 Library scan (`library/`)
@@ -130,7 +134,8 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 - If the log file cannot be opened, continue without logging; do not fall back to stderr.
 
 ### 3.9 TUI (slice 2)
-- Ratatui `init()`/`restore()` for raw mode and alternate screen, plus its panic hook for terminal restoration. mpv cleanup on panic relies on unwinding dropping the backend (`kill_on_drop`). Do not set `panic = "abort"`.
+- Ratatui `init()`/`restore()` for raw mode and alternate screen. mpv cleanup on panic relies on unwinding dropping the backend (`kill_on_drop`). Do not set `panic = "abort"`.
+- Panic hooks run even for panics later caught by `catch_unwind` (the scan's lofty guard) and for panics on Tokio worker threads. After `ratatui::init()`, install one hook that records the UI thread's `ThreadId`: on the UI thread, restore the terminal and chain to the previous hook; on any other thread, only `tracing::error!` the message and location, never touching the terminal or stderr.
 - Select loop branches: crossterm `EventStream`, playback events, scan events, `SIGTERM`/`SIGHUP` (graceful quit), and a 250 ms tick. Redraw on state change or tick, never awaiting playback or scan work. Ctrl-C arrives as a key in raw mode and quits.
 - Layout: Library panel (left), Queue panel (right), now-playing bar (title, artist, state, elapsed/total gauge, volume), and a one-line status area for transient messages (about 5 s). Below 60 columns, show only the focused panel. Show scan progress ("Scanning… 1,234 tracks") until finished.
 - Quit always runs `Shutdown` and waits for it (bounded) before restoring the terminal.
@@ -171,7 +176,7 @@ Library scanning sits in slice 1 because it is non-UI source logic, which keeps 
 - *Player:* Load gets fresh `LoadId`; EOF and Error on current advance; Stopped does not advance; **stale `TrackEnded` after the user played another track is ignored**; deliberate stop's end-file ignored; end of queue stops; `p` restart threshold; Space from stopped/empty; remove-current; an all-missing queue terminates; `BackendExited` disables playback.
 - *Protocol:* exact JSON for commands including paths with quotes, backslashes, newlines, Unicode and leading `-`; parse replies, events, `end-file` with and without `file_error`; unknown events ignored; malformed lines return errors.
 - *mpv state:* id correlation; entry-id mapping; end-file before id reply is buffered and replayed; unknown ids dropped; collapsed queued loads; failed loadfile → `TrackEnded { Error }`.
-- *Event-ordering safety (owner requirement):* prove that entry ids and asynchronous events can never advance the queue incorrectly. Drive the pure mpv state and the player together through scripted message sequences covering every relevant interleaving of `loadfile` reply, `playlist/0/id` reply, `start-file` and `end-file`. Cover at least:
+- *Event-ordering safety (owner requirement; permutations also cover collapsed loads, stop in flight, failed loadfile, redirect and `file-loaded`):* prove that entry ids and asynchronous events can never advance the queue incorrectly. Drive the pure mpv state and the player together through scripted message sequences covering every relevant interleaving of `loadfile` reply, `playlist/0/id` reply, `start-file` and `end-file`. Cover at least:
   - **Rapid skipping:** several `n` presses before any reply; only the last load reaches mpv; exactly one track plays; no extra advance.
   - **Replacement during playback:** the old entry's `end-file` arrives with reason `stop` or `eof` (it finished at the same moment), before or after the new id reply; neither advances.
   - **Very short files:** the new entry's `start-file` and `end-file { eof }` both arrive before the `playlist/0/id` reply; the buffered EOF is replayed and advances exactly once.
@@ -204,3 +209,6 @@ Navidrome, search, Play Folder / Play Album action, config file, persistence of 
 ## 7. Known limitations accepted for M1
 - **Gaps between tracks.** Feeding mpv one track at a time means a short audible gap, noticeable on live or classical albums. A later fix can keep Coda's queue authoritative while handing mpv a one-track lookahead (ADR 0002).
 - **SIGKILL orphans.** If Coda is killed with `SIGKILL`, an idle mpv remains. Every catchable exit path cleans up.
+- **No hung-mpv watchdog.** If mpv stays alive but stops responding, requests queue in memory and the UI is not told. A reply timeout producing `BackendExited` is a candidate follow-up.
+- **Early seeks are dropped.** A seek while a track is still loading is a no-op.
+- **Untested environments.** Linux (`XDG_RUNTIME_DIR`, non-UTF-8 paths) and mpv versions before 0.41 have not been run.

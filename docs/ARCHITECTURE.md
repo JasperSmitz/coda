@@ -1,6 +1,6 @@
 # Coda — Architecture
 
-> **Status: proposed design; not yet implemented.** Update this file to describe reality as work ships. Do not present proposed modules as existing code.
+> **Status:** M1 slice 1 (core, mpv backend, library scan) is implemented; the TUI (slice 2) is not. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
 
 ## Intended boundaries
 
@@ -41,7 +41,24 @@ The drawing is conceptual, not a dependency diagram. Source adapters locate/brow
 Proposed M1 module layout and behaviour details: `docs/plans/m1-local-playback.md`. They become architecture here only once they ship.
 
 ## Implemented modules
-_None yet — project scaffold only._
+Single package `coda-player`: library `coda_player`, binary `coda`.
+
+- `config` — music directory from the CLI argument or `CODA_MUSIC_DIR` (empty counts as unset), validated and canonicalized.
+- `model` — `Track`, `TrackSource::Local`, metadata with filename fallback.
+- `queue` — pure ordered queue addressed by `QueueEntryId`.
+- `player` — pure coordinator: user intents and `PlaybackEvent`s in, `PlaybackCommand`s out. Auto-advances only on EOF/error of the current `LoadId`.
+- `playback` — boundary types and `PlaybackHandle` (unbounded commands, bounded events).
+  - `mpv::protocol` — JSON IPC encode/decode.
+  - `mpv::state` — pure entry-id ↔ `LoadId` mapping, load serialization and collapse, event buffering, redirect and unrequested-entry handling.
+  - `mpv::process` — argv, private socket directory, spawn, connect retry.
+  - `mpv` (driver) — async task: reader loop plus a separate writer task, file pre-check, shutdown with `ShutdownOutcome`.
+- `library::scan` / `library::tree` — blocking-thread scan with incremental batches; directory browse tree.
+- `main` — validates config and mpv availability, then exits; the TUI arrives in slice 2.
+
+Not yet implemented: `app`, `ui`, signal handling, terminal lifecycle.
 
 ## Verification
-_Commands and platform-specific smoke-test notes will be recorded after M1 exists._
+- Standard: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-targets`, `cargo build`.
+- With mpv installed: `cargo test --all-targets -- --ignored` (real-mpv lifecycle, playback and hostile-input tests).
+- Event-ordering safety lives in `tests/event_ordering.rs`, which drives the real `MpvState` and `Player` through exhaustive message interleavings.
+- Verified on macOS with mpv 0.41. Linux and older mpv versions are untested.

@@ -8,7 +8,7 @@ Status legend: proposed / in progress / completed. Do not mark work completed ba
 
 ## M1 — Local playback (in progress: slice 1 approved)
 Brief: `docs/plans/m1-local-playback.md`. Delivered in two independently reviewed slices:
-1. Domain models, queue, player coordinator, mpv backend, library scan, tests.
+1. Domain models, queue, player coordinator, mpv backend, library scan, tests. **(completed, reviewed)**
 2. TUI, navigation, playback interaction, terminal and process lifecycle.
 
 Acceptance:
