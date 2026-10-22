@@ -171,14 +171,33 @@ async fn pause_volume_and_seek_are_reflected_in_events() {
     .await;
 
     handle.send(PlaybackCommand::SetPause(true));
-    wait_for(&mut handle, |e| *e == PlaybackEvent::Paused(true)).await;
+    let (_, mut seen) = wait_for(&mut handle, |e| *e == PlaybackEvent::Paused(true)).await;
     handle.send(PlaybackCommand::SetVolume(40));
-    wait_for(&mut handle, |e| *e == PlaybackEvent::Volume(40)).await;
+    seen.extend(
+        wait_for(&mut handle, |e| *e == PlaybackEvent::Volume(40))
+            .await
+            .1,
+    );
+    let before = seen
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            PlaybackEvent::Position(p) => Some(*p),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert!(
+        before < Duration::from_secs(1),
+        "paused near the start: {before:?}"
+    );
+    // Under `--ao=null` mpv settles about 0.2 s short of the target, so
+    // accept 2.0 s for a seek to 2.5 s; it must still be a clear jump
+    // forward from the paused position.
     handle.send(PlaybackCommand::SeekAbsolute(2.5));
-    wait_for(
-        &mut handle,
-        |e| matches!(e, PlaybackEvent::Position(p) if *p >= Duration::from_millis(2400)),
-    )
+    wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::Position(p)
+            if *p >= Duration::from_millis(2000) && *p >= before + Duration::from_millis(1500))
+    })
     .await;
     handle.send(PlaybackCommand::SeekRelative(-2.0));
     wait_for(

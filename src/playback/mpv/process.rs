@@ -22,6 +22,8 @@ pub const QUIT_GRACE: Duration = Duration::from_millis(500);
 /// bytes; stay safely below.
 pub const MAX_SOCKET_PATH_LEN: usize = 100;
 const FALLBACK_BASE_DIR: &str = "/tmp";
+/// Exit status meaning "command not found".
+const NOT_FOUND_EXIT_CODE: i32 = 127;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpawnError {
@@ -68,15 +70,26 @@ pub fn mpv_args(socket: &Path) -> Vec<OsString> {
     ]
 }
 
-/// Base directory for the socket directory: `$XDG_RUNTIME_DIR`, else
-/// `$TMPDIR`, else `/tmp`. Empty or relative values are ignored.
-pub fn socket_base_dir(xdg_runtime_dir: Option<OsString>, tmpdir: Option<OsString>) -> PathBuf {
-    [xdg_runtime_dir, tmpdir]
+/// Candidate base directories for the socket directory, in preference
+/// order: `$XDG_RUNTIME_DIR`, `$TMPDIR`, then `/tmp`. Empty or relative
+/// values are ignored and duplicates removed. Each comes with a label for
+/// logs and errors.
+pub fn socket_base_dirs(
+    xdg_runtime_dir: Option<OsString>,
+    tmpdir: Option<OsString>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut candidates: Vec<(&'static str, PathBuf)> = Vec::new();
+    let env = [("XDG_RUNTIME_DIR", xdg_runtime_dir), ("TMPDIR", tmpdir)];
+    let found = env
         .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .find(|p| p.is_absolute())
-        .unwrap_or_else(|| PathBuf::from(FALLBACK_BASE_DIR))
+        .filter_map(|(label, value)| Some((label, PathBuf::from(value?))))
+        .filter(|(_, path)| path.is_absolute());
+    for (label, path) in found.chain([("/tmp", PathBuf::from(FALLBACK_BASE_DIR))]) {
+        if !candidates.iter().any(|(_, p)| *p == path) {
+            candidates.push((label, path));
+        }
+    }
+    candidates
 }
 
 /// A private `0700` directory holding the socket. Removed on drop or
@@ -87,19 +100,35 @@ pub struct SocketDir {
 }
 
 impl SocketDir {
-    /// Creates the directory under `base`, falling back to `/tmp` when the
-    /// resulting socket path would be too long.
-    pub fn create_in(base: &Path) -> io::Result<Self> {
-        let dir = Self::create_exact(base)?;
-        if dir.socket_path().as_os_str().len() < MAX_SOCKET_PATH_LEN {
-            return Ok(dir);
+    /// Creates the directory under the first candidate that works. A
+    /// candidate is skipped when creating the directory fails (a stale
+    /// `XDG_RUNTIME_DIR` after `su`/`sudo -E` is common) or when the socket
+    /// path would be too long. Fails only if every candidate fails, naming
+    /// the ones tried.
+    pub fn create_in_first(candidates: &[(&str, PathBuf)]) -> io::Result<Self> {
+        let mut tried = Vec::new();
+        for (label, base) in candidates {
+            match Self::create_exact(base) {
+                Ok(dir) if dir.socket_path().as_os_str().len() < MAX_SOCKET_PATH_LEN => {
+                    return Ok(dir);
+                }
+                Ok(_) => {
+                    tracing::debug!(candidate = label, "socket path too long; trying next");
+                    tried.push(format!(
+                        "{label} ({}): socket path too long",
+                        base.display()
+                    ));
+                }
+                Err(error) => {
+                    tracing::debug!(candidate = label, %error, "cannot create socket dir; trying next");
+                    tried.push(format!("{label} ({}): {error}", base.display()));
+                }
+            }
         }
-        drop(dir);
-        let dir = Self::create_exact(Path::new(FALLBACK_BASE_DIR))?;
-        if dir.socket_path().as_os_str().len() >= MAX_SOCKET_PATH_LEN {
-            return Err(io::Error::other("socket path is too long"));
-        }
-        Ok(dir)
+        Err(io::Error::other(format!(
+            "no usable directory; tried {}",
+            tried.join("; ")
+        )))
     }
 
     fn create_exact(base: &Path) -> io::Result<Self> {
@@ -137,11 +166,11 @@ impl MpvProcess {
     /// [`CONNECT_RETRY`] for up to [`CONNECT_TIMEOUT`], and giving up early
     /// if the child exits.
     pub async fn launch(program: &OsStr) -> Result<(Self, UnixStream), SpawnError> {
-        let base = socket_base_dir(
+        let candidates = socket_base_dirs(
             std::env::var_os("XDG_RUNTIME_DIR"),
             std::env::var_os("TMPDIR"),
         );
-        let socket_dir = SocketDir::create_in(&base).map_err(SpawnError::SocketDir)?;
+        let socket_dir = SocketDir::create_in_first(&candidates).map_err(SpawnError::SocketDir)?;
         let socket = socket_dir.socket_path();
 
         let child = Command::new(program)
@@ -170,6 +199,15 @@ impl MpvProcess {
                 Err(error) => {
                     if let Ok(Some(status)) = process.child.try_wait() {
                         process.cleanup_dir();
+                        // Some environments (seen under Rosetta) report a
+                        // missing program as a child exiting with 127, the
+                        // shell's "command not found", instead of a spawn
+                        // error.
+                        if status.code() == Some(NOT_FOUND_EXIT_CODE) {
+                            return Err(SpawnError::NotFound {
+                                program: program.to_string_lossy().into_owned(),
+                            });
+                        }
                         return Err(SpawnError::ExitedEarly(status));
                     }
                     if tokio::time::Instant::now() >= deadline {
@@ -240,27 +278,46 @@ mod tests {
         );
     }
 
+    fn paths(candidates: &[(&str, PathBuf)]) -> Vec<PathBuf> {
+        candidates.iter().map(|(_, p)| p.clone()).collect()
+    }
+
     #[test]
     fn base_dir_preference() {
         assert_eq!(
-            socket_base_dir(Some("/run/user/1".into()), Some("/var/tmp".into())),
-            PathBuf::from("/run/user/1")
+            paths(&socket_base_dirs(
+                Some("/run/user/1".into()),
+                Some("/var/tmp".into())
+            )),
+            [
+                PathBuf::from("/run/user/1"),
+                PathBuf::from("/var/tmp"),
+                PathBuf::from("/tmp")
+            ]
         );
         assert_eq!(
-            socket_base_dir(None, Some("/var/tmp".into())),
-            PathBuf::from("/var/tmp")
+            paths(&socket_base_dirs(None, Some("/var/tmp".into()))),
+            [PathBuf::from("/var/tmp"), PathBuf::from("/tmp")]
         );
         assert_eq!(
-            socket_base_dir(Some("".into()), Some("relative".into())),
-            PathBuf::from("/tmp")
+            paths(&socket_base_dirs(Some("".into()), Some("relative".into()))),
+            [PathBuf::from("/tmp")]
         );
-        assert_eq!(socket_base_dir(None, None), PathBuf::from("/tmp"));
+        assert_eq!(
+            socket_base_dirs(None, Some("/tmp".into())),
+            [("TMPDIR", PathBuf::from("/tmp"))],
+            "duplicates removed"
+        );
+        assert_eq!(
+            paths(&socket_base_dirs(None, None)),
+            [PathBuf::from("/tmp")]
+        );
     }
 
     #[test]
     fn socket_dir_is_private_and_removed() {
         let base = tempfile::tempdir().unwrap();
-        let dir = SocketDir::create_in(base.path()).unwrap();
+        let dir = SocketDir::create_in_first(&[("base", base.path().into())]).unwrap();
         let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
         assert!(dir.socket_path().as_os_str().len() < MAX_SOCKET_PATH_LEN);
@@ -271,15 +328,41 @@ mod tests {
     }
 
     #[test]
-    fn long_base_dir_falls_back_to_tmp() {
+    fn long_base_dir_falls_back_to_the_next_candidate() {
         let base = tempfile::tempdir().unwrap();
         let long = base.path().join("x".repeat(120));
         std::fs::create_dir(&long).unwrap();
-        let dir = SocketDir::create_in(&long).unwrap();
+        let candidates = socket_base_dirs(Some(long.into()), None);
+        let dir = SocketDir::create_in_first(&candidates).unwrap();
         assert!(dir.path().starts_with(FALLBACK_BASE_DIR));
         assert!(dir.socket_path().as_os_str().len() < MAX_SOCKET_PATH_LEN);
         let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn missing_xdg_runtime_dir_falls_back() {
+        let base = tempfile::tempdir().unwrap();
+        let stale = base.path().join("run-user-1000-gone");
+        let tmpdir = base.path().join("t");
+        std::fs::create_dir(&tmpdir).unwrap();
+        let candidates = socket_base_dirs(Some(stale.into()), Some(tmpdir.clone().into()));
+        let dir = SocketDir::create_in_first(&candidates).unwrap();
+        assert!(dir.path().starts_with(&tmpdir), "{:?}", dir.path());
+    }
+
+    #[test]
+    fn every_candidate_failing_names_the_ones_tried() {
+        let base = tempfile::tempdir().unwrap();
+        let candidates = [
+            ("XDG_RUNTIME_DIR", base.path().join("gone")),
+            ("TMPDIR", base.path().join("also-gone")),
+        ];
+        let err = SocketDir::create_in_first(&candidates).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("XDG_RUNTIME_DIR"), "{message}");
+        assert!(message.contains("TMPDIR"), "{message}");
+        assert!(message.contains("also-gone"), "{message}");
     }
 
     #[tokio::test]
@@ -291,6 +374,19 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("brew install mpv"), "{message}");
         assert!(message.contains("pacman -S mpv"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn exit_status_127_is_not_found() {
+        // Stands in for environments where a missing program "spawns" and
+        // the child exits with 127.
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("fake-mpv");
+        std::fs::write(&program, "#!/bin/sh\nexit 127\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = MpvProcess::launch(program.as_os_str()).await.unwrap_err();
+        assert!(err.is_not_found(), "{err:?}");
+        assert!(err.to_string().contains("brew install mpv"), "{err}");
     }
 
     #[tokio::test]
