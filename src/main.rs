@@ -1,14 +1,15 @@
-//! `coda` binary. Slice 1: validate the configuration, check that the
-//! playback backend can be started, then exit. The TUI arrives in slice 2.
+//! `coda` binary. Startup order (brief 3.7): parse and validate the
+//! config, init logging, spawn mpv and connect, then hand over to
+//! [`app::run`], which enters the TUI and starts the scan. Errors before
+//! the TUI are printed to stderr; the TUI never writes to stdout/stderr.
 
+use std::io::Write;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::Parser;
+use coda_player::app;
 use coda_player::config::{self, Cli, Config};
 use coda_player::playback;
-
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -23,23 +24,27 @@ async fn main() -> ExitCode {
     init_logging();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
 
-    match playback::spawn_backend().await {
-        Ok(handle) => {
-            let outcome = handle.shutdown(SHUTDOWN_TIMEOUT).await;
-            tracing::info!(?outcome, "playback backend shut down");
-        }
+    let handle = match playback::spawn_backend().await {
+        Ok(handle) => handle,
         Err(error) => {
             tracing::error!(%error, "could not start playback backend");
             eprintln!("coda: {error}");
             return ExitCode::FAILURE;
         }
-    }
+    };
 
-    println!(
-        "Music directory: {}\nPlayback backend OK. The terminal UI arrives in M1 slice 2.",
-        config.music_dir.display()
-    );
-    ExitCode::SUCCESS
+    match app::run(handle, config.music_dir).await {
+        Ok(()) => {
+            tracing::info!("coda exiting");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            tracing::error!(%error, "coda exiting after an error");
+            // The terminal may be gone (hangup); never panic on a failed write.
+            let _ = writeln!(std::io::stderr(), "coda: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Logs to a file only, truncated at each launch. Level from `CODA_LOG`

@@ -36,9 +36,11 @@ pub struct Track {
 
 impl Track {
     /// Builds a local track, falling back to the file stem for the title.
-    /// Blank tag values are treated as absent.
+    /// Blank tag values are treated as absent. Text is untrusted, so it is
+    /// capped at [`MAX_METADATA_CHARS`] here, once, which bounds every
+    /// later use (sorting, rendering).
     pub fn local(path: PathBuf, metadata: TrackMetadata) -> Self {
-        let title = non_blank(metadata.title).unwrap_or_else(|| file_stem(&path));
+        let title = non_blank(metadata.title).unwrap_or_else(|| cap_chars(file_stem(&path)));
         Self {
             title,
             artist: non_blank(metadata.artist),
@@ -67,8 +69,21 @@ impl Track {
     }
 }
 
+/// Upper bound on the length of metadata strings, in chars.
+pub const MAX_METADATA_CHARS: usize = 512;
+
 fn non_blank(value: Option<String>) -> Option<String> {
-    value.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    value
+        .map(|s| cap_chars(s.trim().to_owned()))
+        .filter(|s| !s.is_empty())
+}
+
+/// Truncates to at most [`MAX_METADATA_CHARS`] chars, on a char boundary.
+fn cap_chars(mut s: String) -> String {
+    if let Some((end, _)) = s.char_indices().nth(MAX_METADATA_CHARS) {
+        s.truncate(end);
+    }
+    s
 }
 
 fn file_stem(path: &Path) -> String {
@@ -103,6 +118,30 @@ mod tests {
         let track = Track::local("/m/x.mp3".into(), meta);
         assert_eq!(track.title, "x");
         assert_eq!(track.artist, None);
+    }
+
+    #[test]
+    fn oversized_metadata_is_capped_on_a_char_boundary() {
+        let huge = format!("a{}", "\u{301}".repeat(100_000));
+        let meta = TrackMetadata {
+            title: Some(huge.clone()),
+            artist: Some("雨".repeat(1000)),
+            album: Some("x".repeat(MAX_METADATA_CHARS)),
+            ..TrackMetadata::default()
+        };
+        let track = Track::local("/m/x.mp3".into(), meta);
+        assert_eq!(track.title.chars().count(), MAX_METADATA_CHARS);
+        assert!(huge.starts_with(&track.title));
+        assert_eq!(track.artist.unwrap(), "雨".repeat(MAX_METADATA_CHARS));
+        assert_eq!(
+            track.album.unwrap().len(),
+            MAX_METADATA_CHARS,
+            "at the cap: untouched"
+        );
+        // The file-stem fallback is capped too.
+        let stem = "é".repeat(600);
+        let track = Track::local(format!("/m/{stem}.mp3").into(), TrackMetadata::default());
+        assert_eq!(track.title, "é".repeat(MAX_METADATA_CHARS));
     }
 
     #[test]

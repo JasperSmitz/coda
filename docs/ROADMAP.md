@@ -6,10 +6,10 @@ Status legend: proposed / in progress / completed. Do not mark work completed ba
 - Agent contract, vision, architecture notes, roadmap and review workflow established.
 - Cargo initialization moved into M1 slice 1.
 
-## M1 — Local playback (in progress: slice 1 approved)
+## M1 — Local playback (completed; awaiting owner acceptance)
 Brief: `docs/plans/m1-local-playback.md`. Delivered in two independently reviewed slices:
 1. Domain models, queue, player coordinator, mpv backend, library scan, tests. **(completed, reviewed)**
-2. TUI, navigation, playback interaction, terminal and process lifecycle.
+2. TUI, navigation, playback interaction, terminal and process lifecycle. **(completed, reviewed)**
 
 Acceptance:
 - Music directory from a CLI argument or `CODA_MUSIC_DIR`; local discovery and metadata.

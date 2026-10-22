@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use coda_player::library::scan::{self, ScanEvent};
 use coda_player::library::tree::LibraryTree;
-use coda_player::model::Track;
+use coda_player::model::{MAX_METADATA_CHARS, Track};
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor, TagExt};
 use lofty::tag::{Tag, TagType};
@@ -163,6 +163,26 @@ fn tags_written_with_lofty_are_read_back() {
     assert_eq!(t.track_no, Some(7));
     assert_eq!(t.disc_no, Some(2));
     assert_eq!(t.display_name(), "The Artist - The Title");
+}
+
+#[test]
+fn oversized_tags_are_capped() {
+    let (_guard, root) = root();
+    let path = root.join("huge.wav");
+    common::write_wav(&path, 100);
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.set_title(format!("a{}", "\u{301}".repeat(50_000)));
+    tag.set_artist("雨".repeat(5_000));
+    tag.save_to_path(&path, WriteOptions::default()).unwrap();
+
+    let outcome = run_scan(&root);
+    let t = outcome.tracks()[0];
+    assert_eq!(t.title.chars().count(), MAX_METADATA_CHARS);
+    assert!(t.title.starts_with('a'));
+    assert_eq!(
+        t.artist.as_deref(),
+        Some("雨".repeat(MAX_METADATA_CHARS).as_str())
+    );
 }
 
 #[test]

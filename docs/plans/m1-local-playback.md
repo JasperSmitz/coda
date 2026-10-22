@@ -1,6 +1,6 @@
 # M1 — Local playback: implementation brief
 
-- **Status:** approved by owner 2026-10-22. Slice 1 approved for implementation; slice 2 awaits separate approval.
+- **Status:** approved by owner 2026-10-22. Slice 1 completed (08768e4, Linux hardening e6c510d). Slice 2 completed and reviewed.
 - **Scope:** local files only. Navidrome is M2; everything under "Out of scope" stays out.
 - **Delivery:** two slices, each implemented by the developer, independently reviewed, fixed, re-verified, then committed by the architect. No push.
 
@@ -80,7 +80,7 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 - `n`: play next entry; at end, no-op with message "End of queue"; with no current entry, no-op ("Nothing is playing").
 - `p`: if started and position > 3 s, seek to 0; else play previous entry; at the first entry, seek to 0 (no-op while stopped or loading).
 - Space: if loaded, toggle pause; if stopped with a current entry, play it; if no current and queue non-empty, play the first entry.
-- Seeks act only after `Started` (mpv rejects seeks before `file-loaded`); during loading they are no-ops. Volume works whenever loaded, clamped to 0–100 in steps of 5.
+- Seeks act only after `Started` (mpv rejects seeks before `file-loaded`); during loading they are no-ops. Volume works whenever loaded, clamped to 0–100 in steps of 5. Steps are computed from the last requested volume, so rapid presses are not undone by delayed echoes from mpv; an unchanged target sends no command.
 - Removing the current entry while loaded: behaves like `n`, then removes it; if there is no next entry, stop.
 - Position events between `Load` and `Started` for the current load are ignored so the old track's progress never flashes. `Duration` is accepted from `Load` onward (it can precede `Started`) and cleared when the load ends.
 - `BackendExited` (mpv crashed or its socket closed): clear `current_load`, stop playback, mark playback unavailable, and show a persistent error. Playback commands become no-ops with a message. No automatic mpv restart (owner decision).
@@ -96,7 +96,7 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 
 ### 3.5 mpv backend (`playback/mpv/`)
 - **Minimum mpv 0.33** (playlist entry ids on events). Use only `["loadfile", <path>, "replace"]`; the third/fourth `loadfile` arguments changed meaning in 0.38 and are not used.
-- **Socket:** private `0700` directory from `tempfile` under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`; socket `mpv.sock` inside. If the full path is ≥ 100 bytes, fall back to `/tmp`. The directory is removed on shutdown.
+- **Socket:** private `0700` directory from `tempfile` under `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`; socket `mpv.sock` inside. A candidate is skipped if the full path is ≥ 100 bytes or the directory cannot be created (for example a stale `XDG_RUNTIME_DIR` after `su`). The directory is removed on shutdown.
 - **Connect:** retry every 20 ms for up to 3 s; abort early if the child has exited. Failure is a startup error.
 - **Requests:** newline-delimited JSON with integer `request_id`; replies are correlated by id. Unknown events and fields are ignored; malformed lines are logged and skipped, never panic.
 - **Observed properties:** `time-pos`, `duration`, `pause`, `volume`.
@@ -109,7 +109,7 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
   6. `file-loaded` carries no entry id; it is attributed to the entry of the preceding `start-file` ("opening"), cleared by that entry's `end-file`.
 - **Socket writes:** a dedicated writer task owns the write half, so the driver loop never awaits a socket write (mpv stops reading requests while its replies are unread, which deadlocked a single-task design). Normal requests are FIFO; `quit` uses a priority path that overtakes only unwritten lines.
 - **Process lifecycle:** `kill_on_drop(true)`. `Shutdown` closes the event receiver, sends priority `quit`, drains mpv output for up to 500 ms, then kills if needed, reaps and removes the socket dir; it reports a `ShutdownOutcome`. Socket EOF or child exit produces `BackendExited`; if the event channel closes without one, `PlaybackHandle::recv` synthesizes it once.
-- **Missing binary:** spawn `NotFound` maps to a dedicated error. The program path is an internal parameter (default `mpv`) so tests can use a nonexistent one; it is not user configuration.
+- **Missing binary:** spawn `NotFound`, or an early child exit with status 127, maps to a dedicated error. The program path is an internal parameter (default `mpv`) so tests can use a nonexistent one; it is not user configuration.
 
 ### 3.6 Library scan (`library/`)
 - Runs in `spawn_blocking`. Sends `ScanEvent::Batch(Vec<Track>)` every 200 tracks or 100 ms, then `ScanEvent::Finished { tracks, skipped, errors }`.
@@ -135,8 +135,8 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 
 ### 3.9 TUI (slice 2)
 - Ratatui `init()`/`restore()` for raw mode and alternate screen. mpv cleanup on panic relies on unwinding dropping the backend (`kill_on_drop`). Do not set `panic = "abort"`.
-- Panic hooks run even for panics later caught by `catch_unwind` (the scan's lofty guard) and for panics on Tokio worker threads. After `ratatui::init()`, install one hook that records the UI thread's `ThreadId`: on the UI thread, restore the terminal and chain to the previous hook; on any other thread, only `tracing::error!` the message and location, never touching the terminal or stderr.
-- Select loop branches: crossterm `EventStream`, playback events, scan events, `SIGTERM`/`SIGHUP` (graceful quit), and a 250 ms tick. Redraw on state change or tick, never awaiting playback or scan work. Ctrl-C arrives as a key in raw mode and quits.
+- Panic hooks run even for panics later caught by `catch_unwind` (the scan's lofty guard) and for panics on Tokio worker threads. After `ratatui::init()`, install one hook that records the UI thread's `ThreadId`: on the UI thread, restore the terminal and chain to the hook that was active before `ratatui::init()` (not Ratatui's own, which would restore twice); on any other thread, only `tracing::error!` the message and location, never touching the terminal or stderr.
+- Select loop branches: crossterm `EventStream`, playback events, scan events, `SIGTERM`/`SIGHUP`/`SIGINT` (graceful quit), and a 250 ms tick. A closed playback or scan channel disables its branch; a scan channel closing without `Finished` is shown as a failed scan. Redraw on state change or tick, never awaiting playback or scan work. Ctrl-C arrives as a key in raw mode and quits.
 - Layout: Library panel (left), Queue panel (right), now-playing bar (title, artist, state, elapsed/total gauge, volume), and a one-line status area for transient messages (about 5 s). Below 60 columns, show only the focused panel. Show scan progress ("Scanning… 1,234 tracks") until finished.
 - Quit always runs `Shutdown` and waits for it (bounded) before restoring the terminal.
 
@@ -154,7 +154,7 @@ Holds the queue, `current_load: Option<LoadId>`, and the last reported paused/po
 | `←` / `→` | seek −5 s / +5 s | same |
 | `+` (`=`) / `-` | volume ±5 | same |
 | `Tab` | switch panel | same |
-| `?` | toggle help (`Esc` closes) | same |
+| `?` | toggle help (`Esc` closes; only `?`, `Esc`, `q` and Ctrl-C act while it is open) | same |
 | `q`, `Ctrl-C` | quit | same |
 
 `h`/`Backspace` and `d` extend the owner's keymap; they are needed to browse folders and manage the queue.
@@ -211,4 +211,7 @@ Navidrome, search, Play Folder / Play Album action, config file, persistence of 
 - **SIGKILL orphans.** If Coda is killed with `SIGKILL`, an idle mpv remains. Every catchable exit path cleans up.
 - **No hung-mpv watchdog.** If mpv stays alive but stops responding, requests queue in memory and the UI is not told. A reply timeout producing `BackendExited` is a candidate follow-up.
 - **Early seeks are dropped.** A seek while a track is still loading is a no-op.
-- **Untested environments.** Linux (`XDG_RUNTIME_DIR`, non-UTF-8 paths) and mpv versions before 0.41 have not been run.
+- **Linux coverage is container-only.** Slice 1 passed on Debian bookworm (mpv 0.35.1, native arm64) and Arch (mpv 0.41, amd64 emulation) in Docker. No physical Linux desktop and no mpv 0.33/0.34 have been run.
+- **A rejected volume change can show the wrong volume.** A failed `set_property volume` reaches the player only as a generic error, so the requested value stays displayed until the next press or echo. Fixing it needs a structured backend event.
+- **Large queues redraw in full.** Every queue entry is rebuilt per frame: about 8 ms at 50,000 normal entries in release builds, but about 200 ms at 5,000 deliberately hostile (maximum-length, zero-width-heavy) entries. Rendering only the visible window fixes both and is the first candidate follow-up.
+- **No working audio device.** Every track ends with "audio output initialization failed" and the queue errors through to the end, one track at a time.

@@ -40,7 +40,17 @@ pub struct Player {
     paused: bool,
     position: Option<Duration>,
     duration: Option<Duration>,
+    /// Last volume reported by the backend.
     volume: u8,
+    /// The last requested volume, until mpv echoes it. Steps start from it,
+    /// so late echoes of earlier requests cannot make rapid presses step
+    /// from a stale value. mpv coalesces property changes (a burst of sets
+    /// yields one echo of the final value; a burst ending on the previously
+    /// reported value yields none), so its last echo is always the true
+    /// value. Known gap: a late echo of an earlier request equal to the
+    /// pending one clears it early; a following stale echo can then show
+    /// briefly until mpv's final echo arrives.
+    requested_volume: Option<u8>,
     unavailable: Option<String>,
     messages: Vec<String>,
 }
@@ -62,6 +72,7 @@ impl Player {
             position: None,
             duration: None,
             volume: DEFAULT_VOLUME,
+            requested_volume: None,
             unavailable: None,
             messages: Vec::new(),
         }
@@ -97,8 +108,10 @@ impl Player {
         self.duration
     }
 
+    /// The effective volume: the pending request if there is one, else the
+    /// last reported value.
     pub fn volume(&self) -> u8 {
-        self.volume
+        self.requested_volume.unwrap_or(self.volume)
     }
 
     /// The persistent reason playback is unavailable, if it is.
@@ -223,18 +236,24 @@ impl Player {
     }
 
     pub fn volume_up(&mut self) -> Vec<PlaybackCommand> {
-        self.set_volume(self.volume.saturating_add(VOLUME_STEP).min(MAX_VOLUME))
+        self.set_volume(self.volume().saturating_add(VOLUME_STEP).min(MAX_VOLUME))
     }
 
     pub fn volume_down(&mut self) -> Vec<PlaybackCommand> {
-        self.set_volume(self.volume.saturating_sub(VOLUME_STEP))
+        self.set_volume(self.volume().saturating_sub(VOLUME_STEP))
     }
 
+    /// Requests `volume` unless it equals the effective volume: mpv sends
+    /// no property change for an unchanged value, so such a request would
+    /// never be confirmed (e.g. `+` at 100).
     fn set_volume(&mut self, volume: u8) -> Vec<PlaybackCommand> {
-        if self.refuse_if_unavailable() || !self.is_loaded() || volume == self.volume {
+        if self.refuse_if_unavailable() || !self.is_loaded() || volume == self.volume() {
             return Vec::new();
         }
-        self.volume = volume;
+        // A request that mpv never echoes (a burst ending on the value it
+        // last reported) stays pending; that is harmless because it equals
+        // mpv's actual value, and the next press replaces it.
+        self.requested_volume = Some(volume);
         vec![PlaybackCommand::SetVolume(volume)]
     }
 
@@ -293,7 +312,12 @@ impl Player {
                 Vec::new()
             }
             PlaybackEvent::Volume(volume) => {
+                // Always recorded; only the echo of the pending request
+                // clears it. With nothing pending, a change is adopted.
                 self.volume = volume.min(MAX_VOLUME);
+                if self.requested_volume == Some(self.volume) {
+                    self.requested_volume = None;
+                }
                 Vec::new()
             }
             PlaybackEvent::Error(message) => {
@@ -303,6 +327,7 @@ impl Player {
             PlaybackEvent::BackendExited(reason) => {
                 tracing::warn!(%reason, "playback backend exited");
                 self.clear_load();
+                self.requested_volume = None;
                 self.messages.push(format!("Playback stopped: {reason}"));
                 self.unavailable = Some(reason);
                 Vec::new()
@@ -645,10 +670,117 @@ mod tests {
             "already at 100"
         );
         assert_eq!(p.volume_down(), [PlaybackCommand::SetVolume(95)]);
+        p.handle_event(PlaybackEvent::Volume(95));
         p.handle_event(PlaybackEvent::Volume(3));
         assert_eq!(p.volume_down(), [PlaybackCommand::SetVolume(0)]);
         assert!(p.volume_down().is_empty());
         assert_eq!(p.volume_up(), [PlaybackCommand::SetVolume(5)]);
+    }
+
+    fn volume_presses(p: &mut Player, keys: &str) -> Vec<u8> {
+        keys.chars()
+            .flat_map(|k| match k {
+                '-' => p.volume_down(),
+                _ => p.volume_up(),
+            })
+            .map(|c| match c {
+                PlaybackCommand::SetVolume(v) => v,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rapid_volume_presses_step_from_the_last_request() {
+        // Echoes lagging one press behind (the smoke failure: the 95 echo
+        // arrived after the third `-`).
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        let mut sent = volume_presses(&mut p, "--");
+        p.handle_event(PlaybackEvent::Volume(95));
+        sent.extend(volume_presses(&mut p, "-"));
+        p.handle_event(PlaybackEvent::Volume(90));
+        sent.extend(volume_presses(&mut p, "+"));
+        p.handle_event(PlaybackEvent::Volume(85));
+        sent.extend(volume_presses(&mut p, "="));
+        assert_eq!(sent, [95, 90, 85, 90, 95]);
+        assert_eq!(p.volume(), 95, "stale echoes do not show");
+        p.handle_event(PlaybackEvent::Volume(90));
+        assert_eq!(p.volume(), 95);
+        p.handle_event(PlaybackEvent::Volume(95));
+        assert_eq!(p.volume(), 95);
+        // Confirmed: nothing pending, so a later change is adopted.
+        p.handle_event(PlaybackEvent::Volume(42));
+        assert_eq!(p.volume(), 42);
+    }
+
+    #[test]
+    fn coalesced_volume_echoes() {
+        // A burst before any echo: mpv reports only the final value.
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        assert_eq!(volume_presses(&mut p, "---+="), [95, 90, 85, 90, 95]);
+        assert_eq!(p.volume(), 95);
+        p.handle_event(PlaybackEvent::Volume(95));
+        assert_eq!(p.volume(), 95);
+        p.handle_event(PlaybackEvent::Volume(60));
+        assert_eq!(p.volume(), 60, "confirmed, so later changes are adopted");
+
+        // There and back: mpv sends no echo at all. The pending request
+        // equals mpv's value, and further presses step from it.
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        p.handle_event(PlaybackEvent::Volume(50));
+        assert_eq!(volume_presses(&mut p, "+-"), [55, 50]);
+        assert_eq!(p.volume(), 50);
+        assert_eq!(volume_presses(&mut p, "+"), [55]);
+        p.handle_event(PlaybackEvent::Volume(55));
+        assert_eq!(p.volume(), 55);
+
+        // Individual echoes, all delayed: a stale echo may show briefly,
+        // but mpv's last echo is its true value and wins.
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        let sent = volume_presses(&mut p, "---+=");
+        for v in &sent {
+            p.handle_event(PlaybackEvent::Volume(*v));
+        }
+        assert_eq!(p.volume(), 95);
+    }
+
+    #[test]
+    fn external_volume_change_is_adopted_when_nothing_is_pending() {
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        p.handle_event(PlaybackEvent::Volume(42));
+        assert_eq!(p.volume(), 42);
+        assert_eq!(volume_presses(&mut p, "+"), [47]);
+    }
+
+    #[test]
+    fn volume_clamps_without_redundant_commands() {
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        // At 100: `+` sends nothing (mpv would never echo it).
+        assert!(volume_presses(&mut p, "++").is_empty());
+        // Pending 5 -> 0, then `-` at the requested 0 sends nothing.
+        p.handle_event(PlaybackEvent::Volume(5));
+        assert_eq!(volume_presses(&mut p, "--"), [0]);
+        assert_eq!(p.volume(), 0);
+        p.handle_event(PlaybackEvent::Volume(0));
+        assert!(volume_presses(&mut p, "-").is_empty());
+        // Up to 100 and stop there, even before the echoes arrive.
+        p.handle_event(PlaybackEvent::Volume(97));
+        assert_eq!(volume_presses(&mut p, "+++"), [100]);
+    }
+
+    #[test]
+    fn backend_exit_clears_a_pending_volume_request() {
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        assert_eq!(volume_presses(&mut p, "-"), [95]);
+        p.handle_event(PlaybackEvent::BackendExited("gone".into()));
+        assert_eq!(p.volume(), 100, "falls back to the last reported value");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Coda — Architecture
 
-> **Status:** M1 slice 1 (core, mpv backend, library scan) is implemented; the TUI (slice 2) is not. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
+> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
 
 ## Intended boundaries
 
@@ -53,12 +53,15 @@ Single package `coda-player`: library `coda_player`, binary `coda`.
   - `mpv::process` — argv, private socket directory, spawn, connect retry.
   - `mpv` (driver) — async task: reader loop plus a separate writer task, file pre-check, shutdown with `ShutdownOutcome`.
 - `library::scan` / `library::tree` — blocking-thread scan with incremental batches; directory browse tree.
-- `main` — validates config and mpv availability, then exits; the TUI arrives in slice 2.
+- `app` — App state and the single `tokio::select!` loop (terminal input, playback events, scan events, SIGTERM/SIGHUP/SIGINT, 250 ms tick); terminal lifecycle and the panic hook. Every exit runs a bounded backend shutdown, then restores the terminal.
+- `ui::keymap` / `ui::render` / `ui::help` — key-to-action mapping per focused panel; Library, Queue, now-playing bar and status line; help overlay. Untrusted text is sanitized (control and bidi characters) and truncated by display width with bounded work.
+- `main` — config, file logging, mpv spawn and connect, then `app::run`.
 
-Not yet implemented: `app`, `ui`, signal handling, terminal lifecycle.
+Only `app` and `ui` depend on Ratatui/Crossterm.
 
 ## Verification
 - Standard: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-targets`, `cargo build`.
 - With mpv installed: `cargo test --all-targets -- --ignored` (real-mpv lifecycle, playback and hostile-input tests).
 - Event-ordering safety lives in `tests/event_ordering.rs`, which drives the real `MpvState` and `Player` through exhaustive message interleavings.
-- Verified on macOS with mpv 0.41. Linux and older mpv versions are untested.
+- UI rendering is covered by Ratatui `TestBackend` tests; the panic hook has its own test binary (`tests/panic_hook.rs`).
+- Verified on macOS with mpv 0.41, including pty-driven smoke runs of every exit path. Slice 1 also passed in Debian (mpv 0.35) and Arch (mpv 0.41) containers; the TUI has not been run on Linux.
