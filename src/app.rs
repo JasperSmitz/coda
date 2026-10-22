@@ -199,6 +199,23 @@ impl App {
             .collect()
     }
 
+    /// Number of rows in the open directory.
+    pub fn library_row_count(&self) -> usize {
+        self.library_len()
+    }
+
+    /// At most `len` rows starting at row `start`, without building the rest.
+    pub fn library_rows_window(&self, start: usize, len: usize) -> Vec<LibraryRow<'_>> {
+        let dir = self.library_dir();
+        dir.dirs()
+            .iter()
+            .map(LibraryRow::Dir)
+            .chain(dir.tracks().iter().map(LibraryRow::Track))
+            .skip(start)
+            .take(len)
+            .collect()
+    }
+
     fn library_len(&self) -> usize {
         let dir = self.library_dir();
         dir.dirs().len() + dir.tracks().len()

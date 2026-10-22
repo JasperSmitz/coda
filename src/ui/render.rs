@@ -23,11 +23,44 @@ pub const NARROW_WIDTH: u16 = 60;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 const NOW_PLAYING_HEIGHT: u16 = 4;
 
-/// Widget state that persists between frames (list scroll offsets).
+/// Widget state that persists between frames: the first visible row of
+/// each panel, so the view does not jump between frames.
 #[derive(Debug, Default)]
 pub struct ViewState {
-    library: ListState,
-    queue: ListState,
+    library_offset: usize,
+    queue_offset: usize,
+}
+
+/// The first visible row for a list of `len` rows in a viewport of
+/// `height` rows, starting from the previous `offset`.
+///
+/// Scrolls only as far as needed to keep `selected` visible, and keeps the
+/// result valid when the list shrinks or the viewport changes: the window
+/// never starts past the last page, and an empty list or zero height gives
+/// 0. (With a height of 1 the selection is the one visible row.)
+fn scroll_offset(offset: usize, selected: usize, len: usize, height: usize) -> usize {
+    if len == 0 || height == 0 {
+        return 0;
+    }
+    let selected = selected.min(len - 1);
+    let mut offset = offset.min(len - height.min(len));
+    if selected < offset {
+        offset = selected;
+    } else if selected >= offset + height {
+        offset = selected + 1 - height;
+    }
+    offset
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Rows built by the panels, to check work scales with the viewport.
+    static ROWS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_row_built() {
+    #[cfg(test)]
+    ROWS_BUILT.with(|n| n.set(n.get() + 1));
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
@@ -106,27 +139,39 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
     }
 
     let width = row_width(area);
+    let height = usize::from(block.inner(area).height);
+    let offset = scroll_offset(
+        view.library_offset,
+        app.library_selected(),
+        app.library_row_count(),
+        height,
+    );
+    view.library_offset = offset;
     let items: Vec<ListItem> = app
-        .library_rows()
+        .library_rows_window(offset, height)
         .into_iter()
-        .map(|row| match row {
-            LibraryRow::Dir(dir) => ListItem::new(Line::styled(
-                fit(&format!("{}/", dir.name()), width),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            LibraryRow::Track(track) => {
-                let left = match track.track_no {
-                    Some(no) => format!("{no:02} {}", track.title),
-                    None => track.title.clone(),
-                };
-                ListItem::new(row_line(&left, track.duration.map(format_time), width))
+        .map(|row| {
+            note_row_built();
+            match row {
+                LibraryRow::Dir(dir) => ListItem::new(Line::styled(
+                    fit(&format!("{}/", dir.name()), width),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                LibraryRow::Track(track) => {
+                    let left = match track.track_no {
+                        Some(no) => format!("{no:02} {}", track.title),
+                        None => track.title.clone(),
+                    };
+                    ListItem::new(row_line(&left, track.duration.map(format_time), width))
+                }
             }
         })
         .collect();
-    view.library.select(Some(app.library_selected()));
-    frame.render_stateful_widget(list_widget(items, block, focused), area, &mut view.library);
+    let mut state =
+        ListState::default().with_selected(Some(app.library_selected().saturating_sub(offset)));
+    frame.render_stateful_widget(list_widget(items, block, focused), area, &mut state);
 }
 
 fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, focused: bool) {
@@ -146,11 +191,17 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
         return;
     }
     let width = row_width(area).saturating_sub(2);
+    let height = usize::from(block.inner(area).height);
+    let offset = scroll_offset(view.queue_offset, app.queue_selected(), queue.len(), height);
+    view.queue_offset = offset;
     let current = queue.current();
     let items: Vec<ListItem> = queue
         .entries()
         .iter()
+        .skip(offset)
+        .take(height)
         .map(|entry| {
+            note_row_built();
             let is_current = current == Some(entry.id);
             let marker = if is_current { "▶ " } else { "  " };
             let mut line = row_line(
@@ -169,8 +220,9 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
             ListItem::new(line)
         })
         .collect();
-    view.queue.select(Some(app.queue_selected()));
-    frame.render_stateful_widget(list_widget(items, block, focused), area, &mut view.queue);
+    let mut state =
+        ListState::default().with_selected(Some(app.queue_selected().saturating_sub(offset)));
+    frame.render_stateful_widget(list_widget(items, block, focused), area, &mut state);
 }
 
 fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
@@ -390,6 +442,10 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, app, &mut view, now))
             .unwrap();
+        buffer_text(&terminal)
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
         let mut out = String::new();
         for y in 0..buffer.area.height {
@@ -655,6 +711,195 @@ mod tests {
             // Only guards against a quadratic regression; real cost is microseconds.
             assert!(elapsed < Duration::from_secs(1), "render took {elapsed:?}");
         }
+    }
+
+    #[test]
+    fn scroll_follows_the_selection_minimally() {
+        // Within the window: unchanged.
+        assert_eq!(scroll_offset(0, 3, 100, 10), 0);
+        assert_eq!(scroll_offset(5, 14, 100, 10), 5);
+        // Past the bottom: the selection becomes the last visible row.
+        assert_eq!(scroll_offset(0, 10, 100, 10), 1);
+        assert_eq!(scroll_offset(5, 15, 100, 10), 6);
+        // Past the top: the selection becomes the first visible row.
+        assert_eq!(scroll_offset(20, 19, 100, 10), 19);
+        // Jump to the end and back.
+        assert_eq!(scroll_offset(0, 99, 100, 10), 90);
+        assert_eq!(scroll_offset(90, 0, 100, 10), 0);
+    }
+
+    #[test]
+    fn scroll_stays_valid_when_the_list_shrinks() {
+        // Removing the last entries with the selection clamped to the end.
+        assert_eq!(scroll_offset(90, 94, 95, 10), 85);
+        assert_eq!(scroll_offset(85, 89, 90, 10), 80);
+        // The list shrinks below the offset, or to fewer rows than a page.
+        assert_eq!(scroll_offset(90, 3, 5, 10), 0);
+        assert_eq!(scroll_offset(90, 4, 50, 10), 4);
+        assert_eq!(scroll_offset(40, 45, 50, 10), 40);
+        // A stale out-of-range selection is clamped.
+        assert_eq!(scroll_offset(0, 500, 20, 10), 10);
+    }
+
+    #[test]
+    fn scroll_handles_viewport_changes_and_degenerate_sizes() {
+        // Shrinking keeps the selection visible, growing uses the room.
+        assert_eq!(scroll_offset(10, 19, 100, 10), 10);
+        assert_eq!(scroll_offset(10, 19, 100, 5), 15);
+        assert_eq!(scroll_offset(15, 19, 100, 20), 15);
+        assert_eq!(scroll_offset(95, 97, 100, 20), 80);
+        // Empty list and zero height.
+        assert_eq!(scroll_offset(7, 0, 0, 10), 0);
+        assert_eq!(scroll_offset(7, 3, 100, 0), 0);
+        // Height one: the selection is the only row.
+        assert_eq!(scroll_offset(0, 0, 100, 1), 0);
+        assert_eq!(scroll_offset(0, 42, 100, 1), 42);
+        assert_eq!(scroll_offset(42, 41, 100, 1), 41);
+    }
+
+    /// An app whose queue holds `n` tracks from one folder, focused on the
+    /// queue with entry 0 playing.
+    fn queue_app(n: usize, title: impl Fn(usize) -> String, now: Instant) -> App {
+        let mut app = App::new("/music".into());
+        let tracks = (0..n)
+            .map(|i| {
+                let mut t = tagged(&format!("d/{i:05}.flac"), "x", "x", 60);
+                t.title = title(i);
+                t
+            })
+            .collect();
+        app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        app.handle_action(Action::Enqueue, now); // the folder, recursively
+        app.handle_action(Action::SwitchFocus, now);
+        app.handle_action(Action::Activate, now);
+        assert_eq!(app.player().queue().len(), n);
+        app
+    }
+
+    fn rows_built_by(f: impl FnOnce()) -> usize {
+        ROWS_BUILT.with(|n| n.set(0));
+        f();
+        ROWS_BUILT.with(|n| n.get())
+    }
+
+    fn draw_to(
+        terminal: &mut Terminal<TestBackend>,
+        app: &App,
+        view: &mut ViewState,
+        now: Instant,
+    ) {
+        terminal.draw(|f| draw(f, app, view, now)).unwrap();
+    }
+
+    #[test]
+    fn large_queue_shows_the_selected_window_and_markers() {
+        let now = Instant::now();
+        let mut app = queue_app(50_000, |i| format!("song{i:05}"), now);
+        let mut view = ViewState::default();
+        // 14 rows - now playing (4) - status (1) = 9 panel rows, 7 inner.
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("▶ x - song00000"), "{screen}");
+
+        for _ in 0..49_995 {
+            app.handle_action(Action::Down, now);
+        }
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        let screen = buffer_text(&terminal);
+        // Selection is the last visible row; the window ends there.
+        assert_eq!(view.queue_offset, 49_995 + 1 - 7);
+        assert!(screen.contains("x - song49989"), "{screen}");
+        assert!(
+            screen.contains("> ") && screen.contains("x - song49995"),
+            "{screen}"
+        );
+        assert!(!screen.contains("x - song49996"), "{screen}");
+        assert!(!screen.contains("x - song00000"), "{screen}");
+        assert!(!screen.contains('▶'), "{screen}");
+        // Work scales with the viewport: queue rows plus library rows.
+        assert!(built <= 2 * 7, "built {built} rows");
+
+        // Selecting the playing entry again shows its marker.
+        for _ in 0..49_995 {
+            app.handle_action(Action::Up, now);
+        }
+        draw_to(&mut terminal, &app, &mut view, now);
+        assert_eq!(view.queue_offset, 0);
+        assert!(buffer_text(&terminal).contains("▶ x - song00000"));
+    }
+
+    #[test]
+    fn offset_persists_and_follows_removal_and_resize() {
+        let now = Instant::now();
+        let mut app = queue_app(30, |i| format!("song{i:02}"), now);
+        let mut view = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        for _ in 0..12 {
+            app.handle_action(Action::Down, now);
+        }
+        draw_to(&mut terminal, &app, &mut view, now);
+        assert_eq!(view.queue_offset, 6);
+        // Moving up within the window does not scroll.
+        app.handle_action(Action::Up, now);
+        app.handle_action(Action::Up, now);
+        draw_to(&mut terminal, &app, &mut view, now);
+        assert_eq!(view.queue_offset, 6);
+        // Growing the terminal keeps the selection visible.
+        terminal.backend_mut().resize(100, 40);
+        terminal
+            .resize(ratatui::layout::Rect::new(0, 0, 100, 40))
+            .unwrap();
+        draw_to(&mut terminal, &app, &mut view, now);
+        assert!(buffer_text(&terminal).contains("song10"));
+        assert_eq!(view.queue_offset, 0);
+        // Shrinking too (down to a one-row panel).
+        terminal.backend_mut().resize(100, 7);
+        terminal
+            .resize(ratatui::layout::Rect::new(0, 0, 100, 7))
+            .unwrap();
+        draw_to(&mut terminal, &app, &mut view, now);
+        assert!(buffer_text(&terminal).contains("song10"));
+        // Removing entries from the end keeps the last rows on screen.
+        terminal.backend_mut().resize(100, 14);
+        terminal
+            .resize(ratatui::layout::Rect::new(0, 0, 100, 14))
+            .unwrap();
+        for _ in 0..30 {
+            app.handle_action(Action::Down, now);
+        }
+        draw_to(&mut terminal, &app, &mut view, now);
+        for _ in 0..10 {
+            app.handle_action(Action::Remove, now);
+            draw_to(&mut terminal, &app, &mut view, now);
+            let screen = buffer_text(&terminal);
+            let last = app.player().queue().len() - 1;
+            assert!(screen.contains(&format!("x - song{last:02}")), "{screen}");
+        }
+        assert_eq!(app.player().queue().len(), 20);
+        assert_eq!(view.queue_offset, 13);
+    }
+
+    #[test]
+    fn hostile_large_queue_renders_quickly() {
+        let now = Instant::now();
+        // Maximum-length (as capped at ingestion), mostly zero-width names.
+        let hostile: Vec<String> = hostile_inputs()
+            .into_iter()
+            .map(|s| s.chars().take(crate::model::MAX_METADATA_CHARS).collect())
+            .collect();
+        let mut app = queue_app(20_000, |i| hostile[i % hostile.len()].clone(), now);
+        for _ in 0..19_990 {
+            app.handle_action(Action::Down, now);
+        }
+        let mut view = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let started = Instant::now();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        let elapsed = started.elapsed();
+        // Only guards against a regression to per-entry work.
+        assert!(elapsed < Duration::from_secs(1), "render took {elapsed:?}");
+        assert!(built <= 2 * 19, "built {built} rows");
     }
 
     #[test]

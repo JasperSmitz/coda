@@ -213,5 +213,4 @@ Navidrome, search, Play Folder / Play Album action, config file, persistence of 
 - **Early seeks are dropped.** A seek while a track is still loading is a no-op.
 - **Linux coverage is container-only.** Slice 1 passed on Debian bookworm (mpv 0.35.1, native arm64) and Arch (mpv 0.41, amd64 emulation) in Docker. No physical Linux desktop and no mpv 0.33/0.34 have been run.
 - **A rejected volume change can show the wrong volume.** A failed `set_property volume` reaches the player only as a generic error, so the requested value stays displayed until the next press or echo. Fixing it needs a structured backend event.
-- **Large queues redraw in full.** Every queue entry is rebuilt per frame: about 8 ms at 50,000 normal entries in release builds, but about 200 ms at 5,000 deliberately hostile (maximum-length, zero-width-heavy) entries. Rendering only the visible window fixes both and is the first candidate follow-up.
 - **No working audio device.** Every track ends with "audio output initialization failed" and the queue errors through to the end, one track at a time.

@@ -54,7 +54,7 @@ Single package `coda-player`: library `coda_player`, binary `coda`.
   - `mpv` (driver) — async task: reader loop plus a separate writer task, file pre-check, shutdown with `ShutdownOutcome`.
 - `library::scan` / `library::tree` — blocking-thread scan with incremental batches; directory browse tree.
 - `app` — App state and the single `tokio::select!` loop (terminal input, playback events, scan events, SIGTERM/SIGHUP/SIGINT, 250 ms tick); terminal lifecycle and the panic hook. Every exit runs a bounded backend shutdown, then restores the terminal.
-- `ui::keymap` / `ui::render` / `ui::help` — key-to-action mapping per focused panel; Library, Queue, now-playing bar and status line; help overlay. Untrusted text is sanitized (control and bidi characters) and truncated by display width with bounded work.
+- `ui::keymap` / `ui::render` / `ui::help` — key-to-action mapping per focused panel; Library, Queue, now-playing bar and status line; help overlay. Untrusted text is sanitized (control and bidi characters) and truncated by display width with bounded work. Library and Queue panels keep a persistent scroll offset and build only the visible rows, so frame cost does not grow with list length.
 - `main` — config, file logging, mpv spawn and connect, then `app::run`.
 
 Only `app` and `ui` depend on Ratatui/Crossterm.
