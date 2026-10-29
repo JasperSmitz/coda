@@ -73,7 +73,7 @@ Each entry should state:
 - **Context / symptom:** a 64 MiB state file of small objects took 5.3 GB RSS to load.
 - **Root cause:** parsing into `serde_json::Value` first costs ~80× the input for small objects; entries past the item cap were fully built before being dropped.
 - **Rule:** deserialize untrusted files/bodies into typed structs, probe the version with a minimal struct, enforce item caps inside a sequence visitor (skip the rest with `IgnoredAny`, never preallocate from `size_hint`), and keep byte caps near realistic sizes.
-- **Where verified:** M3 slice 1 review measurement; `excess_entries_are_skipped_without_being_kept` in `src/session.rs`.
+- **Where verified:** M3 slice 1 review measurement; `queue_is_capped_and_current_beyond_the_cap_is_dropped` in `src/session.rs`.
 
 ### "Repeat" needs proof of progress, not just a clean end
 - **Context / symptom:** under repeat, a track that ended immediately (8-sample WAV, a stream that closes at once) reloaded as fast as mpv could open it; for Navidrome that is a request storm.
