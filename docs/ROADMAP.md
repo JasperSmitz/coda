@@ -19,10 +19,10 @@ Acceptance:
 - Handles empty/missing libraries, missing mpv and playback failures; terminal restores and mpv exits on every catchable exit path.
 - Queue/player unit tests, mpv integration tests and format/clippy/test/build checks.
 
-## M2 — Navidrome integration (in progress)
+## M2 — Navidrome integration (completed, reviewed)
 Brief: `docs/plans/m2-navidrome.md`. Slices:
 1. Config file and credentials, Subsonic client, remote tracks in the unified queue, mpv streaming. **(completed, reviewed)**
-2. Remote browsing, search and TUI integration. **(in progress)**
+2. Remote browsing, search and TUI integration. **(completed, reviewed)**
 
 Acceptance:
 - Configure and connect to personal Navidrome via Subsonic/OpenSubsonic API.
@@ -30,8 +30,13 @@ Acceptance:
 - Network errors, credentials and stream failures are handled safely.
 - Distinguish sources clearly without unnecessary catalog deduplication.
 
-## M3 — Quality and convenience (proposed)
-Potential scope, to choose later: persistence, shuffle/repeat, favorites, scrobbling, richer browsing, artwork. Avoid promising all of these now.
+## M3 — Quality and convenience (in progress)
+Brief: `docs/plans/m3-quality.md`. Chosen scope, in slices:
+1. Queue controls (move, clear, shuffle upcoming), repeat modes, session persistence. **(in progress)**
+2. Local search and Navidrome scrobbling. **(proposed)**
+3. Playback robustness: hung-mpv watchdog, timing-robust mpv tests, structured volume rejection. **(proposed)**
+
+Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlists, MPRIS.
 
 ## M4 — HEART integration (proposed)
 Define a small command/state API that HEART can call while Coda remains independently operable. Choose library embedding or a process protocol based on real needs.

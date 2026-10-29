@@ -14,3 +14,11 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Review:** no blocking findings. Fixed: streamed body-cap test, decode detail logging, 3xx message, `password_command` output cap + kill/reap proof, network errors log only kind, single `dispatch`, writable-config refusal for `password_command`.
 - **Limitations:** no browse UI yet (slice 2); TLS failures report as "connect".
 - **Next:** M2 slice 2 (remote browsing, search, TUI).
+
+## 2026-10-29 — M2 slice 2: remote browsing, search, TUI (M2 complete)
+- **Done:** `navidrome::browse` (pure Browser: nav stack, session cache, per-resource in-flight dedup, press-ordered enqueue jobs, search input); sources `1`/`2`; Artists → Albums → Songs; `/` search; `r` refresh; `☁` remote marker; bracketed paste into search only; README usage/config.
+- **Decisions:** opens on Navidrome when no music dir; a successful fetch also marks the connection "connected"; job fetches limited to 2 of 4 permits so views are never starved; search from results replaces them; explicit runtime with 500 ms `shutdown_timeout` (also after panics); HTTP crates clamped to warn in the log regardless of `CODA_LOG`.
+- **Tests:** fmt, clippy, `cargo test --all-targets` pass (221 unit + integration incl. 4 fetch-task tests). Ignored mpv: same two pre-existing device-related failures only. Pty smoke against a scripted fake Subsonic server: browse, enqueue, search, paste, exit and log hygiene verified.
+- **Review:** two rounds. Fixed: hyper-util host logging, hidden batch failures, stuck in-flight on panicked/cancelled fetch, starvation by enqueue jobs, failed views not healing, stacked searches, multi-line paste executing commands, server text in logs, DNS hang at exit, panic-path shutdown bound, quit-time warnings.
+- **Limitations:** cache never evicted within a session; connection state stays "connected" after later failures; a single scroll offset shared across remote views; not yet run against a real Navidrome server.
+- **Next:** M3 slice 1 (queue controls, repeat, persistence).

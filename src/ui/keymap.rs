@@ -1,6 +1,7 @@
 //! Key → [`Action`] mapping (brief 3.10). Panel-specific keys only map in
 //! their panel; while the help overlay is open it swallows every key except
-//! the ones that close it and quit.
+//! the ones that close it and quit. While the search input is open, keys
+//! are text ([`map_input_key`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -30,6 +31,10 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Enter => Action::Activate,
         KeyCode::Char('h') | KeyCode::Backspace if focus == Focus::Library => Action::Parent,
         KeyCode::Char('a') if focus == Focus::Library => Action::Enqueue,
+        KeyCode::Char('/') if focus == Focus::Library => Action::OpenSearch,
+        KeyCode::Char('r') if focus == Focus::Library => Action::Refresh,
+        KeyCode::Char('1') => Action::SelectLocal,
+        KeyCode::Char('2') => Action::SelectNavidrome,
         KeyCode::Char('d') if focus == Focus::Queue => Action::Remove,
         KeyCode::Char(' ') => Action::TogglePause,
         KeyCode::Char('n') => Action::Next,
@@ -44,6 +49,25 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         _ => return None,
     };
     Some(action)
+}
+
+/// Keys while the search input is open: printable characters are text,
+/// Backspace edits, Enter submits, Esc cancels. Ctrl-C still quits; other
+/// Ctrl/Alt combinations and control characters are ignored.
+pub fn map_input_key(key: KeyEvent) -> Option<Action> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')).then_some(Action::Quit);
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) if !c.is_control() => Some(Action::InputChar(c)),
+        KeyCode::Backspace => Some(Action::InputBackspace),
+        KeyCode::Enter => Some(Action::InputSubmit),
+        KeyCode::Esc => Some(Action::InputCancel),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +109,8 @@ mod tests {
             (key(KeyCode::Tab), Action::SwitchFocus),
             (ch('?'), Action::ToggleHelp),
             (ch('q'), Action::Quit),
+            (ch('1'), Action::SelectLocal),
+            (ch('2'), Action::SelectNavidrome),
         ];
         for (k, action) in cases {
             assert_eq!(lib(k), Some(action), "library {k:?}");
@@ -97,9 +123,13 @@ mod tests {
         assert_eq!(lib(ch('h')), Some(Action::Parent));
         assert_eq!(lib(key(KeyCode::Backspace)), Some(Action::Parent));
         assert_eq!(lib(ch('a')), Some(Action::Enqueue));
+        assert_eq!(lib(ch('/')), Some(Action::OpenSearch));
+        assert_eq!(lib(ch('r')), Some(Action::Refresh));
         assert_eq!(queue(ch('h')), None);
         assert_eq!(queue(key(KeyCode::Backspace)), None);
         assert_eq!(queue(ch('a')), None);
+        assert_eq!(queue(ch('/')), None);
+        assert_eq!(queue(ch('r')), None);
     }
 
     #[test]
@@ -152,6 +182,10 @@ mod tests {
                 ch('a'),
                 ch('d'),
                 ch('h'),
+                ch('1'),
+                ch('2'),
+                ch('/'),
+                ch('r'),
                 key(KeyCode::Tab),
                 key(KeyCode::Right),
                 ch('+'),
@@ -159,5 +193,31 @@ mod tests {
                 assert_eq!(help(k), None, "{focus:?} {k:?}");
             }
         }
+    }
+
+    #[test]
+    fn input_keys_are_text_except_for_editing_keys() {
+        let shifted = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT);
+        assert_eq!(map_input_key(shifted), Some(Action::InputChar('Q')));
+        for c in ['q', 'j', '?', '1', '2', '/', ' ', 'a', '雨'] {
+            assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
+        }
+        assert_eq!(
+            map_input_key(key(KeyCode::Enter)),
+            Some(Action::InputSubmit)
+        );
+        assert_eq!(map_input_key(key(KeyCode::Esc)), Some(Action::InputCancel));
+        assert_eq!(
+            map_input_key(key(KeyCode::Backspace)),
+            Some(Action::InputBackspace)
+        );
+        assert_eq!(map_input_key(ch('\u{7}')), None);
+        assert_eq!(map_input_key(key(KeyCode::Tab)), None);
+        assert_eq!(map_input_key(key(KeyCode::Up)), None);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(map_input_key(ctrl('c')), Some(Action::Quit));
+        assert_eq!(map_input_key(ctrl('u')), None);
+        let alt = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(map_input_key(alt), None);
     }
 }

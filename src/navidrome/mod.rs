@@ -7,6 +7,7 @@
 //! errors.
 
 pub mod api;
+pub mod browse;
 pub mod client;
 
 use std::time::Duration;

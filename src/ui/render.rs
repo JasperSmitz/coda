@@ -1,9 +1,9 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
 //! now-playing bar, the status line, and the help overlay.
 //!
-//! Untrusted names (tags, file names) are sanitised and truncated by
-//! display width, so control characters and wide characters cannot break
-//! the layout.
+//! Untrusted names (tags, file names, server responses, the search input)
+//! are sanitised and truncated by display width, so control characters and
+//! wide characters cannot break the layout.
 
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Focus, LibraryRow, ScanState, count, thousands};
+use crate::app::{App, Connection, Focus, LibraryRow, ScanState, Source, count, thousands};
+use crate::model::Track;
+use crate::navidrome::browse::{Browser, Load, Resource, Row};
 use crate::player::PlaybackStatus;
 use crate::ui::help;
 
@@ -22,12 +24,20 @@ use crate::ui::help;
 pub const NARROW_WIDTH: u16 = 60;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 const NOW_PLAYING_HEIGHT: u16 = 4;
+/// Marks tracks streamed from Navidrome in the queue and now-playing bar.
+/// U+2601 has no emoji presentation by default, so terminals draw it as a
+/// one-column text glyph (and `unicode-width` agrees).
+pub const REMOTE_MARKER: &str = "☁";
+const SEARCH_PROMPT: &str = "Search: ";
+/// Shown right-aligned on the search input line when it fits.
+const SEARCH_HINT: &str = "Enter search · Esc cancel";
 
 /// Widget state that persists between frames: the first visible row of
 /// each panel, so the view does not jump between frames.
 #[derive(Debug, Default)]
 pub struct ViewState {
     library_offset: usize,
+    remote_offset: usize,
     queue_offset: usize,
 }
 
@@ -121,10 +131,14 @@ fn row_width(area: Rect) -> usize {
 }
 
 fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, focused: bool) {
+    if let (Source::Navidrome, Some(browser)) = (app.source(), app.browser()) {
+        draw_remote(frame, app, browser, view, area, focused);
+        return;
+    }
     let location = if app.library_path().is_empty() {
-        "Library".to_owned()
+        "Local".to_owned()
     } else {
-        format!("Library: {}", app.library_path().join("/"))
+        format!("Local: {}", app.library_path().join("/"))
     };
     let block = panel_block(location, focused, area.width);
 
@@ -175,6 +189,188 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
     frame.render_stateful_widget(list_widget(items, block, focused), area, &mut state);
 }
 
+/// `Navidrome (<state>): Artists / <artist> / <album>`, fitted to a panel
+/// of `width` columns. When too long, the start of the path is cut so the
+/// shown view stays visible.
+fn remote_title(connection: &Connection, browser: &Browser, width: u16) -> String {
+    let state = match connection {
+        Connection::Connecting => "connecting…",
+        Connection::Connected => "connected",
+        Connection::Failed(_) => "not connected",
+    };
+    let prefix = format!("Navidrome ({state}): ");
+    let path: Vec<&str> = browser.stack().iter().map(|v| v.title.as_str()).collect();
+    let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
+    format!("{prefix}{}", fit_tail(&path.join(" / "), room))
+}
+
+fn draw_remote(
+    frame: &mut Frame,
+    app: &App,
+    browser: &Browser,
+    view: &mut ViewState,
+    area: Rect,
+    focused: bool,
+) {
+    let title = remote_title(app.connection(), browser, area.width);
+    let block = panel_block(title, focused, area.width);
+    let mut body = block.inner(area);
+    frame.render_widget(block, area);
+    if let Some(query) = browser.input() {
+        let [input_area, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(body);
+        draw_search_input(frame, query, input_area);
+        body = rest;
+    }
+    let message = |frame: &mut Frame, text: &str, style: Style| {
+        let line = Line::styled(fit(text, usize::from(body.width)), style);
+        frame.render_widget(Paragraph::new(line), body);
+    };
+    let Some(current) = browser.current() else {
+        return;
+    };
+    match &current.load {
+        Load::Loading(_) => message(frame, "Loading…", Style::default().fg(Color::Yellow)),
+        Load::Failed(error) => message(
+            frame,
+            &format!("Error: {error} (r to retry)"),
+            Style::default().fg(Color::Red),
+        ),
+        Load::Ready => {
+            let Some(content) = browser.content(current) else {
+                return;
+            };
+            if content.is_empty() {
+                let text = match current.resource {
+                    Resource::Artists => "No artists",
+                    Resource::Artist(_) => "No albums",
+                    Resource::Album(_) => "No songs",
+                    Resource::Search(_) => "No results",
+                };
+                message(frame, text, Style::default().fg(Color::DarkGray));
+                return;
+            }
+            let in_search = matches!(current.resource, Resource::Search(_));
+            let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+            let height = usize::from(body.height);
+            let offset = scroll_offset(view.remote_offset, current.selected, content.len(), height);
+            view.remote_offset = offset;
+            let items: Vec<ListItem> = content
+                .rows(offset, height)
+                .into_iter()
+                .map(|row| {
+                    note_row_built();
+                    ListItem::new(remote_row(row, in_search, width))
+                })
+                .collect();
+            let mut state =
+                ListState::default().with_selected(Some(current.selected.saturating_sub(offset)));
+            frame.render_stateful_widget(
+                list_widget(items, Block::new(), focused),
+                body,
+                &mut state,
+            );
+        }
+    }
+}
+
+fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
+    match row {
+        Row::Header(section) => Line::styled(
+            fit(section.label(), width),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Row::Artist(artist) => row_line(
+            &artist.name,
+            artist.album_count.map(|n| count(n as usize, "album")),
+            width,
+        ),
+        Row::Album(album) => {
+            let left = match (&album.artist, in_search) {
+                (Some(artist), true) => format!("{} — {artist}", album.name),
+                _ => album.name.clone(),
+            };
+            row_line(&left, album.year.map(|y| y.to_string()), width)
+        }
+        Row::Song(track) => {
+            let left = if in_search {
+                track.display_name()
+            } else {
+                match track.track_no {
+                    Some(no) => format!("{no:02} {}", track.title),
+                    None => track.title.clone(),
+                }
+            };
+            row_line(&left, track.duration.map(format_time), width)
+        }
+    }
+}
+
+/// The one-line search input: the prompt and the end of the query (the
+/// part being typed), with the terminal cursor after it.
+fn draw_search_input(frame: &mut Frame, query: &str, area: Rect) {
+    let room = usize::from(area.width).saturating_sub(SEARCH_PROMPT.width() + 1);
+    let shown = fit_tail(query, room);
+    let cursor_x = SEARCH_PROMPT.width() + shown.width();
+    let mut spans = vec![
+        Span::styled(SEARCH_PROMPT, Style::default().fg(Color::Cyan)),
+        Span::raw(shown),
+    ];
+    // The hint only appears with at least two spare columns before it.
+    let spare = usize::from(area.width).saturating_sub(cursor_x + 1);
+    if spare >= SEARCH_HINT.width() + 2 {
+        spans.push(Span::raw(" ".repeat(spare - SEARCH_HINT.width())));
+        spans.push(Span::styled(
+            SEARCH_HINT,
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if area.width > 0 && area.height > 0 {
+        let x = area.x + (cursor_x as u16).min(area.width - 1);
+        frame.set_cursor_position((x, area.y));
+    }
+}
+
+/// Like [`fit`], but keeps the end of `text`, starting with `…` when
+/// shortened. Bounded the same way: only the last [`MAX_FIT_CHARS`] chars
+/// are considered and the cut is found by binary search over measured
+/// suffixes.
+fn fit_tail(text: &str, width: usize) -> String {
+    let skip = text.chars().count().saturating_sub(MAX_FIT_CHARS);
+    let clean: String = text
+        .chars()
+        .skip(skip)
+        .map(|c| if is_unsafe(c) { ' ' } else { c })
+        .collect();
+    if skip == 0 && clean.width() <= width {
+        return clean;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1;
+    let starts: Vec<usize> = clean
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([clean.len()])
+        .collect();
+    // Smallest k whose suffix (from starts[k]) fits; the empty suffix
+    // always fits.
+    let (mut lo, mut hi) = (0, starts.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if clean[starts[mid]..].width() <= budget {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    format!("…{}", &clean[starts[lo]..])
+}
+
 fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, focused: bool) {
     let queue = app.player().queue();
     let block = panel_block(
@@ -207,7 +403,7 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
             let marker = if is_current { "▶ " } else { "  " };
             let mut line = row_line(
                 &entry.track.display_name(),
-                entry.track.duration.map(format_time),
+                queue_right(&entry.track),
                 width,
             );
             line.spans.insert(0, Span::raw(marker));
@@ -224,6 +420,18 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
     let mut state =
         ListState::default().with_selected(Some(app.queue_selected().saturating_sub(offset)));
     frame.render_stateful_widget(list_widget(items, block, focused), area, &mut state);
+}
+
+/// The right column of a queue row: the remote marker and the duration.
+fn queue_right(track: &Track) -> Option<String> {
+    let time = track.duration.map(format_time);
+    if !track.is_remote() {
+        return time;
+    }
+    Some(match time {
+        Some(time) => format!("{REMOTE_MARKER} {time}"),
+        None => REMOTE_MARKER.to_owned(),
+    })
 }
 
 fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
@@ -253,7 +461,12 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
         label.clone(),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
-    let room = usize::from(info.width).saturating_sub(label.width());
+    let mut room = usize::from(info.width).saturating_sub(label.width());
+    if entry.is_some_and(|e| e.track.is_remote()) {
+        let marker = fit(&format!("{REMOTE_MARKER} "), room);
+        room = room.saturating_sub(marker.width());
+        spans.push(Span::styled(marker, Style::default().fg(Color::Cyan)));
+    }
     match entry {
         Some(entry) => {
             let title = fit(&entry.track.title, room);
@@ -486,11 +699,17 @@ mod tests {
         let mut app = App::with_sources(None, Some(client));
         let screen = render(&app, 100, 20, now);
         assert!(
-            screen.contains("No local music directory configured"),
+            screen.contains("Navidrome (connecting…): Artists"),
             "{screen}"
         );
         assert!(!screen.contains("Scanning"), "{screen}");
         assert!(screen.contains("? help"), "{screen}");
+        app.handle_action(Action::SelectLocal, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(
+            screen.contains("No local music directory configured"),
+            "{screen}"
+        );
         app.handle_navidrome_ping(Ok(()), now);
         let screen = render(&app, 100, 20, now);
         assert!(screen.contains("Navidrome connected"), "{screen}");
@@ -591,16 +810,16 @@ mod tests {
         app.handle_scan_event(ScanEvent::Batch(vec![tagged("a.flac", "A", "B", 1)]), now);
         let wide = render(&app, 80, 20, now);
         assert!(
-            wide.contains("Library") && wide.contains("Queue (0)"),
+            wide.contains("Local") && wide.contains("Queue (0)"),
             "{wide}"
         );
         let narrow = render(&app, 59, 20, now);
-        assert!(narrow.contains("Library"), "{narrow}");
+        assert!(narrow.contains("Local"), "{narrow}");
         assert!(!narrow.contains("Queue (0)"), "{narrow}");
         app.handle_action(Action::SwitchFocus, now);
         let narrow = render(&app, 59, 20, now);
         assert!(narrow.contains("Queue (0)"), "{narrow}");
-        assert!(!narrow.contains("Library"), "{narrow}");
+        assert!(!narrow.contains("Local"), "{narrow}");
     }
 
     #[test]
@@ -689,6 +908,29 @@ mod tests {
             mixed.push_str("\u{301}\u{301}\u{FE0F}\u{200D}");
         }
         vec![combining, mixed]
+    }
+
+    #[test]
+    fn fit_tail_keeps_the_end_and_never_exceeds_the_width() {
+        assert_eq!(fit_tail("hello", 5), "hello");
+        assert_eq!(fit_tail("hello", 4), "…llo");
+        assert_eq!(fit_tail("hello", 0), "");
+        assert_eq!(fit_tail("雨雨雨", 4), "…雨");
+        for text in TRICKY {
+            for width in 0..=40 {
+                let out = fit_tail(text, width);
+                assert!(out.width() <= width, "{text:?} at {width}: {out:?}");
+                assert!(!out.chars().any(is_unsafe), "{out:?}");
+            }
+        }
+        for text in hostile_inputs() {
+            for width in [0, 1, 10, 200] {
+                let started = Instant::now();
+                let out = fit_tail(&text, width);
+                assert!(out.width() <= width);
+                assert!(started.elapsed() < Duration::from_secs(1));
+            }
+        }
     }
 
     #[test]
@@ -992,5 +1234,324 @@ mod tests {
         assert_eq!(format_time(Duration::from_secs(0)), "0:00");
         assert_eq!(format_time(Duration::from_secs(83)), "1:23");
         assert_eq!(format_time(Duration::from_secs(3725)), "1:02:05");
+    }
+
+    // ----- Navidrome ---------------------------------------------------
+
+    use crate::navidrome::browse::{Content, FetchRequest, FetchResponse};
+    use crate::navidrome::{Album, Artist, SearchResults};
+
+    fn nav_client() -> crate::navidrome::Client {
+        crate::navidrome::Client::new(
+            crate::navidrome::client::parse_base_url("https://secret-host.example/nd").unwrap(),
+            "u".into(),
+            crate::navidrome::Password::new("p".into()),
+        )
+        .unwrap()
+    }
+
+    /// Navidrome only; the startup Artists request is returned unanswered.
+    fn nav_app() -> (App, FetchRequest) {
+        let mut app = App::with_sources(None, Some(nav_client()));
+        let request = app.take_fetch_requests().remove(0);
+        (app, request)
+    }
+
+    fn answer(
+        app: &mut App,
+        request: &FetchRequest,
+        result: Result<Content, crate::navidrome::Error>,
+    ) {
+        app.handle_fetch_response(
+            FetchResponse {
+                id: request.id,
+                resource: request.resource.clone(),
+                result,
+            },
+            Instant::now(),
+        );
+    }
+
+    fn nav_artist(id: &str, name: &str) -> Artist {
+        Artist {
+            id: id.into(),
+            name: name.into(),
+            album_count: Some(3),
+        }
+    }
+
+    fn nav_track(id: &str, title: &str, artist: &str, secs: u64) -> Track {
+        Track::navidrome(
+            id.into(),
+            TrackMetadata {
+                title: Some(title.into()),
+                artist: Some(artist.into()),
+                duration: Some(Duration::from_secs(secs)),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    fn assert_full_width(screen: &str, width: u16) {
+        for line in screen.lines() {
+            assert_eq!(line.width(), usize::from(width), "{screen}");
+        }
+    }
+
+    #[test]
+    fn navidrome_loading_and_artists() {
+        let now = Instant::now();
+        let (mut app, request) = nav_app();
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("Loading…"), "{screen}");
+        app.handle_navidrome_ping(Ok(()), now);
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![
+                nav_artist("1", "Miles Davis"),
+                nav_artist("2", "\u{202E}Evil\u{1b}[31m"),
+            ])),
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected): Artists"),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis"), "{screen}");
+        assert!(screen.contains("3 albums"), "{screen}");
+        assert!(
+            !screen.contains('\u{1b}') && !screen.contains('\u{202E}'),
+            "{screen}"
+        );
+        assert!(!screen.contains("Loading…"), "{screen}");
+        assert_full_width(&screen, 100);
+        // Albums of an artist: breadcrumb title and loading.
+        app.handle_action(Action::Activate, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected): Artists / Miles Davis"),
+            "{screen}"
+        );
+        assert!(screen.contains("Loading…"), "{screen}");
+        let albums = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![Album {
+                id: "k".into(),
+                name: "Kind of Blue".into(),
+                artist: Some("Miles Davis".into()),
+                year: Some(1959),
+                song_count: None,
+                duration: None,
+            }])),
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("> Kind of Blue"), "{screen}");
+        assert!(screen.contains("1959"), "{screen}");
+    }
+
+    #[test]
+    fn navidrome_errors_render_inline_without_urls() {
+        let now = Instant::now();
+        let (mut app, request) = nav_app();
+        answer(&mut app, &request, Err(crate::navidrome::Error::Auth));
+        app.handle_navidrome_ping(Err(crate::navidrome::Error::Auth), now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Error: authentication failed (r to retry)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Navidrome (not connected)"), "{screen}");
+        assert!(!screen.contains("secret-host"), "{screen}");
+        // Hostile server message: sanitised and truncated.
+        app.handle_action(Action::Refresh, now);
+        let retry = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &retry,
+            Err(crate::navidrome::Error::Server {
+                code: 0,
+                message: format!("\u{1b}[2J{}", "❤️".repeat(200)),
+            }),
+        );
+        for width in [40, 100] {
+            let screen = render(&app, width, 14, now);
+            assert!(screen.contains("Error: server error 0:"), "{screen}");
+            assert!(!screen.contains('\u{1b}'), "{screen}");
+            assert_full_width(&screen, width);
+        }
+    }
+
+    #[test]
+    fn search_input_and_results() {
+        let now = Instant::now();
+        let (mut app, request) = nav_app();
+        answer(&mut app, &request, Ok(Content::Artists(Vec::new())));
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No artists"), "{screen}");
+        app.handle_action(Action::OpenSearch, now);
+        for c in "blue\u{202E}x".chars() {
+            app.handle_action(Action::InputChar(c), now);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut view = ViewState::default();
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("│Search: blue x"), "{screen}");
+        assert!(screen.contains("No artists"), "{screen}");
+        // The cursor sits after the query (border + prompt + 6 chars).
+        terminal
+            .backend_mut()
+            .assert_cursor_position((1 + 8 + 6, 1));
+        assert!(screen.contains("Enter search · Esc cancel"), "{screen}");
+        // Too narrow for the hint: only the query.
+        let narrow = render(&app, 30, 14, now);
+        assert!(!narrow.contains("Esc cancel"), "{narrow}");
+        assert_full_width(&narrow, 30);
+        // A long query shows its end.
+        for _ in 0..200 {
+            app.handle_action(Action::InputChar('z'), now);
+        }
+        app.handle_action(Action::InputChar('!'), now);
+        for width in [30, 100] {
+            let screen = render(&app, width, 14, now);
+            assert!(screen.contains("Search: …zzz"), "{screen}");
+            assert!(screen.contains("z!"), "{screen}");
+            assert_full_width(&screen, width);
+        }
+        for _ in 0..201 {
+            app.handle_action(Action::InputBackspace, now);
+        }
+        app.handle_action(Action::InputSubmit, now);
+        let search = app.take_fetch_requests().remove(0);
+        let screen = render(&app, 140, 14, now);
+        assert!(!screen.contains("Search: "), "{screen}");
+        assert!(
+            screen.contains("Navidrome (connected): Artists / Search \"blue x\""),
+            "{screen}"
+        );
+        // A narrow panel cuts the start of the path, not the shown view.
+        let screen = render(&app, 40, 14, now);
+        assert!(
+            screen.contains("(connected): …") && screen.contains("\"blue x\" ┐"),
+            "{screen}"
+        );
+        answer(
+            &mut app,
+            &search,
+            Ok(Content::Search(SearchResults {
+                artists: vec![nav_artist("1", "Blue Note Band")],
+                albums: vec![Album {
+                    id: "b".into(),
+                    name: "Blue Train".into(),
+                    artist: Some("John Coltrane".into()),
+                    year: None,
+                    song_count: None,
+                    duration: None,
+                }],
+                tracks: vec![nav_track("s", "Blue in Green", "Miles Davis", 337)],
+            })),
+        );
+        let screen = render(&app, 100, 14, now);
+        for expected in [
+            "Artists",
+            "> Blue Note Band",
+            "Albums",
+            "Blue Train — John Coltrane",
+            "Songs",
+            "Miles Davis - Blue in Green",
+            "5:37",
+        ] {
+            assert!(screen.contains(expected), "{expected}:\n{screen}");
+        }
+        let screen = render(&app, 20, 14, now);
+        assert_full_width(&screen, 20);
+    }
+
+    #[test]
+    fn remote_tracks_are_marked_in_the_queue_and_now_playing_bar() {
+        let now = Instant::now();
+        assert_eq!(REMOTE_MARKER.width(), 1);
+        assert_eq!(REMOTE_MARKER.chars().count(), 1);
+        let mut app = App::with_sources(Some("/music".into()), Some(nav_client()));
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("l.flac", "Local Song", "Band", 61)]),
+            now,
+        );
+        app.handle_action(Action::Enqueue, now);
+        app.handle_action(Action::SelectNavidrome, now);
+        let request = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![nav_artist("1", "A")])),
+        );
+        app.handle_action(Action::Activate, now);
+        let albums = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![Album {
+                id: "x".into(),
+                name: "X".into(),
+                artist: None,
+                year: None,
+                song_count: None,
+                duration: None,
+            }])),
+        );
+        app.handle_action(Action::Activate, now);
+        let songs = app.take_fetch_requests().remove(0);
+        let mut no_duration = nav_track("r2", "No Length", "Remote", 0);
+        no_duration.duration = None;
+        answer(
+            &mut app,
+            &songs,
+            Ok(Content::Songs(vec![
+                nav_track("r1", "Remote Song", "Cloud", 125),
+                no_duration,
+            ])),
+        );
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Enqueue, now);
+        app.handle_action(Action::Up, now);
+        let commands = app.handle_action(Action::Activate, now);
+        let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
+            panic!("{commands:?}");
+        };
+        app.handle_playback_event(PlaybackEvent::Started { load: *load }, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("[Playing] ☁ Remote Song — Cloud"),
+            "{screen}"
+        );
+        let lines: Vec<&str> = screen.lines().collect();
+        let row = |text: &str| {
+            *lines
+                .iter()
+                .find(|l| l.contains(text))
+                .unwrap_or_else(|| panic!("{text}:\n{screen}"))
+        };
+        assert!(row("Band - Local Song").contains("1:01"), "{screen}");
+        assert!(!row("Band - Local Song").contains('☁'), "{screen}");
+        assert!(row("▶ Cloud - Remote Song").contains("☁ 2:05"), "{screen}");
+        assert!(
+            row("Remote - No Length")
+                .trim_end_matches('│')
+                .trim_end()
+                .ends_with('☁')
+        );
+        // The marker never breaks the layout, at any width.
+        for width in [10, 20, 40, 59, 61, 100] {
+            for focus_queue in [false, true] {
+                if focus_queue != (app.focus() == Focus::Queue) {
+                    app.handle_action(Action::SwitchFocus, now);
+                }
+                let screen = render(&app, width, 14, now);
+                assert_full_width(&screen, width);
+            }
+        }
     }
 }

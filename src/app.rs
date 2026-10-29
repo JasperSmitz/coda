@@ -11,6 +11,13 @@
 //! that cannot be resolved is fed back to the player as a failed track, so
 //! the queue advances exactly as for a missing file.
 //!
+//! The Library panel has two sources: the local tree and, when configured,
+//! Navidrome ([`navidrome::browse::Browser`]). Remote lists are fetched in
+//! the background: [`App`] queues fetch requests as data
+//! ([`App::take_fetch_requests`]) and the loop spawns them, at most
+//! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
+//! [`App::handle_fetch_response`].
+//!
 //! [`run`] owns the terminal lifecycle: it enters the TUI, installs the
 //! panic hook, starts the scan, runs the loop, and on every exit shuts the
 //! playback backend down (bounded) before restoring the terminal. Only this
@@ -19,19 +26,25 @@
 use std::io;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
+};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 use crate::library::scan::{self, ScanEvent};
 use crate::library::tree::{DirNode, LibraryTree};
 use crate::model::Track;
 use crate::navidrome;
+use crate::navidrome::browse::{
+    self, Activated, Browser, FetchRequest, FetchResponse, JobOutcome, MAX_CONCURRENT_FETCHES,
+};
 use crate::playback::{PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{Player, PlayerCommand};
 use crate::resolve;
@@ -52,18 +65,54 @@ pub enum Focus {
     Queue,
 }
 
+/// What the Library panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Local,
+    Navidrome,
+}
+
+/// Navidrome connection state, as last observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Connection {
+    /// The startup ping has not answered yet.
+    Connecting,
+    Connected,
+    /// Short, URL-free error text.
+    Failed(String),
+}
+
+/// Status when `2` is pressed without a Navidrome configuration.
+pub const NAVIDROME_NOT_CONFIGURED: &str = "Navidrome is not configured";
+
 /// A user intent, already resolved from a key by [`keymap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Up,
     Down,
-    /// Enter: open a directory, play a library track now, or play the
-    /// selected queue entry.
+    /// Enter: open a directory, artist or album, play a library track
+    /// now, or play the selected queue entry.
     Activate,
-    /// Library: go to the parent directory.
+    /// Library: go to the parent directory or previous view.
     Parent,
-    /// Library: enqueue the track, or all tracks below the directory.
+    /// Library: enqueue the track, all tracks below the directory, or a
+    /// remote album or artist.
     Enqueue,
+    /// `1`: show the local library (focuses the Library panel).
+    SelectLocal,
+    /// `2`: show Navidrome (focuses the Library panel).
+    SelectNavidrome,
+    /// Library: open the search input (Navidrome).
+    OpenSearch,
+    /// Library: refetch the shown Navidrome view.
+    Refresh,
+    /// Search input: a typed character.
+    InputChar(char),
+    InputBackspace,
+    /// Search input: Enter.
+    InputSubmit,
+    /// Search input: Esc.
+    InputCancel,
     /// Queue: remove the selected entry.
     Remove,
     TogglePause,
@@ -134,6 +183,10 @@ pub struct App {
     quit: bool,
     /// Signs stream URLs for remote tracks; `None` if not configured.
     navidrome: Option<navidrome::Client>,
+    source: Source,
+    /// Remote browse state; `Some` exactly when Navidrome is configured.
+    browser: Option<Browser>,
+    connection: Connection,
 }
 
 impl App {
@@ -144,11 +197,20 @@ impl App {
 
     /// An app with an optional local library and an optional Navidrome
     /// client. Without a music directory the library stays empty and no
-    /// scan is expected.
+    /// scan is expected; if Navidrome is configured it is then the active
+    /// source, and its artists are requested right away.
     pub fn with_sources(music_dir: Option<PathBuf>, navidrome: Option<navidrome::Client>) -> Self {
         let scan = match music_dir {
             Some(_) => ScanState::Scanning { tracks: 0 },
             None => ScanState::NoLibrary,
+        };
+        let mut browser = navidrome.as_ref().map(|_| Browser::new());
+        let source = match (&music_dir, &mut browser) {
+            (None, Some(browser)) => {
+                browser.ensure_started();
+                Source::Navidrome
+            }
+            _ => Source::Local,
         };
         Self {
             player: Player::new(),
@@ -162,6 +224,9 @@ impl App {
             status: None,
             quit: false,
             navidrome,
+            source,
+            browser,
+            connection: Connection::Connecting,
         }
     }
 
@@ -197,6 +262,36 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The Navidrome browse state, if Navidrome is configured.
+    pub fn browser(&self) -> Option<&Browser> {
+        self.browser.as_ref()
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// `true` while the search input takes all keys.
+    pub fn input_open(&self) -> bool {
+        self.browser.as_ref().is_some_and(|b| b.input().is_some())
+    }
+
+    /// Fetches to spawn, in order.
+    pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
+        self.browser
+            .as_mut()
+            .map(Browser::take_requests)
+            .unwrap_or_default()
+    }
+
+    fn remote_active(&self) -> bool {
+        self.focus == Focus::Library && self.source == Source::Navidrome && self.browser.is_some()
     }
 
     /// The transient message, if it has not expired at `now`.
@@ -291,6 +386,17 @@ impl App {
 
     /// Applies a user action and returns the commands to send.
     pub fn handle_action(&mut self, action: Action, now: Instant) -> Vec<PlaybackCommand> {
+        if let Some(browser) = self.browser.as_mut().filter(|b| b.input().is_some()) {
+            match action {
+                Action::InputChar(c) => browser.input_char(c),
+                Action::InputBackspace => browser.input_backspace(),
+                Action::InputSubmit => browser.submit_search(),
+                Action::InputCancel => browser.cancel_search(),
+                Action::Quit => self.quit = true,
+                _ => {}
+            }
+            return Vec::new();
+        }
         if self.help_open {
             match action {
                 Action::ToggleHelp | Action::CloseHelp => self.help_open = false,
@@ -308,22 +414,67 @@ impl App {
                 self.move_selection(1);
                 Vec::new()
             }
+            Action::Activate if self.remote_active() => self.activate_remote(now),
             Action::Activate => match self.focus {
                 Focus::Library => self.activate_library(now),
                 Focus::Queue => self.activate_queue(),
             },
             Action::Parent => {
-                if self.focus == Focus::Library {
+                if self.remote_active() {
+                    self.browser_mut().go_up();
+                } else if self.focus == Focus::Library {
                     self.go_to_parent();
                 }
                 Vec::new()
             }
             Action::Enqueue => {
-                if self.focus == Focus::Library {
+                if self.remote_active() {
+                    let outcomes = self.browser_mut().enqueue_selected();
+                    self.apply_job_outcomes(outcomes, now);
+                } else if self.focus == Focus::Library {
                     self.enqueue_selected(now);
                 }
                 Vec::new()
             }
+            Action::SelectLocal => {
+                self.source = Source::Local;
+                self.focus = Focus::Library;
+                Vec::new()
+            }
+            Action::SelectNavidrome => {
+                match self.browser.as_mut() {
+                    Some(browser) => {
+                        browser.ensure_started();
+                        self.source = Source::Navidrome;
+                        self.focus = Focus::Library;
+                    }
+                    None => self.set_status(NAVIDROME_NOT_CONFIGURED, now),
+                }
+                Vec::new()
+            }
+            Action::OpenSearch => {
+                if self.remote_active() {
+                    self.browser_mut().open_search();
+                } else if self.focus == Focus::Library {
+                    let text = if self.browser.is_some() {
+                        "Search works in the Navidrome library (press 2)"
+                    } else {
+                        NAVIDROME_NOT_CONFIGURED
+                    };
+                    self.set_status(text, now);
+                }
+                Vec::new()
+            }
+            Action::Refresh => {
+                if self.remote_active() {
+                    self.browser_mut().refresh();
+                }
+                Vec::new()
+            }
+            Action::InputChar(_)
+            | Action::InputBackspace
+            | Action::InputSubmit
+            | Action::InputCancel => Vec::new(),
             Action::Remove => match self.focus {
                 Focus::Queue => self.remove_selected(),
                 Focus::Library => Vec::new(),
@@ -373,14 +524,40 @@ impl App {
         match result {
             Ok(()) => {
                 tracing::info!("navidrome ping ok");
+                self.connection = Connection::Connected;
                 self.set_status("Navidrome connected", now);
             }
             Err(error) => {
                 // Never `Debug`: network errors include the server address.
-                tracing::warn!(%error, detail = %error.detail(), "navidrome ping failed");
+                // Only the detail: `Display` can carry untrusted server text.
+                tracing::warn!(endpoint = "ping", detail = %error.detail(), "navidrome ping failed");
+                self.connection = Connection::Failed(error.to_string());
                 self.set_status(format!("Navidrome: {error}"), now);
             }
         }
+    }
+
+    /// Bracketed paste: into the search input when it is open (through the
+    /// typed-character filter, so newlines never submit), ignored
+    /// otherwise.
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(browser) = self.browser.as_mut() {
+            browser.input_str(text);
+        }
+    }
+
+    /// Applies a finished fetch: caches it, updates the view if it still
+    /// awaits this request, and completes enqueue jobs that were waiting
+    /// for it. A successful fetch also marks the server as connected.
+    pub fn handle_fetch_response(&mut self, response: FetchResponse, now: Instant) {
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        if response.result.is_ok() {
+            self.connection = Connection::Connected;
+        }
+        let outcomes = browser.handle_response(response);
+        self.apply_job_outcomes(outcomes, now);
     }
 
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
@@ -469,6 +646,10 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
+        if self.remote_active() {
+            self.browser_mut().move_selection(delta);
+            return;
+        }
         let len = match self.focus {
             Focus::Library => self.library_len(),
             Focus::Queue => self.player.queue().len(),
@@ -497,6 +678,70 @@ impl App {
             }
             None => Vec::new(),
         }
+    }
+
+    fn browser_mut(&mut self) -> &mut Browser {
+        self.browser
+            .as_mut()
+            .expect("remote actions require a configured browser")
+    }
+
+    fn activate_remote(&mut self, now: Instant) -> Vec<PlayerCommand> {
+        match self.browser_mut().activate() {
+            Activated::Play(track) => {
+                self.set_status(format!("Playing {}", track.display_name()), now);
+                self.player.play_track_now(track)
+            }
+            Activated::Opened | Activated::Nothing => Vec::new(),
+        }
+    }
+
+    /// Adds completed enqueue jobs to the queue, in order, and reports
+    /// them in the status line. Failures take priority over other outcomes
+    /// of the same batch, with the number of tracks added alongside.
+    fn apply_job_outcomes(&mut self, outcomes: Vec<JobOutcome>, now: Instant) {
+        let mut failures = Vec::new();
+        let mut added = 0;
+        let mut last = None;
+        for outcome in outcomes {
+            match outcome {
+                JobOutcome::Added { label, tracks } => {
+                    last = Some(match tracks.as_slice() {
+                        [] => format!("Nothing to add from {label}"),
+                        [one] => format!("Added {}", one.display_name()),
+                        many => format!("Added {} from {label}", count(many.len(), "track")),
+                    });
+                    added += tracks.len();
+                    for track in tracks {
+                        self.player.enqueue(track);
+                    }
+                }
+                JobOutcome::Fetching { label } => last = Some(format!("Fetching {label}…")),
+                JobOutcome::Queued { label, after } => {
+                    last = Some(format!("Queued {label} after {after}…"));
+                }
+                JobOutcome::Failed { label, error } => {
+                    failures.push(format!("Could not add {label}: {error}"));
+                }
+            }
+        }
+        let text = match failures.as_slice() {
+            [] => last,
+            [first, rest @ ..] => {
+                let mut text = first.clone();
+                if !rest.is_empty() {
+                    text.push_str(&format!(" (and {} more)", rest.len()));
+                }
+                if added > 0 {
+                    text.push_str(&format!("; added {}", count(added, "track")));
+                }
+                Some(text)
+            }
+        };
+        if let Some(text) = text {
+            self.set_status(text, now);
+        }
+        self.clamp_selections();
     }
 
     fn activate_queue(&mut self) -> Vec<PlayerCommand> {
@@ -610,6 +855,9 @@ pub async fn run(
         }
     };
     install_panic_hook(previous_hook);
+    if let Err(error) = crossterm::execute!(io::stdout(), EnableBracketedPaste) {
+        tracing::warn!(%error, "could not enable bracketed paste");
+    }
     // Never dropped implicitly: if a panic unwinds out of the loop after
     // the terminal hung up, `Terminal::drop` would `eprintln!` on the dead
     // tty, panic while panicking and abort, so `kill_on_drop` would never
@@ -623,8 +871,12 @@ pub async fn run(
 
     let scan = music_dir.clone().map(scan::spawn_scan);
     let ping = navidrome.clone().map(spawn_ping);
-    let mut app = App::with_sources(music_dir, navidrome);
-    let sources = Sources { scan, ping };
+    let mut app = App::with_sources(music_dir, navidrome.clone());
+    let sources = Sources {
+        scan,
+        ping,
+        navidrome,
+    };
     let result = event_loop(&mut terminal, &mut app, &mut playback, sources, signals).await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
@@ -654,6 +906,9 @@ fn release_terminal(mut terminal: DefaultTerminal) {
 /// Restores the terminal without ever writing to stderr: after a hangup
 /// the terminal is gone and a failed write must not panic.
 fn restore_terminal() {
+    if let Err(error) = crossterm::execute!(io::stdout(), DisableBracketedPaste) {
+        tracing::warn!(%error, "could not disable bracketed paste");
+    }
     if let Err(error) = ratatui::try_restore() {
         tracing::warn!(%error, "could not restore the terminal");
     }
@@ -683,7 +938,11 @@ pub fn install_panic_hook(previous: PanicHook) {
             // `try_restore` does not show the cursor, and the leaked
             // terminal (see `run`) never will. Errors are ignored so a
             // hung-up tty stays safe.
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
             previous(info);
         } else {
             let thread = std::thread::current();
@@ -726,6 +985,24 @@ type PingResult = Result<(), navidrome::Error>;
 struct Sources {
     scan: Option<mpsc::Receiver<ScanEvent>>,
     ping: Option<oneshot::Receiver<PingResult>>,
+    /// Runs the app's fetch requests.
+    navidrome: Option<navidrome::Client>,
+}
+
+/// Spawns the fetch tasks for `requests`; their responses arrive on
+/// `responses`. Concurrency is bounded by `limit`.
+fn spawn_fetches(
+    requests: Vec<FetchRequest>,
+    client: Option<&navidrome::Client>,
+    limit: &Arc<Semaphore>,
+    responses: &mpsc::UnboundedSender<FetchResponse>,
+) {
+    let Some(client) = client else {
+        return;
+    };
+    for request in requests {
+        browse::spawn_fetch(client.clone(), limit.clone(), request, responses.clone());
+    }
 }
 
 /// Pings the server on a Tokio task; the result arrives over a oneshot.
@@ -765,11 +1042,23 @@ async fn event_loop(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut view = render::ViewState::default();
-    let Sources { mut scan, mut ping } = sources;
+    let Sources {
+        mut scan,
+        mut ping,
+        navidrome,
+    } = sources;
+    let fetch_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+    let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
     let mut playback_open = true;
     let mut dirty = true;
 
     loop {
+        spawn_fetches(
+            app.take_fetch_requests(),
+            navidrome.as_ref(),
+            &fetch_limit,
+            &fetch_tx,
+        );
         if dirty {
             terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
             dirty = false;
@@ -777,11 +1066,22 @@ async fn event_loop(
         tokio::select! {
             input_event = input.next() => match input_event {
                 Some(Ok(Event::Key(key))) => {
+                    let action = if app.input_open() {
+                        keymap::map_input_key(key)
+                    } else {
+                        keymap::map_key(key, app.focus(), app.help_open())
+                    };
                     if key.kind != KeyEventKind::Release
-                        && let Some(action) = keymap::map_key(key, app.focus(), app.help_open())
+                        && let Some(action) = action
                     {
                         let commands = app.handle_action(action, Instant::now());
                         playback.send_all(commands);
+                        dirty = true;
+                    }
+                }
+                Some(Ok(Event::Paste(text))) => {
+                    if app.input_open() {
+                        app.handle_paste(&text);
                         dirty = true;
                     }
                 }
@@ -812,6 +1112,11 @@ async fn event_loop(
                         app.scan_closed(Instant::now());
                     }
                 }
+                dirty = true;
+            },
+            // The loop holds a sender, so this never yields `None`.
+            Some(response) = fetch_rx.recv() => {
+                app.handle_fetch_response(response, Instant::now());
                 dirty = true;
             },
             result = next_ping(&mut ping) => {
@@ -1377,5 +1682,588 @@ mod tests {
         assert_eq!(thousands(1_234_567), "1,234,567");
         assert_eq!(count(1, "track"), "1 track");
         assert_eq!(count(5000, "track"), "5,000 tracks");
+    }
+
+    // ----- Navidrome browsing ------------------------------------------
+
+    use crate::navidrome::browse::{Content, Load, Resource};
+    use crate::navidrome::{Album, Artist, SearchResults};
+
+    fn artist(id: &str) -> Artist {
+        Artist {
+            id: id.into(),
+            name: format!("Artist {id}"),
+            album_count: Some(2),
+        }
+    }
+
+    fn album(id: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: format!("Album {id}"),
+            artist: Some("Someone".into()),
+            year: Some(1999),
+            song_count: None,
+            duration: None,
+        }
+    }
+
+    fn songs(ids: &[&str]) -> Content {
+        Content::Songs(ids.iter().map(|id| remote(id)).collect())
+    }
+
+    /// Navidrome only: the Navidrome source is active and the artists are
+    /// requested at once.
+    fn nav_app() -> (App, Instant) {
+        (App::with_sources(None, Some(client())), Instant::now())
+    }
+
+    fn requests(app: &mut App) -> Vec<FetchRequest> {
+        app.take_fetch_requests()
+    }
+
+    fn one_request(app: &mut App) -> FetchRequest {
+        let mut requests = requests(app);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        requests.remove(0)
+    }
+
+    fn respond(app: &mut App, request: &FetchRequest, result: Result<Content, navidrome::Error>) {
+        app.handle_fetch_response(
+            FetchResponse {
+                id: request.id,
+                resource: request.resource.clone(),
+                result,
+            },
+            Instant::now(),
+        );
+    }
+
+    /// Answers the startup Artists request with `ids`.
+    fn nav_app_with_artists(ids: &[&str]) -> (App, Instant) {
+        let (mut app, now) = nav_app();
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Artists);
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Artists(ids.iter().map(|id| artist(id)).collect())),
+        );
+        (app, now)
+    }
+
+    fn browser(app: &App) -> &Browser {
+        app.browser().unwrap()
+    }
+
+    fn view_titles(app: &App) -> Vec<String> {
+        browser(app)
+            .stack()
+            .iter()
+            .map(|v| v.title.clone())
+            .collect()
+    }
+
+    fn current_load(app: &App) -> Load {
+        browser(app).current().unwrap().load.clone()
+    }
+
+    fn current_selected(app: &App) -> usize {
+        browser(app).current().unwrap().selected
+    }
+
+    #[test]
+    fn navidrome_only_starts_on_the_navidrome_source_and_fetches_artists() {
+        let (mut app, _) = nav_app();
+        assert_eq!(app.source(), Source::Navidrome);
+        assert_eq!(app.connection(), &Connection::Connecting);
+        assert!(matches!(current_load(&app), Load::Loading(_)));
+        assert_eq!(view_titles(&app), ["Artists"]);
+        assert_eq!(one_request(&mut app).resource, Resource::Artists);
+        assert!(requests(&mut app).is_empty(), "taken once");
+        // With a local library too, Local is active and nothing is fetched.
+        let mut both = App::with_sources(Some(ROOT.into()), Some(client()));
+        assert_eq!(both.source(), Source::Local);
+        assert!(requests(&mut both).is_empty());
+    }
+
+    #[test]
+    fn navigation_stack_opens_artists_and_albums_and_plays_songs() {
+        let (mut app, now) = nav_app_with_artists(&["a1", "a2"]);
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(app.connection(), &Connection::Connected);
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a2"]);
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Artist("a2".into()));
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a2", "Album y"]);
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Album("y".into()));
+        respond(&mut app, &request, Ok(songs(&["s1", "s2", "s3"])));
+
+        // Enter on a song plays it now, inserted after the current entry.
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_id(&commands), "s1");
+        let commands = press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(stream_id(&commands), "s3");
+        assert_eq!(queue_titles(&app), ["Remote s1", "Remote s3*"]);
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::Activate], now); // back to s1
+        app.focus = Focus::Library;
+        let commands = press(&mut app, &[Action::Up, Action::Activate], now);
+        assert_eq!(stream_id(&commands), "s2");
+        assert_eq!(queue_titles(&app), ["Remote s1", "Remote s2*", "Remote s3"]);
+        assert_eq!(app.status(now), Some("Playing Remote s2"));
+
+        // Up the stack: each view keeps its selection; the root stays.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a2"]);
+        assert_eq!(current_selected(&app), 1);
+        press(&mut app, &[Action::Parent, Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Artists"]);
+        assert_eq!(current_selected(&app), 1);
+        // Re-opening a cached list needs no request.
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(current_load(&app), Load::Ready);
+        assert!(requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn stale_responses_are_cached_but_do_not_change_the_view() {
+        let (mut app, now) = nav_app_with_artists(&["a1", "a2"]);
+        press(&mut app, &[Action::Activate], now);
+        let first = one_request(&mut app);
+        // Leave before it answers and open another artist.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Down, Action::Activate],
+            now,
+        );
+        let second = one_request(&mut app);
+        assert_eq!(second.resource, Resource::Artist("a2".into()));
+        respond(&mut app, &first, Ok(Content::Albums(vec![album("x")])));
+        assert_eq!(view_titles(&app), ["Artists", "Artist a2"]);
+        assert_eq!(current_load(&app), Load::Loading(second.id));
+        assert!(browser(&app).cached(&first.resource).is_some());
+        // Going back to the first artist shows the cached albums at once.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::Activate],
+            now,
+        );
+        assert_eq!(current_load(&app), Load::Ready);
+        assert!(requests(&mut app).is_empty());
+        // The second response still lands in the cache.
+        respond(&mut app, &second, Ok(Content::Albums(vec![album("z")])));
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+        assert!(browser(&app).cached(&second.resource).is_some());
+    }
+
+    #[test]
+    fn errors_show_inline_and_refresh_retries() {
+        let (mut app, now) = nav_app();
+        let request = one_request(&mut app);
+        respond(&mut app, &request, Err(navidrome::Error::Auth));
+        assert_eq!(
+            current_load(&app),
+            Load::Failed("authentication failed".into())
+        );
+        assert_eq!(
+            app.connection(),
+            &Connection::Connecting,
+            "fetch errors keep the ping state"
+        );
+        // Nothing to act on while failed.
+        assert!(
+            press(
+                &mut app,
+                &[Action::Down, Action::Activate, Action::Enqueue],
+                now
+            )
+            .is_empty()
+        );
+        press(&mut app, &[Action::Refresh], now);
+        let retry = one_request(&mut app);
+        assert_eq!(retry.resource, Resource::Artists);
+        assert_ne!(retry.id, request.id);
+        assert_eq!(current_load(&app), Load::Loading(retry.id));
+        // Refresh while loading awaits the same request.
+        press(&mut app, &[Action::Refresh], now);
+        assert!(requests(&mut app).is_empty());
+        respond(&mut app, &retry, Ok(Content::Artists(vec![artist("a")])));
+        assert_eq!(current_load(&app), Load::Ready);
+    }
+
+    #[test]
+    fn refresh_refetches_and_replaces_the_cache_entry() {
+        let (mut app, now) = nav_app_with_artists(&["a1", "a2", "a3"]);
+        press(&mut app, &[Action::Down, Action::Down], now);
+        press(&mut app, &[Action::Refresh], now);
+        let request = one_request(&mut app);
+        assert!(browser(&app).cached(&Resource::Artists).is_none());
+        assert!(matches!(current_load(&app), Load::Loading(_)));
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![artist("b1"), artist("b2")])),
+        );
+        let Some(Content::Artists(artists)) = browser(&app).cached(&Resource::Artists) else {
+            panic!("artists not cached");
+        };
+        assert_eq!(artists[0].id, "b1");
+        // The selection is kept, clamped to the new list.
+        assert_eq!(current_selected(&app), 1);
+        // `r` in the local source does nothing.
+        press(&mut app, &[Action::SelectLocal, Action::Refresh], now);
+        assert!(requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn album_and_artist_enqueue_after_fetch_in_press_order() {
+        let (mut app, now) = nav_app_with_artists(&["a1", "a2"]);
+        // `a` on artist a1, then on artist a2: both need their albums.
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(app.status(now), Some("Fetching Artist a1…"));
+        press(&mut app, &[Action::Down, Action::Enqueue], now);
+        let mut reqs = requests(&mut app);
+        assert_eq!(
+            reqs.iter().map(|r| r.resource.clone()).collect::<Vec<_>>(),
+            [Resource::Artist("a1".into()), Resource::Artist("a2".into())]
+        );
+        let (a2, a1) = (reqs.pop().unwrap(), reqs.pop().unwrap());
+        // a2 answers first, entirely: it waits for a1.
+        respond(&mut app, &a2, Ok(Content::Albums(vec![album("z")])));
+        let z = one_request(&mut app);
+        respond(&mut app, &z, Ok(songs(&["z1"])));
+        assert!(app.player().queue().is_empty());
+        // a1's albums arrive; its two albums answer in reverse order.
+        respond(
+            &mut app,
+            &a1,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        let mut reqs = requests(&mut app);
+        assert_eq!(reqs.len(), 2);
+        let (y, x) = (reqs.pop().unwrap(), reqs.pop().unwrap());
+        assert_eq!(x.resource, Resource::Album("x".into()));
+        respond(&mut app, &y, Ok(songs(&["y1", "y2"])));
+        assert!(app.player().queue().is_empty());
+        respond(&mut app, &x, Ok(songs(&["x1", "x2"])));
+        assert_eq!(
+            queue_titles(&app),
+            [
+                "Remote x1",
+                "Remote x2",
+                "Remote y1",
+                "Remote y2",
+                "Remote z1"
+            ]
+        );
+        // The last completed job reports; a single track is named.
+        assert_eq!(app.status(now), Some("Added Remote z1"));
+        assert!(app.player().status() == crate::player::PlaybackStatus::Stopped);
+        assert_eq!(browser(&app).pending_jobs(), 0);
+        // Cached now: an album enqueues at once.
+        press(&mut app, &[Action::Activate], now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(app.player().queue().len(), 6);
+        assert_eq!(app.status(now), Some("Added Remote z1"));
+    }
+
+    #[test]
+    fn song_enqueue_waits_behind_an_earlier_album_and_failures_are_dropped_in_turn() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        let albums = one_request(&mut app);
+        respond(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        // `a` on album x (not fetched), then open album y and `a` a song.
+        press(&mut app, &[Action::Enqueue], now);
+        let x = one_request(&mut app);
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let y = one_request(&mut app);
+        respond(&mut app, &y, Ok(songs(&["y1", "y2"])));
+        press(&mut app, &[Action::Down, Action::Enqueue], now);
+        assert!(app.player().queue().is_empty(), "waits for album x");
+        assert_eq!(app.status(now), Some("Queued Remote y2 after Album x…"));
+        respond(&mut app, &x, Err(navidrome::Error::Http(500)));
+        assert_eq!(queue_titles(&app), ["Remote y2"]);
+        // The failure is not overwritten by the song added in the same batch.
+        assert_eq!(
+            app.status(now),
+            Some("Could not add Album x: server returned HTTP 500; added 1 track")
+        );
+        assert_eq!(browser(&app).pending_jobs(), 0);
+        // A later job for the failed album fetches it again.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::Enqueue],
+            now,
+        );
+        assert_eq!(one_request(&mut app).resource, Resource::Album("x".into()));
+    }
+
+    #[test]
+    fn failed_job_reports_its_error() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Enqueue], now);
+        let request = one_request(&mut app);
+        respond(&mut app, &request, Err(navidrome::Error::Http(500)));
+        assert_eq!(
+            app.status(now),
+            Some("Could not add Artist a1: server returned HTTP 500")
+        );
+        assert!(app.player().queue().is_empty());
+    }
+
+    fn type_text(app: &mut App, text: &str, now: Instant) {
+        for c in text.chars() {
+            app.handle_action(Action::InputChar(c), now);
+        }
+    }
+
+    fn input(app: &App) -> Option<&str> {
+        browser(app).input()
+    }
+
+    #[test]
+    fn search_input_edits_and_cancels() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::OpenSearch], now);
+        assert!(app.input_open());
+        assert_eq!(input(&app), Some(""));
+        type_text(&mut app, "ab\u{7}c\u{1b}", now);
+        assert_eq!(input(&app), Some("abc"), "control characters are ignored");
+        press(&mut app, &[Action::InputBackspace], now);
+        assert_eq!(input(&app), Some("ab"));
+        // Every other action is swallowed while typing, except Quit.
+        let commands = press(
+            &mut app,
+            &[
+                Action::Next,
+                Action::Enqueue,
+                Action::SelectLocal,
+                Action::ToggleHelp,
+            ],
+            now,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(app.source(), Source::Navidrome);
+        assert!(!app.help_open());
+        assert!(app.player().queue().is_empty());
+        // Capped at 256 chars.
+        type_text(&mut app, &"雨".repeat(300), now);
+        assert_eq!(
+            input(&app).unwrap().chars().count(),
+            browse::MAX_QUERY_CHARS
+        );
+        press(&mut app, &[Action::InputCancel], now);
+        assert!(!app.input_open());
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(view_titles(&app), ["Artists"]);
+        // A blank query only closes the input.
+        press(&mut app, &[Action::OpenSearch], now);
+        type_text(&mut app, "   ", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(!app.input_open());
+        assert!(requests(&mut app).is_empty());
+        // Quit works while typing.
+        press(&mut app, &[Action::OpenSearch, Action::Quit], now);
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn search_results_open_and_enqueue_like_browsing() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::OpenSearch], now);
+        type_text(&mut app, " blue ", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(!app.input_open());
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Search("blue".into()));
+        assert_eq!(view_titles(&app), ["Artists", "Search \"blue\""]);
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Search(SearchResults {
+                artists: vec![artist("ar")],
+                albums: vec![album("al")],
+                tracks: vec![remote("so")],
+            })),
+        );
+        // Rows: header, artist, header, album, header, song; headers are
+        // skipped by the selection.
+        assert_eq!(current_selected(&app), 1);
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 1);
+        press(&mut app, &[Action::Down], now);
+        assert_eq!(current_selected(&app), 3);
+        press(&mut app, &[Action::Down, Action::Down], now);
+        assert_eq!(current_selected(&app), 5);
+        // Songs: `a` adds, Enter plays.
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(queue_titles(&app), ["Remote so"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_id(&commands), "so");
+        // Albums open.
+        press(&mut app, &[Action::Up, Action::Activate], now);
+        assert_eq!(
+            view_titles(&app),
+            ["Artists", "Search \"blue\"", "Album al"]
+        );
+        assert_eq!(one_request(&mut app).resource, Resource::Album("al".into()));
+        // `h` back to the results, then to the view before the search.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(current_selected(&app), 3);
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Artists"]);
+    }
+
+    #[test]
+    fn source_switching_preserves_each_position() {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![track("d/1.flac"), track("d/2.flac")]),
+            now,
+        );
+        press(&mut app, &[Action::Activate, Action::Down], now);
+        assert_eq!(app.library_path(), ["d"]);
+        assert_eq!(selected_name(&app), "2");
+        // `2` from the queue panel focuses the library on Navidrome.
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SelectNavidrome],
+            now,
+        );
+        assert_eq!(app.focus(), Focus::Library);
+        assert_eq!(app.source(), Source::Navidrome);
+        let request = one_request(&mut app);
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![
+                artist("a"),
+                artist("b"),
+                artist("c"),
+            ])),
+        );
+        press(&mut app, &[Action::Down, Action::Down], now);
+        press(&mut app, &[Action::SwitchFocus, Action::SelectLocal], now);
+        assert_eq!(app.focus(), Focus::Library);
+        assert_eq!(app.source(), Source::Local);
+        assert_eq!(app.library_path(), ["d"]);
+        assert_eq!(selected_name(&app), "2");
+        // Local keys act on the local tree.
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(selected_name(&app), "1");
+        press(&mut app, &[Action::SelectNavidrome], now);
+        assert_eq!(current_selected(&app), 2);
+        assert!(requests(&mut app).is_empty(), "started only once");
+        // `/` outside the Navidrome source explains itself.
+        press(&mut app, &[Action::SelectLocal, Action::OpenSearch], now);
+        assert!(!app.input_open());
+        assert_eq!(
+            app.status(now),
+            Some("Search works in the Navidrome library (press 2)")
+        );
+    }
+
+    #[test]
+    fn navidrome_keys_without_navidrome_show_a_message() {
+        let (mut app, now) = app_with(&["1.flac"]);
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SelectNavidrome],
+            now,
+        );
+        assert_eq!(app.source(), Source::Local);
+        assert_eq!(app.focus(), Focus::Queue);
+        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
+        assert!(app.browser().is_none());
+        assert!(requests(&mut app).is_empty());
+        press(
+            &mut app,
+            &[Action::SelectLocal, Action::OpenSearch, Action::Refresh],
+            now,
+        );
+        assert_eq!(app.focus(), Focus::Library);
+        assert!(!app.input_open());
+        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
+        // A response without a browser is ignored.
+        app.handle_fetch_response(
+            FetchResponse {
+                id: browse::RequestId(1),
+                resource: Resource::Artists,
+                result: Ok(Content::Artists(Vec::new())),
+            },
+            now,
+        );
+        assert_eq!(selected_name(&app), "1");
+    }
+
+    #[test]
+    fn ping_sets_the_connection_state() {
+        let (mut app, now) = nav_app();
+        app.handle_navidrome_ping(Err(navidrome::Error::Auth), now);
+        assert_eq!(
+            app.connection(),
+            &Connection::Failed("authentication failed".into())
+        );
+        app.handle_navidrome_ping(Ok(()), now);
+        assert_eq!(app.connection(), &Connection::Connected);
+    }
+
+    #[test]
+    fn a_search_from_search_results_replaces_them() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        for query in ["blue", "red", "green"] {
+            press(&mut app, &[Action::OpenSearch], now);
+            type_text(&mut app, query, now);
+            press(&mut app, &[Action::InputSubmit], now);
+        }
+        assert_eq!(
+            view_titles(&app),
+            ["Artists", "Artist a1", "Search \"green\""]
+        );
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+    }
+
+    #[test]
+    fn paste_goes_into_the_search_input_only_and_never_submits() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        // Closed input: ignored.
+        app.handle_paste("ignored\n");
+        assert!(!app.input_open());
+        press(&mut app, &[Action::OpenSearch], now);
+        type_text(&mut app, "x", now);
+        app.handle_paste("blue\nmoon\r\njazz\tbop\u{1b}\r");
+        assert!(app.input_open(), "a pasted newline does not submit");
+        assert_eq!(input(&app), Some("xblue moon jazz bop "));
+        assert!(requests(&mut app).is_empty());
+        // A huge paste stops at the cap.
+        app.handle_paste(&"z".repeat(1_000_000));
+        assert_eq!(
+            input(&app).unwrap().chars().count(),
+            browse::MAX_QUERY_CHARS
+        );
+        assert!(input(&app).unwrap().starts_with("xblue moon jazz bop "));
     }
 }

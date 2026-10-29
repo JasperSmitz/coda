@@ -137,6 +137,10 @@ pub enum Error {
     Setup(#[source] reqwest::Error),
     #[error("could not generate a random salt")]
     Random,
+    /// The fetch task ended without a result (it panicked or was
+    /// cancelled).
+    #[error("request did not complete")]
+    Aborted,
 }
 
 impl Error {
@@ -169,7 +173,9 @@ impl Error {
             Self::Server { code, .. } => format!("subsonic error code {code}"),
             Self::Decode(detail) => format!("decode: {detail}"),
             Self::Setup(_) => "HTTP client setup failed".to_owned(),
-            Self::Auth | Self::TooLarge | Self::InvalidUrl(_) | Self::Random => self.to_string(),
+            Self::Auth | Self::TooLarge | Self::InvalidUrl(_) | Self::Random | Self::Aborted => {
+                self.to_string()
+            }
         }
     }
 }

@@ -56,3 +56,15 @@ Each entry should state:
 - **Root cause:** toml's `Display` for parse errors prints the offending source line.
 - **Rule:** build user-facing parse errors from the error message plus line/column only, and test with a malformed secret line.
 - **Where verified:** M2 slice 1; `unquoted_password_is_not_echoed`.
+
+### Clamp third-party HTTP crates in the log filter
+- **Context / symptom:** with `CODA_LOG=debug` the log contained `connecting to <server ip:port>`, despite all of Coda's own messages being redacted.
+- **Root cause:** hyper-util emits `tracing` events with peer addresses at debug and hosts at trace. A plain `crate=warn` directive is not enough: EnvFilter prefers more specific user directives (`hyper_util::client::legacy=trace`).
+- **Rule:** enforce a separate per-target filter layer (ANDed with the user's filter) that drops sub-warn events from HTTP crates, and test it by driving the real layer with hostile `CODA_LOG` values.
+- **Where verified:** M2 slice 2 review; `http_crates_are_clamped_to_warn_whatever_coda_log_says`, pty smoke log.
+
+### Every spawned request must answer exactly once
+- **Context / symptom:** a fetch task that panicked or was cancelled left its resource "in flight" forever: the view stayed on Loading and `r` could not recover.
+- **Root cause:** the response was only sent on the happy path; a guard created inside the task does not exist if the task is aborted before its first poll.
+- **Rule:** create a drop guard that sends an error response *before* spawning, consume it on the normal send, and test cancellation before first poll.
+- **Where verified:** M2 slice 2 review; `a_cancelled_fetch_still_answers_with_an_error`.

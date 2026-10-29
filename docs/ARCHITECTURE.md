@@ -1,6 +1,6 @@
 # Coda — Architecture
 
-> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. M2 slice 1 adds config file, Navidrome client and remote tracks in the unified queue; remote browsing UI is M2 slice 2. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
+> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. M2 (Navidrome) is implemented: config file, Subsonic client, remote tracks in the unified queue, remote browsing and search. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
 
 ## Intended boundaries
 
@@ -57,8 +57,10 @@ Single package `coda-player`: library `coda_player`, binary `coda`.
 - `library::scan` / `library::tree` — blocking-thread scan with incremental batches; directory browse tree.
 - `app` — App state and the single `tokio::select!` loop (terminal input, playback events, scan events, SIGTERM/SIGHUP/SIGINT, 250 ms tick); terminal lifecycle and the panic hook. Every exit runs a bounded backend shutdown, then restores the terminal.
 - `ui::keymap` / `ui::render` / `ui::help` — key-to-action mapping per focused panel; Library, Queue, now-playing bar and status line; help overlay. Untrusted text is sanitized (control and bidi characters) and truncated by display width with bounded work. Library and Queue panels keep a persistent scroll offset and build only the visible rows, so frame cost does not grow with list length.
+- `navidrome::browse` — pure remote browse state (`Browser`): navigation stack of views (Artists → Artist → Album, plus Search), session cache keyed by `Resource`, at most one in-flight request per resource, FIFO enqueue jobs completed strictly in press order, single-line search input. Emits `FetchRequest`s as data; `spawn_fetch` runs them on Tokio tasks under a 4-permit semaphore, with background enqueue jobs limited to 2 in flight so browsing is never starved. A drop guard guarantees every fetch answers exactly once (`Error::Aborted` on panic/cancel).
+- `app` has two library sources (`Source::{Local, Navidrome}`, keys `1`/`2`) and a `Connection` state. It drains fetch requests at the top of each loop iteration and applies `FetchResponse`s from a channel branch. Bracketed paste is enabled; pastes go only into the search input, filtered like typed text.
 - `app` also starts a background Navidrome `ping` after the TUI is up and reports the result in the status line; without a music directory there is no scan and the library shows "No local music directory configured".
-- `main` — config (including `password_command`), file logging, optional Navidrome client, mpv spawn and connect, then `app::run`.
+- `main` — config (including `password_command`), file logging, optional Navidrome client, mpv spawn and connect, then `app::run` on an explicitly built runtime that is shut down with a 500 ms bound (also after a panic), so a stuck DNS lookup cannot delay exit. The log filter always clamps HTTP crates (`hyper_util`, `hyper`, `h2`, `reqwest`, `rustls`) to warn, whatever `CODA_LOG` says, because hyper-util logs peer addresses at debug.
 
 Only `app` and `ui` depend on Ratatui/Crossterm.
 

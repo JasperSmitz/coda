@@ -6,12 +6,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use crate::ui::render::REMOTE_MARKER;
+
 /// Key column, description column.
 pub const BINDINGS: &[(&str, &str)] = &[
     ("j/k  ↓/↑", "Move selection"),
-    ("Enter", "Open directory / play now"),
-    ("h  Backspace", "Parent directory (library)"),
-    ("a", "Add track or directory (library)"),
+    ("Enter", "Open / play now / play entry"),
+    ("h  Backspace", "Go up (library)"),
+    ("a", "Add track, folder, album, artist"),
+    ("1 / 2", "Local / Navidrome library"),
+    ("/", "Search Navidrome (library)"),
+    ("  Enter / Esc", "Run search / cancel"),
+    ("r", "Refresh Navidrome view"),
     ("d", "Remove entry (queue)"),
     ("Space", "Pause / resume / start"),
     ("n / p", "Next / previous"),
@@ -20,6 +26,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("Tab", "Switch panel"),
     ("?  Esc", "Close help"),
     ("q  Ctrl-C", "Quit"),
+    (REMOTE_MARKER, "Streamed from Navidrome"),
 ];
 
 const KEY_WIDTH: usize = 14;
