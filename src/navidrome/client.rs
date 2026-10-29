@@ -6,7 +6,7 @@
 //! URL: every `reqwest::Error` is stripped with `without_url` first.
 
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use url::{Host, Url};
 
@@ -315,6 +315,29 @@ impl Client {
                 .filter_map(api::RawSong::into_track)
                 .collect(),
         })
+    }
+
+    /// `scrobble`: with `submission` false, reports `id` as now playing;
+    /// with `submission` true, records a play. `time` is when the play
+    /// started (sent as milliseconds since the Unix epoch); without it the
+    /// server uses the time of the request.
+    pub async fn scrobble(
+        &self,
+        id: &str,
+        submission: bool,
+        time: Option<SystemTime>,
+    ) -> Result<(), Error> {
+        let time = time
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|since| since.as_millis().to_string());
+        let mut params = vec![
+            ("id", id),
+            ("submission", if submission { "true" } else { "false" }),
+        ];
+        if let Some(time) = &time {
+            params.push(("time", time.as_str()));
+        }
+        self.get("scrobble", &params).await.map(drop)
     }
 
     /// A freshly signed stream URL for `song_id`. Pure apart from the salt.

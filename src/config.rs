@@ -92,6 +92,8 @@ pub struct NavidromeConfig {
     pub url: Url,
     pub username: String,
     pub password: PasswordSource,
+    /// Report plays to the server (`scrobble`, default `true`).
+    pub scrobble: bool,
 }
 
 impl fmt::Debug for NavidromeConfig {
@@ -223,6 +225,7 @@ struct FileNavidrome {
     username: Option<String>,
     password: Option<FilePassword>,
     password_command: Option<Vec<String>>,
+    scrobble: Option<bool>,
 }
 
 /// A password string from the file. Its deserializer never echoes the
@@ -402,6 +405,7 @@ fn merge_navidrome(
     if file.password.is_some() && file.password_command.is_some() {
         return Err(ConfigError::ConflictingPassword);
     }
+    let scrobble = file.scrobble.unwrap_or(true);
     let non_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
     let url = env_string(&env.navidrome_url, NAVIDROME_URL_ENV)?.or(non_empty(file.url));
     let username =
@@ -437,6 +441,7 @@ fn merge_navidrome(
         url: parse_base_url(&url)?,
         username,
         password,
+        scrobble,
     }))
 }
 
@@ -708,6 +713,29 @@ mod tests {
         assert_eq!(expose(&nd.password), "hunter2");
         assert!(!format!("{nd:?}").contains("hunter2"));
         assert!(!format!("{nd:?}").contains("example"));
+    }
+
+    #[test]
+    fn scrobbling_defaults_to_on_and_can_be_turned_off() {
+        let f = Fixture::new();
+        f.write(NAVIDROME, 0o600);
+        assert!(f.load(cli(None)).unwrap().navidrome.unwrap().scrobble);
+        f.write(&format!("{NAVIDROME}scrobble = false\n"), 0o600);
+        assert!(!f.load(cli(None)).unwrap().navidrome.unwrap().scrobble);
+        f.write(&format!("{NAVIDROME}scrobble = true\n"), 0o600);
+        assert!(f.load(cli(None)).unwrap().navidrome.unwrap().scrobble);
+        // Not a boolean: a parse error naming the line.
+        f.write(&format!("{NAVIDROME}scrobble = \"no\"\n"), 0o600);
+        let err = f.load(cli(None)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::ConfigParse { line: 5, .. }),
+            "{err:?}"
+        );
+        // On its own it does not configure Navidrome.
+        let music = f.music("music");
+        f.write("[navidrome]\nscrobble = false\n", 0o600);
+        let config = f.load(cli(Some(&music))).unwrap();
+        assert!(config.navidrome.is_none());
     }
 
     #[test]

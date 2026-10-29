@@ -33,8 +33,8 @@ Acceptance:
 ## M3 — Quality and convenience (in progress)
 Brief: `docs/plans/m3-quality.md`. Chosen scope, in slices:
 1. Queue controls (move, clear, shuffle upcoming), repeat modes, session persistence. **(completed, reviewed)**
-2. Local search and Navidrome scrobbling. **(in progress)**
-3. Playback robustness: hung-mpv watchdog, timing-robust mpv tests, structured volume rejection. **(proposed)**
+2. Local search and Navidrome scrobbling. **(completed, reviewed)**
+3. Playback robustness: hung-mpv watchdog, timing-robust mpv tests, structured volume rejection. **(in progress)**
 
 Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlists, MPRIS.
 

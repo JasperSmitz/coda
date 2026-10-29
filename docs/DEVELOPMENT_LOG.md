@@ -30,3 +30,11 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Review:** two rounds plus one regression fix. Fixed: 5 GB peak memory on hostile state file, repeat hot loop, `d` under All, quarantine overwrite, volume lost after backend exit, Saver poll race, UI freeze on huge unresolvable queue, uncapped live queue, unconfirmed clear, help overflow at 80×24, FIFO/TOCTOU on open, remote-skip regression.
 - **Limitations:** tracks < ~1.25 s never repeat; abandoned exit saves may leave a `.tmp` file; quarantine name choice is check-then-rename.
 - **Next:** M3 slice 2 (local search, scrobbling).
+
+## 2026-10-29 — M3 slice 2: local search and scrobbling
+- **Done:** `/` on Local searches title/artist/album/relative path (1,000 shown + total, snapshot overlay, Esc/h back); shared `line_input`; Navidrome scrobbling (now playing on start, submission at 50 %/4 min of real listening, once per load) via a bounded single-task worker; `[navidrome] scrobble` option; Esc leaves Navidrome search results too.
+- **Decisions:** search stays synchronous (≈14 ms / 50k tracks in release; accepted deviation, documented in ARCHITECTURE); scrobble rule owned by `App` next to the credential-free `Player`; submission `time` = play start captured as `SystemTime`; server duration 0 treated as unknown.
+- **Tests:** fmt, clippy, `cargo test --all-targets` (308 lib + integration) pass; ignored mpv: 15 pass excluding the 2 known device failures; pty smoke against a fake Subsonic server with scrobbling on and off.
+- **Review:** one round; fixed zero-duration fallback, sleep-skewed timestamps, Esc inconsistency, a non-proving queue-bound test.
+- **Limitations:** no Unicode normalization in search; queued scrobbles are lost at quit; listened time follows mpv's media clock.
+- **Next:** M3 slice 3 (watchdog, timing-robust mpv tests, structured volume rejection).

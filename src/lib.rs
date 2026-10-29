@@ -9,6 +9,7 @@
 pub mod app;
 pub mod config;
 pub mod library;
+pub mod line_input;
 pub mod model;
 pub mod navidrome;
 pub mod playback;

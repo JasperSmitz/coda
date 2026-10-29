@@ -14,7 +14,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Connection, Focus, LibraryRow, ScanState, Source, count, thousands};
+use crate::app::{
+    App, Connection, Focus, LibraryRow, LocalSearch, NO_LOCAL_LIBRARY, ScanState, Source, count,
+    thousands,
+};
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
@@ -37,6 +40,7 @@ const SEARCH_HINT: &str = "Enter search · Esc cancel";
 #[derive(Debug, Default)]
 pub struct ViewState {
     library_offset: usize,
+    local_search_offset: usize,
     remote_offset: usize,
     queue_offset: usize,
     /// The largest useful help scroll for the last frame's size.
@@ -137,26 +141,38 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         draw_remote(frame, app, browser, view, area, focused);
         return;
     }
-    let location = if app.library_path().is_empty() {
-        "Local".to_owned()
-    } else {
-        format!("Local: {}", app.library_path().join("/"))
+    let title = match app.local_search() {
+        Some(search) => local_search_title(search),
+        None if app.library_path().is_empty() => "Local".to_owned(),
+        None => format!("Local: {}", app.library_path().join("/")),
     };
-    let block = panel_block(location, focused, area.width);
+    let block = panel_block(title, focused, area.width);
+    let mut body = block.inner(area);
+    frame.render_widget(block, area);
+    if let Some(query) = app.local_input() {
+        let [input_area, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(body);
+        draw_search_input(frame, query, input_area);
+        body = rest;
+    }
+    if let Some(search) = app.local_search() {
+        draw_local_search(frame, search, view, body, focused);
+        return;
+    }
 
     if app.tree().is_empty() {
         let message = match app.scan_state() {
             ScanState::Scanning { .. } => "Scanning…".to_owned(),
-            ScanState::NoLibrary => "No local music directory configured".to_owned(),
+            ScanState::NoLibrary => NO_LOCAL_LIBRARY.to_owned(),
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
-        let inner = usize::from(area.width.saturating_sub(2));
-        frame.render_widget(Paragraph::new(fit(&message, inner)).block(block), area);
+        let width = usize::from(body.width);
+        frame.render_widget(Paragraph::new(fit(&message, width)), body);
         return;
     }
 
-    let width = row_width(area);
-    let height = usize::from(block.inner(area).height);
+    let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+    let height = usize::from(body.height);
     let offset = scroll_offset(
         view.library_offset,
         app.library_selected(),
@@ -188,7 +204,70 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         .collect();
     let mut state =
         ListState::default().with_selected(Some(app.library_selected().saturating_sub(offset)));
-    frame.render_stateful_widget(list_widget(items, block, focused), area, &mut state);
+    frame.render_stateful_widget(list_widget(items, Block::new(), focused), body, &mut state);
+}
+
+/// `Local: 12 results for "blue"`; with more matches than are kept,
+/// `1,000 of 2,345 results`; while the scan was still running, the title
+/// says only the tracks scanned so far were searched. The query comes
+/// last, so a narrow panel cuts it rather than the counts.
+fn local_search_title(search: &LocalSearch) -> String {
+    let results = &search.results;
+    let shown = results.tracks.len();
+    let counts = if shown < results.total {
+        format!("{} of {}", thousands(shown), count(results.total, "result"))
+    } else {
+        count(results.total, "result")
+    };
+    let scope = if search.partial {
+        " (scanned so far)"
+    } else {
+        ""
+    };
+    format!("Local{scope}: {counts} for \"{}\"", results.query)
+}
+
+fn draw_local_search(
+    frame: &mut Frame,
+    search: &LocalSearch,
+    view: &mut ViewState,
+    area: Rect,
+    focused: bool,
+) {
+    let tracks = &search.results.tracks;
+    if tracks.is_empty() {
+        let line = Line::styled(
+            fit("No matches (h or Esc to go back)", usize::from(area.width)),
+            Style::default().fg(Color::DarkGray),
+        );
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let width = usize::from(area.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+    let height = usize::from(area.height);
+    let offset = scroll_offset(
+        view.local_search_offset,
+        search.selected,
+        tracks.len(),
+        height,
+    );
+    view.local_search_offset = offset;
+    let items: Vec<ListItem> = tracks
+        .iter()
+        .skip(offset)
+        .take(height)
+        .map(|track| {
+            note_row_built();
+            ListItem::new(row_line(
+                &track.display_name(),
+                track.duration.map(format_time),
+                width,
+            ))
+        })
+        .collect();
+    let mut state =
+        ListState::default().with_selected(Some(search.selected.saturating_sub(offset)));
+    frame.render_stateful_widget(list_widget(items, Block::new(), focused), area, &mut state);
 }
 
 /// `Navidrome (<state>): Artists / <artist> / <album>`, fitted to a panel
@@ -1296,6 +1375,123 @@ mod tests {
         assert_eq!(format_time(Duration::from_secs(0)), "0:00");
         assert_eq!(format_time(Duration::from_secs(83)), "1:23");
         assert_eq!(format_time(Duration::from_secs(3725)), "1:02:05");
+    }
+
+    // ----- local search ------------------------------------------------
+
+    fn search_local(app: &mut App, query: &str, now: Instant) {
+        app.handle_action(Action::OpenSearch, now);
+        for c in query.chars() {
+            app.handle_action(Action::InputChar(c), now);
+        }
+        app.handle_action(Action::InputSubmit, now);
+    }
+
+    fn finish_scan(app: &mut App, tracks: usize, now: Instant) {
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+    }
+
+    #[test]
+    fn local_search_input_and_results() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                tagged("a/1.flac", "Blue in Green", "Miles Davis", 337),
+                tagged("a/2.flac", "So What", "Miles Davis", 562),
+                tagged(
+                    "b/3.flac",
+                    "\u{202E}Blue\u{1b}[31m Evil",
+                    "❤️".repeat(40).as_str(),
+                    60,
+                ),
+            ]),
+            now,
+        );
+        // The input line sits at the top of the Local panel, with its hint.
+        app.handle_action(Action::OpenSearch, now);
+        for c in "blue".chars() {
+            app.handle_action(Action::InputChar(c), now);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut view = ViewState::default();
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("│Search: blue"), "{screen}");
+        assert!(screen.contains("Enter search · Esc cancel"), "{screen}");
+        assert!(screen.contains("a/"), "the tree stays visible: {screen}");
+        terminal
+            .backend_mut()
+            .assert_cursor_position((1 + 8 + 4, 1));
+        app.handle_action(Action::InputSubmit, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(!screen.contains("Search: "), "{screen}");
+        assert!(
+            screen.contains("Local (scanned so far): 2 results for \"blue\""),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis - Blue in Green"), "{screen}");
+        assert!(screen.contains("5:37"), "{screen}");
+        assert!(!screen.contains("So What"), "{screen}");
+        assert!(
+            !screen.contains('\u{1b}') && !screen.contains('\u{202E}'),
+            "{screen}"
+        );
+        for width in [20, 59, 100] {
+            assert_full_width(&render(&app, width, 14, now), width);
+        }
+        // After the scan, the title no longer qualifies the results.
+        finish_scan(&mut app, 3, now);
+        search_local(&mut app, "nothing here", now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Local: 0 results for \"nothing here\""),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("No matches (h or Esc to go back)"),
+            "{screen}"
+        );
+        // Back to the tree.
+        app.handle_action(Action::Back, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("┌ Local ─"), "{screen}");
+        assert!(screen.contains("> a/"), "{screen}");
+    }
+
+    #[test]
+    fn local_search_results_are_capped_and_scroll_with_the_selection() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        let tracks: Vec<Track> = (0..1234)
+            .map(|i| tagged(&format!("d/{i:04}.flac"), &format!("Song {i:04}"), "x", 1))
+            .collect();
+        app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        finish_scan(&mut app, 1234, now);
+        search_local(&mut app, "song", now);
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut view = ViewState::default();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("Local: 1,000 of 1,234 results for \"song\""),
+            "{screen}"
+        );
+        assert!(built < 30, "only visible rows are built: {built}");
+        for _ in 0..1500 {
+            app.handle_action(Action::Down, now);
+        }
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> x - Song 0999"), "{screen}");
+        assert!(!screen.contains("Song 1000"), "{screen}");
     }
 
     // ----- Navidrome ---------------------------------------------------

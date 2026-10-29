@@ -12,10 +12,10 @@ use crate::ui::render::REMOTE_MARKER;
 pub const BINDINGS: &[(&str, &str)] = &[
     ("j/k  ↓/↑", "Move selection"),
     ("Enter", "Open / play now / play entry"),
-    ("h  Backspace", "Go up (library)"),
+    ("h  Backspace", "Go up (Esc: leave results)"),
     ("a", "Add track, folder, album, artist"),
     ("1 / 2", "Local / Navidrome library"),
-    ("/", "Search Navidrome (library)"),
+    ("/", "Search the library"),
     ("  Enter / Esc", "Run search / cancel"),
     ("r", "Refresh Navidrome view"),
     ("d", "Remove entry (queue)"),

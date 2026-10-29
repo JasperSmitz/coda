@@ -461,3 +461,144 @@ async fn chunked_bodies_over_the_cap_are_rejected_while_reading() {
         .unwrap();
     assert!(sent > MAX_BODY_BYTES, "only {sent} bytes were sent");
 }
+
+#[tokio::test]
+async fn scrobble_sends_id_submission_and_time() {
+    let (server, client) = server().await;
+    mount(&server, "scrobble", ok(json!({}))).await;
+    client.scrobble("song 1&x", false, None).await.unwrap();
+    let played = std::time::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+    client.scrobble("s2", true, Some(played)).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let now_playing = query(&requests[0].url);
+    assert_eq!(param(&now_playing, "id").as_deref(), Some("song 1&x"));
+    assert_eq!(param(&now_playing, "submission").as_deref(), Some("false"));
+    assert_eq!(param(&now_playing, "time"), None);
+    assert!(
+        param(&now_playing, "t").is_some(),
+        "signed like every request"
+    );
+    let submission = query(&requests[1].url);
+    assert_eq!(param(&submission, "id").as_deref(), Some("s2"));
+    assert_eq!(param(&submission, "submission").as_deref(), Some("true"));
+    assert_eq!(param(&submission, "time").as_deref(), Some("1700000000123"));
+    // A failed status is an error like for every endpoint.
+    let (server, client) = self::server().await;
+    mount(&server, "scrobble", failed(70, "not found")).await;
+    let err = client.scrobble("x", true, None).await.unwrap_err();
+    assert!(matches!(err, Error::Server { code: 70, .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn scrobbler_sends_in_order_and_reports_only_the_first_failure() {
+    use coda_player::navidrome::scrobble::{ScrobbleRequest, Scrobbler};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/scrobble"))
+        .and(query_param("id", "bad"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    mount(&server, "scrobble", ok(json!({}))).await;
+    let (scrobbler, mut failure) = Scrobbler::spawn(client_at(&server.uri()));
+    let started = std::time::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+    scrobbler.send(ScrobbleRequest::now_playing("a".into()));
+    scrobbler.send(ScrobbleRequest {
+        song_id: "a".into(),
+        submission: true,
+        started_at: Some(started),
+    });
+    scrobbler.send(ScrobbleRequest::now_playing("bad".into()));
+    scrobbler.send(ScrobbleRequest::now_playing("bad".into()));
+    scrobbler.send(ScrobbleRequest::now_playing("c".into()));
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut failure)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(error, Error::Http(500)), "{error:?}");
+    // Wait for the rest, then check order and parameters.
+    let mut requests = Vec::new();
+    for _ in 0..100 {
+        requests = server.received_requests().await.unwrap();
+        if requests.len() == 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent: Vec<(String, String, Option<String>)> = requests
+        .iter()
+        .map(|r| {
+            let q = query(&r.url);
+            (
+                param(&q, "id").unwrap(),
+                param(&q, "submission").unwrap(),
+                param(&q, "time"),
+            )
+        })
+        .collect();
+    let ids: Vec<(&str, &str)> = sent
+        .iter()
+        .map(|(id, sub, _)| (id.as_str(), sub.as_str()))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            ("a", "false"),
+            ("a", "true"),
+            ("bad", "false"),
+            ("bad", "false"),
+            ("c", "false")
+        ]
+    );
+    // The submission carries the start of the play.
+    assert_eq!(sent[1].2.as_deref(), Some("1700000000123"));
+    assert!(
+        sent.iter()
+            .filter(|s| s.1 == "false")
+            .all(|s| s.2.is_none())
+    );
+}
+
+#[tokio::test]
+async fn scrobbler_drops_requests_beyond_its_queue() {
+    use coda_player::navidrome::scrobble::{QUEUE_CAPACITY, ScrobbleRequest, Scrobbler};
+
+    let server = MockServer::start().await;
+    // Slow enough that every request below is sent while the first one is
+    // still running, so the queue fills up.
+    mount(
+        &server,
+        "scrobble",
+        ok(json!({})).set_delay(Duration::from_millis(300)),
+    )
+    .await;
+    let (scrobbler, _failure) = Scrobbler::spawn(client_at(&server.uri()));
+    // The first request reaches the server and holds the worker busy...
+    scrobbler.send(ScrobbleRequest::now_playing("0".into()));
+    for _ in 0..100 {
+        if !server.received_requests().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // ...so the queue holds exactly `QUEUE_CAPACITY` of the rest.
+    let total = QUEUE_CAPACITY + 50;
+    for i in 1..total {
+        // Never blocks, however many are sent.
+        scrobbler.send(ScrobbleRequest::now_playing(i.to_string()));
+    }
+    // Let the queue drain completely.
+    tokio::time::sleep(Duration::from_millis(300 * (QUEUE_CAPACITY as u64 + 3))).await;
+    let ids: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| param(&query(&r.url), "id").unwrap())
+        .collect();
+    // In order, and nothing beyond what the queue could hold.
+    let expected: Vec<String> = (0..=QUEUE_CAPACITY).map(|i| i.to_string()).collect();
+    assert_eq!(ids, expected, "{} of {total} sent", ids.len());
+}

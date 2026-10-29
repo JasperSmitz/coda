@@ -34,6 +34,7 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('h') | KeyCode::Backspace if focus == Focus::Library => Action::Parent,
         KeyCode::Char('a') if focus == Focus::Library => Action::Enqueue,
         KeyCode::Char('/') if focus == Focus::Library => Action::OpenSearch,
+        KeyCode::Esc if focus == Focus::Library => Action::Back,
         KeyCode::Char('r') if focus == Focus::Library => Action::Refresh,
         KeyCode::Char('1') => Action::SelectLocal,
         KeyCode::Char('2') => Action::SelectNavidrome,
@@ -133,11 +134,13 @@ mod tests {
         assert_eq!(lib(key(KeyCode::Backspace)), Some(Action::Parent));
         assert_eq!(lib(ch('a')), Some(Action::Enqueue));
         assert_eq!(lib(ch('/')), Some(Action::OpenSearch));
+        assert_eq!(lib(key(KeyCode::Esc)), Some(Action::Back));
         assert_eq!(lib(ch('r')), Some(Action::Refresh));
         assert_eq!(queue(ch('h')), None);
         assert_eq!(queue(key(KeyCode::Backspace)), None);
         assert_eq!(queue(ch('a')), None);
         assert_eq!(queue(ch('/')), None);
+        assert_eq!(queue(key(KeyCode::Esc)), None);
         assert_eq!(queue(ch('r')), None);
     }
 
@@ -207,7 +210,7 @@ mod tests {
 
     #[test]
     fn unbound_keys_map_to_nothing() {
-        for k in [ch('x'), ch('Q'), key(KeyCode::Esc), key(KeyCode::F(1))] {
+        for k in [ch('x'), ch('Q'), key(KeyCode::F(1))] {
             assert_eq!(lib(k), None, "{k:?}");
             assert_eq!(queue(k), None, "{k:?}");
         }

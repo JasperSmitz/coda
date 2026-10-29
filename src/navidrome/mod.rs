@@ -9,6 +9,7 @@
 pub mod api;
 pub mod browse;
 pub mod client;
+pub mod scrobble;
 
 use std::time::Duration;
 

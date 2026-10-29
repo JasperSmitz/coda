@@ -64,6 +64,7 @@ async fn run() -> ExitCode {
     init_logging();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
 
+    let scrobble = config.navidrome.as_ref().is_some_and(|n| n.scrobble);
     let navidrome = match config.navidrome {
         Some(settings) => {
             let password = match settings.password.resolve(PASSWORD_COMMAND_TIMEOUT).await {
@@ -88,6 +89,7 @@ async fn run() -> ExitCode {
     tracing::info!(
         local = config.music_dir.is_some(),
         navidrome = navidrome.is_some(),
+        scrobble,
         "sources configured"
     );
 
@@ -105,7 +107,7 @@ async fn run() -> ExitCode {
         }
     };
 
-    match app::run(handle, config.music_dir, navidrome, restored).await {
+    match app::run(handle, config.music_dir, navidrome, scrobble, restored).await {
         Ok(()) => {
             tracing::info!("coda exiting");
             ExitCode::SUCCESS

@@ -34,7 +34,7 @@ use std::io;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
@@ -47,14 +47,18 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::library::scan::{self, ScanEvent};
+use crate::library::search::{self, SearchResults};
 use crate::library::tree::{DirNode, LibraryTree};
+use crate::line_input::LineInput;
 use crate::model::Track;
+use crate::model::TrackSource;
 use crate::navidrome;
 use crate::navidrome::browse::{
     self, Activated, Browser, FetchRequest, FetchResponse, JobOutcome, MAX_CONCURRENT_FETCHES,
 };
-use crate::playback::{PlaybackCommand, PlaybackEvent, PlaybackHandle};
-use crate::player::{Player, PlayerCommand, QUEUE_FULL};
+use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
+use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
 use crate::queue::{QueueEntryId, Rng};
 use crate::resolve;
 use crate::session::{self, Session};
@@ -102,6 +106,9 @@ pub enum Connection {
 
 /// Status when `2` is pressed without a Navidrome configuration.
 pub const NAVIDROME_NOT_CONFIGURED: &str = "Navidrome is not configured";
+/// Status when `/` is pressed on the local source without a music
+/// directory.
+pub const NO_LOCAL_LIBRARY: &str = "No local music directory configured";
 
 /// A user intent, already resolved from a key by [`keymap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +127,10 @@ pub enum Action {
     SelectLocal,
     /// `2`: show Navidrome (focuses the Library panel).
     SelectNavidrome,
-    /// Library: open the search input (Navidrome).
+    /// Library: open the search input (local or Navidrome).
     OpenSearch,
+    /// Esc in the library: leave local or Navidrome search results.
+    Back,
     /// Library: refetch the shown Navidrome view.
     Refresh,
     /// Search input: a typed character.
@@ -189,6 +198,19 @@ pub struct StatusMessage {
     pub expires_at: Instant,
 }
 
+/// Local search results, shown in the Library panel instead of the tree
+/// until left with `h`/Esc. A snapshot: later scan batches do not change
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSearch {
+    pub results: SearchResults,
+    /// The scan was still running (or had failed) when the search ran, so
+    /// only the tracks scanned so far were searched.
+    pub partial: bool,
+    /// Selected row in `results.tracks`.
+    pub selected: usize,
+}
+
 /// Identity of a library row, used to keep the selection on the same item
 /// while scan batches insert rows around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +235,10 @@ pub struct App {
     help_scroll: usize,
     /// Until when a second `C` clears the queue.
     clear_armed_until: Option<Instant>,
+    /// The local search input while it is open.
+    local_input: Option<LineInput>,
+    /// Local search results, while shown.
+    local_search: Option<LocalSearch>,
     scan: ScanState,
     status: Option<StatusMessage>,
     quit: bool,
@@ -231,6 +257,15 @@ pub struct App {
     saved_revision: Option<u64>,
     /// When the debounced save is due.
     save_due: Option<Instant>,
+    /// Report Navidrome plays; only ever `true` with a client.
+    scrobbling: bool,
+    /// Listening progress of the current load, if it is a remote track
+    /// and scrobbling is on.
+    listen: Option<Listen>,
+    /// Scrobbles to send, in order; see [`App::take_scrobble_requests`].
+    scrobbles: Vec<ScrobbleRequest>,
+    /// A scrobble failure has been shown; later ones are only logged.
+    scrobble_failure_shown: bool,
 }
 
 impl App {
@@ -248,6 +283,7 @@ impl App {
             Some(_) => ScanState::Scanning { tracks: 0 },
             None => ScanState::NoLibrary,
         };
+        let navidrome_configured = navidrome.is_some();
         let mut browser = navidrome.as_ref().map(|_| Browser::new());
         let source = match (&music_dir, &mut browser) {
             (None, Some(browser)) => {
@@ -266,6 +302,8 @@ impl App {
             help_open: false,
             help_scroll: 0,
             clear_armed_until: None,
+            local_input: None,
+            local_search: None,
             scan,
             status: None,
             quit: false,
@@ -277,6 +315,19 @@ impl App {
             seen_revision: 0,
             saved_revision: Some(0),
             save_due: None,
+            scrobbling: navidrome_configured,
+            listen: None,
+            scrobbles: Vec::new(),
+            scrobble_failure_shown: false,
+        }
+    }
+
+    /// Turns scrobbling of Navidrome plays on or off (on by default when
+    /// Navidrome is configured; it stays off without a client).
+    pub fn set_scrobbling(&mut self, enabled: bool) {
+        self.scrobbling = enabled && self.navidrome.is_some();
+        if !self.scrobbling {
+            self.listen = None;
         }
     }
 
@@ -403,9 +454,24 @@ impl App {
         &self.connection
     }
 
-    /// `true` while the search input takes all keys.
+    /// `true` while a search input (local or Navidrome) takes all keys.
     pub fn input_open(&self) -> bool {
-        self.browser.as_ref().is_some_and(|b| b.input().is_some())
+        self.local_input.is_some() || self.browser.as_ref().is_some_and(|b| b.input().is_some())
+    }
+
+    /// The local search input while it is open.
+    pub fn local_input(&self) -> Option<&str> {
+        self.local_input.as_ref().map(LineInput::as_str)
+    }
+
+    /// Local search results, while shown.
+    pub fn local_search(&self) -> Option<&LocalSearch> {
+        self.local_search.as_ref()
+    }
+
+    /// Scrobbles to send, in order.
+    pub fn take_scrobble_requests(&mut self) -> Vec<ScrobbleRequest> {
+        std::mem::take(&mut self.scrobbles)
     }
 
     /// Fetches to spawn, in order.
@@ -418,6 +484,11 @@ impl App {
 
     fn remote_active(&self) -> bool {
         self.focus == Focus::Library && self.source == Source::Navidrome && self.browser.is_some()
+    }
+
+    /// Library keys act on local search results.
+    fn local_results_active(&self) -> bool {
+        self.focus == Focus::Library && self.source == Source::Local && self.local_search.is_some()
     }
 
     /// The transient message, if it has not expired at `now`.
@@ -512,6 +583,17 @@ impl App {
 
     /// Applies a user action and returns the commands to send.
     pub fn handle_action(&mut self, action: Action, now: Instant) -> Vec<PlaybackCommand> {
+        if let Some(input) = self.local_input.as_mut() {
+            match action {
+                Action::InputChar(c) => input.push_char(c),
+                Action::InputBackspace => input.backspace(),
+                Action::InputSubmit => self.submit_local_search(),
+                Action::InputCancel => self.local_input = None,
+                Action::Quit => self.quit = true,
+                _ => {}
+            }
+            return Vec::new();
+        }
         if let Some(browser) = self.browser.as_mut().filter(|b| b.input().is_some()) {
             match action {
                 Action::InputChar(c) => browser.input_char(c),
@@ -548,6 +630,7 @@ impl App {
                 Vec::new()
             }
             Action::Activate if self.remote_active() => self.activate_remote(now),
+            Action::Activate if self.local_results_active() => self.play_search_result(now),
             Action::Activate => match self.focus {
                 Focus::Library => self.activate_library(now),
                 Focus::Queue => self.activate_queue(),
@@ -555,8 +638,23 @@ impl App {
             Action::Parent => {
                 if self.remote_active() {
                     self.browser_mut().go_up();
+                } else if self.local_results_active() {
+                    self.local_search = None;
                 } else if self.focus == Focus::Library {
                     self.go_to_parent();
+                }
+                Vec::new()
+            }
+            Action::Back => {
+                if self.local_results_active() {
+                    self.local_search = None;
+                } else if self.remote_active()
+                    && self
+                        .browser_mut()
+                        .current()
+                        .is_some_and(|v| matches!(v.resource, browse::Resource::Search(_)))
+                {
+                    self.browser_mut().go_up();
                 }
                 Vec::new()
             }
@@ -564,6 +662,8 @@ impl App {
                 if self.remote_active() {
                     let outcomes = self.browser_mut().enqueue_selected();
                     self.apply_job_outcomes(outcomes, now);
+                } else if self.local_results_active() {
+                    self.enqueue_search_result(now);
                 } else if self.focus == Focus::Library {
                     self.enqueue_selected(now);
                 }
@@ -589,12 +689,11 @@ impl App {
                 if self.remote_active() {
                     self.browser_mut().open_search();
                 } else if self.focus == Focus::Library {
-                    let text = if self.browser.is_some() {
-                        "Search works in the Navidrome library (press 2)"
+                    if self.scan == ScanState::NoLibrary {
+                        self.set_status(NO_LOCAL_LIBRARY, now);
                     } else {
-                        NAVIDROME_NOT_CONFIGURED
-                    };
-                    self.set_status(text, now);
+                        self.local_input = Some(LineInput::new());
+                    }
                 }
                 Vec::new()
             }
@@ -673,10 +772,85 @@ impl App {
         event: PlaybackEvent,
         now: Instant,
     ) -> Vec<PlaybackCommand> {
+        let started = match event {
+            PlaybackEvent::Started { load } => Some(load),
+            _ => None,
+        };
+        let position = match event {
+            PlaybackEvent::Position(position) => Some(position),
+            _ => None,
+        };
         let commands = self.player.handle_event(event);
+        if let Some(load) = started {
+            self.listen_started(load);
+        }
+        if let Some(position) = position {
+            self.listen_progressed(position);
+        }
         let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
         self.after_player_call(now);
         commands
+    }
+
+    /// A scrobble failed. The first failure of the session is shown in the
+    /// status line; the worker logs every failure.
+    pub fn handle_scrobble_failure(&mut self, error: navidrome::Error, now: Instant) {
+        if !self.scrobble_failure_shown {
+            self.scrobble_failure_shown = true;
+            self.set_status(format!("Navidrome scrobbling failed: {error}"), now);
+        }
+    }
+
+    /// The current load started: if it is a remote track, report it as
+    /// now playing and start counting what is listened to.
+    fn listen_started(&mut self, load: LoadId) {
+        if !self.scrobbling
+            || self.player.current_load() != Some(load)
+            || self.listen.as_ref().is_some_and(|l| l.load() == load)
+        {
+            return;
+        }
+        let song_id = match self.player.queue().current_entry().map(|e| &e.track.source) {
+            Some(TrackSource::Navidrome { song_id }) => song_id.clone(),
+            _ => return,
+        };
+        // Wall clock, not `Instant`: an `Instant` stops during system
+        // sleep, so it cannot be turned back into the date of the play.
+        let listen = Listen::new(load, song_id, SystemTime::now());
+        self.scrobbles.push(listen.now_playing());
+        self.listen = Some(listen);
+    }
+
+    /// A position report for the current load: submits the play once
+    /// enough of it was heard.
+    fn listen_progressed(&mut self, position: Duration) {
+        let status = self.player.status();
+        if !matches!(status, PlaybackStatus::Playing | PlaybackStatus::Paused) {
+            return;
+        }
+        let current_load = self.player.current_load();
+        // The server's duration first: it is what scrobble services judge
+        // by, and a stream's reported duration may be an estimate. A zero
+        // from the server means unknown, so mpv's value is used then.
+        let duration = self
+            .player
+            .queue()
+            .current_entry()
+            .and_then(|e| e.track.duration)
+            .filter(|d| !d.is_zero())
+            .or(self.player.duration());
+        let Some(listen) = self
+            .listen
+            .as_mut()
+            .filter(|l| Some(l.load()) == current_load)
+        else {
+            return;
+        };
+        if let Some(request) =
+            listen.on_position(position, status == PlaybackStatus::Paused, duration)
+        {
+            self.scrobbles.push(request);
+        }
     }
 
     /// Shows the result of the startup Navidrome ping.
@@ -697,11 +871,13 @@ impl App {
         }
     }
 
-    /// Bracketed paste: into the search input when it is open (through the
-    /// typed-character filter, so newlines never submit), ignored
-    /// otherwise.
+    /// Bracketed paste: into the open search input, local or Navidrome
+    /// (through the typed-character filter, so newlines never submit),
+    /// ignored otherwise.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(browser) = self.browser.as_mut() {
+        if let Some(input) = self.local_input.as_mut() {
+            input.push_str(text);
+        } else if let Some(browser) = self.browser.as_mut() {
             browser.input_str(text);
         }
     }
@@ -791,6 +967,14 @@ impl App {
     // ----- helpers -----------------------------------------------------
 
     fn after_player_call(&mut self, now: Instant) {
+        // A new load, a stop or a backend exit ends the current listen.
+        if self
+            .listen
+            .as_ref()
+            .is_some_and(|l| Some(l.load()) != self.player.current_load())
+        {
+            self.listen = None;
+        }
         if let Some(last) = self.player.take_messages().pop() {
             self.set_status(last, now);
         }
@@ -810,6 +994,15 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         if self.remote_active() {
             self.browser_mut().move_selection(delta);
+            return;
+        }
+        if self.local_results_active()
+            && let Some(search) = self.local_search.as_mut()
+        {
+            search.selected = search
+                .selected
+                .saturating_add_signed(delta)
+                .min(search.results.tracks.len().saturating_sub(1));
             return;
         }
         let len = match self.focus {
@@ -839,6 +1032,50 @@ impl App {
                 self.player.play_track_now(track)
             }
             None => Vec::new(),
+        }
+    }
+
+    /// Enter in the local search input: runs the search over every track
+    /// scanned so far and shows the results. A blank query only closes the
+    /// input (results already shown stay).
+    fn submit_local_search(&mut self) {
+        let Some(input) = self.local_input.take() else {
+            return;
+        };
+        let Some(results) = search::search(&self.tree, input.as_str()) else {
+            return;
+        };
+        // A failed scan also left only part of the library.
+        let partial = matches!(
+            self.scan,
+            ScanState::Scanning { .. } | ScanState::Failed { .. }
+        );
+        tracing::debug!(matches = results.total, partial, "local search");
+        self.local_search = Some(LocalSearch {
+            results,
+            partial,
+            selected: 0,
+        });
+    }
+
+    fn selected_search_result(&self) -> Option<Track> {
+        let search = self.local_search.as_ref()?;
+        search.results.tracks.get(search.selected).cloned()
+    }
+
+    fn play_search_result(&mut self, now: Instant) -> Vec<PlayerCommand> {
+        match self.selected_search_result() {
+            Some(track) => {
+                self.set_status(format!("Playing {}", track.display_name()), now);
+                self.player.play_track_now(track)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn enqueue_search_result(&mut self, now: Instant) {
+        if let Some(track) = self.selected_search_result() {
+            self.enqueue_with_status(vec![track], now);
         }
     }
 
@@ -949,6 +1186,11 @@ impl App {
             }
             None => return,
         };
+        self.enqueue_with_status(tracks, now);
+    }
+
+    /// Appends `tracks` and reports what was added in the status line.
+    fn enqueue_with_status(&mut self, tracks: Vec<Track>, now: Instant) {
         let text = match tracks.as_slice() {
             [one] => format!("Added {}", one.display_name()),
             many => format!("Added {}", count(many.len(), "track")),
@@ -1077,10 +1319,14 @@ pub fn thousands(n: usize) -> String {
 /// `restored` (already loaded) is restored before the loop starts and its
 /// notice shown. With a save path, changes are saved there during the
 /// session (debounced) and once more on exit, bounded by [`SAVE_TIMEOUT`].
+///
+/// With `scrobble` (and a client), plays of Navidrome tracks are reported
+/// to the server by a background [`Scrobbler`].
 pub async fn run(
     mut playback: PlaybackHandle,
     music_dir: Option<PathBuf>,
     navidrome: Option<navidrome::Client>,
+    scrobble: bool,
     restored: session::Restored,
 ) -> io::Result<()> {
     let signals = match Signals::new() {
@@ -1118,17 +1364,22 @@ pub async fn run(
 
     let scan = music_dir.clone().map(scan::spawn_scan);
     let ping = navidrome.clone().map(spawn_ping);
+    let scrobbler = navidrome.clone().filter(|_| scrobble).map(Scrobbler::spawn);
     let mut app = App::with_sources(music_dir, navidrome.clone());
+    app.set_scrobbling(scrobbler.is_some());
     let now = Instant::now();
     playback.send_all(app.restore_session(restored.session, now));
     if let Some(notice) = restored.notice {
         app.set_status(notice, now);
     }
     let mut saver = Saver::new(restored.save_path);
+    let (scrobbler, scrobble_failure) = scrobbler.unzip();
     let sources = Sources {
         scan,
         ping,
         navidrome,
+        scrobbler,
+        scrobble_failure,
     };
     let result = event_loop(
         &mut terminal,
@@ -1340,6 +1591,10 @@ struct Sources {
     ping: Option<oneshot::Receiver<PingResult>>,
     /// Runs the app's fetch requests.
     navidrome: Option<navidrome::Client>,
+    /// Sends the app's scrobbles.
+    scrobbler: Option<Scrobbler>,
+    /// The first scrobble failure, if any.
+    scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
 }
 
 /// Spawns the fetch tasks for `requests`; their responses arrive on
@@ -1367,9 +1622,10 @@ fn spawn_ping(client: navidrome::Client) -> oneshot::Receiver<PingResult> {
     rx
 }
 
-/// Waits for the ping result; pends forever once it has been taken.
-async fn next_ping(ping: &mut Option<oneshot::Receiver<PingResult>>) -> Option<PingResult> {
-    match ping {
+/// Waits for a one-off result (the ping, the first scrobble failure);
+/// pends forever once it has been taken. `None` if the sender was dropped.
+async fn next_once<T>(once: &mut Option<oneshot::Receiver<T>>) -> Option<T> {
+    match once {
         Some(rx) => rx.await.ok(),
         None => std::future::pending().await,
     }
@@ -1400,6 +1656,8 @@ async fn event_loop(
         mut scan,
         mut ping,
         navidrome,
+        scrobbler,
+        mut scrobble_failure,
     } = sources;
     let fetch_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
@@ -1413,6 +1671,11 @@ async fn event_loop(
             &fetch_limit,
             &fetch_tx,
         );
+        for request in app.take_scrobble_requests() {
+            if let Some(scrobbler) = &scrobbler {
+                scrobbler.send(request);
+            }
+        }
         if dirty {
             terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
             app.clamp_help_scroll(view.help_max_scroll);
@@ -1474,7 +1737,15 @@ async fn event_loop(
                 app.handle_fetch_response(response, Instant::now());
                 dirty = true;
             },
-            result = next_ping(&mut ping) => {
+            failure = next_once(&mut scrobble_failure) => {
+                scrobble_failure = None;
+                // `None`: the worker ended without a failure (at exit).
+                if let Some(error) = failure {
+                    app.handle_scrobble_failure(error, Instant::now());
+                    dirty = true;
+                }
+            },
+            result = next_once(&mut ping) => {
                 ping = None;
                 // A dropped sender means the task panicked; it is logged.
                 if let Some(result) = result {
@@ -1511,6 +1782,7 @@ async fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line_input::MAX_QUERY_CHARS;
     use crate::model::TrackMetadata;
     use crate::playback::LoadId;
     use crate::playback::{EndReason, PlaybackTarget};
@@ -2551,13 +2823,11 @@ mod tests {
         press(&mut app, &[Action::SelectNavidrome], now);
         assert_eq!(current_selected(&app), 2);
         assert!(requests(&mut app).is_empty(), "started only once");
-        // `/` outside the Navidrome source explains itself.
+        // `/` on the local source opens the local search.
         press(&mut app, &[Action::SelectLocal, Action::OpenSearch], now);
-        assert!(!app.input_open());
-        assert_eq!(
-            app.status(now),
-            Some("Search works in the Navidrome library (press 2)")
-        );
+        assert!(app.input_open());
+        assert_eq!(app.local_input(), Some(""));
+        assert_eq!(browser(&app).input(), None);
     }
 
     #[test]
@@ -2573,11 +2843,7 @@ mod tests {
         assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
         assert!(app.browser().is_none());
         assert!(requests(&mut app).is_empty());
-        press(
-            &mut app,
-            &[Action::SelectLocal, Action::OpenSearch, Action::Refresh],
-            now,
-        );
+        press(&mut app, &[Action::SelectLocal, Action::Refresh], now);
         assert_eq!(app.focus(), Focus::Library);
         assert!(!app.input_open());
         assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
@@ -2603,6 +2869,36 @@ mod tests {
         );
         app.handle_navidrome_ping(Ok(()), now);
         assert_eq!(app.connection(), &Connection::Connected);
+    }
+
+    #[test]
+    fn esc_leaves_navidrome_search_results_only() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        // Not a search view: Esc does nothing.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+        press(&mut app, &[Action::OpenSearch], now);
+        type_text(&mut app, "blue", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(
+            view_titles(&app),
+            ["Artists", "Artist a1", "Search \"blue\""]
+        );
+        // In the queue panel, Esc is not a library key.
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::Back, Action::SwitchFocus],
+            now,
+        );
+        assert_eq!(
+            view_titles(&app),
+            ["Artists", "Artist a1", "Search \"blue\""]
+        );
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
     }
 
     #[test]
@@ -2641,6 +2937,381 @@ mod tests {
             browse::MAX_QUERY_CHARS
         );
         assert!(input(&app).unwrap().starts_with("xblue moon jazz bop "));
+    }
+
+    // ----- local search ------------------------------------------------------
+
+    fn local_titles(app: &App) -> Vec<String> {
+        app.local_search()
+            .map(|s| s.results.tracks.iter().map(|t| t.title.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn local_search_for(app: &mut App, query: &str, now: Instant) {
+        press(app, &[Action::OpenSearch], now);
+        type_text(app, query, now);
+        press(app, &[Action::InputSubmit], now);
+    }
+
+    #[test]
+    fn local_search_plays_enqueues_and_returns_to_the_browse_position() {
+        let (mut app, now) = app_with(&[
+            "blues/a.flac",
+            "blues/b.flac",
+            "rock/blue moon.flac",
+            "x.flac",
+        ]);
+        app.player.enqueue(track("x.flac"));
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::Activate], now);
+        app.focus = Focus::Library;
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        assert_eq!(app.library_path(), ["rock"]);
+        assert_eq!(selected_name(&app), "blue moon");
+
+        local_search_for(&mut app, "BLUE", now);
+        assert!(!app.input_open());
+        assert_eq!(local_titles(&app), ["a", "b", "blue moon"]);
+        // `app_with` never finishes its scan, so the search is partial.
+        let search = app.local_search().unwrap();
+        assert_eq!(
+            (search.results.total, search.partial, search.selected),
+            (3, true, 0)
+        );
+        // Selection stays within the results.
+        press(
+            &mut app,
+            &[Action::Up, Action::Down, Action::Down, Action::Down],
+            now,
+        );
+        assert_eq!(app.local_search().unwrap().selected, 2);
+        press(&mut app, &[Action::Up], now);
+        // `a` enqueues the selected result.
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(queue_titles(&app), ["x*", "b"]);
+        assert_eq!(app.status(now), Some("Added b"));
+        // Enter plays it now, after the current entry.
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(load_path(&commands), PathBuf::from("/music/blues/b.flac"));
+        assert_eq!(queue_titles(&app), ["x", "b*", "b"]);
+        // `h` returns to where browsing left off.
+        press(&mut app, &[Action::Parent], now);
+        assert!(app.local_search().is_none());
+        assert_eq!(app.library_path(), ["rock"]);
+        assert_eq!(selected_name(&app), "blue moon");
+        // So does Esc (`Back`); Backspace maps to `Parent` like `h`.
+        local_search_for(&mut app, "x", now);
+        assert_eq!(local_titles(&app), ["x"]);
+        press(&mut app, &[Action::Back], now);
+        assert!(app.local_search().is_none());
+        assert_eq!(selected_name(&app), "blue moon");
+        // `Back` outside results changes nothing.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(app.library_path(), ["rock"]);
+    }
+
+    #[test]
+    fn local_search_input_edits_cancels_and_ignores_blank_queries() {
+        let (mut app, now) = app_with(&["blue.flac", "red.flac"]);
+        press(&mut app, &[Action::OpenSearch], now);
+        assert!(app.input_open());
+        type_text(&mut app, "re\u{7}x\u{1b}", now);
+        assert_eq!(app.local_input(), Some("rex"));
+        press(&mut app, &[Action::InputBackspace], now);
+        assert_eq!(app.local_input(), Some("re"));
+        // Other actions are swallowed while typing.
+        let commands = press(
+            &mut app,
+            &[
+                Action::Activate,
+                Action::Enqueue,
+                Action::ToggleHelp,
+                Action::SwitchFocus,
+            ],
+            now,
+        );
+        assert!(commands.is_empty());
+        assert!(app.player().queue().is_empty());
+        assert!(!app.help_open());
+        assert_eq!(app.focus(), Focus::Library);
+        // Esc cancels without searching.
+        press(&mut app, &[Action::InputCancel], now);
+        assert!(!app.input_open());
+        assert!(app.local_search().is_none());
+        // Results stay when a later search is cancelled or blank.
+        local_search_for(&mut app, "red", now);
+        assert_eq!(local_titles(&app), ["red"]);
+        press(&mut app, &[Action::OpenSearch, Action::InputCancel], now);
+        local_search_for(&mut app, "   ", now);
+        assert!(!app.input_open());
+        assert_eq!(local_titles(&app), ["red"]);
+        // A new search replaces the results.
+        local_search_for(&mut app, "blue", now);
+        assert_eq!(local_titles(&app), ["blue"]);
+        // Capped like the Navidrome input; pastes go to the local input.
+        press(&mut app, &[Action::OpenSearch], now);
+        app.handle_paste("a\nb");
+        assert_eq!(app.local_input(), Some("a b"));
+        app.handle_paste(&"z".repeat(10_000));
+        assert_eq!(app.local_input().unwrap().chars().count(), MAX_QUERY_CHARS);
+        // Quit works while typing.
+        press(&mut app, &[Action::Quit], now);
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn local_search_during_a_scan_searches_what_was_scanned() {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        app.handle_scan_event(ScanEvent::Batch(vec![track("blue 1.flac")]), now);
+        local_search_for(&mut app, "blue", now);
+        let search = app.local_search().unwrap();
+        assert!(search.partial);
+        assert_eq!(search.results.total, 1);
+        // Later batches do not change the shown results.
+        app.handle_scan_event(ScanEvent::Batch(vec![track("blue 2.flac")]), now);
+        assert_eq!(local_titles(&app), ["blue 1"]);
+        // A scan that ended early is still partial.
+        let mut failed = App::new(ROOT.into());
+        failed.handle_scan_event(ScanEvent::Batch(vec![track("blue.flac")]), now);
+        failed.scan_closed(now);
+        local_search_for(&mut failed, "blue", now);
+        assert!(failed.local_search().unwrap().partial);
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 2,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        local_search_for(&mut app, "blue", now);
+        let search = app.local_search().unwrap();
+        assert!(!search.partial);
+        assert_eq!(local_titles(&app), ["blue 1", "blue 2"]);
+        // An empty result list is harmless for every results key.
+        local_search_for(&mut app, "nothing", now);
+        let commands = press(
+            &mut app,
+            &[Action::Down, Action::Activate, Action::Enqueue],
+            now,
+        );
+        assert!(commands.is_empty());
+        assert!(app.player().queue().is_empty());
+    }
+
+    #[test]
+    fn local_results_survive_source_switches_and_need_a_library() {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        app.handle_scan_event(ScanEvent::Batch(vec![track("blue.flac")]), now);
+        local_search_for(&mut app, "blue", now);
+        press(&mut app, &[Action::SelectNavidrome], now);
+        // Navidrome keys act on Navidrome while the local results wait.
+        press(&mut app, &[Action::Parent, Action::Back], now);
+        press(&mut app, &[Action::SelectLocal], now);
+        assert_eq!(local_titles(&app), ["blue"]);
+        // In the queue panel, library keys do not touch the results.
+        press(&mut app, &[Action::SwitchFocus, Action::Back], now);
+        assert_eq!(local_titles(&app), ["blue"]);
+        // Without a music directory, `/` on the local source explains.
+        let (mut nav, now) = nav_app();
+        press(&mut nav, &[Action::SelectLocal, Action::OpenSearch], now);
+        assert!(!nav.input_open());
+        assert_eq!(nav.status(now), Some(NO_LOCAL_LIBRARY));
+    }
+
+    // ----- scrobbling ----------------------------------------------------------
+
+    fn timed_remote(id: &str, secs: u64) -> Track {
+        Track::navidrome(
+            id.into(),
+            TrackMetadata {
+                title: Some(format!("Remote {id}")),
+                duration: Some(Duration::from_secs(secs)),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    /// A Navidrome app with `tracks` queued, focused on the queue.
+    fn scrobble_app(tracks: Vec<Track>) -> (App, Instant) {
+        let (mut app, now) = nav_app();
+        app.take_fetch_requests();
+        for track in tracks {
+            app.player.enqueue(track);
+        }
+        app.focus = Focus::Queue;
+        (app, now)
+    }
+
+    /// Reports positions every 250 ms from `from` to `to` seconds.
+    fn progress(app: &mut App, from: f64, to: f64, now: Instant) {
+        let mut at = from;
+        while at < to {
+            at = (at + 0.25).min(to);
+            app.handle_playback_event(PlaybackEvent::Position(Duration::from_secs_f64(at)), now);
+        }
+    }
+
+    fn summary(requests: &[ScrobbleRequest]) -> Vec<String> {
+        requests
+            .iter()
+            .map(|r| {
+                let kind = if r.submission { "submit" } else { "playing" };
+                format!("{kind} {}", r.song_id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remote_plays_are_reported_and_submitted_once_at_half() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180), track("local.flac")]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert!(
+            app.take_scrobble_requests().is_empty(),
+            "not before Started"
+        );
+        let before = SystemTime::now();
+        started(&mut app, &commands, now);
+        let after = SystemTime::now();
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing s1"]);
+        progress(&mut app, 0.0, 89.75, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        progress(&mut app, 89.75, 90.0, now);
+        let requests = app.take_scrobble_requests();
+        assert_eq!(summary(&requests), ["submit s1"]);
+        // The wall-clock start of the play, taken at `Started`.
+        let started_at = requests[0].started_at.unwrap();
+        assert!(before <= started_at && started_at <= after);
+        progress(&mut app, 90.0, 180.0, now);
+        assert!(app.take_scrobble_requests().is_empty(), "once per load");
+        // The local track after it is never scrobbled.
+        let load = app.player.current_load().unwrap();
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 200.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+    }
+
+    #[test]
+    fn a_zero_server_duration_falls_back_to_the_players() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("z", 0)]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        app.handle_playback_event(PlaybackEvent::Duration(Some(Duration::from_secs(180))), now);
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 89.75, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing z"]);
+        progress(&mut app, 89.75, 90.0, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["submit z"]);
+    }
+
+    #[test]
+    fn seeks_pauses_and_short_tracks_do_not_submit() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180), timed_remote("short", 29)]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        started(&mut app, &commands, now);
+        app.take_scrobble_requests();
+        // Seeking through the track with the arrow keys is not listening.
+        let mut at = 0;
+        while at < 180 {
+            at += 5;
+            app.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(at)), now);
+        }
+        assert!(app.take_scrobble_requests().is_empty());
+        // Positions while paused do not count either.
+        app.handle_playback_event(PlaybackEvent::Position(Duration::ZERO), now);
+        press(&mut app, &[Action::TogglePause], now);
+        app.handle_playback_event(PlaybackEvent::Paused(true), now);
+        progress(&mut app, 0.0, 120.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        // Resumed: 90 s of real listening from here submits.
+        press(&mut app, &[Action::TogglePause], now);
+        progress(&mut app, 120.0, 210.0, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["submit s1"]);
+        // A short track: now playing, but never submitted.
+        let commands = press(&mut app, &[Action::Next], now);
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 29.0, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing short"]);
+    }
+
+    #[test]
+    fn a_new_load_starts_a_new_listen_and_stale_progress_is_ignored() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("a", 60), timed_remote("b", 60)]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 20.0, now);
+        // `n` before the submission: the next load has not started, so
+        // positions still arriving for the old track count for nothing.
+        let commands = press(&mut app, &[Action::Next], now);
+        progress(&mut app, 20.0, 40.0, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing a"]);
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 29.75, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing b"]);
+        progress(&mut app, 29.75, 30.0, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["submit b"]);
+        // A duplicate Started for the same load changes nothing.
+        let load = app.player.current_load().unwrap();
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        assert!(app.take_scrobble_requests().is_empty());
+    }
+
+    #[test]
+    fn repeat_one_reloads_are_scrobbled_again() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("a", 40)]);
+        app.player.set_repeat(crate::player::RepeatMode::One);
+        let mut commands = press(&mut app, &[Action::Activate], now);
+        for _ in 0..2 {
+            let load = started(&mut app, &commands, now);
+            progress(&mut app, 0.0, 40.0, now);
+            assert_eq!(
+                summary(&app.take_scrobble_requests()),
+                ["playing a", "submit a"]
+            );
+            commands = app.handle_playback_event(
+                PlaybackEvent::TrackEnded {
+                    load,
+                    reason: EndReason::Eof,
+                },
+                now,
+            );
+        }
+    }
+
+    #[test]
+    fn scrobbling_can_be_turned_off_and_needs_a_client() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("a", 60)]);
+        app.set_scrobbling(false);
+        let commands = press(&mut app, &[Action::Activate], now);
+        started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 60.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        // Without a client remote tracks cannot play, and scrobbling
+        // cannot be turned on.
+        let (mut local, _) = app_with(&[]);
+        local.set_scrobbling(true);
+        assert!(!local.scrobbling);
+    }
+
+    #[test]
+    fn only_the_first_scrobble_failure_is_shown() {
+        let (mut app, now) = scrobble_app(Vec::new());
+        app.handle_scrobble_failure(navidrome::Error::Auth, now);
+        assert_eq!(
+            app.status(now),
+            Some("Navidrome scrobbling failed: authentication failed")
+        );
+        app.set_status("other", now);
+        app.handle_scrobble_failure(navidrome::Error::Http(500), now);
+        assert_eq!(app.status(now), Some("other"));
     }
 
     // ----- queue controls, repeat, session saving -------------------------

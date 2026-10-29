@@ -31,10 +31,10 @@ use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
 
 use super::{Album, Artist, Client, Error, SearchResults};
+use crate::line_input::LineInput;
 use crate::model::Track;
 
-/// Upper bound on the search input, in chars.
-pub const MAX_QUERY_CHARS: usize = 256;
+pub use crate::line_input::MAX_QUERY_CHARS;
 /// Upper bound on concurrently running fetches.
 pub const MAX_CONCURRENT_FETCHES: usize = 4;
 /// Upper bound on fetches in flight for enqueue jobs; the remaining
@@ -253,7 +253,7 @@ pub struct Browser {
     next_id: u64,
     outbox: Vec<FetchRequest>,
     jobs: VecDeque<Job>,
-    input: Option<String>,
+    input: Option<LineInput>,
 }
 
 impl Browser {
@@ -293,7 +293,7 @@ impl Browser {
 
     /// The search input while it is open.
     pub fn input(&self) -> Option<&str> {
-        self.input.as_deref()
+        self.input.as_ref().map(LineInput::as_str)
     }
 
     pub fn cached(&self, resource: &Resource) -> Option<&Content> {
@@ -451,47 +451,26 @@ impl Browser {
     // ----- search input --------------------------------------------------
 
     pub fn open_search(&mut self) {
-        self.input = Some(String::new());
+        self.input = Some(LineInput::new());
     }
 
-    /// Adds a typed char; control characters and chars past
-    /// [`MAX_QUERY_CHARS`] are ignored.
+    /// Adds a typed char to the open input; see [`LineInput::push_str`].
     pub fn input_char(&mut self, c: char) {
-        let mut buf = [0u8; 4];
-        self.input_str(c.encode_utf8(&mut buf));
+        if let Some(input) = &mut self.input {
+            input.push_char(c);
+        }
     }
 
-    /// Adds pasted (or typed) text. Line breaks and tabs become a single
-    /// space (`\r\n` gives one space, not two); other control characters
-    /// are dropped, so a paste never submits. Input stops at
-    /// [`MAX_QUERY_CHARS`]; work is bounded by the cap, not the paste size.
+    /// Adds pasted text to the open input; see [`LineInput::push_str`].
     pub fn input_str(&mut self, text: &str) {
-        let Some(input) = &mut self.input else {
-            return;
-        };
-        let mut len = input.chars().count();
-        let mut previous = None;
-        for c in text.chars() {
-            if len >= MAX_QUERY_CHARS {
-                break;
-            }
-            let crlf = previous == Some('\r') && c == '\n';
-            previous = Some(c);
-            let c = match c {
-                '\n' | '\r' | '\t' => ' ',
-                c if c.is_control() => continue,
-                c => c,
-            };
-            if !crlf {
-                input.push(c);
-                len += 1;
-            }
+        if let Some(input) = &mut self.input {
+            input.push_str(text);
         }
     }
 
     pub fn input_backspace(&mut self) {
         if let Some(input) = &mut self.input {
-            input.pop();
+            input.backspace();
         }
     }
 
@@ -508,7 +487,7 @@ impl Browser {
         let Some(input) = self.input.take() else {
             return;
         };
-        let query = input.trim();
+        let query = input.as_str().trim();
         if query.is_empty() {
             return;
         }

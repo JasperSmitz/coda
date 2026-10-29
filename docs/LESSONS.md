@@ -80,3 +80,9 @@ Each entry should state:
 - **Root cause:** EOF was trusted as "played"; and resetting the failure counter on `Started` let instant-EOF files reset it forever.
 - **Rule:** count an end as successful only after observed progress (position ≥ 1 s after `Started`); otherwise treat it as a failure for termination and advance. Prove termination with tests for all-failing and all-instant queues under every repeat mode.
 - **Where verified:** M3 slice 1 review; `files_that_end_at_once_never_loop_under_repeat`.
+
+### Capture wall-clock timestamps when the event happens
+- **Context / symptom:** scrobble submissions carried a play-start time that was too late by the length of any system sleep during the track.
+- **Root cause:** the start was stored as an `Instant` and converted to wall-clock time at send time; `Instant` does not advance during system sleep on macOS or Linux.
+- **Rule:** timestamps destined for external systems are captured as `SystemTime` at the event and carried as data; use `Instant` only for local durations and timeouts.
+- **Where verified:** M3 slice 2 review; `Listen::new(load, song_id, SystemTime)`.
