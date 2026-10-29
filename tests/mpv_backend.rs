@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use coda_player::model::{Track, TrackMetadata};
+use coda_player::navidrome;
 use coda_player::playback::mpv::{self, MpvOptions};
 use coda_player::playback::{
-    EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle, ShutdownOutcome,
+    EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle, PlaybackTarget,
+    ShutdownOutcome,
 };
-use coda_player::player::{PlaybackStatus, Player};
+use coda_player::player::{PlaybackStatus, Player, PlayerCommand};
+use coda_player::resolve;
 use tokio::time::timeout;
 
 const STEP: Duration = Duration::from_secs(5);
@@ -59,7 +62,7 @@ async fn wait_for(
 fn load(n: u64, path: &Path) -> PlaybackCommand {
     PlaybackCommand::Load {
         load: LoadId(n),
-        path: path.to_path_buf(),
+        target: PlaybackTarget::File(path.to_path_buf()),
     }
 }
 
@@ -475,10 +478,13 @@ struct Driven {
 }
 
 /// Sends `initial`, then pumps events through the player until `done`.
+/// Loads are resolved as the app does, signing remote tracks with
+/// `navidrome`.
 async fn drive(
     player: &mut Player,
     handle: &mut PlaybackHandle,
-    initial: Vec<PlaybackCommand>,
+    initial: Vec<PlayerCommand>,
+    navidrome: Option<&navidrome::Client>,
     done: impl Fn(&Player, &[String]) -> bool,
 ) -> Driven {
     let mut driven = Driven {
@@ -486,12 +492,13 @@ async fn drive(
         loads: 0,
     };
     let mut titles: HashMap<LoadId, String> = HashMap::new();
-    let send = |player: &Player,
+    let send = |player: &mut Player,
                 handle: &PlaybackHandle,
-                commands: Vec<PlaybackCommand>,
+                commands: Vec<PlayerCommand>,
                 driven: &mut Driven,
                 titles: &mut HashMap<LoadId, String>| {
-        for command in commands {
+        // The app's own dispatch: unresolvable loads advance the queue.
+        for command in resolve::dispatch(player, navidrome, commands) {
             if let PlaybackCommand::Load { load, .. } = &command {
                 driven.loads += 1;
                 let title = player.queue().current_entry().unwrap().track.title.clone();
@@ -536,7 +543,7 @@ async fn queue_of_short_wavs_plays_through_in_order_exactly_once() {
     let (mut player, _) = wav_queue(dir.path(), &names, 50);
     let mut handle = backend().await;
     let initial = player.toggle_pause();
-    let driven = drive(&mut player, &mut handle, initial, |p, started| {
+    let driven = drive(&mut player, &mut handle, initial, None, |p, started| {
         !started.is_empty() && p.status() == PlaybackStatus::Stopped
     })
     .await;
@@ -565,7 +572,7 @@ async fn rapid_loads_end_on_the_last_requested_track() {
     initial.extend(player.play_next());
     initial.extend(player.play_next());
     initial.extend(player.play_next());
-    let driven = drive(&mut player, &mut handle, initial, |p, _| {
+    let driven = drive(&mut player, &mut handle, initial, None, |p, _| {
         p.status() == PlaybackStatus::Playing
     })
     .await;
@@ -579,6 +586,146 @@ async fn rapid_loads_end_on_the_last_requested_track() {
     }
     assert_eq!(player.status(), PlaybackStatus::Playing);
     assert_eq!(player.queue().current_entry().unwrap().track.title, "r4");
+    handle.shutdown(STEP).await;
+}
+
+/// A wiremock "Navidrome" serving `stream` for song `good` (a WAV of
+/// `millis`) and 404 for anything else, plus a client signed for it.
+async fn stream_server(millis: u32) -> (wiremock::MockServer, navidrome::Client) {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/music/rest/stream"))
+        .and(query_param("id", "good"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(common::wav_bytes(millis), "audio/wav"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let client = navidrome::Client::new(
+        navidrome::client::parse_base_url(&format!("{}/music", server.uri())).unwrap(),
+        "u".into(),
+        navidrome::Password::new("p".into()),
+    )
+    .unwrap();
+    (server, client)
+}
+
+fn stream_load(n: u64, client: &navidrome::Client, song_id: &str) -> PlaybackCommand {
+    PlaybackCommand::Load {
+        load: LoadId(n),
+        target: PlaybackTarget::Stream(client.stream_url(song_id).unwrap()),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn served_wav_stream_starts_then_ends_with_eof() {
+    let (server, client) = stream_server(1000).await;
+    let mut handle = backend().await;
+    handle.send(stream_load(1, &client, "good"));
+    let (ended, seen) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    assert!(
+        seen.contains(&PlaybackEvent::Started { load: LoadId(1) }),
+        "{seen:?}"
+    );
+    assert_eq!(
+        ended,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(1),
+            reason: EndReason::Eof
+        }
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.url.path() == "/music/rest/stream")
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.url.query_pairs().all(|(k, _)| k != "p"))
+    );
+    handle.shutdown(STEP).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn missing_stream_ends_with_error() {
+    let (_server, client) = stream_server(1000).await;
+    let mut handle = backend().await;
+    handle.send(stream_load(1, &client, "missing"));
+    let (ended, seen) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    let PlaybackEvent::TrackEnded {
+        load: LoadId(1),
+        reason: EndReason::Error(message),
+    } = &ended
+    else {
+        panic!("expected an error end, got {ended:?} after {seen:?}");
+    };
+    assert!(!message.contains("t="), "{message}");
+    assert!(
+        !seen.contains(&PlaybackEvent::Started { load: LoadId(1) }),
+        "{seen:?}"
+    );
+    handle.shutdown(STEP).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn mixed_local_and_remote_queue_plays_through_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_server, client) = stream_server(300).await;
+    let (mut player, _) = wav_queue(dir.path(), &["local1"], 300);
+    player.enqueue(Track::navidrome(
+        "good".into(),
+        TrackMetadata {
+            title: Some("remote".into()),
+            ..TrackMetadata::default()
+        },
+    ));
+    player.enqueue(Track::navidrome(
+        "missing".into(),
+        TrackMetadata {
+            title: Some("remote404".into()),
+            ..TrackMetadata::default()
+        },
+    ));
+    let path = dir.path().join("local2.wav");
+    common::write_wav(&path, 300);
+    player.enqueue(Track::local(path, TrackMetadata::default()));
+
+    let mut handle = backend().await;
+    let initial = player.toggle_pause();
+    let driven = drive(
+        &mut player,
+        &mut handle,
+        initial,
+        Some(&client),
+        |p, started| started.len() >= 3 && p.status() == PlaybackStatus::Stopped,
+    )
+    .await;
+    assert_eq!(driven.started, ["local1", "remote", "local2"]);
+    assert_eq!(driven.loads, 4);
+    let messages = player.take_messages();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("Could not play remote404")),
+        "{messages:?}"
+    );
     handle.shutdown(STEP).await;
 }
 

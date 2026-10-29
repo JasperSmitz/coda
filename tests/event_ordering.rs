@@ -14,8 +14,9 @@ use coda_player::model::{Track, TrackMetadata};
 use coda_player::playback::mpv::protocol::MpvCommand;
 use coda_player::playback::mpv::state::{MpvState, OutgoingRequest, Output};
 use coda_player::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use coda_player::player::{PlaybackStatus, Player};
+use coda_player::player::{PlaybackStatus, Player, PlayerCommand};
 use coda_player::queue::QueueEntryId;
+use coda_player::resolve::resolve_command;
 use serde_json::json;
 
 /// One `loadfile` that reached mpv, with the request ids of its replies.
@@ -72,13 +73,18 @@ impl Sim {
         sim
     }
 
-    /// Applies player commands to mpv and feeds resulting events back,
-    /// until quiescent.
-    fn commands(&mut self, commands: Vec<PlaybackCommand>) {
+    /// Resolves player commands as the app does (local tracks only, no
+    /// Navidrome client), applies them to mpv and feeds resulting events
+    /// back, until quiescent.
+    fn commands(&mut self, commands: Vec<PlayerCommand>) {
         // Messages produced by the intent that created `commands`.
         self.messages.extend(self.player.take_messages());
-        let mut work: VecDeque<PlaybackCommand> = commands.into();
+        let mut work: VecDeque<PlayerCommand> = commands.into();
         while let Some(command) = work.pop_front() {
+            let command = match resolve_command(command, None) {
+                Ok(command) => command,
+                Err((load, reason)) => panic!("{load}: local load not resolved: {reason}"),
+            };
             if let PlaybackCommand::Load { load, .. } = &command {
                 self.loads.push(*load);
             }
@@ -89,7 +95,7 @@ impl Sim {
 
     /// Records requests and delivers events to the player; returns the
     /// player's follow-up commands.
-    fn process(&mut self, out: Output) -> Vec<PlaybackCommand> {
+    fn process(&mut self, out: Output) -> Vec<PlayerCommand> {
         self.sent.extend(out.requests);
         let mut follow_up = Vec::new();
         for event in out.events {
@@ -414,7 +420,7 @@ fn started_waits_for_file_loaded() {
     assert_eq!(sim.player.status(), PlaybackStatus::Playing);
     assert_eq!(
         sim.player.seek_relative(5.0),
-        [PlaybackCommand::SeekRelative(5.0)]
+        [PlayerCommand::SeekRelative(5.0)]
     );
 }
 
@@ -546,7 +552,7 @@ fn failed_load_at_end_of_queue_stops() {
 
 fn reject_next(sim: &mut Sim, reason: &str) {
     let commands = sim.player.play_next();
-    let [PlaybackCommand::Load { load, .. }] = commands.as_slice() else {
+    let [PlayerCommand::Load { load, .. }] = commands.as_slice() else {
         panic!("expected Load");
     };
     sim.loads.push(*load);
@@ -826,7 +832,7 @@ fn every_interleaving_of_stop_while_a_load_is_in_flight() {
         let mut sim = playing_then_next(&["A", "B"])();
         let id = sim.ids[1];
         let commands = sim.player.remove(id);
-        assert_eq!(commands, [PlaybackCommand::Stop]);
+        assert_eq!(commands, [PlayerCommand::Stop]);
         sim.commands(commands);
         sim
     };

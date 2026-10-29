@@ -5,6 +5,12 @@
 //! I/O and takes the current time as a parameter, so it is tested without
 //! a terminal, mpv or a real clock.
 //!
+//! The player emits loads in terms of a track's source; [`App`] resolves
+//! each into a backend target (a local file, or a stream URL signed by the
+//! Navidrome client) just before it leaves, see [`crate::resolve`]. A load
+//! that cannot be resolved is fed back to the player as a failed track, so
+//! the queue advances exactly as for a missing file.
+//!
 //! [`run`] owns the terminal lifecycle: it enters the TUI, installs the
 //! panic hook, starts the scan, runs the loop, and on every exit shuts the
 //! playback backend down (bounded) before restoring the terminal. Only this
@@ -19,14 +25,16 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 use crate::library::scan::{self, ScanEvent};
 use crate::library::tree::{DirNode, LibraryTree};
 use crate::model::Track;
+use crate::navidrome;
 use crate::playback::{PlaybackCommand, PlaybackEvent, PlaybackHandle};
-use crate::player::Player;
+use crate::player::{Player, PlayerCommand};
+use crate::resolve;
 use crate::ui::{keymap, render};
 
 /// Redraw interval when nothing else changes (progress, status expiry).
@@ -85,6 +93,8 @@ pub enum ScanState {
     Failed {
         tracks: usize,
     },
+    /// No local music directory is configured; nothing is scanned.
+    NoLibrary,
 }
 
 /// One row of the library panel: sub-directories first, then tracks.
@@ -122,21 +132,36 @@ pub struct App {
     scan: ScanState,
     status: Option<StatusMessage>,
     quit: bool,
+    /// Signs stream URLs for remote tracks; `None` if not configured.
+    navidrome: Option<navidrome::Client>,
 }
 
 impl App {
+    /// An app browsing `music_dir`, without Navidrome.
     pub fn new(music_dir: PathBuf) -> Self {
+        Self::with_sources(Some(music_dir), None)
+    }
+
+    /// An app with an optional local library and an optional Navidrome
+    /// client. Without a music directory the library stays empty and no
+    /// scan is expected.
+    pub fn with_sources(music_dir: Option<PathBuf>, navidrome: Option<navidrome::Client>) -> Self {
+        let scan = match music_dir {
+            Some(_) => ScanState::Scanning { tracks: 0 },
+            None => ScanState::NoLibrary,
+        };
         Self {
             player: Player::new(),
-            tree: LibraryTree::new(music_dir),
+            tree: LibraryTree::new(music_dir.unwrap_or_default()),
             library_path: Vec::new(),
             library_selected: 0,
             queue_selected: 0,
             focus: Focus::Library,
             help_open: false,
-            scan: ScanState::Scanning { tracks: 0 },
+            scan,
             status: None,
             quit: false,
+            navidrome,
         }
     }
 
@@ -327,6 +352,7 @@ impl App {
                 Vec::new()
             }
         };
+        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
         self.after_player_call(now);
         commands
     }
@@ -337,8 +363,24 @@ impl App {
         now: Instant,
     ) -> Vec<PlaybackCommand> {
         let commands = self.player.handle_event(event);
+        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
         self.after_player_call(now);
         commands
+    }
+
+    /// Shows the result of the startup Navidrome ping.
+    pub fn handle_navidrome_ping(&mut self, result: Result<(), navidrome::Error>, now: Instant) {
+        match result {
+            Ok(()) => {
+                tracing::info!("navidrome ping ok");
+                self.set_status("Navidrome connected", now);
+            }
+            Err(error) => {
+                // Never `Debug`: network errors include the server address.
+                tracing::warn!(%error, detail = %error.detail(), "navidrome ping failed");
+                self.set_status(format!("Navidrome: {error}"), now);
+            }
+        }
     }
 
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
@@ -440,7 +482,7 @@ impl App {
             .min(len.saturating_sub(1));
     }
 
-    fn activate_library(&mut self, now: Instant) -> Vec<PlaybackCommand> {
+    fn activate_library(&mut self, now: Instant) -> Vec<PlayerCommand> {
         match self.selected_row() {
             Some(LibraryRow::Dir(dir)) => {
                 let name = dir.name().to_owned();
@@ -457,7 +499,7 @@ impl App {
         }
     }
 
-    fn activate_queue(&mut self) -> Vec<PlaybackCommand> {
+    fn activate_queue(&mut self) -> Vec<PlayerCommand> {
         match self.player.queue().entries().get(self.queue_selected) {
             Some(entry) => {
                 let id = entry.id;
@@ -494,7 +536,7 @@ impl App {
         self.set_status(text, now);
     }
 
-    fn remove_selected(&mut self) -> Vec<PlaybackCommand> {
+    fn remove_selected(&mut self) -> Vec<PlayerCommand> {
         match self.player.queue().entries().get(self.queue_selected) {
             Some(entry) => {
                 let id = entry.id;
@@ -540,7 +582,15 @@ pub fn thousands(n: usize) -> String {
 /// is shut down (bounded by [`SHUTDOWN_TIMEOUT`]) before the terminal is
 /// restored. A panic on the UI thread restores the terminal from the panic
 /// hook; the backend's child is then killed as unwinding drops it.
-pub async fn run(mut playback: PlaybackHandle, music_dir: PathBuf) -> io::Result<()> {
+///
+/// With a music directory, a scan starts after the TUI is up. With a
+/// Navidrome client, a background ping reports the connection state in the
+/// status line; neither ever blocks the loop.
+pub async fn run(
+    mut playback: PlaybackHandle,
+    music_dir: Option<PathBuf>,
+    navidrome: Option<navidrome::Client>,
+) -> io::Result<()> {
     let signals = match Signals::new() {
         Ok(signals) => signals,
         Err(error) => {
@@ -571,9 +621,11 @@ pub async fn run(mut playback: PlaybackHandle, music_dir: PathBuf) -> io::Result
     // terminal without restoring it or shutting the backend down.
     let mut terminal = ManuallyDrop::new(terminal);
 
-    let scan = scan::spawn_scan(music_dir.clone());
-    let mut app = App::new(music_dir);
-    let result = event_loop(&mut terminal, &mut app, &mut playback, scan, signals).await;
+    let scan = music_dir.clone().map(scan::spawn_scan);
+    let ping = navidrome.clone().map(spawn_ping);
+    let mut app = App::with_sources(music_dir, navidrome);
+    let sources = Sources { scan, ping };
+    let result = event_loop(&mut terminal, &mut app, &mut playback, sources, signals).await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
@@ -668,6 +720,31 @@ impl Signals {
     }
 }
 
+type PingResult = Result<(), navidrome::Error>;
+
+/// Background work whose results arrive in the loop.
+struct Sources {
+    scan: Option<mpsc::Receiver<ScanEvent>>,
+    ping: Option<oneshot::Receiver<PingResult>>,
+}
+
+/// Pings the server on a Tokio task; the result arrives over a oneshot.
+fn spawn_ping(client: navidrome::Client) -> oneshot::Receiver<PingResult> {
+    let (tx, rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let _ = tx.send(client.ping().await);
+    });
+    rx
+}
+
+/// Waits for the ping result; pends forever once it has been taken.
+async fn next_ping(ping: &mut Option<oneshot::Receiver<PingResult>>) -> Option<PingResult> {
+    match ping {
+        Some(rx) => rx.await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
 /// Waits for the next scan event; pends forever once the scan channel has
 /// been closed and dropped, so the branch never spins.
 async fn next_scan_event(scan: &mut Option<mpsc::Receiver<ScanEvent>>) -> Option<ScanEvent> {
@@ -681,14 +758,14 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     playback: &mut PlaybackHandle,
-    scan: mpsc::Receiver<ScanEvent>,
+    sources: Sources,
     mut signals: Signals,
 ) -> io::Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut view = render::ViewState::default();
-    let mut scan = Some(scan);
+    let Sources { mut scan, mut ping } = sources;
     let mut playback_open = true;
     let mut dirty = true;
 
@@ -737,6 +814,14 @@ async fn event_loop(
                 }
                 dirty = true;
             },
+            result = next_ping(&mut ping) => {
+                ping = None;
+                // A dropped sender means the task panicked; it is logged.
+                if let Some(result) = result {
+                    app.handle_navidrome_ping(result, Instant::now());
+                    dirty = true;
+                }
+            },
             _ = signals.terminate.recv() => {
                 tracing::info!("SIGTERM received; quitting");
                 return Ok(());
@@ -766,6 +851,7 @@ mod tests {
     use super::*;
     use crate::model::TrackMetadata;
     use crate::playback::LoadId;
+    use crate::playback::{EndReason, PlaybackTarget};
 
     const ROOT: &str = "/music";
 
@@ -781,6 +867,101 @@ mod tests {
                 ..TrackMetadata::default()
             },
         )
+    }
+
+    fn remote(id: &str) -> Track {
+        Track::navidrome(
+            id.into(),
+            TrackMetadata {
+                title: Some(format!("Remote {id}")),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    fn client() -> navidrome::Client {
+        navidrome::Client::new(
+            navidrome::client::parse_base_url("https://h.example/nd").unwrap(),
+            "u".into(),
+            navidrome::Password::new("p".into()),
+        )
+        .unwrap()
+    }
+
+    fn stream_id(commands: &[PlaybackCommand]) -> String {
+        match commands {
+            [
+                PlaybackCommand::Load {
+                    target: PlaybackTarget::Stream(url),
+                    ..
+                },
+            ] => {
+                let url = url::Url::parse(url.expose()).unwrap();
+                assert_eq!(url.path(), "/nd/rest/stream");
+                url.query_pairs()
+                    .find(|(k, _)| k == "id")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap()
+            }
+            other => panic!("expected a single stream Load, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_sources_resolve_to_a_stream_url_for_the_song() {
+        let mut app = App::with_sources(None, Some(client()));
+        let now = Instant::now();
+        app.player.enqueue(remote("song 1"));
+        app.player.enqueue(remote("song-2"));
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_id(&commands), "song 1");
+        let load = match &commands[..] {
+            [PlaybackCommand::Load { load, .. }] => *load,
+            _ => unreachable!(),
+        };
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(stream_id(&commands), "song-2");
+    }
+
+    #[test]
+    fn remote_track_without_navidrome_fails_and_the_queue_advances() {
+        let (mut app, now) = app_with(&["a.flac"]);
+        app.player.enqueue(remote("r1"));
+        app.player.enqueue(remote("r2"));
+        app.player.enqueue(track("b.flac"));
+        app.focus = Focus::Queue;
+        // Both remote entries fail in turn; the local one is loaded.
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(load_path(&commands), PathBuf::from("/music/b.flac"));
+        let current = app.player.queue().current_entry().unwrap();
+        assert_eq!(current.track.title, "b");
+        assert_eq!(
+            app.status(now),
+            Some("Could not play Remote r2: Navidrome is not configured")
+        );
+        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Loading);
+    }
+
+    #[test]
+    fn unresolvable_last_entry_stops_the_backend() {
+        let (mut app, now) = app_with(&[]);
+        app.player.enqueue(remote("r1"));
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(commands, [PlaybackCommand::Stop]);
+        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        assert!(
+            app.status(now)
+                .unwrap()
+                .contains("Navidrome is not configured")
+        );
     }
 
     fn app_with(rels: &[&str]) -> (App, Instant) {
@@ -809,7 +990,12 @@ mod tests {
 
     fn load_path(commands: &[PlaybackCommand]) -> PathBuf {
         match commands {
-            [PlaybackCommand::Load { path, .. }] => path.clone(),
+            [
+                PlaybackCommand::Load {
+                    target: PlaybackTarget::File(path),
+                    ..
+                },
+            ] => path.clone(),
             other => panic!("expected one Load, got {other:?}"),
         }
     }

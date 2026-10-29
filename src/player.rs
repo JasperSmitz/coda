@@ -1,6 +1,10 @@
 //! Pure player coordinator: owns the [`Queue`] and the last reported
 //! playback state, and turns user intents and [`PlaybackEvent`]s into
-//! [`PlaybackCommand`]s. No I/O and no Tokio.
+//! [`PlayerCommand`]s. No I/O and no Tokio.
+//!
+//! A [`PlayerCommand::Load`] names the queue entry's [`TrackSource`]; the
+//! application resolves it into a backend [`PlaybackCommand`] (a local file
+//! or a signed stream URL), so the player never handles credentials.
 //!
 //! The central rule: the queue advances only on
 //! `TrackEnded { reason: Eof | Error }` whose `LoadId` equals
@@ -8,7 +12,7 @@
 
 use std::time::Duration;
 
-use crate::model::Track;
+use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
 use crate::queue::{Queue, QueueEntryId};
 
@@ -18,6 +22,36 @@ pub const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 pub const VOLUME_STEP: u8 = 5;
 pub const MAX_VOLUME: u8 = 100;
 const DEFAULT_VOLUME: u8 = 100;
+
+/// What the player asks of the playback backend. Mirrors
+/// [`PlaybackCommand`], except that `Load` carries the track's source
+/// rather than a resolved target.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlayerCommand {
+    Load { load: LoadId, source: TrackSource },
+    SetPause(bool),
+    Stop,
+    SeekRelative(f64),
+    SeekAbsolute(f64),
+    SetVolume(u8),
+    Shutdown,
+}
+
+impl PlayerCommand {
+    /// The backend command for everything except `Load`, which needs
+    /// resolving first and is returned unchanged as `Err`.
+    pub fn into_playback(self) -> Result<PlaybackCommand, (LoadId, TrackSource)> {
+        Ok(match self {
+            Self::Load { load, source } => return Err((load, source)),
+            Self::SetPause(paused) => PlaybackCommand::SetPause(paused),
+            Self::Stop => PlaybackCommand::Stop,
+            Self::SeekRelative(seconds) => PlaybackCommand::SeekRelative(seconds),
+            Self::SeekAbsolute(seconds) => PlaybackCommand::SeekAbsolute(seconds),
+            Self::SetVolume(volume) => PlaybackCommand::SetVolume(volume),
+            Self::Shutdown => PlaybackCommand::Shutdown,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackStatus {
@@ -155,7 +189,7 @@ impl Player {
     /// Enter on a library track: insert a new entry directly after the
     /// current one (or append when there is none) and play it now. The
     /// previously current entry stays in place.
-    pub fn play_track_now(&mut self, track: Track) -> Vec<PlaybackCommand> {
+    pub fn play_track_now(&mut self, track: Track) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
@@ -164,7 +198,7 @@ impl Player {
     }
 
     /// Enter on a queue entry: play it.
-    pub fn play_entry(&mut self, id: QueueEntryId) -> Vec<PlaybackCommand> {
+    pub fn play_entry(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() || self.queue.get(id).is_none() {
             return Vec::new();
         }
@@ -173,13 +207,13 @@ impl Player {
 
     /// Space: toggle pause when loaded; otherwise play the current entry,
     /// or the first entry when there is no current one.
-    pub fn toggle_pause(&mut self) -> Vec<PlaybackCommand> {
+    pub fn toggle_pause(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
         if self.is_loaded() {
             self.paused = !self.paused;
-            return vec![PlaybackCommand::SetPause(self.paused)];
+            return vec![PlayerCommand::SetPause(self.paused)];
         }
         match self.queue.current().or_else(|| self.queue.first()) {
             Some(id) => self.load_entry(id),
@@ -191,7 +225,7 @@ impl Player {
     }
 
     /// `n`: play the next entry; at the end of the queue, do nothing.
-    pub fn play_next(&mut self) -> Vec<PlaybackCommand> {
+    pub fn play_next(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
@@ -211,42 +245,42 @@ impl Player {
     /// `p`: restart the track if past [`RESTART_THRESHOLD`], else play the
     /// previous entry; at the first entry, restart the track. Restarting
     /// needs a started track; while loading it is a no-op.
-    pub fn play_previous(&mut self) -> Vec<PlaybackCommand> {
+    pub fn play_previous(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
         let past_threshold = self.position.is_some_and(|p| p > RESTART_THRESHOLD);
         if self.is_started() && past_threshold {
-            return vec![PlaybackCommand::SeekAbsolute(0.0)];
+            return vec![PlayerCommand::SeekAbsolute(0.0)];
         }
         match self.queue.move_to_previous() {
             Some(id) => self.load_entry(id),
-            None if self.is_started() => vec![PlaybackCommand::SeekAbsolute(0.0)],
+            None if self.is_started() => vec![PlayerCommand::SeekAbsolute(0.0)],
             None => Vec::new(),
         }
     }
 
     /// Seeks need a started track (mpv rejects seeks while a file is still
     /// opening); otherwise this is a no-op.
-    pub fn seek_relative(&mut self, seconds: f64) -> Vec<PlaybackCommand> {
+    pub fn seek_relative(&mut self, seconds: f64) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() || !self.is_started() {
             return Vec::new();
         }
-        vec![PlaybackCommand::SeekRelative(seconds)]
+        vec![PlayerCommand::SeekRelative(seconds)]
     }
 
-    pub fn volume_up(&mut self) -> Vec<PlaybackCommand> {
+    pub fn volume_up(&mut self) -> Vec<PlayerCommand> {
         self.set_volume(self.volume().saturating_add(VOLUME_STEP).min(MAX_VOLUME))
     }
 
-    pub fn volume_down(&mut self) -> Vec<PlaybackCommand> {
+    pub fn volume_down(&mut self) -> Vec<PlayerCommand> {
         self.set_volume(self.volume().saturating_sub(VOLUME_STEP))
     }
 
     /// Requests `volume` unless it equals the effective volume: mpv sends
     /// no property change for an unchanged value, so such a request would
     /// never be confirmed (e.g. `+` at 100).
-    fn set_volume(&mut self, volume: u8) -> Vec<PlaybackCommand> {
+    fn set_volume(&mut self, volume: u8) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() || !self.is_loaded() || volume == self.volume() {
             return Vec::new();
         }
@@ -254,12 +288,12 @@ impl Player {
         // last reported) stays pending; that is harmless because it equals
         // mpv's actual value, and the next press replaces it.
         self.requested_volume = Some(volume);
-        vec![PlaybackCommand::SetVolume(volume)]
+        vec![PlayerCommand::SetVolume(volume)]
     }
 
     /// Removes a queue entry. Removing the current entry while loaded acts
     /// like `n` first; with no next entry, playback stops.
-    pub fn remove(&mut self, id: QueueEntryId) -> Vec<PlaybackCommand> {
+    pub fn remove(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
         let mut commands = Vec::new();
         if self.queue.current() == Some(id) && self.is_loaded() {
             commands = match self.queue.id_after(id) {
@@ -273,14 +307,14 @@ impl Player {
 
     /// Quit: forget the current load first so its end-file is stale, then
     /// shut the backend down.
-    pub fn quit(&mut self) -> Vec<PlaybackCommand> {
+    pub fn quit(&mut self) -> Vec<PlayerCommand> {
         self.clear_load();
-        vec![PlaybackCommand::Shutdown]
+        vec![PlayerCommand::Shutdown]
     }
 
     // ----- backend events -----------------------------------------------
 
-    pub fn handle_event(&mut self, event: PlaybackEvent) -> Vec<PlaybackCommand> {
+    pub fn handle_event(&mut self, event: PlaybackEvent) -> Vec<PlayerCommand> {
         match event {
             PlaybackEvent::Started { load } => {
                 if self.current_load == Some(load) {
@@ -335,7 +369,7 @@ impl Player {
         }
     }
 
-    fn on_track_ended(&mut self, load: LoadId, reason: EndReason) -> Vec<PlaybackCommand> {
+    fn on_track_ended(&mut self, load: LoadId, reason: EndReason) -> Vec<PlayerCommand> {
         if self.current_load != Some(load) {
             tracing::debug!(%load, ?reason, "stale TrackEnded ignored");
             return Vec::new();
@@ -363,7 +397,7 @@ impl Player {
 
     /// Plays the next entry, or stops at the end of the queue with
     /// `current` left on the last entry so Space replays it.
-    fn advance(&mut self, after_error: bool) -> Vec<PlaybackCommand> {
+    fn advance(&mut self, after_error: bool) -> Vec<PlayerCommand> {
         match self.queue.move_to_next() {
             Some(id) => self.load_entry(id),
             // After an error the backend may still be playing an older
@@ -376,10 +410,10 @@ impl Player {
         }
     }
 
-    fn stop(&mut self) -> Vec<PlaybackCommand> {
+    fn stop(&mut self) -> Vec<PlayerCommand> {
         // Cleared before `Stop` is emitted, so its end-file is stale.
         self.clear_load();
-        vec![PlaybackCommand::Stop]
+        vec![PlayerCommand::Stop]
     }
 
     fn clear_load(&mut self) {
@@ -389,13 +423,11 @@ impl Player {
         self.duration = None;
     }
 
-    fn load_entry(&mut self, id: QueueEntryId) -> Vec<PlaybackCommand> {
+    fn load_entry(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
         let Some(entry) = self.queue.get(id) else {
             return Vec::new();
         };
-        let Some(path) = entry.track.local_path().map(|p| p.to_path_buf()) else {
-            return Vec::new();
-        };
+        let source = entry.track.source.clone();
         let name = entry.track.display_name();
         self.queue.set_current(id);
         self.last_load += 1;
@@ -406,7 +438,7 @@ impl Player {
         self.paused = false;
         self.position = None;
         self.duration = None;
-        vec![PlaybackCommand::Load { load, path }]
+        vec![PlayerCommand::Load { load, source }]
     }
 }
 
@@ -426,9 +458,14 @@ mod tests {
         (p, ids)
     }
 
-    fn load_of(cmds: &[PlaybackCommand]) -> (LoadId, PathBuf) {
+    fn load_of(cmds: &[PlayerCommand]) -> (LoadId, PathBuf) {
         match cmds {
-            [PlaybackCommand::Load { load, path }] => (*load, path.clone()),
+            [
+                PlayerCommand::Load {
+                    load,
+                    source: TrackSource::Local { path },
+                },
+            ] => (*load, path.clone()),
             other => panic!("expected a single Load, got {other:?}"),
         }
     }
@@ -526,14 +563,14 @@ mod tests {
         let (mut p, ids) = player_with(&["A"]);
         let l1 = start(&mut p, ids[0]);
         // Removing the current entry at the end of the queue stops.
-        assert_eq!(p.remove(ids[0]), [PlaybackCommand::Stop]);
+        assert_eq!(p.remove(ids[0]), [PlayerCommand::Stop]);
         assert_eq!(p.current_load(), None);
         assert!(p.handle_event(ended(l1, EndReason::Stopped)).is_empty());
         assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
 
         let (mut p, ids) = player_with(&["A", "B"]);
         let l1 = start(&mut p, ids[0]);
-        assert_eq!(p.quit(), [PlaybackCommand::Shutdown]);
+        assert_eq!(p.quit(), [PlayerCommand::Shutdown]);
         assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
         assert_eq!(p.queue().current(), Some(ids[0]));
     }
@@ -570,7 +607,7 @@ mod tests {
         let (mut p, ids) = player_with(&["A", "B"]);
         start(&mut p, ids[1]);
         p.handle_event(PlaybackEvent::Position(Duration::from_millis(3500)));
-        assert_eq!(p.play_previous(), [PlaybackCommand::SeekAbsolute(0.0)]);
+        assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
         assert_eq!(p.queue().current(), Some(ids[1]));
 
         p.handle_event(PlaybackEvent::Position(Duration::from_secs(3)));
@@ -583,7 +620,7 @@ mod tests {
         let (mut p, ids) = player_with(&["A", "B"]);
         start(&mut p, ids[0]);
         p.handle_event(PlaybackEvent::Position(Duration::from_secs(1)));
-        assert_eq!(p.play_previous(), [PlaybackCommand::SeekAbsolute(0.0)]);
+        assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
         // Stopped at the first entry: nothing to seek.
         let (mut p, _) = player_with(&["A"]);
         assert!(p.play_previous().is_empty());
@@ -599,8 +636,8 @@ mod tests {
         assert!(p.play_previous().is_empty());
         assert_eq!(p.queue().current(), Some(ids[0]));
         p.handle_event(PlaybackEvent::Started { load });
-        assert_eq!(p.seek_relative(5.0), [PlaybackCommand::SeekRelative(5.0)]);
-        assert_eq!(p.play_previous(), [PlaybackCommand::SeekAbsolute(0.0)]);
+        assert_eq!(p.seek_relative(5.0), [PlayerCommand::SeekRelative(5.0)]);
+        assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
         // `p` while loading a later entry still goes back.
         load_of(&p.play_next());
         let (_, path) = load_of(&p.play_previous());
@@ -640,9 +677,9 @@ mod tests {
         p.handle_event(PlaybackEvent::Started {
             load: p.current_load().unwrap(),
         });
-        assert_eq!(p.toggle_pause(), [PlaybackCommand::SetPause(true)]);
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(true)]);
         assert_eq!(p.status(), PlaybackStatus::Paused);
-        assert_eq!(p.toggle_pause(), [PlaybackCommand::SetPause(false)]);
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(false)]);
         assert_eq!(p.status(), PlaybackStatus::Playing);
     }
 
@@ -663,18 +700,14 @@ mod tests {
         assert!(p.seek_relative(5.0).is_empty());
         assert!(p.volume_down().is_empty());
         start(&mut p, ids[0]);
-        assert_eq!(p.seek_relative(-5.0), [PlaybackCommand::SeekRelative(-5.0)]);
-        assert_eq!(
-            p.volume_up(),
-            Vec::<PlaybackCommand>::new(),
-            "already at 100"
-        );
-        assert_eq!(p.volume_down(), [PlaybackCommand::SetVolume(95)]);
+        assert_eq!(p.seek_relative(-5.0), [PlayerCommand::SeekRelative(-5.0)]);
+        assert_eq!(p.volume_up(), Vec::<PlayerCommand>::new(), "already at 100");
+        assert_eq!(p.volume_down(), [PlayerCommand::SetVolume(95)]);
         p.handle_event(PlaybackEvent::Volume(95));
         p.handle_event(PlaybackEvent::Volume(3));
-        assert_eq!(p.volume_down(), [PlaybackCommand::SetVolume(0)]);
+        assert_eq!(p.volume_down(), [PlayerCommand::SetVolume(0)]);
         assert!(p.volume_down().is_empty());
-        assert_eq!(p.volume_up(), [PlaybackCommand::SetVolume(5)]);
+        assert_eq!(p.volume_up(), [PlayerCommand::SetVolume(5)]);
     }
 
     fn volume_presses(p: &mut Player, keys: &str) -> Vec<u8> {
@@ -684,7 +717,7 @@ mod tests {
                 _ => p.volume_up(),
             })
             .map(|c| match c {
-                PlaybackCommand::SetVolume(v) => v,
+                PlayerCommand::SetVolume(v) => v,
                 other => panic!("unexpected {other:?}"),
             })
             .collect()
@@ -797,7 +830,7 @@ mod tests {
     fn remove_current_at_end_stops() {
         let (mut p, ids) = player_with(&["A", "B"]);
         start(&mut p, ids[1]);
-        assert_eq!(p.remove(ids[1]), [PlaybackCommand::Stop]);
+        assert_eq!(p.remove(ids[1]), [PlayerCommand::Stop]);
         assert_eq!(p.status(), PlaybackStatus::Stopped);
         assert_eq!(titles(&p), ["A*"]);
     }
@@ -817,6 +850,57 @@ mod tests {
     }
 
     #[test]
+    fn remote_entries_load_by_source_and_share_the_queue() {
+        let mut p = Player::new();
+        let remote = p.enqueue(Track::navidrome("s1".into(), TrackMetadata::default()));
+        p.enqueue(t("A"));
+        let cmds = p.play_entry(remote);
+        let [PlayerCommand::Load { load, source }] = cmds.as_slice() else {
+            panic!("{cmds:?}");
+        };
+        assert_eq!(
+            *source,
+            TrackSource::Navidrome {
+                song_id: "s1".into()
+            }
+        );
+        let (_, path) = load_of(&p.handle_event(ended(*load, EndReason::Eof)));
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+    }
+
+    #[test]
+    fn non_load_commands_map_one_to_one() {
+        let cases = [
+            (
+                PlayerCommand::SetPause(true),
+                PlaybackCommand::SetPause(true),
+            ),
+            (PlayerCommand::Stop, PlaybackCommand::Stop),
+            (
+                PlayerCommand::SeekRelative(-5.0),
+                PlaybackCommand::SeekRelative(-5.0),
+            ),
+            (
+                PlayerCommand::SeekAbsolute(0.0),
+                PlaybackCommand::SeekAbsolute(0.0),
+            ),
+            (PlayerCommand::SetVolume(40), PlaybackCommand::SetVolume(40)),
+            (PlayerCommand::Shutdown, PlaybackCommand::Shutdown),
+        ];
+        for (player, playback) in cases {
+            assert_eq!(player.into_playback(), Ok(playback));
+        }
+        let source = TrackSource::Local {
+            path: "/m/x".into(),
+        };
+        let load = PlayerCommand::Load {
+            load: LoadId(3),
+            source: source.clone(),
+        };
+        assert_eq!(load.into_playback(), Err((LoadId(3), source)));
+    }
+
+    #[test]
     fn all_missing_queue_terminates() {
         let names: Vec<String> = (0..20).map(|i| format!("T{i}")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -824,14 +908,14 @@ mod tests {
         let mut cmds = p.toggle_pause();
         let mut loads = 0;
         let mut steps = 0;
-        while let [PlaybackCommand::Load { load, .. }] = cmds.as_slice() {
+        while let [PlayerCommand::Load { load, .. }] = cmds.as_slice() {
             loads += 1;
             steps += 1;
             assert!(steps <= 100, "did not terminate");
             cmds = p.handle_event(ended(*load, EndReason::Error("file not found".into())));
         }
         assert_eq!(loads, 20);
-        assert_eq!(cmds, [PlaybackCommand::Stop]);
+        assert_eq!(cmds, [PlayerCommand::Stop]);
         assert_eq!(p.status(), PlaybackStatus::Stopped);
         assert_eq!(p.take_messages().len(), 20);
     }

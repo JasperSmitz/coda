@@ -6,7 +6,7 @@ Status legend: proposed / in progress / completed. Do not mark work completed ba
 - Agent contract, vision, architecture notes, roadmap and review workflow established.
 - Cargo initialization moved into M1 slice 1.
 
-## M1 — Local playback (completed; awaiting owner acceptance)
+## M1 — Local playback (completed; accepted 2026-10-29)
 Brief: `docs/plans/m1-local-playback.md`. Delivered in two independently reviewed slices:
 1. Domain models, queue, player coordinator, mpv backend, library scan, tests. **(completed, reviewed)**
 2. TUI, navigation, playback interaction, terminal and process lifecycle. **(completed, reviewed)**
@@ -19,7 +19,11 @@ Acceptance:
 - Handles empty/missing libraries, missing mpv and playback failures; terminal restores and mpv exits on every catchable exit path.
 - Queue/player unit tests, mpv integration tests and format/clippy/test/build checks.
 
-## M2 — Navidrome integration (proposed)
+## M2 — Navidrome integration (in progress)
+Brief: `docs/plans/m2-navidrome.md`. Slices:
+1. Config file and credentials, Subsonic client, remote tracks in the unified queue, mpv streaming. **(completed, reviewed)**
+2. Remote browsing, search and TUI integration. **(in progress)**
+
 Acceptance:
 - Configure and connect to personal Navidrome via Subsonic/OpenSubsonic API.
 - Browse/search remote library and stream into the same queue as local songs.

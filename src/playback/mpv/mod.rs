@@ -21,7 +21,8 @@ pub use process::SpawnError;
 use self::process::{MpvProcess, QUIT_GRACE};
 use self::state::{MpvState, OutgoingRequest, Output, POSITION_INTERVAL};
 use crate::playback::{
-    EVENT_CHANNEL_CAPACITY, PlaybackCommand, PlaybackEvent, PlaybackHandle, ShutdownOutcome,
+    EVENT_CHANNEL_CAPACITY, PlaybackCommand, PlaybackEvent, PlaybackHandle, PlaybackTarget,
+    ShutdownOutcome,
 };
 
 #[derive(Debug, Clone)]
@@ -87,7 +88,9 @@ impl Writer {
                 "mpv <-"
             );
             let line = request.encode();
-            tracing::trace!(line = %line.trim_end(), "mpv <- raw");
+            if !request.command.is_sensitive() {
+                tracing::trace!(line = %line.trim_end(), "mpv <- raw");
+            }
             // A closed writer is noticed through its task handle.
             let _ = self.lines.send(line);
         }
@@ -153,10 +156,14 @@ async fn run(
         pending = tokio::select! {
             command = commands.recv() => match command {
                 None | Some(PlaybackCommand::Shutdown) => break Exit::Graceful,
-                Some(PlaybackCommand::Load { load, path }) => {
+                Some(PlaybackCommand::Load { load, target: PlaybackTarget::File(path) }) => {
                     // Contract: only existing regular files reach mpv.
+                    // Streams are signed http(s) URLs and are not checked.
                     match precheck(&path).await {
-                        Ok(()) => state.handle_command(PlaybackCommand::Load { load, path }),
+                        Ok(()) => state.handle_command(PlaybackCommand::Load {
+                            load,
+                            target: PlaybackTarget::File(path),
+                        }),
                         Err(reason) => state.load_rejected(load, &reason),
                     }
                 }

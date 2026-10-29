@@ -3,12 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Where a track's audio comes from. M1 knows only local files; M2 adds a
-/// remote variant so both kinds can share one queue.
+/// Where a track's audio comes from. Local and remote tracks share one
+/// queue; the source is resolved to a playback target only when loaded.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TrackSource {
     /// An absolute path below the canonicalized music directory.
     Local { path: PathBuf },
+    /// A song on the configured Navidrome server. The id is opaque and
+    /// carries no credentials.
+    Navidrome { song_id: String },
 }
 
 /// Optional metadata as read from tags. `Track` applies the fallbacks.
@@ -40,11 +43,11 @@ impl Track {
     /// capped at [`MAX_METADATA_CHARS`] here, once, which bounds every
     /// later use (sorting, rendering).
     pub fn local(path: PathBuf, metadata: TrackMetadata) -> Self {
-        let title = non_blank(metadata.title).unwrap_or_else(|| cap_chars(file_stem(&path)));
+        let title = clean_text(metadata.title).unwrap_or_else(|| cap_chars(file_stem(&path)));
         Self {
             title,
-            artist: non_blank(metadata.artist),
-            album: non_blank(metadata.album),
+            artist: clean_text(metadata.artist),
+            album: clean_text(metadata.album),
             track_no: metadata.track_no,
             disc_no: metadata.disc_no,
             duration: metadata.duration,
@@ -52,11 +55,31 @@ impl Track {
         }
     }
 
+    /// Builds a Navidrome track. There is no file name to fall back on, so
+    /// a missing title becomes [`UNKNOWN_TITLE`]. Text is capped like tags.
+    pub fn navidrome(song_id: String, metadata: TrackMetadata) -> Self {
+        Self {
+            title: clean_text(metadata.title).unwrap_or_else(|| UNKNOWN_TITLE.to_owned()),
+            artist: clean_text(metadata.artist),
+            album: clean_text(metadata.album),
+            track_no: metadata.track_no,
+            disc_no: metadata.disc_no,
+            duration: metadata.duration,
+            source: TrackSource::Navidrome { song_id },
+        }
+    }
+
     /// The local path, if this track is a local file.
     pub fn local_path(&self) -> Option<&Path> {
         match &self.source {
             TrackSource::Local { path } => Some(path),
+            TrackSource::Navidrome { .. } => None,
         }
+    }
+
+    /// `true` for tracks streamed from a server.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.source, TrackSource::Navidrome { .. })
     }
 
     /// Human-readable name for status lines and logs: `Artist - Title` or
@@ -72,7 +95,12 @@ impl Track {
 /// Upper bound on the length of metadata strings, in chars.
 pub const MAX_METADATA_CHARS: usize = 512;
 
-fn non_blank(value: Option<String>) -> Option<String> {
+/// Title of a remote track whose metadata has none.
+pub const UNKNOWN_TITLE: &str = "Unknown title";
+
+/// Trims untrusted text and caps it at [`MAX_METADATA_CHARS`]; blank
+/// becomes `None`. Used for every string from tags or a server.
+pub fn clean_text(value: Option<String>) -> Option<String> {
     value
         .map(|s| cap_chars(s.trim().to_owned()))
         .filter(|s| !s.is_empty())
@@ -142,6 +170,29 @@ mod tests {
         let stem = "é".repeat(600);
         let track = Track::local(format!("/m/{stem}.mp3").into(), TrackMetadata::default());
         assert_eq!(track.title, "é".repeat(MAX_METADATA_CHARS));
+    }
+
+    #[test]
+    fn navidrome_track_falls_back_to_unknown_title() {
+        let track = Track::navidrome("s1".into(), TrackMetadata::default());
+        assert_eq!(track.title, UNKNOWN_TITLE);
+        assert_eq!(track.local_path(), None);
+        assert!(track.is_remote());
+        assert_eq!(
+            track.source,
+            TrackSource::Navidrome {
+                song_id: "s1".into()
+            }
+        );
+        let meta = TrackMetadata {
+            title: Some("x".repeat(10_000)),
+            artist: Some("  ".into()),
+            ..TrackMetadata::default()
+        };
+        let track = Track::navidrome("s2".into(), meta);
+        assert_eq!(track.title.chars().count(), MAX_METADATA_CHARS);
+        assert_eq!(track.artist, None);
+        assert!(!Track::local("/m/x.mp3".into(), TrackMetadata::default()).is_remote());
     }
 
     #[test]

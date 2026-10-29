@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::playback::StreamUrl;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeekMode {
     Relative,
@@ -22,6 +24,11 @@ pub enum MpvCommand {
     /// later positional arguments changed meaning in mpv 0.38.
     LoadFile {
         path: String,
+    },
+    /// `["loadfile", url, "replace"]` for a signed stream URL. Kept apart
+    /// from `LoadFile` so the URL stays redacted everywhere but the encoder.
+    LoadStream {
+        url: StreamUrl,
     },
     SetProperty {
         name: &'static str,
@@ -48,6 +55,9 @@ impl MpvCommand {
             Self::LoadFile { path } => {
                 vec!["loadfile".into(), path.as_str().into(), "replace".into()]
             }
+            Self::LoadStream { url } => {
+                vec!["loadfile".into(), url.expose().into(), "replace".into()]
+            }
             Self::SetProperty { name, value } => {
                 vec!["set_property".into(), (*name).into(), value.clone()]
             }
@@ -67,10 +77,16 @@ impl MpvCommand {
         }
     }
 
+    /// `true` if the encoded request carries a secret (a signed URL), so
+    /// the raw line must not be logged even at `trace`.
+    pub fn is_sensitive(&self) -> bool {
+        matches!(self, Self::LoadStream { .. })
+    }
+
     /// Short description for logs. Never includes the load target.
     pub fn describe(&self) -> String {
         match self {
-            Self::LoadFile { .. } => "loadfile".to_owned(),
+            Self::LoadFile { .. } | Self::LoadStream { .. } => "loadfile".to_owned(),
             Self::SetProperty { name, .. } => format!("set_property {name}"),
             Self::GetProperty { name } => format!("get_property {name}"),
             Self::ObserveProperty { name, .. } => format!("observe_property {name}"),
@@ -301,6 +317,28 @@ mod tests {
             path: "/secret/path.flac".into(),
         };
         assert!(!cmd.describe().contains("secret"));
+        assert!(!cmd.is_sensitive());
+    }
+
+    #[test]
+    fn stream_loads_encode_the_raw_url_but_never_show_it() {
+        let url = url::Url::parse("https://h.example/rest/stream?id=a&t=secret-token").unwrap();
+        let cmd = MpvCommand::LoadStream {
+            url: StreamUrl::new(url).unwrap(),
+        };
+        let line = encode_request(5, &cmd);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            v["command"],
+            serde_json::json!([
+                "loadfile",
+                "https://h.example/rest/stream?id=a&t=secret-token",
+                "replace"
+            ])
+        );
+        assert!(cmd.is_sensitive());
+        assert_eq!(cmd.describe(), "loadfile");
+        assert!(!format!("{cmd:?}").contains("secret"));
     }
 
     #[test]

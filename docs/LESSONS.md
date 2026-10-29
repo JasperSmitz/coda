@@ -44,3 +44,15 @@ Each entry should state:
 - **Rule:** measure the growing prefix (or grapheme clusters) with string width, use saturating arithmetic in layout code, and test truncation against emoji sequences, combining marks and bidi controls from untrusted metadata.
 - **Follow-up rule:** never re-measure a whole growing string per character. That is quadratic, and zero-width characters let a crafted tag make it unbounded (3.9 s per frame from a 100 KB tag). Cap untrusted strings at ingestion, cap again at render time, and find the truncation point by binary search over measured prefixes (3.9 s → 60 µs per call).
 - **Where verified:** M1 slice 2 review, pty reproduction; `fit` and `row_line` in `src/ui/render.rs`.
+
+### HTTP redirects leak signed URLs through `Referer`
+- **Context / symptom:** Subsonic auth puts a replayable token and salt in the query string of every request.
+- **Root cause:** reqwest's default redirect policy copies the previous URL, query included, into the `Referer` header sent to the redirect target. `reqwest::Error`'s `Display` also embeds the full URL.
+- **Rule:** for APIs that carry credentials in the query string, disable redirects (and test that a 3xx is not followed), call `.without_url()` on every `reqwest::Error`, and hold signed URLs in a type that redacts in `Debug`/`Display`.
+- **Where verified:** M2 slice 1 review; reqwest 0.13.5 `src/redirect.rs` (`make_referer`); `redirects_are_not_followed`.
+
+### Render config errors without the library's full `Display`
+- **Context / symptom:** a malformed `password = …` line in `config.toml` would be echoed back in the error.
+- **Root cause:** toml's `Display` for parse errors prints the offending source line.
+- **Rule:** build user-facing parse errors from the error message plus line/column only, and test with a malformed secret line.
+- **Where verified:** M2 slice 1; `unquoted_password_is_not_echoed`.

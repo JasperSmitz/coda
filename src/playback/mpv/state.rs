@@ -22,7 +22,6 @@
 //!    an unmapped `start-file` with no load in flight is stopped.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -30,7 +29,7 @@ use serde_json::Value;
 use super::protocol::{
     self, EndFileReason, MpvCommand, MpvEvent, MpvMessage, ProtocolError, SeekMode,
 };
-use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
+use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackTarget};
 
 /// Minimum spacing between emitted `Position` events (at most 4/s).
 pub const POSITION_INTERVAL: Duration = Duration::from_millis(250);
@@ -147,7 +146,7 @@ pub struct MpvState {
     next_request_id: u64,
     pending: HashMap<u64, Pending>,
     in_flight: Option<InFlight>,
-    queued: Option<(LoadId, PathBuf)>,
+    queued: Option<(LoadId, PlaybackTarget)>,
     entries: HashMap<i64, LoadId>,
     /// Highest entry id ever mapped. mpv entry ids only increase, so an
     /// unmapped id at or below this can never become ours.
@@ -186,14 +185,14 @@ impl MpvState {
     pub fn handle_command(&mut self, command: PlaybackCommand) -> Output {
         let mut out = Output::default();
         match command {
-            PlaybackCommand::Load { load, path } => {
+            PlaybackCommand::Load { load, target } => {
                 if self.in_flight.is_some() {
                     // Collapse: only the latest queued load survives.
-                    if let Some((dropped, _)) = self.queued.replace((load, path)) {
+                    if let Some((dropped, _)) = self.queued.replace((load, target)) {
                         tracing::debug!(%load, %dropped, "load superseded before reaching mpv");
                     }
                 } else {
-                    self.start_load(&mut out, load, path);
+                    self.start_load(&mut out, load, target);
                 }
             }
             PlaybackCommand::SetPause(paused) => self.request(
@@ -283,10 +282,18 @@ impl MpvState {
         }
     }
 
-    fn start_load(&mut self, out: &mut Output, load: LoadId, path: PathBuf) {
-        let Some(path) = path.to_str().map(str::to_owned) else {
-            self.reject_load(out, load, "path is not valid UTF-8".to_owned());
-            return;
+    fn start_load(&mut self, out: &mut Output, load: LoadId, target: PlaybackTarget) {
+        let command = match target {
+            PlaybackTarget::File(path) => match path.to_str() {
+                Some(path) => MpvCommand::LoadFile {
+                    path: path.to_owned(),
+                },
+                None => {
+                    self.reject_load(out, load, "path is not valid UTF-8".to_owned());
+                    return;
+                }
+            },
+            PlaybackTarget::Stream(url) => MpvCommand::LoadStream { url },
         };
         tracing::debug!(%load, "sending load to mpv");
         self.position.clear();
@@ -302,7 +309,7 @@ impl MpvState {
             },
             Pending::Ignore,
         );
-        self.request(out, MpvCommand::LoadFile { path }, Pending::LoadFile(load));
+        self.request(out, command, Pending::LoadFile(load));
         self.request(
             out,
             MpvCommand::GetProperty {
@@ -403,8 +410,8 @@ impl MpvState {
                 }
             }
         }
-        if let Some((next, path)) = self.queued.take() {
-            self.start_load(out, next, path);
+        if let Some((next, target)) = self.queued.take() {
+            self.start_load(out, next, target);
         }
     }
 
@@ -569,7 +576,7 @@ mod tests {
     fn load(state: &mut MpvState, n: u64, path: &str) -> Output {
         state.handle_command(PlaybackCommand::Load {
             load: l(n),
-            path: path.into(),
+            target: PlaybackTarget::File(path.into()),
         })
     }
 
@@ -621,7 +628,12 @@ mod tests {
                 .expect("request present")
         };
         (
-            find(|c| matches!(c, MpvCommand::LoadFile { .. })),
+            find(|c| {
+                matches!(
+                    c,
+                    MpvCommand::LoadFile { .. } | MpvCommand::LoadStream { .. }
+                )
+            }),
             find(|c| matches!(c, MpvCommand::GetProperty { .. })),
         )
     }
@@ -994,7 +1006,7 @@ mod tests {
         let path = std::ffi::OsStr::from_bytes(b"/m/\xff.flac");
         let out = s.handle_command(PlaybackCommand::Load {
             load: l(1),
-            path: path.into(),
+            target: PlaybackTarget::File(path.into()),
         });
         assert!(out.requests.is_empty());
         assert!(matches!(
@@ -1004,6 +1016,23 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn stream_load_sends_loadfile_with_the_url() {
+        let mut s = MpvState::new();
+        let url = url::Url::parse("http://127.0.0.1:1/rest/stream?id=x").unwrap();
+        let stream = crate::playback::StreamUrl::new(url).unwrap();
+        let out = s.handle_command(PlaybackCommand::Load {
+            load: l(1),
+            target: PlaybackTarget::Stream(stream.clone()),
+        });
+        assert!(out.events.is_empty());
+        assert!(out.requests.iter().any(|r| r.command
+            == MpvCommand::LoadStream {
+                url: stream.clone()
+            }));
+        assert!(load_ids(&out).1 > 0, "entry id is queried as for files");
     }
 
     #[test]

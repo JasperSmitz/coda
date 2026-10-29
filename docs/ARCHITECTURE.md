@@ -1,6 +1,6 @@
 # Coda — Architecture
 
-> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
+> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. M2 slice 1 adds config file, Navidrome client and remote tracks in the unified queue; remote browsing UI is M2 slice 2. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
 
 ## Intended boundaries
 
@@ -43,25 +43,29 @@ Proposed M1 module layout and behaviour details: `docs/plans/m1-local-playback.m
 ## Implemented modules
 Single package `coda-player`: library `coda_player`, binary `coda`.
 
-- `config` — music directory from the CLI argument or `CODA_MUSIC_DIR` (empty counts as unset), validated and canonicalized.
-- `model` — `Track`, `TrackSource::Local`, metadata with filename fallback.
+- `config` — optional TOML file (`CODA_CONFIG`, else `$XDG_CONFIG_HOME/coda/config.toml`, else `~/.config/coda/config.toml`) plus env overrides. Music directory: CLI > `CODA_MUSIC_DIR` > file (absolute, validated, canonicalized). Navidrome url/user/password (file, `CODA_NAVIDROME_*`, or `password_command` argv with timeout and output cap). File permission checks for secrets; parse errors never echo source lines (ADR 0003).
+- `model` — `Track`, `TrackSource::{Local, Navidrome { song_id }}`, metadata with fallbacks and length caps.
 - `queue` — pure ordered queue addressed by `QueueEntryId`.
-- `player` — pure coordinator: user intents and `PlaybackEvent`s in, `PlaybackCommand`s out. Auto-advances only on EOF/error of the current `LoadId`.
+- `player` — pure coordinator: user intents and `PlaybackEvent`s in, `PlayerCommand`s out (loads carry the `TrackSource`). Credential-free. Auto-advances only on EOF/error of the current `LoadId`.
+- `resolve` — turns `PlayerCommand`s into backend `PlaybackCommand`s: local path → `PlaybackTarget::File`, Navidrome song → freshly signed `PlaybackTarget::Stream`. An unresolvable load is fed back to the player as `TrackEnded { Error }` so the queue advances; shared by the app and real-mpv tests.
+- `navidrome` — Subsonic client (`reqwest`/rustls): salted-token auth with a fresh salt per request, ping/getArtists/getArtist/getAlbum/search3, stream URL signing. Timeouts, 8 MiB streamed body cap, redirects disabled, URLs stripped from errors, lenient parsing of untrusted responses. `Password`, `StreamUrl` and `Client` redact in `Debug`/`Display`.
 - `playback` — boundary types and `PlaybackHandle` (unbounded commands, bounded events).
   - `mpv::protocol` — JSON IPC encode/decode.
   - `mpv::state` — pure entry-id ↔ `LoadId` mapping, load serialization and collapse, event buffering, redirect and unrequested-entry handling.
-  - `mpv::process` — argv, private socket directory, spawn, connect retry.
-  - `mpv` (driver) — async task: reader loop plus a separate writer task, file pre-check, shutdown with `ShutdownOutcome`.
+  - `mpv::process` — argv (incl. `--network-timeout`), private socket directory, spawn with `CODA_NAVIDROME_*` removed from the environment, connect retry.
+  - `mpv` (driver) — async task: reader loop plus a separate writer task, file pre-check (files only; streams skip it and are never trace-logged), shutdown with `ShutdownOutcome`.
 - `library::scan` / `library::tree` — blocking-thread scan with incremental batches; directory browse tree.
 - `app` — App state and the single `tokio::select!` loop (terminal input, playback events, scan events, SIGTERM/SIGHUP/SIGINT, 250 ms tick); terminal lifecycle and the panic hook. Every exit runs a bounded backend shutdown, then restores the terminal.
 - `ui::keymap` / `ui::render` / `ui::help` — key-to-action mapping per focused panel; Library, Queue, now-playing bar and status line; help overlay. Untrusted text is sanitized (control and bidi characters) and truncated by display width with bounded work. Library and Queue panels keep a persistent scroll offset and build only the visible rows, so frame cost does not grow with list length.
-- `main` — config, file logging, mpv spawn and connect, then `app::run`.
+- `app` also starts a background Navidrome `ping` after the TUI is up and reports the result in the status line; without a music directory there is no scan and the library shows "No local music directory configured".
+- `main` — config (including `password_command`), file logging, optional Navidrome client, mpv spawn and connect, then `app::run`.
 
 Only `app` and `ui` depend on Ratatui/Crossterm.
 
 ## Verification
 - Standard: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-targets`, `cargo build`.
-- With mpv installed: `cargo test --all-targets -- --ignored` (real-mpv lifecycle, playback and hostile-input tests).
+- With mpv installed: `cargo test --all-targets -- --ignored` (real-mpv lifecycle, playback, hostile-input and HTTP streaming tests).
+- Navidrome client tests run against `wiremock` and a raw TCP server (`tests/navidrome_client.rs`); no test contacts a real server.
 - Event-ordering safety lives in `tests/event_ordering.rs`, which drives the real `MpvState` and `Player` through exhaustive message interleavings.
 - UI rendering is covered by Ratatui `TestBackend` tests; the panic hook has its own test binary (`tests/panic_hook.rs`).
 - Verified on macOS with mpv 0.41, including pty-driven smoke runs of every exit path. Slice 1 also passed in Debian (mpv 0.35) and Arch (mpv 0.41) containers; the TUI has not been run on Linux.

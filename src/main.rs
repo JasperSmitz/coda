@@ -1,20 +1,23 @@
-//! `coda` binary. Startup order (brief 3.7): parse and validate the
-//! config, init logging, spawn mpv and connect, then hand over to
-//! [`app::run`], which enters the TUI and starts the scan. Errors before
-//! the TUI are printed to stderr; the TUI never writes to stdout/stderr.
+//! `coda` binary. Startup order: parse and validate the config, init
+//! logging, obtain the Navidrome password (possibly running
+//! `password_command`, which may prompt) and build the client, spawn mpv
+//! and connect, then hand over to [`app::run`], which enters the TUI,
+//! starts the scan and pings the server. Errors before the TUI are printed
+//! to stderr; the TUI never writes to stdout/stderr.
 
 use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Parser;
 use coda_player::app;
-use coda_player::config::{self, Cli, Config};
+use coda_player::config::{self, Cli, Config, Env, PASSWORD_COMMAND_TIMEOUT};
+use coda_player::navidrome;
 use coda_player::playback;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let config = match Config::from_cli(cli) {
+    let config = match Config::load(cli, &Env::from_process()) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("coda: {error}");
@@ -23,6 +26,33 @@ async fn main() -> ExitCode {
     };
     init_logging();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
+
+    let navidrome = match config.navidrome {
+        Some(settings) => {
+            let password = match settings.password.resolve(PASSWORD_COMMAND_TIMEOUT).await {
+                Ok(password) => password,
+                Err(error) => {
+                    tracing::error!(%error, "could not obtain the Navidrome password");
+                    eprintln!("coda: {error}");
+                    return ExitCode::from(error.exit_code());
+                }
+            };
+            match navidrome::Client::new(settings.url, settings.username, password) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::error!(%error, "could not set up the Navidrome client");
+                    eprintln!("coda: Navidrome: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
+    };
+    tracing::info!(
+        local = config.music_dir.is_some(),
+        navidrome = navidrome.is_some(),
+        "sources configured"
+    );
 
     let handle = match playback::spawn_backend().await {
         Ok(handle) => handle,
@@ -33,7 +63,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    match app::run(handle, config.music_dir).await {
+    match app::run(handle, config.music_dir, navidrome).await {
         Ok(()) => {
             tracing::info!("coda exiting");
             ExitCode::SUCCESS

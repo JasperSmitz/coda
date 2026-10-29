@@ -131,6 +131,7 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
     if app.tree().is_empty() {
         let message = match app.scan_state() {
             ScanState::Scanning { .. } => "Scanning…".to_owned(),
+            ScanState::NoLibrary => "No local music directory configured".to_owned(),
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
         let inner = usize::from(area.width.saturating_sub(2));
@@ -309,7 +310,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
     let right = match app.scan_state() {
         ScanState::Scanning { tracks } => format!("Scanning… {} ", count(tracks, "track")),
         ScanState::Failed { .. } => "Scan incomplete ".to_owned(),
-        ScanState::Finished { .. } => "? help ".to_owned(),
+        ScanState::Finished { .. } | ScanState::NoLibrary => "? help ".to_owned(),
     };
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right.width() as u16)])
@@ -471,6 +472,34 @@ mod tests {
                 ..TrackMetadata::default()
             },
         )
+    }
+
+    #[test]
+    fn navidrome_only_shows_no_local_library_and_ping_status() {
+        let now = Instant::now();
+        let client = crate::navidrome::Client::new(
+            crate::navidrome::client::parse_base_url("https://h.example").unwrap(),
+            "u".into(),
+            crate::navidrome::Password::new("p".into()),
+        )
+        .unwrap();
+        let mut app = App::with_sources(None, Some(client));
+        let screen = render(&app, 100, 20, now);
+        assert!(
+            screen.contains("No local music directory configured"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Scanning"), "{screen}");
+        assert!(screen.contains("? help"), "{screen}");
+        app.handle_navidrome_ping(Ok(()), now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Navidrome connected"), "{screen}");
+        app.handle_navidrome_ping(Err(crate::navidrome::Error::Auth), now);
+        let screen = render(&app, 100, 20, now);
+        assert!(
+            screen.contains("Navidrome: authentication failed"),
+            "{screen}"
+        );
     }
 
     #[test]

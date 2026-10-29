@@ -6,6 +6,11 @@ use std::path::Path;
 
 /// Writes a silent 16-bit mono PCM WAV of `millis` milliseconds.
 pub fn write_wav(path: &Path, millis: u32) {
+    std::fs::write(path, wav_bytes(millis)).expect("write wav");
+}
+
+/// A silent 16-bit mono PCM WAV of `millis` milliseconds.
+pub fn wav_bytes(millis: u32) -> Vec<u8> {
     const RATE: u32 = 8000;
     let samples = RATE * millis / 1000;
     let data_len = samples * 2;
@@ -23,5 +28,5 @@ pub fn write_wav(path: &Path, millis: u32) {
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&data_len.to_le_bytes());
     bytes.resize(44 + data_len as usize, 0);
-    std::fs::write(path, bytes).expect("write wav");
+    bytes
 }

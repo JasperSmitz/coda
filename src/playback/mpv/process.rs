@@ -62,12 +62,38 @@ pub fn mpv_args(socket: &Path) -> Vec<OsString> {
         "--no-video".into(),
         "--no-terminal".into(),
         "--ytdl=no".into(),
+        // Give up on an unresponsive stream server instead of hanging.
+        "--network-timeout=15".into(),
         // Do not follow references inside files: a file whose content is a
         // playlist (e.g. `#EXTM3U` in a `.mp3`) is rejected instead of
         // expanding into entries Coda never requested.
         "--access-references=no".into(),
         ipc,
     ]
+}
+
+/// Environment variables that may hold Navidrome credentials or the
+/// server URL. mpv does not inherit them.
+pub const STRIPPED_ENV: [&str; 3] = [
+    "CODA_NAVIDROME_URL",
+    "CODA_NAVIDROME_USER",
+    "CODA_NAVIDROME_PASSWORD",
+];
+
+/// The mpv command: direct exec (no shell), stdio closed, killed on drop,
+/// and without the `CODA_NAVIDROME_*` environment.
+pub fn mpv_command(program: &OsStr, socket: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(mpv_args(socket))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for name in STRIPPED_ENV {
+        command.env_remove(name);
+    }
+    command
 }
 
 /// Candidate base directories for the socket directory, in preference
@@ -173,12 +199,7 @@ impl MpvProcess {
         let socket_dir = SocketDir::create_in_first(&candidates).map_err(SpawnError::SocketDir)?;
         let socket = socket_dir.socket_path();
 
-        let child = Command::new(program)
-            .args(mpv_args(&socket))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
+        let child = mpv_command(program, &socket)
             .spawn()
             .map_err(|e| match e.kind() {
                 io::ErrorKind::NotFound => SpawnError::NotFound {
@@ -272,10 +293,24 @@ mod tests {
                 "--no-video",
                 "--no-terminal",
                 "--ytdl=no",
+                "--network-timeout=15",
                 "--access-references=no",
                 "--input-ipc-server=/run/user/1000/coda-x/mpv.sock",
             ]
         );
+    }
+
+    #[test]
+    fn navidrome_env_is_not_inherited() {
+        let command = mpv_command(OsStr::new("mpv"), Path::new("/tmp/x/mpv.sock"));
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        for name in STRIPPED_ENV {
+            assert!(
+                envs.contains(&(OsStr::new(name), None)),
+                "{name} not removed: {envs:?}"
+            );
+        }
+        assert!(STRIPPED_ENV.contains(&crate::config::NAVIDROME_PASSWORD_ENV));
     }
 
     fn paths(candidates: &[(&str, PathBuf)]) -> Vec<PathBuf> {
