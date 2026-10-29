@@ -18,10 +18,17 @@
 //! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
 //! [`App::handle_fetch_response`].
 //!
+//! The session (queue, current entry, volume, repeat mode) is restored at
+//! startup ([`App::restore_session`]) and saved by the loop: [`App`] only
+//! reports that a save is due ([`App::take_due_save`], debounced by
+//! [`SAVE_DEBOUNCE`]) and hands over a snapshot; the loop writes it on a
+//! blocking thread.
+//!
 //! [`run`] owns the terminal lifecycle: it enters the TUI, installs the
-//! panic hook, starts the scan, runs the loop, and on every exit shuts the
-//! playback backend down (bounded) before restoring the terminal. Only this
-//! module and `ui/` use Ratatui or Crossterm.
+//! panic hook, starts the scan, runs the loop, and on every exit saves the
+//! session and shuts the playback backend down (both bounded) before
+//! restoring the terminal. Only this module and `ui/` use Ratatui or
+//! Crossterm.
 
 use std::io;
 use std::mem::ManuallyDrop;
@@ -32,10 +39,11 @@ use std::time::{Duration, Instant};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::library::scan::{self, ScanEvent};
@@ -46,9 +54,11 @@ use crate::navidrome::browse::{
     self, Activated, Browser, FetchRequest, FetchResponse, JobOutcome, MAX_CONCURRENT_FETCHES,
 };
 use crate::playback::{PlaybackCommand, PlaybackEvent, PlaybackHandle};
-use crate::player::{Player, PlayerCommand};
+use crate::player::{Player, PlayerCommand, QUEUE_FULL};
+use crate::queue::{QueueEntryId, Rng};
 use crate::resolve;
-use crate::ui::{keymap, render};
+use crate::session::{self, Session};
+use crate::ui::{help, keymap, render};
 
 /// Redraw interval when nothing else changes (progress, status expiry).
 pub const TICK: Duration = Duration::from_millis(250);
@@ -58,6 +68,14 @@ pub const STATUS_TTL: Duration = Duration::from_secs(5);
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Seek step for the arrow keys, in seconds.
 pub const SEEK_STEP: f64 = 5.0;
+/// The session is saved this long after the last change to it.
+pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+/// Upper bound on waiting for the session save at quit.
+pub const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// A second `C` within this time clears the queue.
+pub const CLEAR_CONFIRM: Duration = Duration::from_secs(3);
+/// Status after the first `C`.
+pub const CLEAR_PROMPT: &str = "Press C again to clear the queue";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -115,6 +133,18 @@ pub enum Action {
     InputCancel,
     /// Queue: remove the selected entry.
     Remove,
+    /// Queue: move the selected entry up (`K`); the selection follows it.
+    MoveEntryUp,
+    /// Queue: move the selected entry down (`J`).
+    MoveEntryDown,
+    /// Queue: remove every entry (`C`).
+    ClearQueue,
+    /// Queue: select the current entry (`g`).
+    SelectCurrent,
+    /// Queue: shuffle the entries after the current one (`s`).
+    ShuffleUpcoming,
+    /// `R`: cycle repeat off → all → one.
+    CycleRepeat,
     TogglePause,
     Next,
     Previous,
@@ -178,6 +208,11 @@ pub struct App {
     queue_selected: usize,
     focus: Focus,
     help_open: bool,
+    /// First help line shown; clamped by the loop to what the last frame
+    /// could show ([`App::clamp_help_scroll`]).
+    help_scroll: usize,
+    /// Until when a second `C` clears the queue.
+    clear_armed_until: Option<Instant>,
     scan: ScanState,
     status: Option<StatusMessage>,
     quit: bool,
@@ -187,6 +222,15 @@ pub struct App {
     /// Remote browse state; `Some` exactly when Navidrome is configured.
     browser: Option<Browser>,
     connection: Connection,
+    /// Drives `s` (shuffle upcoming).
+    rng: Rng,
+    /// Player revision last seen by [`App::note_changes`].
+    seen_revision: u64,
+    /// Player revision of the last snapshot handed out for saving; `None`
+    /// after a failed save, so the exit save retries.
+    saved_revision: Option<u64>,
+    /// When the debounced save is due.
+    save_due: Option<Instant>,
 }
 
 impl App {
@@ -220,6 +264,8 @@ impl App {
             queue_selected: 0,
             focus: Focus::Library,
             help_open: false,
+            help_scroll: 0,
+            clear_armed_until: None,
             scan,
             status: None,
             quit: false,
@@ -227,7 +273,77 @@ impl App {
             source,
             browser,
             connection: Connection::Connecting,
+            rng: Rng::from_entropy(),
+            seen_revision: 0,
+            saved_revision: Some(0),
+            save_due: None,
         }
+    }
+
+    /// Restores a saved session: the queue, its current entry (selected in
+    /// the Queue panel) and the repeat mode, without playing anything.
+    /// Returns the command that applies the saved volume, if it differs
+    /// from the backend's startup volume. The restored state counts as
+    /// saved.
+    pub fn restore_session(&mut self, session: Session, now: Instant) -> Vec<PlaybackCommand> {
+        let restored = session.tracks.len();
+        let commands = self.player.restore(
+            session.tracks,
+            session.current,
+            session.repeat,
+            session.volume,
+        );
+        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        let queue = self.player.queue();
+        self.queue_selected = queue
+            .current()
+            .and_then(|id| queue.position(id))
+            .unwrap_or(0);
+        if restored > 0 {
+            self.set_status(format!("Restored queue: {}", count(restored, "track")), now);
+        }
+        self.seen_revision = self.player.revision();
+        self.saved_revision = Some(self.seen_revision);
+        self.save_due = None;
+        commands
+    }
+
+    // ----- session saving ----------------------------------------------
+
+    /// Starts (or restarts) the save debounce if the saved state changed.
+    fn note_changes(&mut self, now: Instant) {
+        let revision = self.player.revision();
+        if revision != self.seen_revision {
+            self.seen_revision = revision;
+            self.save_due = Some(now + SAVE_DEBOUNCE);
+        }
+    }
+
+    /// A snapshot to save, once [`SAVE_DEBOUNCE`] has passed since the last
+    /// change. The caller writes it; see [`App::save_failed`].
+    pub fn take_due_save(&mut self, now: Instant) -> Option<Session> {
+        if self.save_due.is_none_or(|due| now < due) {
+            return None;
+        }
+        self.save_due = None;
+        Some(self.save_snapshot())
+    }
+
+    /// A snapshot to save at exit, if anything changed since the last one
+    /// (or the last save failed). Cancels a pending debounce.
+    pub fn take_final_save(&mut self) -> Option<Session> {
+        self.save_due = None;
+        (self.saved_revision != Some(self.player.revision())).then(|| self.save_snapshot())
+    }
+
+    /// The last snapshot could not be written; the exit save retries.
+    pub fn save_failed(&mut self) {
+        self.saved_revision = None;
+    }
+
+    fn save_snapshot(&mut self) -> Session {
+        self.saved_revision = Some(self.player.revision());
+        Session::from_player(&self.player)
     }
 
     // ----- read access for rendering -----------------------------------
@@ -254,6 +370,16 @@ impl App {
 
     pub fn help_open(&self) -> bool {
         self.help_open
+    }
+
+    pub fn help_scroll(&self) -> usize {
+        self.help_scroll
+    }
+
+    /// Keeps the help scroll within what the last frame could show, so
+    /// scrolling back up responds at once.
+    pub fn clamp_help_scroll(&mut self, max: usize) {
+        self.help_scroll = self.help_scroll.min(max);
     }
 
     pub fn scan_state(&self) -> ScanState {
@@ -400,11 +526,18 @@ impl App {
         if self.help_open {
             match action {
                 Action::ToggleHelp | Action::CloseHelp => self.help_open = false,
+                Action::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Action::Down => {
+                    self.help_scroll =
+                        (self.help_scroll + 1).min(help::BINDINGS.len().saturating_sub(1));
+                }
                 Action::Quit => self.quit = true,
                 _ => {}
             }
             return Vec::new();
         }
+        // Any other action cancels a pending `C`.
+        let clear_armed = self.clear_armed_until.take();
         let commands = match action {
             Action::Up => {
                 self.move_selection(-1);
@@ -479,6 +612,32 @@ impl App {
                 Focus::Queue => self.remove_selected(),
                 Focus::Library => Vec::new(),
             },
+            Action::MoveEntryUp | Action::MoveEntryDown => {
+                if self.focus == Focus::Queue {
+                    self.move_selected_entry(action == Action::MoveEntryUp);
+                }
+                Vec::new()
+            }
+            Action::ClearQueue => match self.focus {
+                Focus::Queue => self.clear_queue(clear_armed, now),
+                Focus::Library => Vec::new(),
+            },
+            Action::SelectCurrent => {
+                if self.focus == Focus::Queue {
+                    self.select_current(now);
+                }
+                Vec::new()
+            }
+            Action::ShuffleUpcoming => {
+                if self.focus == Focus::Queue {
+                    self.shuffle_upcoming(now);
+                }
+                Vec::new()
+            }
+            Action::CycleRepeat => {
+                self.player.cycle_repeat();
+                Vec::new()
+            }
             Action::TogglePause => self.player.toggle_pause(),
             Action::Next => self.player.play_next(),
             Action::Previous => self.player.play_previous(),
@@ -495,6 +654,7 @@ impl App {
             }
             Action::ToggleHelp => {
                 self.help_open = true;
+                self.help_scroll = 0;
                 Vec::new()
             }
             Action::CloseHelp => Vec::new(),
@@ -558,6 +718,7 @@ impl App {
         }
         let outcomes = browser.handle_response(response);
         self.apply_job_outcomes(outcomes, now);
+        self.note_changes(now);
     }
 
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
@@ -634,6 +795,7 @@ impl App {
             self.set_status(last, now);
         }
         self.clamp_selections();
+        self.note_changes(now);
     }
 
     fn clamp_selections(&mut self) {
@@ -702,6 +864,7 @@ impl App {
     fn apply_job_outcomes(&mut self, outcomes: Vec<JobOutcome>, now: Instant) {
         let mut failures = Vec::new();
         let mut added = 0;
+        let mut not_added = 0;
         let mut last = None;
         for outcome in outcomes {
             match outcome {
@@ -711,10 +874,9 @@ impl App {
                         [one] => format!("Added {}", one.display_name()),
                         many => format!("Added {} from {label}", count(many.len(), "track")),
                     });
-                    added += tracks.len();
-                    for track in tracks {
-                        self.player.enqueue(track);
-                    }
+                    let (n, dropped) = self.enqueue_tracks(tracks);
+                    added += n;
+                    not_added += dropped;
                 }
                 JobOutcome::Fetching { label } => last = Some(format!("Fetching {label}…")),
                 JobOutcome::Queued { label, after } => {
@@ -738,10 +900,26 @@ impl App {
                 Some(text)
             }
         };
+        let text = match (text, not_added) {
+            (text, 0) => text,
+            (Some(text), n) => Some(format!("{text}; queue full, {} not added", thousands(n))),
+            (None, _) => Some(QUEUE_FULL.to_owned()),
+        };
         if let Some(text) = text {
             self.set_status(text, now);
         }
         self.clamp_selections();
+    }
+
+    /// Appends `tracks` up to the queue's cap. Returns how many were added
+    /// and how many were dropped.
+    fn enqueue_tracks(&mut self, tracks: Vec<Track>) -> (usize, usize) {
+        let total = tracks.len();
+        let added = tracks
+            .into_iter()
+            .map_while(|track| self.player.enqueue(track))
+            .count();
+        (added, total - added)
     }
 
     fn activate_queue(&mut self) -> Vec<PlayerCommand> {
@@ -775,9 +953,73 @@ impl App {
             [one] => format!("Added {}", one.display_name()),
             many => format!("Added {}", count(many.len(), "track")),
         };
-        for track in tracks {
-            self.player.enqueue(track);
+        let text = match self.enqueue_tracks(tracks) {
+            (_, 0) => text,
+            (0, _) => QUEUE_FULL.to_owned(),
+            (added, dropped) => format!(
+                "Added {}; queue full, {} not added",
+                count(added, "track"),
+                thousands(dropped)
+            ),
+        };
+        self.set_status(text, now);
+    }
+
+    fn selected_entry_id(&self) -> Option<QueueEntryId> {
+        self.player
+            .queue()
+            .entries()
+            .get(self.queue_selected)
+            .map(|e| e.id)
+    }
+
+    /// `J`/`K`: moves the selected entry; the selection follows it.
+    fn move_selected_entry(&mut self, up: bool) {
+        let Some(id) = self.selected_entry_id() else {
+            return;
+        };
+        let moved = if up {
+            self.player.move_up(id)
+        } else {
+            self.player.move_down(id)
+        };
+        if moved && let Some(pos) = self.player.queue().position(id) {
+            self.queue_selected = pos;
         }
+    }
+
+    /// `C`: the first press asks for confirmation; a second one within
+    /// [`CLEAR_CONFIRM`] (with nothing in between) clears.
+    fn clear_queue(&mut self, armed: Option<Instant>, now: Instant) -> Vec<PlayerCommand> {
+        if self.player.queue().is_empty() {
+            return Vec::new();
+        }
+        if armed.is_none_or(|until| now >= until) {
+            self.clear_armed_until = Some(now + CLEAR_CONFIRM);
+            self.set_status(CLEAR_PROMPT, now);
+            return Vec::new();
+        }
+        let commands = self.player.clear_queue();
+        self.queue_selected = 0;
+        self.set_status("Queue cleared", now);
+        commands
+    }
+
+    fn select_current(&mut self, now: Instant) {
+        let queue = self.player.queue();
+        match queue.current().and_then(|id| queue.position(id)) {
+            Some(pos) => self.queue_selected = pos,
+            None => self.set_status("No current entry", now),
+        }
+    }
+
+    fn shuffle_upcoming(&mut self, now: Instant) {
+        let shuffled = self.player.shuffle_upcoming(&mut self.rng);
+        let text = if shuffled > 1 {
+            format!("Shuffled {} upcoming entries", thousands(shuffled))
+        } else {
+            "Nothing to shuffle".to_owned()
+        };
         self.set_status(text, now);
     }
 
@@ -831,10 +1073,15 @@ pub fn thousands(n: usize) -> String {
 /// With a music directory, a scan starts after the TUI is up. With a
 /// Navidrome client, a background ping reports the connection state in the
 /// status line; neither ever blocks the loop.
+///
+/// `restored` (already loaded) is restored before the loop starts and its
+/// notice shown. With a save path, changes are saved there during the
+/// session (debounced) and once more on exit, bounded by [`SAVE_TIMEOUT`].
 pub async fn run(
     mut playback: PlaybackHandle,
     music_dir: Option<PathBuf>,
     navidrome: Option<navidrome::Client>,
+    restored: session::Restored,
 ) -> io::Result<()> {
     let signals = match Signals::new() {
         Ok(signals) => signals,
@@ -872,19 +1119,125 @@ pub async fn run(
     let scan = music_dir.clone().map(scan::spawn_scan);
     let ping = navidrome.clone().map(spawn_ping);
     let mut app = App::with_sources(music_dir, navidrome.clone());
+    let now = Instant::now();
+    playback.send_all(app.restore_session(restored.session, now));
+    if let Some(notice) = restored.notice {
+        app.set_status(notice, now);
+    }
+    let mut saver = Saver::new(restored.save_path);
     let sources = Sources {
         scan,
         ping,
         navidrome,
     };
-    let result = event_loop(&mut terminal, &mut app, &mut playback, sources, signals).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &mut playback,
+        sources,
+        signals,
+        &mut saver,
+    )
+    .await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
-    shutdown_backend(playback).await;
+    tokio::join!(saver.finish(&mut app), shutdown_backend(playback));
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
     result
+}
+
+/// Writes one snapshot (blocking). [`session::save`] outside tests.
+type SaveFn = Arc<dyn Fn(&Path, &Session) -> io::Result<()> + Send + Sync>;
+
+/// Writes session snapshots on a blocking thread, one at a time, so an
+/// older snapshot can never land after a newer one.
+struct Saver {
+    /// `None`: saving is off.
+    path: Option<PathBuf>,
+    write: SaveFn,
+    /// The running write; `true` if it succeeded.
+    in_flight: Option<JoinHandle<bool>>,
+}
+
+impl Saver {
+    fn new(path: Option<PathBuf>) -> Self {
+        Self::with_writer(path, Arc::new(session::save))
+    }
+
+    fn with_writer(path: Option<PathBuf>, write: SaveFn) -> Self {
+        Self {
+            path,
+            write,
+            in_flight: None,
+        }
+    }
+
+    /// Collects a finished write and starts the next one if a save is due.
+    /// While a write is running (or its result cannot be collected yet), a
+    /// due save waits for a later call.
+    fn poll(&mut self, app: &mut App, now: Instant) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Some(handle) = &mut self.in_flight {
+            // `None` also when Tokio's coop budget is spent: keep the
+            // handle and try again next time.
+            match handle.now_or_never() {
+                None => return,
+                Some(result) => {
+                    self.in_flight = None;
+                    if !matches!(result, Ok(true)) {
+                        app.save_failed();
+                    }
+                }
+            }
+        }
+        if let Some(session) = app.take_due_save(now) {
+            self.in_flight = Some(spawn_save(self.write.clone(), path.clone(), session));
+        }
+    }
+
+    /// The exit save: waits for a running write, then writes the final
+    /// snapshot if anything changed (or the last write failed). Bounded by
+    /// [`SAVE_TIMEOUT`]; a write still running after that is abandoned
+    /// (the old file stays intact).
+    async fn finish(mut self, app: &mut App) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        let in_flight = self.in_flight.take();
+        let write = self.write.clone();
+        let work = async {
+            if let Some(handle) = in_flight
+                && !matches!(handle.await, Ok(true))
+            {
+                app.save_failed();
+            }
+            if let Some(session) = app.take_final_save()
+                && !matches!(spawn_save(write, path, session).await, Ok(true))
+            {
+                app.save_failed();
+            }
+        };
+        if tokio::time::timeout(SAVE_TIMEOUT, work).await.is_err() {
+            tracing::warn!("session save did not finish in time");
+        }
+    }
+}
+
+fn spawn_save(write: SaveFn, path: PathBuf, session: Session) -> JoinHandle<bool> {
+    tokio::task::spawn_blocking(move || match write(&path, &session) {
+        Ok(()) => {
+            tracing::debug!(entries = session.tracks.len(), "session saved");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(error = %error.kind(), "could not save the session");
+            false
+        }
+    })
 }
 
 async fn shutdown_backend(playback: PlaybackHandle) {
@@ -1037,6 +1390,7 @@ async fn event_loop(
     playback: &mut PlaybackHandle,
     sources: Sources,
     mut signals: Signals,
+    saver: &mut Saver,
 ) -> io::Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -1061,6 +1415,7 @@ async fn event_loop(
         );
         if dirty {
             terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            app.clamp_help_scroll(view.help_max_scroll);
             dirty = false;
         }
         tokio::select! {
@@ -1140,7 +1495,9 @@ async fn event_loop(
                 return Ok(());
             },
             _ = tick.tick() => {
-                app.tick(Instant::now());
+                let now = Instant::now();
+                app.tick(now);
+                saver.poll(app, now);
                 dirty = true;
             },
         }
@@ -1239,17 +1596,36 @@ mod tests {
     fn remote_track_without_navidrome_fails_and_the_queue_advances() {
         let (mut app, now) = app_with(&["a.flac"]);
         app.player.enqueue(remote("r1"));
-        app.player.enqueue(remote("r2"));
         app.player.enqueue(track("b.flac"));
+        app.player.enqueue(remote("r2"));
+        app.player.enqueue(remote("r3"));
+        app.player.enqueue(track("c.flac"));
         app.focus = Focus::Queue;
-        // Both remote entries fail in turn; the local one is loaded.
+        // A single remote entry fails; the local one after it is loaded.
         let commands = press(&mut app, &[Action::Activate], now);
         assert_eq!(load_path(&commands), PathBuf::from("/music/b.flac"));
         let current = app.player.queue().current_entry().unwrap();
         assert_eq!(current.track.title, "b");
         assert_eq!(
             app.status(now),
-            Some("Could not play Remote r2: Navidrome is not configured")
+            Some("Could not play Remote r1: Navidrome is not configured")
+        );
+        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Loading);
+        // Two in a row: the remote run is skipped in one pass to the next
+        // local entry.
+        let load = load_id(&commands);
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(load_path(&commands), PathBuf::from("/music/c.flac"));
+        assert_eq!(
+            app.status(now),
+            Some("Navidrome is not configured; skipped 1 remote track")
         );
         assert_eq!(app.player.status(), crate::player::PlaybackStatus::Loading);
     }
@@ -2265,5 +2641,447 @@ mod tests {
             browse::MAX_QUERY_CHARS
         );
         assert!(input(&app).unwrap().starts_with("xblue moon jazz bop "));
+    }
+
+    // ----- queue controls, repeat, session saving -------------------------
+
+    fn queued_app(names: &[&str]) -> (App, Instant) {
+        let (mut app, now) = app_with(&[]);
+        for name in names {
+            app.player.enqueue(track(&format!("{name}.flac")));
+        }
+        app.focus = Focus::Queue;
+        (app, now)
+    }
+
+    fn started(app: &mut App, commands: &[PlaybackCommand], now: Instant) -> LoadId {
+        let [PlaybackCommand::Load { load, .. }] = commands else {
+            panic!("{commands:?}");
+        };
+        app.handle_playback_event(PlaybackEvent::Started { load: *load }, now);
+        *load
+    }
+
+    #[test]
+    fn move_keys_reorder_and_the_selection_follows() {
+        let (mut app, now) = queued_app(&["A", "B", "C"]);
+        let commands = press(&mut app, &[Action::Down, Action::Activate], now);
+        started(&mut app, &commands, now);
+        let load = app.player.current_load();
+        assert!(press(&mut app, &[Action::MoveEntryUp], now).is_empty());
+        assert_eq!(queue_titles(&app), ["B*", "A", "C"]);
+        assert_eq!(app.queue_selected(), 0);
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert_eq!(app.queue_selected(), 0, "already first");
+        press(
+            &mut app,
+            &[Action::MoveEntryDown, Action::MoveEntryDown],
+            now,
+        );
+        assert_eq!(queue_titles(&app), ["A", "C", "B*"]);
+        assert_eq!(app.queue_selected(), 2);
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(app.queue_selected(), 2, "already last");
+        assert_eq!(app.player.current_load(), load, "playback untouched");
+        // Library focus: no effect.
+        app.focus = Focus::Library;
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert_eq!(queue_titles(&app), ["A", "C", "B*"]);
+    }
+
+    #[test]
+    fn select_current_jumps_to_the_current_entry() {
+        let (mut app, now) = queued_app(&["A", "B", "C"]);
+        press(&mut app, &[Action::SelectCurrent], now);
+        assert_eq!(app.status(now), Some("No current entry"));
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        press(&mut app, &[Action::Up, Action::Up], now);
+        assert_eq!(app.queue_selected(), 0);
+        assert!(press(&mut app, &[Action::SelectCurrent], now).is_empty());
+        assert_eq!(app.queue_selected(), 2);
+    }
+
+    #[test]
+    fn clear_stops_playback_and_ignores_the_old_end_file() {
+        let (mut app, now) = queued_app(&["A", "B"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        app.focus = Focus::Library;
+        assert!(press(&mut app, &[Action::ClearQueue], now).is_empty());
+        assert_eq!(app.player.queue().len(), 2, "queue panel only");
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::Down], now);
+        assert!(press(&mut app, &[Action::ClearQueue], now).is_empty());
+        assert_eq!(app.status(now), Some(CLEAR_PROMPT));
+        assert_eq!(app.player.queue().len(), 2, "not yet");
+        assert_eq!(
+            press(&mut app, &[Action::ClearQueue], now + CLEAR_CONFIRM / 2),
+            [PlaybackCommand::Stop]
+        );
+        assert!(app.player.queue().is_empty());
+        assert_eq!(app.queue_selected(), 0);
+        assert_eq!(app.status(now), Some("Queue cleared"));
+        for reason in [EndReason::Stopped, EndReason::Eof] {
+            let commands =
+                app.handle_playback_event(PlaybackEvent::TrackEnded { load, reason }, now);
+            assert!(commands.is_empty());
+        }
+        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        // Clearing an empty queue does nothing.
+        assert!(press(&mut app, &[Action::ClearQueue], now).is_empty());
+    }
+
+    #[test]
+    fn shuffle_keeps_the_current_entry_and_playback() {
+        let (mut app, now) = queued_app(&["A", "B", "C", "D", "E", "F"]);
+        app.rng = Rng::from_seed(11);
+        let commands = press(&mut app, &[Action::Down, Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        assert!(press(&mut app, &[Action::ShuffleUpcoming], now).is_empty());
+        let titles = queue_titles(&app);
+        assert_eq!(titles[..2], ["A", "B*"]);
+        let mut rest = titles[2..].to_vec();
+        rest.sort();
+        assert_eq!(rest, ["C", "D", "E", "F"]);
+        assert_eq!(app.player.current_load(), Some(load));
+        assert_eq!(app.status(now), Some("Shuffled 4 upcoming entries"));
+        // The same seed gives the same order.
+        let (mut other, _) = queued_app(&["A", "B", "C", "D", "E", "F"]);
+        other.rng = Rng::from_seed(11);
+        press(&mut other, &[Action::Down, Action::Activate], now);
+        press(&mut other, &[Action::ShuffleUpcoming], now);
+        assert_eq!(queue_titles(&other), titles);
+        // Nothing after the last entry.
+        let (mut app, now) = queued_app(&["A"]);
+        press(&mut app, &[Action::Activate, Action::ShuffleUpcoming], now);
+        assert_eq!(app.status(now), Some("Nothing to shuffle"));
+    }
+
+    #[test]
+    fn repeat_cycles_from_any_panel_but_not_in_help_or_search() {
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        let now = Instant::now();
+        press(&mut app, &[Action::CycleRepeat], now);
+        assert_eq!(app.player.repeat(), crate::player::RepeatMode::All);
+        assert_eq!(app.status(now), Some("Repeat all"));
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::CycleRepeat], now);
+        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+        press(&mut app, &[Action::ToggleHelp, Action::CycleRepeat], now);
+        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+        press(
+            &mut app,
+            &[
+                Action::CloseHelp,
+                Action::SelectNavidrome,
+                Action::OpenSearch,
+            ],
+            now,
+        );
+        assert!(app.input_open());
+        press(&mut app, &[Action::CycleRepeat], now);
+        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+    }
+
+    #[test]
+    fn saves_are_debounced_and_emitted_as_data() {
+        let (mut app, now) = queued_app(&[]);
+        assert_eq!(app.take_due_save(now + SAVE_DEBOUNCE * 10), None);
+        assert_eq!(app.take_final_save(), None, "nothing changed");
+
+        let (mut app, t0) = app_with(&["a.flac", "b.flac"]);
+        press(&mut app, &[Action::Enqueue], t0);
+        assert_eq!(app.take_due_save(t0 + SAVE_DEBOUNCE / 2), None);
+        // Another change restarts the debounce.
+        let t1 = t0 + SAVE_DEBOUNCE / 2;
+        press(&mut app, &[Action::CycleRepeat], t1);
+        assert_eq!(app.take_due_save(t0 + SAVE_DEBOUNCE), None);
+        let session = app.take_due_save(t1 + SAVE_DEBOUNCE).expect("due");
+        assert_eq!(session.tracks.len(), 1);
+        assert_eq!(session.repeat, crate::player::RepeatMode::All);
+        assert_eq!(app.take_due_save(t1 + SAVE_DEBOUNCE * 2), None, "taken");
+        assert_eq!(app.take_final_save(), None, "already saved");
+
+        // Progress and pause do not schedule saves.
+        let t2 = t1 + SAVE_DEBOUNCE * 3;
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Activate], t2);
+        let load = started(&mut app, &commands, t2);
+        let session = app
+            .take_due_save(t2 + SAVE_DEBOUNCE)
+            .expect("current changed");
+        assert_eq!(session.current, Some(0));
+        let t3 = t2 + SAVE_DEBOUNCE * 2;
+        app.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(5)), t3);
+        press(&mut app, &[Action::TogglePause], t3);
+        assert_eq!(app.take_due_save(t3 + SAVE_DEBOUNCE), None);
+
+        // A pending change is saved at exit even before the debounce.
+        press(&mut app, &[Action::VolumeDown], t3);
+        let session = app.take_final_save().expect("volume changed");
+        assert_eq!(session.volume, 95);
+        assert_eq!(app.take_due_save(t3 + SAVE_DEBOUNCE), None, "cancelled");
+
+        // After a failed save, the exit save retries.
+        app.save_failed();
+        assert!(app.take_final_save().is_some());
+        let _ = load;
+    }
+
+    #[test]
+    fn restore_selects_current_requests_volume_and_counts_as_saved() {
+        let (mut app, now) = app_with(&[]);
+        let session = Session {
+            volume: 60,
+            repeat: crate::player::RepeatMode::All,
+            current: Some(2),
+            tracks: vec![track("a.flac"), remote("r1"), track("c.flac")],
+        };
+        let commands = app.restore_session(session, now);
+        assert_eq!(commands, [PlaybackCommand::SetVolume(60)]);
+        assert_eq!(app.queue_selected(), 2);
+        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        assert_eq!(app.status(now), Some("Restored queue: 3 tracks"));
+        assert_eq!(app.take_due_save(now + SAVE_DEBOUNCE), None);
+        assert_eq!(app.take_final_save(), None);
+        // mpv reports its startup volume; the restored one stays.
+        app.handle_playback_event(PlaybackEvent::Volume(100), now);
+        app.handle_playback_event(PlaybackEvent::Volume(60), now);
+        assert_eq!(app.player.volume(), 60);
+        assert_eq!(app.take_due_save(now + SAVE_DEBOUNCE), None);
+        // Restored remote entries without Navidrome fail and advance.
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Up, Action::Activate], now);
+        assert_eq!(load_path(&commands), PathBuf::from("/music/c.flac"));
+        assert_eq!(
+            app.status(now),
+            Some("Could not play Remote r1: Navidrome is not configured")
+        );
+    }
+
+    #[test]
+    fn clear_needs_a_second_press_soon_and_with_nothing_in_between() {
+        let (mut app, now) = queued_app(&["A", "B"]);
+        // Too late: the second press only asks again.
+        press(&mut app, &[Action::ClearQueue], now);
+        press(&mut app, &[Action::ClearQueue], now + CLEAR_CONFIRM);
+        assert_eq!(app.player.queue().len(), 2);
+        assert_eq!(app.status(now + CLEAR_CONFIRM), Some(CLEAR_PROMPT));
+        // Another key in between cancels it.
+        let t = now + CLEAR_CONFIRM * 3;
+        press(
+            &mut app,
+            &[Action::ClearQueue, Action::Down, Action::ClearQueue],
+            t,
+        );
+        assert_eq!(app.player.queue().len(), 2);
+        // Twice in a row clears.
+        press(&mut app, &[Action::ClearQueue], t);
+        assert!(app.player.queue().is_empty());
+        assert_eq!(app.status(t), Some("Queue cleared"));
+    }
+
+    #[test]
+    fn adds_beyond_the_queue_cap_are_reported() {
+        use crate::queue::MAX_QUEUE_LEN;
+        let (mut app, now) = app_with(&["dir/a.flac", "dir/b.flac", "dir/c.flac"]);
+        let filler: Vec<Track> = (0..MAX_QUEUE_LEN - 1)
+            .map(|i| track(&format!("f/{i}.flac")))
+            .collect();
+        app.restore_session(
+            Session {
+                tracks: filler,
+                ..Session::default()
+            },
+            now,
+        );
+        // `a` on the directory: one fits.
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(app.player.queue().len(), MAX_QUEUE_LEN);
+        assert_eq!(
+            app.status(now),
+            Some("Added 1 track; queue full, 2 not added")
+        );
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(app.status(now), Some(QUEUE_FULL));
+        // Enter on a track: refused, nothing loads.
+        press(&mut app, &[Action::Activate], now);
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(app.status(now), Some(QUEUE_FULL));
+        assert_eq!(app.player.queue().len(), MAX_QUEUE_LEN);
+    }
+
+    #[test]
+    fn help_scrolls_within_the_bindings() {
+        let (mut app, now) = app_with(&[]);
+        press(&mut app, &[Action::ToggleHelp, Action::Up], now);
+        assert_eq!(app.help_scroll(), 0);
+        for _ in 0..100 {
+            press(&mut app, &[Action::Down], now);
+        }
+        assert_eq!(app.help_scroll(), help::BINDINGS.len() - 1);
+        app.clamp_help_scroll(4);
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(app.help_scroll(), 3, "responds at once after clamping");
+        assert_eq!(app.queue_selected(), 0, "the panels did not move");
+        press(&mut app, &[Action::CloseHelp, Action::ToggleHelp], now);
+        assert_eq!(app.help_scroll(), 0, "reopening starts at the top");
+    }
+
+    // ----- Saver -----------------------------------------------------------
+
+    use std::sync::Mutex;
+    use std::sync::mpsc as std_mpsc;
+
+    /// A writer that records sessions and blocks until released (one
+    /// `true`/`false` per write: succeed or fail).
+    struct GatedWriter {
+        written: Arc<Mutex<Vec<Session>>>,
+        started: Arc<Mutex<usize>>,
+        release: std_mpsc::Sender<bool>,
+    }
+
+    fn gated_saver(path: Option<PathBuf>) -> (Saver, GatedWriter) {
+        let (release, gate) = std_mpsc::channel::<bool>();
+        let gate = Arc::new(Mutex::new(gate));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(Mutex::new(0));
+        let (w, st) = (written.clone(), started.clone());
+        let write: SaveFn = Arc::new(move |_path: &Path, session: &Session| {
+            *st.lock().unwrap() += 1;
+            let ok = gate.lock().unwrap().recv().unwrap_or(false);
+            if ok {
+                w.lock().unwrap().push(session.clone());
+                Ok(())
+            } else {
+                Err(io::Error::other("disk full"))
+            }
+        });
+        let saver = Saver::with_writer(path, write);
+        (
+            saver,
+            GatedWriter {
+                written,
+                started,
+                release,
+            },
+        )
+    }
+
+    async fn settle(saver: &Saver) {
+        if let Some(handle) = &saver.in_flight {
+            while !handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+
+    fn changed_app(names: &[&str], now: Instant) -> App {
+        let (mut app, _) = queued_app(&[]);
+        for name in names {
+            app.player.enqueue(track(name));
+        }
+        app.note_changes(now);
+        app
+    }
+
+    #[tokio::test]
+    async fn saver_writes_one_snapshot_at_a_time() {
+        let now = Instant::now();
+        let (mut saver, w) = gated_saver(Some("/unused/state.json".into()));
+        let mut app = changed_app(&["a"], now);
+        saver.poll(&mut app, now);
+        assert!(saver.in_flight.is_none(), "not due yet");
+        let due = now + SAVE_DEBOUNCE;
+        saver.poll(&mut app, due);
+        assert!(saver.in_flight.is_some());
+        // A second change becomes due while the first write blocks.
+        app.player.enqueue(track("b"));
+        app.note_changes(due);
+        let later = due + SAVE_DEBOUNCE;
+        saver.poll(&mut app, later);
+        saver.poll(&mut app, later);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(*w.started.lock().unwrap(), 1, "still one write");
+        w.release.send(true).unwrap();
+        settle(&saver).await;
+        saver.poll(&mut app, later);
+        assert!(saver.in_flight.is_some(), "the waiting save starts");
+        w.release.send(true).unwrap();
+        settle(&saver).await;
+        saver.poll(&mut app, later);
+        assert!(saver.in_flight.is_none());
+        let written = w.written.lock().unwrap();
+        let lens: Vec<usize> = written.iter().map(|s| s.tracks.len()).collect();
+        assert_eq!(lens, [1, 2], "in order");
+    }
+
+    #[tokio::test]
+    async fn exit_save_waits_for_a_running_write_then_saves_the_rest() {
+        let now = Instant::now();
+        let (mut saver, w) = gated_saver(Some("/unused/state.json".into()));
+        let mut app = changed_app(&["a"], now);
+        saver.poll(&mut app, now + SAVE_DEBOUNCE);
+        app.player.enqueue(track("b"));
+        let release = w.release.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            release.send(true).unwrap();
+            release.send(true).unwrap();
+        });
+        saver.finish(&mut app).await;
+        let lens: Vec<usize> = w
+            .written
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.tracks.len())
+            .collect();
+        assert_eq!(lens, [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_is_retried_at_exit() {
+        let now = Instant::now();
+        let (mut saver, w) = gated_saver(Some("/unused/state.json".into()));
+        let mut app = changed_app(&["a"], now);
+        saver.poll(&mut app, now + SAVE_DEBOUNCE);
+        w.release.send(false).unwrap();
+        settle(&saver).await;
+        saver.poll(&mut app, now + SAVE_DEBOUNCE);
+        assert!(saver.in_flight.is_none(), "collected");
+        assert!(w.written.lock().unwrap().is_empty());
+        w.release.send(true).unwrap();
+        saver.finish(&mut app).await;
+        assert_eq!(w.written.lock().unwrap().len(), 1, "retried");
+        assert_eq!(*w.started.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn saver_without_a_path_never_writes() {
+        let now = Instant::now();
+        let (mut saver, w) = gated_saver(None);
+        let mut app = changed_app(&["a"], now);
+        saver.poll(&mut app, now + SAVE_DEBOUNCE);
+        assert!(saver.in_flight.is_none());
+        saver.finish(&mut app).await;
+        assert_eq!(*w.started.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn saver_writes_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coda").join("state.json");
+        let now = Instant::now();
+        let saver = Saver::new(Some(path.clone()));
+        let mut app = changed_app(&["a", "b"], now);
+        saver.finish(&mut app).await;
+        let (session, _) = session::load(&path);
+        assert_eq!(session.tracks.len(), 2);
     }
 }

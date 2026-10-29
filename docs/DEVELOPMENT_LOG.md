@@ -22,3 +22,11 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Review:** two rounds. Fixed: hyper-util host logging, hidden batch failures, stuck in-flight on panicked/cancelled fetch, starvation by enqueue jobs, failed views not healing, stacked searches, multi-line paste executing commands, server text in logs, DNS hang at exit, panic-path shutdown bound, quit-time warnings.
 - **Limitations:** cache never evicted within a session; connection state stays "connected" after later failures; a single scroll offset shared across remote views; not yet run against a real Navidrome server.
 - **Next:** M3 slice 1 (queue controls, repeat, persistence).
+
+## 2026-10-29 — M3 slice 1: queue controls, repeat, persistence
+- **Done:** queue `J`/`K` move, `C`×2 clear, `g` current, `s` shuffle upcoming, `R` repeat off/all/one; queue capped at 10k; `session` module persisting queue/current/volume/repeat to `state.json` with debounced atomic saves and safe restore; scrollable help overlay.
+- **Decisions:** "proven playback" (≥ 1 s position) gates repeat to prevent hot loops; failures-in-a-row resets on proven playback or user loads; without Navidrome, runs of remote entries are skipped to the next local one in a single pass; restored local paths need not lie under the music root (state file is user-owned; mpv pre-check still applies); new `libc` dependency for `O_NONBLOCK` open.
+- **Tests:** fmt, clippy, `cargo test --all-targets` (281 lib, 26 event-ordering, …) pass; ignored mpv tests: 15 pass excluding the 2 known device failures; pty smoke: quit/relaunch restores queue/volume/repeat, corrupt file quarantined with notice.
+- **Review:** two rounds plus one regression fix. Fixed: 5 GB peak memory on hostile state file, repeat hot loop, `d` under All, quarantine overwrite, volume lost after backend exit, Saver poll race, UI freeze on huge unresolvable queue, uncapped live queue, unconfirmed clear, help overflow at 80×24, FIFO/TOCTOU on open, remote-skip regression.
+- **Limitations:** tracks < ~1.25 s never repeat; abandoned exit saves may leave a `.tmp` file; quarantine name choice is check-then-rename.
+- **Next:** M3 slice 2 (local search, scrobbling).

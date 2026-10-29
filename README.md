@@ -43,7 +43,7 @@ password_command = ["pass", "show", "navidrome"]   # argv, no shell
 `CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file. Coda uses salted-token auth and never logs URLs, tokens or passwords. With only Navidrome configured, Coda starts on the Navidrome library.
 
 ### Keys
-`?` shows all keys. Highlights: `1`/`2` switch between the local and Navidrome libraries, `Enter` opens or plays now, `a` adds a track/folder/album/artist to the queue, `/` searches Navidrome, `Space` pauses, `n`/`p` skip, `←`/`→` seek, `+`/`-` volume, `Tab` switches panels, `q` quits. Remote tracks are marked `☁` in the queue.
+`?` shows all keys. Highlights: `1`/`2` switch between the local and Navidrome libraries, `Enter` opens or plays now, `a` adds a track/folder/album/artist to the queue, `/` searches Navidrome, `Space` pauses, `n`/`p` skip, `←`/`→` seek, `+`/`-` volume, `Tab` switches panels, `q` quits. Remote tracks are marked `☁` in the queue. In the queue panel: `J`/`K` move, `s` shuffles upcoming, `g` jumps to the current entry, `C` (twice) clears; `R` cycles repeat off/all/one. The queue, volume and repeat mode are restored at the next launch (from `state.json` next to the log).
 
 Logs are written to `$XDG_STATE_HOME/coda/coda.log` (default `~/.local/state/coda/coda.log`). Set `CODA_LOG=debug` for more detail.
 

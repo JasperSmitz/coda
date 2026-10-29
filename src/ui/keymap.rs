@@ -1,6 +1,6 @@
 //! Key → [`Action`] mapping (brief 3.10). Panel-specific keys only map in
 //! their panel; while the help overlay is open it swallows every key except
-//! the ones that close it and quit. While the search input is open, keys
+//! the ones that close it, scroll it (`j`/`k`) and quit. While the search input is open, keys
 //! are text ([`map_input_key`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -22,6 +22,8 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
             KeyCode::Char('?') => Some(Action::ToggleHelp),
             KeyCode::Esc => Some(Action::CloseHelp),
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
             _ => None,
         };
     }
@@ -36,6 +38,12 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('1') => Action::SelectLocal,
         KeyCode::Char('2') => Action::SelectNavidrome,
         KeyCode::Char('d') if focus == Focus::Queue => Action::Remove,
+        KeyCode::Char('J') if focus == Focus::Queue => Action::MoveEntryDown,
+        KeyCode::Char('K') if focus == Focus::Queue => Action::MoveEntryUp,
+        KeyCode::Char('C') if focus == Focus::Queue => Action::ClearQueue,
+        KeyCode::Char('g') if focus == Focus::Queue => Action::SelectCurrent,
+        KeyCode::Char('s') if focus == Focus::Queue => Action::ShuffleUpcoming,
+        KeyCode::Char('R') => Action::CycleRepeat,
         KeyCode::Char(' ') => Action::TogglePause,
         KeyCode::Char('n') => Action::Next,
         KeyCode::Char('p') => Action::Previous,
@@ -111,6 +119,7 @@ mod tests {
             (ch('q'), Action::Quit),
             (ch('1'), Action::SelectLocal),
             (ch('2'), Action::SelectNavidrome),
+            (ch('R'), Action::CycleRepeat),
         ];
         for (k, action) in cases {
             assert_eq!(lib(k), Some(action), "library {k:?}");
@@ -134,8 +143,45 @@ mod tests {
 
     #[test]
     fn queue_only_keys() {
-        assert_eq!(queue(ch('d')), Some(Action::Remove));
-        assert_eq!(lib(ch('d')), None);
+        let cases = [
+            (ch('d'), Action::Remove),
+            (ch('J'), Action::MoveEntryDown),
+            (ch('K'), Action::MoveEntryUp),
+            (ch('C'), Action::ClearQueue),
+            (ch('g'), Action::SelectCurrent),
+            (ch('s'), Action::ShuffleUpcoming),
+        ];
+        for (k, action) in cases {
+            assert_eq!(queue(k), Some(action), "{k:?}");
+            assert_eq!(lib(k), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn new_keys_do_not_shadow_existing_ones() {
+        // Lowercase j/k still move the selection; `r` still refreshes and
+        // only in the library; `R` is repeat in both panels.
+        assert_eq!(queue(ch('j')), Some(Action::Down));
+        assert_eq!(queue(ch('k')), Some(Action::Up));
+        assert_eq!(lib(ch('r')), Some(Action::Refresh));
+        assert_eq!(lib(ch('R')), Some(Action::CycleRepeat));
+        assert_eq!(queue(ch('r')), None);
+        // Terminals may report uppercase letters with SHIFT set.
+        let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+        assert_eq!(queue(shifted('J')), Some(Action::MoveEntryDown));
+        assert_eq!(lib(shifted('R')), Some(Action::CycleRepeat));
+        // Ctrl-C still quits rather than clearing the queue.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL);
+        assert_eq!(queue(ctrl_c), Some(Action::Quit));
+        let ctrl_shift_c = KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(queue(ctrl_shift_c), Some(Action::Quit));
+        // In the search input, all of them are text.
+        for c in ['J', 'K', 'C', 'g', 's', 'R'] {
+            assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
+        }
     }
 
     #[test]
@@ -168,14 +214,17 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_swallows_everything_but_close_and_quit() {
+    fn help_overlay_swallows_everything_but_close_scroll_and_quit() {
         for focus in [Focus::Library, Focus::Queue] {
             let help = |k| map_key(k, focus, true);
             assert_eq!(help(ch('?')), Some(Action::ToggleHelp));
             assert_eq!(help(key(KeyCode::Esc)), Some(Action::CloseHelp));
             assert_eq!(help(ch('q')), Some(Action::Quit));
+            assert_eq!(help(ch('j')), Some(Action::Down));
+            assert_eq!(help(key(KeyCode::Down)), Some(Action::Down));
+            assert_eq!(help(ch('k')), Some(Action::Up));
+            assert_eq!(help(key(KeyCode::Up)), Some(Action::Up));
             for k in [
-                ch('j'),
                 key(KeyCode::Enter),
                 ch(' '),
                 ch('n'),
@@ -186,6 +235,12 @@ mod tests {
                 ch('2'),
                 ch('/'),
                 ch('r'),
+                ch('R'),
+                ch('J'),
+                ch('K'),
+                ch('C'),
+                ch('g'),
+                ch('s'),
                 key(KeyCode::Tab),
                 key(KeyCode::Right),
                 ch('+'),

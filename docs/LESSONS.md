@@ -68,3 +68,15 @@ Each entry should state:
 - **Root cause:** the response was only sent on the happy path; a guard created inside the task does not exist if the task is aborted before its first poll.
 - **Rule:** create a drop guard that sends an error response *before* spawning, consume it on the normal send, and test cancellation before first poll.
 - **Where verified:** M2 slice 2 review; `a_cancelled_fetch_still_answers_with_an_error`.
+
+### Cap untrusted JSON by what it parses into, not by file size
+- **Context / symptom:** a 64 MiB state file of small objects took 5.3 GB RSS to load.
+- **Root cause:** parsing into `serde_json::Value` first costs ~80× the input for small objects; entries past the item cap were fully built before being dropped.
+- **Rule:** deserialize untrusted files/bodies into typed structs, probe the version with a minimal struct, enforce item caps inside a sequence visitor (skip the rest with `IgnoredAny`, never preallocate from `size_hint`), and keep byte caps near realistic sizes.
+- **Where verified:** M3 slice 1 review measurement; `excess_entries_are_skipped_without_being_kept` in `src/session.rs`.
+
+### "Repeat" needs proof of progress, not just a clean end
+- **Context / symptom:** under repeat, a track that ended immediately (8-sample WAV, a stream that closes at once) reloaded as fast as mpv could open it; for Navidrome that is a request storm.
+- **Root cause:** EOF was trusted as "played"; and resetting the failure counter on `Started` let instant-EOF files reset it forever.
+- **Rule:** count an end as successful only after observed progress (position ≥ 1 s after `Started`); otherwise treat it as a failure for termination and advance. Prove termination with tests for all-failing and all-instant queues under every repeat mode.
+- **Where verified:** M3 slice 1 review; `files_that_end_at_once_never_loop_under_repeat`.

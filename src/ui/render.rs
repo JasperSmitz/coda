@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Connection, Focus, LibraryRow, ScanState, Source, count, thousands};
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, Resource, Row};
-use crate::player::PlaybackStatus;
+use crate::player::{PlaybackStatus, RepeatMode};
 use crate::ui::help;
 
 /// Below this width only the focused panel is shown.
@@ -39,6 +39,8 @@ pub struct ViewState {
     library_offset: usize,
     remote_offset: usize,
     queue_offset: usize,
+    /// The largest useful help scroll for the last frame's size.
+    pub help_max_scroll: usize,
 }
 
 /// The first visible row for a list of `len` rows in a viewport of
@@ -96,7 +98,7 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     draw_now_playing(frame, app, now_playing);
     draw_status(frame, app, status, now);
     if app.help_open() {
-        help::draw(frame, frame.area());
+        view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
     }
 }
 
@@ -486,7 +488,11 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), info);
 
-    let volume = format!(" Vol {:>3}%", player.volume());
+    let repeat = match player.repeat() {
+        RepeatMode::Off => String::new(),
+        mode => format!(" Repeat {}", mode.label()),
+    };
+    let volume = format!("{repeat} Vol {:>3}%", player.volume());
     let [gauge_area, volume_area] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length(volume.width() as u16),
@@ -647,6 +653,7 @@ mod tests {
     use crate::library::scan::ScanEvent;
     use crate::model::{Track, TrackMetadata};
     use crate::playback::{PlaybackCommand, PlaybackEvent};
+    use crate::ui::help;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -799,8 +806,63 @@ mod tests {
         assert!(screen.contains(" Help "), "{screen}");
         assert!(screen.contains("Switch panel"), "{screen}");
         assert!(screen.contains("Ctrl-C"), "{screen}");
+        for text in [
+            "Move entry down / up",
+            "Select current entry",
+            "Shuffle upcoming",
+            "Clear queue",
+            "Repeat: off / all / one",
+            "Streamed from Navidrome",
+        ] {
+            assert!(screen.contains(text), "{text}: {screen}");
+        }
         // Also fits a tiny terminal without panicking.
         render(&app, 10, 5, now);
+    }
+
+    #[test]
+    fn every_help_binding_is_reachable_at_80x24_and_smaller() {
+        let now = Instant::now();
+        for (width, height) in [(80, 24), (80, 12), (60, 8)] {
+            let mut app = App::new("/music".into());
+            app.handle_action(Action::ToggleHelp, now);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut view = ViewState::default();
+            let mut seen = String::new();
+            for _ in 0..help::BINDINGS.len() {
+                terminal
+                    .draw(|frame| draw(frame, &app, &mut view, now))
+                    .unwrap();
+                app.clamp_help_scroll(view.help_max_scroll);
+                seen.push_str(&buffer_text(&terminal));
+                app.handle_action(Action::Down, now);
+            }
+            for (key, what) in help::BINDINGS {
+                assert!(seen.contains(what), "{width}x{height}: {key} {what}");
+            }
+            let fits = view.help_max_scroll == 0;
+            assert_eq!(fits, height == 24, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn now_playing_shows_the_repeat_mode() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        let screen = render(&app, 100, 20, now);
+        assert!(!screen.contains("Repeat"), "off is not shown: {screen}");
+        assert!(screen.contains("Vol 100%"), "{screen}");
+        app.handle_action(Action::CycleRepeat, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Repeat all Vol 100%"), "{screen}");
+        assert!(screen.contains("Repeat all"), "status line: {screen}");
+        app.handle_action(Action::CycleRepeat, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Repeat one Vol 100%"), "{screen}");
+        // Narrow terminals do not break the layout.
+        render(&app, 12, 8, now);
+        app.handle_action(Action::CycleRepeat, now);
+        assert!(!render(&app, 100, 20, now).contains("Repeat one"));
     }
 
     #[test]
@@ -1065,7 +1127,7 @@ mod tests {
     #[test]
     fn large_queue_shows_the_selected_window_and_markers() {
         let now = Instant::now();
-        let mut app = queue_app(50_000, |i| format!("song{i:05}"), now);
+        let mut app = queue_app(10_000, |i| format!("song{i:05}"), now);
         let mut view = ViewState::default();
         // 14 rows - now playing (4) - status (1) = 9 panel rows, 7 inner.
         let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
@@ -1073,26 +1135,26 @@ mod tests {
         let screen = buffer_text(&terminal);
         assert!(screen.contains("▶ x - song00000"), "{screen}");
 
-        for _ in 0..49_995 {
+        for _ in 0..9_995 {
             app.handle_action(Action::Down, now);
         }
         let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
         let screen = buffer_text(&terminal);
         // Selection is the last visible row; the window ends there.
-        assert_eq!(view.queue_offset, 49_995 + 1 - 7);
-        assert!(screen.contains("x - song49989"), "{screen}");
+        assert_eq!(view.queue_offset, 9_995 + 1 - 7);
+        assert!(screen.contains("x - song09989"), "{screen}");
         assert!(
-            screen.contains("> ") && screen.contains("x - song49995"),
+            screen.contains("> ") && screen.contains("x - song09995"),
             "{screen}"
         );
-        assert!(!screen.contains("x - song49996"), "{screen}");
+        assert!(!screen.contains("x - song09996"), "{screen}");
         assert!(!screen.contains("x - song00000"), "{screen}");
         assert!(!screen.contains('▶'), "{screen}");
         // Work scales with the viewport: queue rows plus library rows.
         assert!(built <= 2 * 7, "built {built} rows");
 
         // Selecting the playing entry again shows its marker.
-        for _ in 0..49_995 {
+        for _ in 0..9_995 {
             app.handle_action(Action::Up, now);
         }
         draw_to(&mut terminal, &app, &mut view, now);
@@ -1159,8 +1221,8 @@ mod tests {
             .into_iter()
             .map(|s| s.chars().take(crate::model::MAX_METADATA_CHARS).collect())
             .collect();
-        let mut app = queue_app(20_000, |i| hostile[i % hostile.len()].clone(), now);
-        for _ in 0..19_990 {
+        let mut app = queue_app(10_000, |i| hostile[i % hostile.len()].clone(), now);
+        for _ in 0..9_990 {
             app.handle_action(Action::Down, now);
         }
         let mut view = ViewState::default();

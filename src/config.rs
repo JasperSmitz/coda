@@ -551,13 +551,26 @@ pub async fn run_password_command(
     Ok(Password::new(password))
 }
 
-/// `$XDG_STATE_HOME/coda/coda.log`, else `~/.local/state/coda/coda.log`.
-/// Relative or empty values are ignored; `None` if no location is known.
-pub fn log_file_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+/// `$XDG_STATE_HOME/coda`, else `~/.local/state/coda`. Relative or empty
+/// values are ignored; `None` if no location is known.
+pub fn state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
     let state = absolute(xdg_state_home)
         .or_else(|| absolute(home).map(|h| h.join(".local").join("state")))?;
-    Some(state.join("coda").join("coda.log"))
+    Some(state.join("coda"))
+}
+
+/// `coda.log` in [`state_dir`].
+pub fn log_file_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    Some(state_dir(xdg_state_home, home)?.join("coda.log"))
+}
+
+/// `state.json` (the saved session) in [`state_dir`].
+pub fn session_file_path(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    Some(state_dir(xdg_state_home, home)?.join("state.json"))
 }
 
 #[cfg(test)]
@@ -1128,5 +1141,14 @@ mod tests {
             Some(PathBuf::from("/home/u/.local/state/coda/coda.log"))
         );
         assert_eq!(log_file_path(None, None), None);
+        assert_eq!(
+            session_file_path(Some("/state".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/state/coda/state.json"))
+        );
+        assert_eq!(
+            session_file_path(Some("".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/state/coda/state.json"))
+        );
+        assert_eq!(session_file_path(None, None), None);
     }
 }

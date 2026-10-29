@@ -156,6 +156,41 @@ async fn silent_wav_starts_then_ends_with_eof() {
 
 #[tokio::test]
 #[ignore = "needs mpv"]
+async fn volume_set_while_idle_is_accepted_and_echoed() {
+    // A restored session sets the volume before anything is loaded.
+    let mut handle = backend().await;
+    handle.send(PlaybackCommand::SetVolume(40));
+    let (_, seen) = wait_for(&mut handle, |e| *e == PlaybackEvent::Volume(40)).await;
+    assert!(
+        !seen.iter().any(|e| matches!(e, PlaybackEvent::Error(_))),
+        "{seen:?}"
+    );
+    // It sticks for the next load.
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("short.wav");
+    common::write_wav(&wav, 300);
+    handle.send(load(1, &wav));
+    let (_, seen) = wait_for(&mut handle, |e| {
+        matches!(
+            e,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(1),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::Volume(v) if *v != 40)),
+        "{seen:?}"
+    );
+    handle.shutdown(STEP).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
 async fn pause_volume_and_seek_are_reflected_in_events() {
     let dir = tempfile::tempdir().unwrap();
     let wav = dir.path().join("long.wav");

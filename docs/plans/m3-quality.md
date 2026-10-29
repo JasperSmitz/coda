@@ -32,7 +32,7 @@
 - Loaded at startup before the TUI; missing → empty; unreadable/invalid/unknown version → start empty, log a warning, keep the bad file as `state.json.bad` (do not overwrite user data silently). Restored text goes through the same capping as tags. Cap restored queue length (e.g. 10,000 entries).
 - Restore does not auto-play. The current entry is restored (Space plays it). Volume is applied with `SetVolume` once the backend is up.
 - Local entries whose files vanished stay and fail like any missing file. Remote entries without Navidrome configured fail with "Navidrome is not configured" (existing resolution path).
-- `--no-restore` flag (or `CODA_NO_RESTORE=1`) starts with an empty queue without deleting the file? Keep it out unless trivial; document.
+- No `--no-restore` flag in this slice; clearing the queue with `C` covers the need.
 
 ### Tests
 Queue move/clear/shuffle (deterministic), repeat transitions incl. termination, persistence round-trip, corrupt/unknown-version file handling, atomic write leaves no temp file, mode 0600, debounce emits saves as data (App stays pure: it emits a "save requested" flag/command and the loop performs I/O), keymap and render (repeat indicator).

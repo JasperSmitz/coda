@@ -4,8 +4,15 @@
 //! Entries are addressed by [`QueueEntryId`], never by an index captured
 //! earlier, so concurrent edits cannot make an operation hit the wrong
 //! entry. The same track may appear several times as distinct entries.
+//!
+//! Every change to the entries or to `current` bumps [`Queue::revision`],
+//! so callers can tell cheaply whether the queue needs saving.
 
 use crate::model::Track;
+
+/// Upper bound on queue length, enforced where tracks are added (the
+/// player) and on restore.
+pub const MAX_QUEUE_LEN: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueueEntryId(u64);
@@ -27,6 +34,7 @@ pub struct Queue {
     entries: Vec<QueueEntry>,
     current: Option<QueueEntryId>,
     next_id: u64,
+    revision: u64,
 }
 
 impl Queue {
@@ -48,6 +56,16 @@ impl Queue {
 
     pub fn current(&self) -> Option<QueueEntryId> {
         self.current
+    }
+
+    /// Increases with every change to the entries, their order or
+    /// `current`. Never decreases.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn changed(&mut self) {
+        self.revision += 1;
     }
 
     pub fn current_entry(&self) -> Option<&QueueEntry> {
@@ -83,6 +101,7 @@ impl Queue {
         let entry = self.new_entry(track);
         let id = entry.id;
         self.entries.push(entry);
+        self.changed();
         id
     }
 
@@ -95,6 +114,7 @@ impl Queue {
         let entry = self.new_entry(track);
         let id = entry.id;
         self.entries.insert(pos + 1, entry);
+        self.changed();
         id
     }
 
@@ -102,7 +122,10 @@ impl Queue {
     /// not in the queue.
     pub fn set_current(&mut self, id: QueueEntryId) -> bool {
         if self.position(id).is_some() {
-            self.current = Some(id);
+            if self.current != Some(id) {
+                self.current = Some(id);
+                self.changed();
+            }
             true
         } else {
             false
@@ -115,6 +138,7 @@ impl Queue {
     pub fn move_to_next(&mut self) -> Option<QueueEntryId> {
         let next = self.id_after(self.current?)?;
         self.current = Some(next);
+        self.changed();
         Some(next)
     }
 
@@ -124,6 +148,7 @@ impl Queue {
     pub fn move_to_previous(&mut self) -> Option<QueueEntryId> {
         let prev = self.id_before(self.current?)?;
         self.current = Some(prev);
+        self.changed();
         Some(prev)
     }
 
@@ -134,6 +159,7 @@ impl Queue {
     pub fn remove(&mut self, id: QueueEntryId) -> Option<QueueEntry> {
         let pos = self.position(id)?;
         let entry = self.entries.remove(pos);
+        self.changed();
         if self.current == Some(id) {
             self.current = self
                 .entries
@@ -144,12 +170,101 @@ impl Queue {
         Some(entry)
     }
 
+    /// Swaps entry `id` with the one before it. Returns `false` (and changes
+    /// nothing) if `id` is unknown or already first. `current` keeps
+    /// pointing at the same entry.
+    pub fn move_up(&mut self, id: QueueEntryId) -> bool {
+        match self.position(id) {
+            Some(pos) if pos > 0 => {
+                self.entries.swap(pos - 1, pos);
+                self.changed();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Swaps entry `id` with the one after it. Returns `false` (and changes
+    /// nothing) if `id` is unknown or already last.
+    pub fn move_down(&mut self, id: QueueEntryId) -> bool {
+        match self.position(id) {
+            Some(pos) if pos + 1 < self.entries.len() => {
+                self.entries.swap(pos, pos + 1);
+                self.changed();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Removes every entry. Ids are never reused afterwards.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.current = None;
+        self.changed();
+    }
+
+    /// Shuffles the entries after the current one (all entries when there
+    /// is no current one) with a Fisher–Yates shuffle. `random_below(n)`
+    /// must return a value in `0..n`; out-of-range values are reduced
+    /// modulo `n`. The current entry and everything before it stay in
+    /// place. Returns the number of entries shuffled.
+    pub fn shuffle_after_current(&mut self, mut random_below: impl FnMut(usize) -> usize) -> usize {
+        let start = match self.current.and_then(|id| self.position(id)) {
+            Some(pos) => pos + 1,
+            None => 0,
+        };
+        let upcoming = &mut self.entries[start..];
+        for i in (1..upcoming.len()).rev() {
+            let j = random_below(i + 1) % (i + 1);
+            upcoming.swap(i, j);
+        }
+        let shuffled = upcoming.len();
+        if shuffled > 1 {
+            self.changed();
+        }
+        shuffled
+    }
+
     fn new_entry(&mut self, track: Track) -> QueueEntry {
         self.next_id += 1;
         QueueEntry {
             id: QueueEntryId(self.next_id),
             track,
         }
+    }
+}
+
+/// A small seeded PRNG (SplitMix64) for shuffling. Not cryptographic.
+#[derive(Debug, Clone)]
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn from_seed(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    /// Seeded from the OS; falls back to the clock if that fails.
+    pub fn from_entropy() -> Self {
+        let seed = getrandom::u64().unwrap_or_else(|_| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64)
+        });
+        Self(seed)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A value in `0..n` (`0` when `n` is `0`).
+    pub fn below(&mut self, n: usize) -> usize {
+        ((u128::from(self.next_u64()) * n as u128) >> 64) as usize
     }
 }
 
@@ -284,5 +399,113 @@ mod tests {
         q.remove(a);
         assert_eq!(q.current(), None);
         assert!(q.remove(a).is_none());
+    }
+
+    #[test]
+    fn move_up_and_down_keep_current_and_respect_bounds() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        let b = q.append(t("B"));
+        let c = q.append(t("C"));
+        q.set_current(b);
+        assert!(q.move_up(b));
+        assert_eq!(titles(&q), ["B*", "A", "C"]);
+        assert!(!q.move_up(b), "already first");
+        assert!(q.move_down(a));
+        assert_eq!(titles(&q), ["B*", "C", "A"]);
+        assert!(!q.move_down(a), "already last");
+        assert!(q.move_down(b));
+        assert_eq!(titles(&q), ["C", "B*", "A"]);
+        assert_eq!(q.current(), Some(b));
+        q.remove(c);
+        assert!(!q.move_up(c), "unknown id");
+        assert!(!q.move_down(c));
+        assert_eq!(titles(&q), ["B*", "A"]);
+    }
+
+    #[test]
+    fn clear_empties_and_never_reuses_ids() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.set_current(a);
+        q.clear();
+        assert!(q.is_empty());
+        assert_eq!(q.current(), None);
+        let b = q.append(t("B"));
+        assert_ne!(a, b);
+        assert!(!q.set_current(a));
+    }
+
+    /// Always picks the lowest index: Fisher–Yates then rotates left.
+    fn lowest(_: usize) -> usize {
+        0
+    }
+
+    #[test]
+    fn shuffle_after_current_leaves_current_and_earlier_entries() {
+        let mut q = Queue::new();
+        let ids: Vec<_> = ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|n| q.append(t(n)))
+            .collect();
+        q.set_current(ids[1]);
+        assert_eq!(q.shuffle_after_current(lowest), 3);
+        assert_eq!(titles(&q), ["A", "B*", "D", "E", "C"]);
+        assert_eq!(q.current(), Some(ids[1]));
+        // Picking the highest index each time is the identity.
+        q.shuffle_after_current(|n| n - 1);
+        assert_eq!(titles(&q), ["A", "B*", "D", "E", "C"]);
+        // Out-of-range picks are reduced, never panic.
+        q.shuffle_after_current(|_| usize::MAX);
+        assert_eq!(q.len(), 5);
+    }
+
+    #[test]
+    fn shuffle_without_current_shuffles_everything() {
+        let mut q = Queue::new();
+        for n in ["A", "B", "C"] {
+            q.append(t(n));
+        }
+        assert_eq!(q.shuffle_after_current(lowest), 3);
+        assert_eq!(titles(&q), ["B", "C", "A"]);
+    }
+
+    #[test]
+    fn shuffle_of_short_tails_is_a_no_op() {
+        let mut q = Queue::new();
+        assert_eq!(q.shuffle_after_current(lowest), 0);
+        let a = q.append(t("A"));
+        q.set_current(a);
+        assert_eq!(q.shuffle_after_current(lowest), 0);
+        q.append(t("B"));
+        assert_eq!(q.shuffle_after_current(lowest), 1);
+        assert_eq!(titles(&q), ["A*", "B"]);
+    }
+
+    #[test]
+    fn shuffle_is_a_permutation_with_a_seeded_rng() {
+        let mut q = Queue::new();
+        for i in 0..50 {
+            q.append(t(&format!("T{i}")));
+        }
+        let before: Vec<_> = q.entries().iter().map(|e| e.id).collect();
+        let mut rng = Rng::from_seed(7);
+        q.shuffle_after_current(|n| rng.below(n));
+        let mut after: Vec<_> = q.entries().iter().map(|e| e.id).collect();
+        assert_ne!(after, before, "50 entries stay in order only by chance");
+        after.sort();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn rng_is_deterministic_and_in_range() {
+        let mut a = Rng::from_seed(1);
+        let mut b = Rng::from_seed(1);
+        for n in 1..1000 {
+            let x = a.below(n);
+            assert_eq!(x, b.below(n));
+            assert!(x < n);
+        }
+        assert_eq!(a.below(0), 0);
     }
 }

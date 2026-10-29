@@ -1,8 +1,9 @@
 //! `coda` binary. Startup order: parse and validate the config, init
 //! logging, obtain the Navidrome password (possibly running
-//! `password_command`, which may prompt) and build the client, spawn mpv
-//! and connect, then hand over to [`app::run`], which enters the TUI,
-//! starts the scan and pings the server. Errors before the TUI are printed
+//! `password_command`, which may prompt) and build the client, load the
+//! saved session, spawn mpv and connect, then hand over to [`app::run`],
+//! which restores the session, enters the TUI, starts the scan and pings
+//! the server. Errors before the TUI are printed
 //! to stderr; the TUI never writes to stdout/stderr.
 
 use std::io::Write;
@@ -15,6 +16,7 @@ use coda_player::app;
 use coda_player::config::{self, Cli, Config, Env, PASSWORD_COMMAND_TIMEOUT};
 use coda_player::navidrome;
 use coda_player::playback;
+use coda_player::session;
 use tracing::{Level, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
@@ -89,6 +91,11 @@ async fn run() -> ExitCode {
         "sources configured"
     );
 
+    let restored = session::restore(config::session_file_path(
+        std::env::var_os("XDG_STATE_HOME"),
+        std::env::var_os("HOME"),
+    ));
+
     let handle = match playback::spawn_backend().await {
         Ok(handle) => handle,
         Err(error) => {
@@ -98,7 +105,7 @@ async fn run() -> ExitCode {
         }
     };
 
-    match app::run(handle, config.music_dir, navidrome).await {
+    match app::run(handle, config.music_dir, navidrome, restored).await {
         Ok(()) => {
             tracing::info!("coda exiting");
             ExitCode::SUCCESS

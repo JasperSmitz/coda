@@ -19,6 +19,11 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("  Enter / Esc", "Run search / cancel"),
     ("r", "Refresh Navidrome view"),
     ("d", "Remove entry (queue)"),
+    ("J / K", "Move entry down / up (queue)"),
+    ("g", "Select current entry (queue)"),
+    ("s", "Shuffle upcoming (queue)"),
+    ("C", "Clear queue (queue)"),
+    ("R", "Repeat: off / all / one"),
     ("Space", "Pause / resume / start"),
     ("n / p", "Next / previous"),
     ("← / →", "Seek -5 s / +5 s"),
@@ -31,7 +36,10 @@ pub const BINDINGS: &[(&str, &str)] = &[
 
 const KEY_WIDTH: usize = 14;
 
-pub fn draw(frame: &mut Frame, area: Rect) {
+/// Draws the help box with its lines starting at `scroll` (clamped).
+/// When not every line fits, the title says how to scroll. Returns the
+/// largest scroll that still shows a full box of lines.
+pub fn draw(frame: &mut Frame, area: Rect, scroll: usize) -> usize {
     let lines: Vec<Line> = BINDINGS
         .iter()
         .map(|(key, what)| {
@@ -52,9 +60,19 @@ pub fn draw(frame: &mut Frame, area: Rect) {
         width,
         height,
     };
+    let visible = usize::from(height.saturating_sub(2));
+    let max_scroll = lines.len().saturating_sub(visible);
+    let scroll = scroll.min(max_scroll);
+    let title = if max_scroll > 0 {
+        format!(" Help {}/{} · j/k scroll ", scroll + visible, lines.len())
+    } else {
+        " Help ".to_owned()
+    };
+    let shown: Vec<Line> = lines.into_iter().skip(scroll).take(visible).collect();
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Help ")),
+        Paragraph::new(shown).block(Block::bordered().title(title)),
         popup,
     );
+    max_scroll
 }

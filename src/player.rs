@@ -9,19 +9,69 @@
 //! The central rule: the queue advances only on
 //! `TrackEnded { reason: Eof | Error }` whose `LoadId` equals
 //! `current_load`. Every other `TrackEnded` is stale and ignored.
+//!
+//! Repeat ([`RepeatMode`]) changes only where an advance goes: `One`
+//! reloads the same entry with a fresh `LoadId` on EOF, `All` wraps from
+//! the last entry to the first. Errors never repeat a track, and under
+//! `All` a run of failures as long as the queue stops playback.
+//!
+//! A load that reaches EOF without ever reporting a position of at least
+//! [`PROVEN_PLAYBACK`] is a *suspect* end (an almost empty file, or a
+//! stream that ends at once). It counts as a failure and is never repeated
+//! by `One`, so repeat cannot reload as fast as mpv opens files (or hammer
+//! a server). Position, unlike a reported duration, proves that real time
+//! passed, which bounds reloads to about one per second without a clock.
 
 use std::time::Duration;
 
 use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use crate::queue::{Queue, QueueEntryId};
+use crate::queue::{MAX_QUEUE_LEN, Queue, QueueEntryId, Rng};
 
 /// `p` restarts the current track instead of going back when the position
 /// is beyond this.
 pub const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 pub const VOLUME_STEP: u8 = 5;
 pub const MAX_VOLUME: u8 = 100;
-const DEFAULT_VOLUME: u8 = 100;
+/// mpv's volume at startup (it runs with `--no-config`).
+pub const DEFAULT_VOLUME: u8 = 100;
+
+/// Status text when every entry of a repeating queue failed in a row.
+pub const NO_PLAYABLE_TRACKS: &str = "No playable tracks in queue";
+
+/// Status text when an add is refused because the queue is full.
+pub const QUEUE_FULL: &str = "Queue is full (10,000 entries)";
+
+/// A load whose reported position reaches this has really played; see the
+/// module docs on suspect ends.
+pub const PROVEN_PLAYBACK: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl RepeatMode {
+    /// `R`: off → all → one → off.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::All => "all",
+            Self::One => "one",
+        }
+    }
+}
 
 /// What the player asks of the playback backend. Mirrors
 /// [`PlaybackCommand`], except that `Load` carries the track's source
@@ -71,6 +121,8 @@ pub struct Player {
     last_load: u64,
     current_load: Option<LoadId>,
     started: bool,
+    /// The current load reported a position of at least [`PROVEN_PLAYBACK`].
+    proven: bool,
     paused: bool,
     position: Option<Duration>,
     duration: Option<Duration>,
@@ -85,6 +137,13 @@ pub struct Player {
     /// pending one clears it early; a following stale echo can then show
     /// briefly until mpv's final echo arrives.
     requested_volume: Option<u8>,
+    repeat: RepeatMode,
+    /// Loads that failed or ended suspiciously since the last proven
+    /// playback or user request. Under `All` it stops an endless loop over
+    /// failing entries.
+    failures_in_a_row: usize,
+    /// Bumped when the volume or repeat mode changes; see [`Player::revision`].
+    settings_revision: u64,
     unavailable: Option<String>,
     messages: Vec<String>,
 }
@@ -102,11 +161,15 @@ impl Player {
             last_load: 0,
             current_load: None,
             started: false,
+            proven: false,
             paused: false,
             position: None,
             duration: None,
             volume: DEFAULT_VOLUME,
             requested_volume: None,
+            repeat: RepeatMode::Off,
+            failures_in_a_row: 0,
+            settings_revision: 0,
             unavailable: None,
             messages: Vec::new(),
         }
@@ -148,6 +211,16 @@ impl Player {
         self.requested_volume.unwrap_or(self.volume)
     }
 
+    pub fn repeat(&self) -> RepeatMode {
+        self.repeat
+    }
+
+    /// Increases whenever something worth saving changes: the queue, its
+    /// current entry, the effective volume or the repeat mode.
+    pub fn revision(&self) -> u64 {
+        self.queue.revision() + self.settings_revision
+    }
+
     /// The persistent reason playback is unavailable, if it is.
     pub fn unavailable_reason(&self) -> Option<&str> {
         self.unavailable.as_deref()
@@ -182,8 +255,14 @@ impl Player {
     // ----- user intents -------------------------------------------------
 
     /// Appends a track to the end of the queue without playing it.
-    pub fn enqueue(&mut self, track: Track) -> QueueEntryId {
-        self.queue.append(track)
+    /// Returns `None` (and adds nothing) when the queue holds
+    /// [`MAX_QUEUE_LEN`] entries.
+    pub fn enqueue(&mut self, track: Track) -> Option<QueueEntryId> {
+        (!self.is_queue_full()).then(|| self.queue.append(track))
+    }
+
+    pub fn is_queue_full(&self) -> bool {
+        self.queue.len() >= MAX_QUEUE_LEN
     }
 
     /// Enter on a library track: insert a new entry directly after the
@@ -193,8 +272,12 @@ impl Player {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
+        if self.is_queue_full() {
+            self.messages.push(QUEUE_FULL.into());
+            return Vec::new();
+        }
         let id = self.queue.insert_after_current(track);
-        self.load_entry(id)
+        self.user_load(id)
     }
 
     /// Enter on a queue entry: play it.
@@ -202,7 +285,7 @@ impl Player {
         if self.refuse_if_unavailable() || self.queue.get(id).is_none() {
             return Vec::new();
         }
-        self.load_entry(id)
+        self.user_load(id)
     }
 
     /// Space: toggle pause when loaded; otherwise play the current entry,
@@ -216,7 +299,7 @@ impl Player {
             return vec![PlayerCommand::SetPause(self.paused)];
         }
         match self.queue.current().or_else(|| self.queue.first()) {
-            Some(id) => self.load_entry(id),
+            Some(id) => self.user_load(id),
             None => {
                 self.messages.push("Queue is empty".into());
                 Vec::new()
@@ -224,7 +307,8 @@ impl Player {
         }
     }
 
-    /// `n`: play the next entry; at the end of the queue, do nothing.
+    /// `n`: play the next entry; at the end of the queue, wrap around
+    /// under [`RepeatMode::All`], else do nothing.
     pub fn play_next(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
@@ -233,8 +317,9 @@ impl Player {
             self.messages.push("Nothing is playing".into());
             return Vec::new();
         }
-        match self.queue.move_to_next() {
-            Some(id) => self.load_entry(id),
+        let next = self.queue.move_to_next().or_else(|| self.wrap_target());
+        match next {
+            Some(id) => self.user_load(id),
             None => {
                 self.messages.push("End of queue".into());
                 Vec::new()
@@ -254,7 +339,7 @@ impl Player {
             return vec![PlayerCommand::SeekAbsolute(0.0)];
         }
         match self.queue.move_to_previous() {
-            Some(id) => self.load_entry(id),
+            Some(id) => self.user_load(id),
             None if self.is_started() => vec![PlayerCommand::SeekAbsolute(0.0)],
             None => Vec::new(),
         }
@@ -288,21 +373,148 @@ impl Player {
         // last reported) stays pending; that is harmless because it equals
         // mpv's actual value, and the next press replaces it.
         self.requested_volume = Some(volume);
+        self.settings_revision += 1;
+        vec![PlayerCommand::SetVolume(volume)]
+    }
+
+    /// `R`: cycles the repeat mode. Allowed while playback is unavailable.
+    pub fn cycle_repeat(&mut self) {
+        self.set_repeat(self.repeat.next());
+        self.messages
+            .push(format!("Repeat {}", self.repeat.label()));
+    }
+
+    pub fn set_repeat(&mut self, mode: RepeatMode) {
+        if self.repeat != mode {
+            self.repeat = mode;
+            self.settings_revision += 1;
+        }
+    }
+
+    /// Moves an entry one place up. Never changes `current` or playback.
+    pub fn move_up(&mut self, id: QueueEntryId) -> bool {
+        self.queue.move_up(id)
+    }
+
+    /// Moves an entry one place down. Never changes `current` or playback.
+    pub fn move_down(&mut self, id: QueueEntryId) -> bool {
+        self.queue.move_down(id)
+    }
+
+    /// Shuffles the entries after the current one (all entries without a
+    /// current one). Never changes `current` or playback. Returns the
+    /// number of entries shuffled.
+    pub fn shuffle_upcoming(&mut self, rng: &mut Rng) -> usize {
+        self.queue.shuffle_after_current(|n| rng.below(n))
+    }
+
+    /// `C`: empties the queue. Playback stops like a deliberate stop: the
+    /// load is forgotten before `Stop`, so its end-file is stale.
+    pub fn clear_queue(&mut self) -> Vec<PlayerCommand> {
+        let commands = if self.is_loaded() {
+            self.stop()
+        } else {
+            Vec::new()
+        };
+        self.queue.clear();
+        self.failures_in_a_row = 0;
+        commands
+    }
+
+    /// Restores a saved session: appends `tracks`, makes `current` (an
+    /// index into them) the current entry, and sets the repeat mode.
+    /// Nothing starts playing. A `volume` other than mpv's startup volume
+    /// is requested from the backend.
+    pub fn restore(
+        &mut self,
+        tracks: Vec<Track>,
+        current: Option<usize>,
+        repeat: RepeatMode,
+        volume: u8,
+    ) -> Vec<PlayerCommand> {
+        let ids: Vec<QueueEntryId> = tracks.into_iter().map_while(|t| self.enqueue(t)).collect();
+        if let Some(id) = current.and_then(|i| ids.get(i)) {
+            self.queue.set_current(*id);
+        }
+        self.set_repeat(repeat);
+        let volume = volume.min(MAX_VOLUME);
+        if self.unavailable.is_some() || volume == self.volume() {
+            return Vec::new();
+        }
+        self.requested_volume = Some(volume);
+        self.settings_revision += 1;
         vec![PlayerCommand::SetVolume(volume)]
     }
 
     /// Removes a queue entry. Removing the current entry while loaded acts
-    /// like `n` first; with no next entry, playback stops.
+    /// like `n` first (wrapping under [`RepeatMode::All`] to the first
+    /// other entry); with no next entry, playback stops.
     pub fn remove(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
         let mut commands = Vec::new();
         if self.queue.current() == Some(id) && self.is_loaded() {
-            commands = match self.queue.id_after(id) {
-                Some(next) => self.load_entry(next),
+            let next = self
+                .queue
+                .id_after(id)
+                .or_else(|| self.wrap_target().filter(|first| *first != id));
+            commands = match next {
+                Some(next) => self.user_load(next),
                 None => self.stop(),
             };
         }
         self.queue.remove(id);
         commands
+    }
+
+    /// Remote entries cannot play (no Navidrome client) and `load`, the
+    /// current one, is the second such failure in a row: instead of trying
+    /// the following remote entries one by one, jump to the next local
+    /// entry in a single pass (wrapping under [`RepeatMode::All`], like
+    /// `n`). The current entry and the remote entries passed over count as
+    /// failures in a row. Stops when no local entry remains, or (under
+    /// `All`) once every entry has failed in a row.
+    pub fn skip_remote_entries(&mut self, load: LoadId) -> Vec<PlayerCommand> {
+        if self.current_load != Some(load) {
+            return Vec::new();
+        }
+        let Some(pos) = self.queue.current().and_then(|id| self.queue.position(id)) else {
+            return self.stop();
+        };
+        let entries = self.queue.entries();
+        let wrap = if self.repeat == RepeatMode::All {
+            pos
+        } else {
+            0
+        };
+        let mut skipped = 1;
+        let mut target = None;
+        for entry in entries[pos + 1..].iter().chain(&entries[..wrap]) {
+            if entry.track.is_remote() {
+                skipped += 1;
+            } else {
+                target = Some(entry.id);
+                break;
+            }
+        }
+        tracing::info!(%load, skipped, "remote entries skipped: Navidrome is not configured");
+        self.messages.push(format!(
+            "Navidrome is not configured; skipped {skipped} remote track{}",
+            if skipped == 1 { "" } else { "s" }
+        ));
+        self.failures_in_a_row += skipped;
+        let Some(target) = target else {
+            self.failures_in_a_row = 0;
+            return self.stop();
+        };
+        if self.repeat == RepeatMode::All && self.failures_in_a_row >= self.queue.len() {
+            tracing::info!(
+                failures = self.failures_in_a_row,
+                "every queue entry failed"
+            );
+            self.messages.push(NO_PLAYABLE_TRACKS.into());
+            self.failures_in_a_row = 0;
+            return self.stop();
+        }
+        self.load_entry(target)
     }
 
     /// Quit: forget the current load first so its end-file is stale, then
@@ -330,6 +542,10 @@ impl Player {
                 // the previous track.
                 if self.is_loaded() && self.started {
                     self.position = Some(position);
+                    if position >= PROVEN_PLAYBACK && !self.proven {
+                        self.proven = true;
+                        self.failures_in_a_row = 0;
+                    }
                 }
                 Vec::new()
             }
@@ -348,9 +564,13 @@ impl Player {
             PlaybackEvent::Volume(volume) => {
                 // Always recorded; only the echo of the pending request
                 // clears it. With nothing pending, a change is adopted.
+                let before = self.volume();
                 self.volume = volume.min(MAX_VOLUME);
                 if self.requested_volume == Some(self.volume) {
                     self.requested_volume = None;
+                }
+                if self.volume() != before {
+                    self.settings_revision += 1;
                 }
                 Vec::new()
             }
@@ -361,6 +581,8 @@ impl Player {
             PlaybackEvent::BackendExited(reason) => {
                 tracing::warn!(%reason, "playback backend exited");
                 self.clear_load();
+                // Keep the effective volume so it is still the one saved.
+                self.volume = self.volume();
                 self.requested_volume = None;
                 self.messages.push(format!("Playback stopped: {reason}"));
                 self.unavailable = Some(reason);
@@ -375,6 +597,20 @@ impl Player {
             return Vec::new();
         }
         match reason {
+            EndReason::Eof if !self.proven => {
+                tracing::info!(%load, "track ended without playing; not repeated");
+                if let Some(stop) = self.count_failure() {
+                    return stop;
+                }
+                self.advance(false)
+            }
+            EndReason::Eof if self.repeat == RepeatMode::One => match self.queue.current() {
+                Some(id) => self.load_entry(id),
+                None => {
+                    self.clear_load();
+                    Vec::new()
+                }
+            },
             EndReason::Eof => self.advance(false),
             EndReason::Error(message) => {
                 let name = self
@@ -385,6 +621,9 @@ impl Player {
                 tracing::info!(%load, track = %name, error = %message, "track failed");
                 self.messages
                     .push(format!("Could not play {name}: {message}"));
+                if let Some(stop) = self.count_failure() {
+                    return stop;
+                }
                 self.advance(true)
             }
             EndReason::Stopped => {
@@ -395,10 +634,28 @@ impl Player {
         }
     }
 
-    /// Plays the next entry, or stops at the end of the queue with
+    /// Counts a failed or suspect end. Under [`RepeatMode::All`], once every
+    /// entry has failed in a row, stops and returns the commands.
+    fn count_failure(&mut self) -> Option<Vec<PlayerCommand>> {
+        self.failures_in_a_row += 1;
+        if self.repeat != RepeatMode::All || self.failures_in_a_row < self.queue.len() {
+            return None;
+        }
+        tracing::info!(
+            failures = self.failures_in_a_row,
+            "every queue entry failed"
+        );
+        self.messages.push(NO_PLAYABLE_TRACKS.into());
+        self.failures_in_a_row = 0;
+        Some(self.stop())
+    }
+
+    /// Plays the next entry (wrapping to the first under
+    /// [`RepeatMode::All`]), or stops at the end of the queue with
     /// `current` left on the last entry so Space replays it.
     fn advance(&mut self, after_error: bool) -> Vec<PlayerCommand> {
-        match self.queue.move_to_next() {
+        let next = self.queue.move_to_next().or_else(|| self.wrap_target());
+        match next {
             Some(id) => self.load_entry(id),
             // After an error the backend may still be playing an older
             // track (a load rejected before reaching it), so stop it.
@@ -410,6 +667,14 @@ impl Player {
         }
     }
 
+    /// The first entry when repeating the whole queue, for an advance past
+    /// the end.
+    fn wrap_target(&self) -> Option<QueueEntryId> {
+        (self.repeat == RepeatMode::All)
+            .then(|| self.queue.first())
+            .flatten()
+    }
+
     fn stop(&mut self) -> Vec<PlayerCommand> {
         // Cleared before `Stop` is emitted, so its end-file is stale.
         self.clear_load();
@@ -419,8 +684,15 @@ impl Player {
     fn clear_load(&mut self) {
         self.current_load = None;
         self.started = false;
+        self.proven = false;
         self.position = None;
         self.duration = None;
+    }
+
+    /// A load the user asked for: a fresh start for failure counting.
+    fn user_load(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
+        self.failures_in_a_row = 0;
+        self.load_entry(id)
     }
 
     fn load_entry(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
@@ -435,6 +707,7 @@ impl Player {
         tracing::info!(%load, track = %name, "loading track");
         self.current_load = Some(load);
         self.started = false;
+        self.proven = false;
         self.paused = false;
         self.position = None;
         self.duration = None;
@@ -454,7 +727,7 @@ mod tests {
 
     fn player_with(names: &[&str]) -> (Player, Vec<QueueEntryId>) {
         let mut p = Player::new();
-        let ids = names.iter().map(|n| p.enqueue(t(n))).collect();
+        let ids = names.iter().map(|n| p.enqueue(t(n)).unwrap()).collect();
         (p, ids)
     }
 
@@ -485,6 +758,22 @@ mod tests {
     fn start(p: &mut Player, id: QueueEntryId) -> LoadId {
         let (load, _) = load_of(&p.play_entry(id));
         p.handle_event(PlaybackEvent::Started { load });
+        load
+    }
+
+    /// Plays entry `id`, delivers `Started` and a position that proves
+    /// real playback.
+    fn play_through(p: &mut Player, id: QueueEntryId) -> LoadId {
+        let load = start(p, id);
+        p.handle_event(PlaybackEvent::Position(PROVEN_PLAYBACK));
+        load
+    }
+
+    /// Delivers `Started` and a proving position for a load just emitted.
+    fn proven(p: &mut Player, cmds: &[PlayerCommand]) -> LoadId {
+        let (load, _) = load_of(cmds);
+        p.handle_event(PlaybackEvent::Started { load });
+        p.handle_event(PlaybackEvent::Position(Duration::from_secs(2)));
         load
     }
 
@@ -808,12 +1097,17 @@ mod tests {
     }
 
     #[test]
-    fn backend_exit_clears_a_pending_volume_request() {
+    fn backend_exit_keeps_the_effective_volume() {
         let (mut p, ids) = player_with(&["A"]);
         start(&mut p, ids[0]);
         assert_eq!(volume_presses(&mut p, "-"), [95]);
+        let r = p.revision();
         p.handle_event(PlaybackEvent::BackendExited("gone".into()));
-        assert_eq!(p.volume(), 100, "falls back to the last reported value");
+        assert_eq!(p.volume(), 95, "the request is what a save records");
+        assert_eq!(p.revision(), r);
+        // Nothing is pending any more: no later echo is waited for.
+        assert!(p.volume_down().is_empty(), "unavailable");
+        assert_eq!(p.volume(), 95);
     }
 
     #[test]
@@ -852,7 +1146,9 @@ mod tests {
     #[test]
     fn remote_entries_load_by_source_and_share_the_queue() {
         let mut p = Player::new();
-        let remote = p.enqueue(Track::navidrome("s1".into(), TrackMetadata::default()));
+        let remote = p
+            .enqueue(Track::navidrome("s1".into(), TrackMetadata::default()))
+            .unwrap();
         p.enqueue(t("A"));
         let cmds = p.play_entry(remote);
         let [PlayerCommand::Load { load, source }] = cmds.as_slice() else {
@@ -1014,5 +1310,457 @@ mod tests {
         assert_ne!(current, ids[1]);
         assert!(p.queue().get(ids[1]).is_some());
         assert_eq!(p.queue().position(ids[1]), Some(2));
+    }
+
+    // ----- repeat ----------------------------------------------------------
+
+    fn missing_queue(n: usize, repeat: RepeatMode) -> (usize, Vec<PlayerCommand>, Player) {
+        let names: Vec<String> = (0..n).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut p, _) = player_with(&refs);
+        p.set_repeat(repeat);
+        let mut cmds = p.toggle_pause();
+        let mut loads = 0;
+        while let [PlayerCommand::Load { load, .. }] = cmds.as_slice() {
+            loads += 1;
+            assert!(loads <= 10 * n + 10, "did not terminate");
+            cmds = p.handle_event(ended(*load, EndReason::Error("file not found".into())));
+        }
+        (loads, cmds, p)
+    }
+
+    #[test]
+    fn repeat_cycles_off_all_one_with_messages() {
+        let mut p = Player::new();
+        assert_eq!(p.repeat(), RepeatMode::Off);
+        let r0 = p.revision();
+        p.cycle_repeat();
+        assert_eq!(p.repeat(), RepeatMode::All);
+        p.cycle_repeat();
+        assert_eq!(p.repeat(), RepeatMode::One);
+        p.cycle_repeat();
+        assert_eq!(p.repeat(), RepeatMode::Off);
+        assert_eq!(
+            p.take_messages(),
+            ["Repeat all", "Repeat one", "Repeat off"]
+        );
+        assert!(p.revision() > r0);
+        // Allowed while playback is unavailable.
+        p.handle_event(PlaybackEvent::BackendExited("gone".into()));
+        p.cycle_repeat();
+        assert_eq!(p.repeat(), RepeatMode::All);
+    }
+
+    #[test]
+    fn repeat_one_reloads_the_same_entry_with_a_fresh_load_id() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::One);
+        let l1 = play_through(&mut p, ids[0]);
+        let (l2, path) = load_of(&p.handle_event(ended(l1, EndReason::Eof)));
+        assert_ne!(l1, l2);
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+        assert_eq!(p.queue().current(), Some(ids[0]));
+        assert_eq!(p.current_load(), Some(l2));
+        // The old load's late events are stale.
+        assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
+        assert!(p.handle_event(ended(l1, EndReason::Stopped)).is_empty());
+        assert_eq!(p.current_load(), Some(l2));
+        // `n` and `p` behave as usual.
+        let (_, path) = load_of(&p.play_next());
+        assert_eq!(path, PathBuf::from("/m/B.flac"));
+        assert!(p.play_next().is_empty());
+        assert_eq!(p.take_messages(), ["End of queue"]);
+    }
+
+    #[test]
+    fn repeat_one_error_advances_instead_of_looping() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::One);
+        let l1 = start(&mut p, ids[0]);
+        let (_, path) = load_of(&p.handle_event(ended(l1, EndReason::Error("x".into()))));
+        assert_eq!(path, PathBuf::from("/m/B.flac"));
+        assert_eq!(p.queue().current(), Some(ids[1]));
+    }
+
+    #[test]
+    fn repeat_all_wraps_on_eof_error_and_next() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::All);
+        let l1 = start(&mut p, ids[1]);
+        let (_, path) = load_of(&p.handle_event(ended(l1, EndReason::Eof)));
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+        assert_eq!(p.queue().current(), Some(ids[0]));
+
+        let l2 = start(&mut p, ids[1]);
+        let (_, path) = load_of(&p.handle_event(ended(l2, EndReason::Error("x".into()))));
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+
+        start(&mut p, ids[1]);
+        let (_, path) = load_of(&p.play_next());
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+        // `p` at the first entry still restarts rather than wrapping.
+        let load = p.current_load().unwrap();
+        p.handle_event(PlaybackEvent::Started { load });
+        assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
+    }
+
+    #[test]
+    fn single_entry_repeat_all_reloads_it() {
+        let (mut p, ids) = player_with(&["A"]);
+        p.set_repeat(RepeatMode::All);
+        let l1 = play_through(&mut p, ids[0]);
+        let (l2, _) = load_of(&p.handle_event(ended(l1, EndReason::Eof)));
+        assert_ne!(l1, l2);
+        assert_eq!(p.queue().current(), Some(ids[0]));
+    }
+
+    #[test]
+    fn all_missing_queue_terminates_under_every_repeat_mode() {
+        for (repeat, expected_loads) in [
+            (RepeatMode::Off, 7),
+            (RepeatMode::All, 7),
+            (RepeatMode::One, 7),
+        ] {
+            let (loads, cmds, mut p) = missing_queue(7, repeat);
+            assert_eq!(loads, expected_loads, "{repeat:?}");
+            assert_eq!(cmds, [PlayerCommand::Stop], "{repeat:?}");
+            assert_eq!(p.status(), PlaybackStatus::Stopped, "{repeat:?}");
+            let messages = p.take_messages();
+            assert_eq!(
+                messages.last().map(String::as_str) == Some(NO_PLAYABLE_TRACKS),
+                repeat == RepeatMode::All,
+                "{repeat:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeat_all_failure_count_starts_mid_queue_and_resets_on_proven_playback() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        p.set_repeat(RepeatMode::All);
+        // Start at C: C, A, B fail, then playback stops.
+        let (mut load, _) = load_of(&p.play_entry(ids[2]));
+        let mut failed = 0;
+        loop {
+            let cmds = p.handle_event(ended(load, EndReason::Error("x".into())));
+            failed += 1;
+            match cmds.as_slice() {
+                [PlayerCommand::Load { load: next, .. }] => load = *next,
+                [PlayerCommand::Stop] => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(failed, 3);
+        assert_eq!(p.queue().current(), Some(ids[1]));
+
+        // Two failures, a real playback, then two more: never three in a
+        // row. `Started` alone does not count as playing.
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        p.set_repeat(RepeatMode::All);
+        let (l, _) = load_of(&p.play_entry(ids[0]));
+        let (l, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        let (l, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        p.handle_event(PlaybackEvent::Started { load: l });
+        p.handle_event(PlaybackEvent::Position(PROVEN_PLAYBACK));
+        let (l, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        let (l, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        assert_eq!(p.current_load(), Some(l));
+        assert_eq!(p.queue().current(), Some(ids[1]));
+    }
+
+    #[test]
+    fn user_load_resets_the_failure_count() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::All);
+        let (l, _) = load_of(&p.play_entry(ids[0]));
+        let (_, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        // The user picks A again: two more failures are allowed.
+        let (l, _) = load_of(&p.play_entry(ids[0]));
+        let (l, _) = load_of(&p.handle_event(ended(l, EndReason::Error("x".into()))));
+        assert_eq!(
+            p.handle_event(ended(l, EndReason::Error("x".into()))),
+            [PlayerCommand::Stop]
+        );
+    }
+
+    // ----- queue controls ------------------------------------------------
+
+    #[test]
+    fn moving_and_shuffling_never_touch_current_or_playback() {
+        let (mut p, ids) = player_with(&["A", "B", "C", "D"]);
+        let l1 = start(&mut p, ids[1]);
+        assert!(p.move_up(ids[1]));
+        assert!(!p.move_down(ids[3]), "already last");
+        assert_eq!(titles(&p), ["B*", "A", "C", "D"]);
+        let mut rng = Rng::from_seed(3);
+        assert_eq!(p.shuffle_upcoming(&mut rng), 3);
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        assert_eq!(p.current_load(), Some(l1));
+        assert_eq!(p.status(), PlaybackStatus::Playing);
+        assert_eq!(p.queue().position(ids[1]), Some(0));
+    }
+
+    #[test]
+    fn clear_while_playing_stops_and_its_end_file_is_stale() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let l1 = start(&mut p, ids[0]);
+        assert_eq!(p.clear_queue(), [PlayerCommand::Stop]);
+        assert_eq!(p.current_load(), None);
+        assert!(p.queue().is_empty());
+        for reason in [
+            EndReason::Stopped,
+            EndReason::Eof,
+            EndReason::Error("x".into()),
+        ] {
+            assert!(p.handle_event(ended(l1, reason)).is_empty());
+        }
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+        // Stopped: nothing to send.
+        let (mut p, _) = player_with(&["A"]);
+        assert!(p.clear_queue().is_empty());
+        assert!(p.queue().is_empty());
+    }
+
+    // ----- restore -------------------------------------------------------
+
+    #[test]
+    fn restore_sets_queue_current_repeat_and_volume_without_playing() {
+        let mut p = Player::new();
+        let cmds = p.restore(vec![t("A"), t("B")], Some(1), RepeatMode::One, 40);
+        assert_eq!(cmds, [PlayerCommand::SetVolume(40)]);
+        assert_eq!(titles(&p), ["A", "B*"]);
+        assert_eq!(p.repeat(), RepeatMode::One);
+        assert_eq!(p.volume(), 40);
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+        // mpv's initial report of its startup volume does not undo it.
+        p.handle_event(PlaybackEvent::Volume(100));
+        assert_eq!(p.volume(), 40);
+        p.handle_event(PlaybackEvent::Volume(40));
+        assert_eq!(p.volume(), 40);
+        // Space plays the restored current entry.
+        let (_, path) = load_of(&p.toggle_pause());
+        assert_eq!(path, PathBuf::from("/m/B.flac"));
+
+        // The default volume needs no command; a bad index means no current.
+        let mut p = Player::new();
+        assert!(
+            p.restore(vec![t("A")], Some(5), RepeatMode::Off, 100)
+                .is_empty()
+        );
+        assert_eq!(p.queue().current(), None);
+        assert_eq!(p.queue().len(), 1);
+    }
+
+    #[test]
+    fn revision_tracks_saved_state_only() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let r = p.revision();
+        let l1 = start(&mut p, ids[0]);
+        let r_loaded = p.revision();
+        assert!(r_loaded > r, "current changed");
+        p.handle_event(PlaybackEvent::Position(Duration::from_secs(3)));
+        p.handle_event(PlaybackEvent::Paused(true));
+        p.handle_event(PlaybackEvent::Volume(100));
+        assert_eq!(p.revision(), r_loaded, "progress, pause, same volume");
+        p.volume_down();
+        let r_vol = p.revision();
+        assert!(r_vol > r_loaded);
+        p.handle_event(PlaybackEvent::Volume(95));
+        assert_eq!(p.revision(), r_vol, "echo of the request changes nothing");
+        p.handle_event(PlaybackEvent::Volume(50));
+        assert!(p.revision() > r_vol, "external change");
+        let r = p.revision();
+        // Replaying the current entry does not change `current`.
+        p.play_entry(ids[0]);
+        assert_eq!(p.revision(), r);
+        let _ = l1;
+    }
+
+    // ----- suspect ends, `d` under repeat, abandoning, queue cap ------------
+
+    /// Every load starts and immediately reaches EOF, reporting at most
+    /// `position`. Returns the number of loads before playback ended.
+    fn instant_eofs(n: usize, repeat: RepeatMode, position: Duration) -> (usize, Player) {
+        let names: Vec<String> = (0..n).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut p, _) = player_with(&refs);
+        p.set_repeat(repeat);
+        let mut cmds = p.toggle_pause();
+        let mut loads = 0;
+        while let [PlayerCommand::Load { load, .. }] = cmds.as_slice() {
+            loads += 1;
+            assert!(loads <= 10 * n + 10, "{repeat:?}: did not terminate");
+            p.handle_event(PlaybackEvent::Started { load: *load });
+            p.handle_event(PlaybackEvent::Position(position));
+            p.handle_event(PlaybackEvent::Duration(Some(Duration::from_secs(300))));
+            cmds = p.handle_event(ended(*load, EndReason::Eof));
+        }
+        (loads, p)
+    }
+
+    #[test]
+    fn tracks_that_end_at_once_are_never_hot_reloaded() {
+        let almost = PROVEN_PLAYBACK - Duration::from_millis(1);
+        // One: each suspect end advances, so the queue plays through once.
+        let (loads, p) = instant_eofs(3, RepeatMode::One, almost);
+        assert_eq!(loads, 3);
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+        // All: one round, then "No playable tracks". A reported duration
+        // does not count as playing.
+        let (loads, mut p) = instant_eofs(3, RepeatMode::All, almost);
+        assert_eq!(loads, 3);
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+        assert_eq!(
+            p.take_messages().last().map(String::as_str),
+            Some(NO_PLAYABLE_TRACKS)
+        );
+        // A single entry under One or All plays once.
+        for repeat in [RepeatMode::One, RepeatMode::All] {
+            let (loads, _) = instant_eofs(1, repeat, Duration::ZERO);
+            assert_eq!(loads, 1, "{repeat:?}");
+        }
+    }
+
+    #[test]
+    fn proven_playback_repeats() {
+        let (mut p, ids) = player_with(&["A"]);
+        p.set_repeat(RepeatMode::One);
+        let mut load = play_through(&mut p, ids[0]);
+        for _ in 0..5 {
+            let cmds = p.handle_event(ended(load, EndReason::Eof));
+            load = proven(&mut p, &cmds);
+        }
+        assert_eq!(p.queue().current(), Some(ids[0]));
+        // A position before `Started` (the previous track's) proves nothing.
+        let cmds = p.handle_event(ended(load, EndReason::Eof));
+        let (load, _) = load_of(&cmds);
+        p.handle_event(PlaybackEvent::Position(Duration::from_secs(9)));
+        p.handle_event(PlaybackEvent::Started { load });
+        assert!(p.handle_event(ended(load, EndReason::Eof)).is_empty());
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+    }
+
+    #[test]
+    fn removing_the_last_current_entry_wraps_under_repeat_all() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        p.set_repeat(RepeatMode::All);
+        start(&mut p, ids[2]);
+        let (_, path) = load_of(&p.remove(ids[2]));
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+        assert_eq!(titles(&p), ["A*", "B"]);
+        // Without repeat it stops, as before.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        start(&mut p, ids[1]);
+        assert_eq!(p.remove(ids[1]), [PlayerCommand::Stop]);
+        // The only entry: nothing to wrap to.
+        let (mut p, ids) = player_with(&["A"]);
+        p.set_repeat(RepeatMode::All);
+        start(&mut p, ids[0]);
+        assert_eq!(p.remove(ids[0]), [PlayerCommand::Stop]);
+        assert!(p.queue().is_empty());
+    }
+
+    fn remote(id: &str) -> Track {
+        Track::navidrome(id.into(), TrackMetadata::default())
+    }
+
+    fn any_load(cmds: &[PlayerCommand]) -> LoadId {
+        match cmds {
+            [PlayerCommand::Load { load, .. }] => *load,
+            other => panic!("expected a single Load, got {other:?}"),
+        }
+    }
+
+    fn mixed(p: &mut Player, spec: &str) -> Vec<QueueEntryId> {
+        // `L` local, `R` remote, in order.
+        spec.chars()
+            .enumerate()
+            .map(|(i, c)| match c {
+                'L' => p.enqueue(t(&format!("L{i}"))).unwrap(),
+                _ => p.enqueue(remote(&format!("R{i}"))).unwrap(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skipping_remote_entries_jumps_to_the_next_local_one() {
+        // Off: [L1, R2, R3, L4] with R3 the second failure: L4 plays.
+        let mut p = Player::new();
+        let ids = mixed(&mut p, "LRRL");
+        p.queue.set_current(ids[2]);
+        let load = any_load(&p.play_entry(ids[2]));
+        assert!(p.skip_remote_entries(LoadId(999)).is_empty(), "stale");
+        let (_, path) = load_of(&p.skip_remote_entries(load));
+        assert_eq!(path, PathBuf::from("/m/L3.flac"));
+        assert_eq!(p.queue().current(), Some(ids[3]));
+        assert_eq!(
+            p.take_messages(),
+            ["Navidrome is not configured; skipped 1 remote track"]
+        );
+
+        // Off: no local entry after it: stop, current left in place.
+        let mut p = Player::new();
+        let ids = mixed(&mut p, "LRRR");
+        let load = any_load(&p.play_entry(ids[1]));
+        assert_eq!(p.skip_remote_entries(load), [PlayerCommand::Stop]);
+        assert_eq!(p.current_load(), None);
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        assert_eq!(
+            p.take_messages(),
+            ["Navidrome is not configured; skipped 3 remote tracks"]
+        );
+        assert!(p.handle_event(ended(load, EndReason::Stopped)).is_empty());
+
+        // All: wraps to an earlier local entry.
+        let mut p = Player::new();
+        p.set_repeat(RepeatMode::All);
+        let ids = mixed(&mut p, "RLRRR");
+        let load = any_load(&p.play_entry(ids[3]));
+        let (_, path) = load_of(&p.skip_remote_entries(load));
+        assert_eq!(path, PathBuf::from("/m/L1.flac"));
+        assert_eq!(p.queue().current(), Some(ids[1]));
+
+        // All, every entry remote: stops.
+        let mut p = Player::new();
+        p.set_repeat(RepeatMode::All);
+        let ids = mixed(&mut p, "RRR");
+        let load = any_load(&p.play_entry(ids[1]));
+        assert_eq!(p.skip_remote_entries(load), [PlayerCommand::Stop]);
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+    }
+
+    #[test]
+    fn skipped_remote_entries_count_toward_repeat_all_termination() {
+        // [R, R, L] under All where the local file is missing too: the run
+        // of failures stops after one round instead of cycling forever.
+        let mut p = Player::new();
+        p.set_repeat(RepeatMode::All);
+        let ids = mixed(&mut p, "RRL");
+        let load = any_load(&p.play_entry(ids[0]));
+        // R0 fails (first), R1 is the second and is skipped to L2.
+        let load = any_load(&p.handle_event(ended(load, EndReason::Error("nc".into()))));
+        let load = any_load(&p.skip_remote_entries(load));
+        assert_eq!(
+            p.handle_event(ended(load, EndReason::Error("file not found".into()))),
+            [PlayerCommand::Stop]
+        );
+        assert_eq!(
+            p.take_messages().last().map(String::as_str),
+            Some(NO_PLAYABLE_TRACKS)
+        );
+    }
+
+    #[test]
+    fn queue_is_capped() {
+        let mut p = Player::new();
+        let tracks: Vec<Track> = (0..MAX_QUEUE_LEN + 3).map(|i| t(&i.to_string())).collect();
+        p.restore(tracks, Some(MAX_QUEUE_LEN + 1), RepeatMode::Off, 100);
+        assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
+        assert_eq!(p.queue().current(), None);
+        assert!(p.is_queue_full());
+        assert_eq!(p.enqueue(t("X")), None);
+        assert!(p.play_track_now(t("X")).is_empty());
+        assert_eq!(p.take_messages(), [QUEUE_FULL]);
+        assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
     }
 }
