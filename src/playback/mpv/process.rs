@@ -18,6 +18,10 @@ pub const SOCKET_NAME: &str = "mpv.sock";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const CONNECT_RETRY: Duration = Duration::from_millis(20);
 pub const QUIT_GRACE: Duration = Duration::from_millis(500);
+/// How long [`MpvProcess::kill`] waits to reap the killed child. A process
+/// stuck in uninterruptible I/O may not die at once; it is not waited for
+/// beyond this (Tokio reaps it in the background once it exits).
+pub const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 /// Unix socket paths are limited to about 104 (macOS) or 108 (Linux)
 /// bytes; stay safely below.
 pub const MAX_SOCKET_PATH_LEN: usize = 100;
@@ -52,11 +56,12 @@ impl SpawnError {
     }
 }
 
-/// Arguments passed to mpv (excluding the program name).
-pub fn mpv_args(socket: &Path) -> Vec<OsString> {
+/// Arguments passed to mpv (excluding the program name). `extra` is
+/// internal (tests use `--ao=null`) and goes before the IPC argument.
+pub fn mpv_args(socket: &Path, extra: &[&str]) -> Vec<OsString> {
     let mut ipc = OsString::from("--input-ipc-server=");
     ipc.push(socket);
-    vec![
+    let mut args: Vec<OsString> = vec![
         "--no-config".into(),
         "--idle=yes".into(),
         "--no-video".into(),
@@ -68,8 +73,10 @@ pub fn mpv_args(socket: &Path) -> Vec<OsString> {
         // playlist (e.g. `#EXTM3U` in a `.mp3`) is rejected instead of
         // expanding into entries Coda never requested.
         "--access-references=no".into(),
-        ipc,
-    ]
+    ];
+    args.extend(extra.iter().map(OsString::from));
+    args.push(ipc);
+    args
 }
 
 /// Environment variables that may hold Navidrome credentials or the
@@ -82,10 +89,10 @@ pub const STRIPPED_ENV: [&str; 3] = [
 
 /// The mpv command: direct exec (no shell), stdio closed, killed on drop,
 /// and without the `CODA_NAVIDROME_*` environment.
-pub fn mpv_command(program: &OsStr, socket: &Path) -> Command {
+pub fn mpv_command(program: &OsStr, socket: &Path, extra_args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command
-        .args(mpv_args(socket))
+        .args(mpv_args(socket, extra_args))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -191,7 +198,10 @@ impl MpvProcess {
     /// Spawns `program` and connects to its IPC socket, retrying every
     /// [`CONNECT_RETRY`] for up to [`CONNECT_TIMEOUT`], and giving up early
     /// if the child exits.
-    pub async fn launch(program: &OsStr) -> Result<(Self, UnixStream), SpawnError> {
+    pub async fn launch(
+        program: &OsStr,
+        extra_args: &[&str],
+    ) -> Result<(Self, UnixStream), SpawnError> {
         let candidates = socket_base_dirs(
             std::env::var_os("XDG_RUNTIME_DIR"),
             std::env::var_os("TMPDIR"),
@@ -199,7 +209,7 @@ impl MpvProcess {
         let socket_dir = SocketDir::create_in_first(&candidates).map_err(SpawnError::SocketDir)?;
         let socket = socket_dir.socket_path();
 
-        let child = mpv_command(program, &socket)
+        let child = mpv_command(program, &socket, extra_args)
             .spawn()
             .map_err(|e| match e.kind() {
                 io::ErrorKind::NotFound => SpawnError::NotFound {
@@ -244,6 +254,15 @@ impl MpvProcess {
         }
     }
 
+    /// Wraps an already running child that stands in for mpv (tests).
+    #[cfg(test)]
+    pub(crate) fn from_child(child: Child) -> Self {
+        Self {
+            child,
+            socket_dir: None,
+        }
+    }
+
     pub fn id(&self) -> Option<u32> {
         self.child.id()
     }
@@ -257,14 +276,19 @@ impl MpvProcess {
         self.child.wait().await
     }
 
-    /// Kills (if still running) and reaps the child, then removes the
-    /// socket dir.
+    /// Kills the child (if still running), waits up to [`REAP_TIMEOUT`]
+    /// to reap it, and removes the socket dir either way.
     pub async fn kill(&mut self) {
         if let Err(error) = self.child.start_kill() {
             // Already exited (and possibly reaped) is the common case.
             tracing::debug!(%error, "kill mpv");
         }
-        let _ = self.child.wait().await;
+        if tokio::time::timeout(REAP_TIMEOUT, self.child.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(pid = ?self.id(), "killed mpv has not exited yet; not waiting for it");
+        }
         self.cleanup_dir();
     }
 
@@ -283,7 +307,7 @@ mod tests {
 
     #[test]
     fn argv_contents() {
-        let args = mpv_args(Path::new("/run/user/1000/coda-x/mpv.sock"));
+        let args = mpv_args(Path::new("/run/user/1000/coda-x/mpv.sock"), &[]);
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
@@ -298,11 +322,17 @@ mod tests {
                 "--input-ipc-server=/run/user/1000/coda-x/mpv.sock",
             ]
         );
+        let args = mpv_args(Path::new("/s/mpv.sock"), &["--ao=null"]);
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args[args.len() - 2..],
+            ["--ao=null", "--input-ipc-server=/s/mpv.sock"]
+        );
     }
 
     #[test]
     fn navidrome_env_is_not_inherited() {
-        let command = mpv_command(OsStr::new("mpv"), Path::new("/tmp/x/mpv.sock"));
+        let command = mpv_command(OsStr::new("mpv"), Path::new("/tmp/x/mpv.sock"), &[]);
         let envs: Vec<_> = command.as_std().get_envs().collect();
         for name in STRIPPED_ENV {
             assert!(
@@ -402,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_program_is_not_found() {
-        let err = MpvProcess::launch(OsStr::new("coda-test-no-such-mpv-binary"))
+        let err = MpvProcess::launch(OsStr::new("coda-test-no-such-mpv-binary"), &[])
             .await
             .unwrap_err();
         assert!(err.is_not_found(), "{err:?}");
@@ -419,7 +449,9 @@ mod tests {
         let program = dir.path().join("fake-mpv");
         std::fs::write(&program, "#!/bin/sh\nexit 127\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let err = MpvProcess::launch(program.as_os_str()).await.unwrap_err();
+        let err = MpvProcess::launch(program.as_os_str(), &[])
+            .await
+            .unwrap_err();
         assert!(err.is_not_found(), "{err:?}");
         assert!(err.to_string().contains("brew install mpv"), "{err}");
     }
@@ -427,7 +459,9 @@ mod tests {
     #[tokio::test]
     async fn program_that_exits_immediately_is_reported() {
         // `false` exists everywhere and exits at once without a socket.
-        let err = MpvProcess::launch(OsStr::new("false")).await.unwrap_err();
+        let err = MpvProcess::launch(OsStr::new("false"), &[])
+            .await
+            .unwrap_err();
         assert!(matches!(err, SpawnError::ExitedEarly(_)), "{err:?}");
     }
 }

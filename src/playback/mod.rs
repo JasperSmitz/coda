@@ -109,9 +109,16 @@ pub enum PlaybackEvent {
     Duration(Option<Duration>),
     Paused(bool),
     Volume(u8),
+    /// The backend refused `SetVolume(volume)`; its volume is unchanged by
+    /// that request. `reason` is user-presentable.
+    VolumeRejected {
+        volume: u8,
+        reason: String,
+    },
     /// A non-fatal backend problem worth showing to the user.
     Error(String),
-    /// The backend is gone (crashed, or its connection closed). Terminal.
+    /// The backend is gone (crashed, its connection closed, or it stopped
+    /// answering requests and was killed). Terminal.
     BackendExited(String),
 }
 

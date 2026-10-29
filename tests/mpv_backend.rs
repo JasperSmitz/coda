@@ -24,6 +24,23 @@ async fn backend() -> PlaybackHandle {
     mpv::spawn(MpvOptions::default()).await.expect("mpv starts")
 }
 
+/// A backend whose playback is timed by mpv's own clock (`--ao=null`), for
+/// tests that need a track to keep playing for as long as it lasts.
+///
+/// With a real device, mpv's `eof` can come seconds before the audio is
+/// heard: on macOS with Bluetooth headphones, CoreAudio rejects the mono
+/// fixtures' channel layout, mpv falls back to its `avfoundation` output,
+/// and that output takes about 4 s of 8 kHz audio up front. A 3 s fixture
+/// then ends 0.1 s after it starts, and a 10 s one after 6.4 s.
+async fn timed_backend() -> PlaybackHandle {
+    mpv::spawn(MpvOptions {
+        null_audio: true,
+        ..MpvOptions::default()
+    })
+    .await
+    .expect("mpv starts")
+}
+
 async fn next_event(handle: &mut PlaybackHandle) -> PlaybackEvent {
     timeout(STEP, handle.recv())
         .await
@@ -195,7 +212,8 @@ async fn pause_volume_and_seek_are_reflected_in_events() {
     let dir = tempfile::tempdir().unwrap();
     let wav = dir.path().join("long.wav");
     common::write_wav(&wav, 4000);
-    let mut handle = backend().await;
+    // The track must still be playing when the seeks arrive.
+    let mut handle = timed_backend().await;
     handle.send(load(1, &wav));
     // `Started` is mpv's file-loaded, so seeking works straight away. The
     // duration may arrive on either side of it; both must be seen.
@@ -601,7 +619,9 @@ async fn rapid_loads_end_on_the_last_requested_track() {
     let dir = tempfile::tempdir().unwrap();
     let names = ["r1", "r2", "r3", "r4", "r5"];
     let (mut player, _) = wav_queue(dir.path(), &names, 3000);
-    let mut handle = backend().await;
+    // r4 must outlast the quiet period below, or its own (legitimate) end
+    // advances the queue.
+    let mut handle = timed_backend().await;
     // Space and three `n` presses before any event is processed.
     let mut initial = player.toggle_pause();
     initial.extend(player.play_next());
@@ -768,9 +788,170 @@ async fn mixed_local_and_remote_queue_plays_through_in_order() {
 async fn nonexistent_program_is_not_found() {
     let err = mpv::spawn(MpvOptions {
         program: "/nonexistent/bin/mpv".into(),
+        ..MpvOptions::default()
     })
     .await
     .err()
     .expect("spawn fails");
     assert!(err.is_not_found(), "{err:?}");
+}
+
+// ----- reply watchdog ------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn stopped_mpv_is_reported_as_not_responding_and_killed() {
+    // SIGSTOP leaves mpv alive with its socket open, but it answers nothing.
+    let reply_timeout = Duration::from_secs(1);
+    let mut handle = mpv::spawn(MpvOptions {
+        reply_timeout,
+        ..MpvOptions::default()
+    })
+    .await
+    .expect("mpv starts");
+    let pid = handle.pid().unwrap();
+    let dir = ipc_dir(pid);
+    // Startup settled: its requests were answered.
+    wait_for(&mut handle, |e| matches!(e, PlaybackEvent::Volume(_))).await;
+    std::process::Command::new("kill")
+        .args(["-STOP", &pid.to_string()])
+        .status()
+        .unwrap();
+    let sent = tokio::time::Instant::now();
+    handle.send(PlaybackCommand::SetPause(true));
+    let (event, _) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::BackendExited(_))
+    })
+    .await;
+    let elapsed = sent.elapsed();
+    assert_eq!(
+        event,
+        PlaybackEvent::BackendExited("mpv stopped responding".into())
+    );
+    assert!(elapsed >= reply_timeout, "{elapsed:?}");
+    assert!(elapsed < reply_timeout * 3, "{elapsed:?}");
+    assert!(!pid_alive(pid), "hung mpv was not killed");
+    assert!(!dir.exists(), "socket dir not removed");
+    assert!(timeout(STEP, handle.recv()).await.unwrap().is_none());
+
+    // The player treats it like any crashed backend.
+    let mut player = Player::new();
+    player.enqueue(Track::local("/m/a.wav".into(), TrackMetadata::default()));
+    player.handle_event(event);
+    assert_eq!(player.status(), PlaybackStatus::Unavailable);
+    assert_eq!(player.unavailable_reason(), Some("mpv stopped responding"));
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn stalled_stream_does_not_trip_the_watchdog() {
+    // A server that accepts connections and never sends a byte: mpv keeps
+    // opening the stream, but still answers every request at once.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let client = navidrome::Client::new(
+        navidrome::client::parse_base_url(&format!("http://{address}/music")).unwrap(),
+        "u".into(),
+        navidrome::Password::new("p".into()),
+    )
+    .unwrap();
+    let reply_timeout = Duration::from_millis(1000);
+    let mut handle = mpv::spawn(MpvOptions {
+        reply_timeout,
+        ..MpvOptions::default()
+    })
+    .await
+    .expect("mpv starts");
+    let pid = handle.pid().unwrap();
+    handle.send(stream_load(1, &client, "slow"));
+    // Keep requests flowing for several timeouts while the open hangs.
+    let until = tokio::time::Instant::now() + reply_timeout * 4;
+    let mut volume = 50;
+    while tokio::time::Instant::now() < until {
+        handle.send(PlaybackCommand::SetVolume(volume));
+        volume = if volume == 50 { 60 } else { 50 };
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(200), handle.recv()).await
+        {
+            assert!(
+                !matches!(
+                    event,
+                    PlaybackEvent::BackendExited(_)
+                        | PlaybackEvent::TrackEnded { .. }
+                        | PlaybackEvent::Started { .. }
+                ),
+                "{event:?}"
+            );
+        }
+    }
+    assert!(pid_alive(pid));
+    handle.send(PlaybackCommand::Stop);
+    let (ended, _) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    assert_eq!(
+        ended,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(1),
+            reason: EndReason::Stopped
+        }
+    );
+    assert_eq!(handle.shutdown(STEP).await, ShutdownOutcome::Clean);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn draining_the_audio_buffer_at_the_end_does_not_trip_the_watchdog() {
+    // After the last entry's `end-file eof`, mpv blocks its core until the
+    // buffered audio has played: here, 3 s of a 3 s file taken up front.
+    // Requests sent meanwhile wait for that, which must stay within the
+    // (default) reply timeout.
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("buffered.wav");
+    common::write_wav(&wav, 3000);
+    let options = MpvOptions {
+        null_audio: true,
+        null_audio_buffer: Some(3),
+        ..MpvOptions::default()
+    };
+    assert_eq!(options.reply_timeout, Duration::from_secs(10));
+    let mut handle = mpv::spawn(options).await.expect("mpv starts");
+    handle.send(load(1, &wav));
+    let (ended, _) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    assert_eq!(
+        ended,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(1),
+            reason: EndReason::Eof
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let sent = tokio::time::Instant::now();
+    handle.send(PlaybackCommand::SetVolume(50));
+    handle.send(load(2, &wav));
+    let (_, seen) = wait_for(&mut handle, |e| {
+        *e == PlaybackEvent::Started { load: LoadId(2) }
+    })
+    .await;
+    let waited = sent.elapsed();
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::BackendExited(_))),
+        "{seen:?}"
+    );
+    // The stall really happened (mpv answered only after draining).
+    assert!(waited >= Duration::from_millis(1500), "{waited:?}");
+    handle.shutdown(STEP).await;
 }

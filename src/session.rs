@@ -63,7 +63,7 @@ impl Session {
     pub fn from_player(player: &Player) -> Self {
         let queue = player.queue();
         Self {
-            volume: player.volume(),
+            volume: player.preferred_volume(),
             repeat: player.repeat(),
             current: queue.current().and_then(|id| queue.position(id)),
             tracks: queue.entries().iter().map(|e| e.track.clone()).collect(),

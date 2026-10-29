@@ -86,3 +86,9 @@ Each entry should state:
 - **Root cause:** the start was stored as an `Instant` and converted to wall-clock time at send time; `Instant` does not advance during system sleep on macOS or Linux.
 - **Rule:** timestamps destined for external systems are captured as `SystemTime` at the event and carried as data; use `Instant` only for local durations and timeouts.
 - **Where verified:** M3 slice 2 review; `Listen::new(load, song_id, SystemTime)`.
+
+### mpv's `end-file eof` is not "the audio finished"
+- **Context / symptom:** two real-mpv tests failed on one Mac only, with "unexpected advance" and missing positions; in M3 the watchdog's assumption that "mpv replies at once" turned out to be false right after EOF.
+- **Root cause:** mpv reports `end-file eof` when decoding ends, which can be early by up to the audio output's buffer: about 0.3 s for CD-quality audio on CoreAudio, and about 4 s for 8 kHz mono WAVs that CoreAudio rejects and avfoundation plays instead. On the last playlist entry mpv then blocks its core while that buffer drains, so replies to the next commands are delayed by up to the same amount. The buffered audio still plays out, so tracks are not cut off.
+- **Rule:** run timing-sensitive real-mpv tests with `--ao=null`; size reply timeouts to cover an audio-buffer drain; never treat EOF as a wall-clock signal.
+- **Where verified:** M3 slice 3 root-cause probes (mpv 0.41, `--msg-level=all=v`); reviewer IPC probes; `pause_volume_and_seek_are_reflected_in_events`, `rapid_loads_end_on_the_last_requested_track`.

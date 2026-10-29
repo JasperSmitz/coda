@@ -8,7 +8,7 @@ pub mod state;
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
@@ -19,34 +19,58 @@ use tokio::time::MissedTickBehavior;
 pub use process::SpawnError;
 
 use self::process::{MpvProcess, QUIT_GRACE};
-use self::state::{MpvState, OutgoingRequest, Output, POSITION_INTERVAL};
+use self::state::{MpvState, OutgoingRequest, Output, POSITION_INTERVAL, STOPPED_RESPONDING};
 use crate::playback::{
     EVENT_CHANNEL_CAPACITY, PlaybackCommand, PlaybackEvent, PlaybackHandle, PlaybackTarget,
     ShutdownOutcome,
 };
 
+/// Internal backend parameters, public only for Coda's own tests. None of
+/// them is user configuration; the app always uses the default.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MpvOptions {
-    /// Program to execute. Internal: tests point it at a nonexistent
-    /// binary. Not user configuration.
+    /// Program to execute. Tests point it at a nonexistent binary.
     pub program: OsString,
+    /// How long a request may go without a reply before mpv is considered
+    /// hung and killed. Tests shorten it.
+    pub reply_timeout: Duration,
+    /// Run mpv with `--ao=null`: playback is timed by mpv's clock instead
+    /// of an audio device. Tests whose timing must not depend on the
+    /// device's buffering use it.
+    pub null_audio: bool,
+    /// With `null_audio`, `--ao-null-buffer=<seconds>`: how much audio the
+    /// null output takes up front, like a real device's buffer.
+    pub null_audio_buffer: Option<u32>,
 }
 
 impl Default for MpvOptions {
     fn default() -> Self {
         Self {
             program: process::DEFAULT_PROGRAM.into(),
+            reply_timeout: state::REPLY_TIMEOUT,
+            null_audio: false,
+            null_audio_buffer: None,
         }
     }
 }
 
 /// Spawns mpv, connects to it and starts the driver task.
 pub async fn spawn(options: MpvOptions) -> Result<PlaybackHandle, SpawnError> {
-    let (process, stream) = MpvProcess::launch(&options.program).await?;
+    let mut extra_args = Vec::new();
+    if options.null_audio {
+        extra_args.push("--ao=null".to_owned());
+        if let Some(seconds) = options.null_audio_buffer {
+            extra_args.push(format!("--ao-null-buffer={seconds}"));
+        }
+    }
+    let extra_args: Vec<&str> = extra_args.iter().map(String::as_str).collect();
+    let (process, stream) = MpvProcess::launch(&options.program, &extra_args).await?;
     let pid = process.id();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-    let task = tokio::spawn(run(process, stream, command_rx, event_tx));
+    let state = MpvState::with_reply_timeout(options.reply_timeout);
+    let task = tokio::spawn(run(process, stream, state, command_rx, event_tx));
     Ok(PlaybackHandle::new(command_tx, event_rx, task, pid))
 }
 
@@ -134,21 +158,31 @@ async fn write_loop(
     }
 }
 
+/// The driver loop. Every iteration first checks the reply watchdog; the
+/// tick guarantees an iteration at least every [`POSITION_INTERVAL`] while
+/// the loop waits, which is the cadence the watchdog relies on to tell
+/// listening time from time spent blocked elsewhere.
 async fn run(
     mut process: MpvProcess,
     stream: UnixStream,
+    mut state: MpvState,
     mut commands: mpsc::UnboundedReceiver<PlaybackCommand>,
     events: mpsc::Sender<PlaybackEvent>,
 ) -> ShutdownOutcome {
     let (read, write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let mut writer = Writer::spawn(write);
-    let mut state = MpvState::new();
     let mut tick = tokio::time::interval(POSITION_INTERVAL);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let mut pending = state.startup();
     let exit = loop {
+        let now = Instant::now();
+        if let Some((request_id, waited)) = state.overdue_reply(now) {
+            tracing::error!(request_id, ?waited, "mpv did not reply in time");
+            break Exit::BackendGone(STOPPED_RESPONDING.to_owned());
+        }
+        state.requests_sent(&pending.requests, now);
         writer.send(&pending.requests);
         if !deliver(&events, std::mem::take(&mut pending.events)).await {
             break Exit::Graceful;
@@ -340,5 +374,160 @@ mod tests {
         let out = read_all(peer).await;
         assert_eq!(out, "{\"command\":[\"quit\"]}\n");
         drop(lines);
+    }
+
+    /// `true` if a process with this pid exists (zombies included).
+    fn pid_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run kill")
+            .success()
+    }
+
+    struct FakeMpv {
+        commands: mpsc::UnboundedSender<PlaybackCommand>,
+        events: mpsc::Receiver<PlaybackEvent>,
+        task: tokio::task::JoinHandle<ShutdownOutcome>,
+        pid: u32,
+    }
+
+    /// Runs the driver against a stand-in for mpv: a `sleep` child as the
+    /// process, and `peer` (returned to the test) as mpv's end of the IPC
+    /// connection.
+    fn fake_mpv(reply_timeout: Duration) -> (FakeMpv, UnixStream) {
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().unwrap();
+        let (ours, peer) = UnixStream::pair().unwrap();
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let (event_tx, events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let task = tokio::spawn(run(
+            MpvProcess::from_child(child),
+            ours,
+            MpvState::with_reply_timeout(reply_timeout),
+            command_rx,
+            event_tx,
+        ));
+        let fake = FakeMpv {
+            commands,
+            events,
+            task,
+            pid,
+        };
+        (fake, peer)
+    }
+
+    #[tokio::test]
+    async fn mpv_that_never_replies_is_reported_and_killed() {
+        let timeout = Duration::from_millis(400);
+        let started = Instant::now();
+        // The peer stays open and never answers (or reads) anything.
+        let (mut fake, _peer) = fake_mpv(timeout);
+        assert!(pid_exists(fake.pid));
+        let event = tokio::time::timeout(Duration::from_secs(5), fake.events.recv())
+            .await
+            .expect("reported in time");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            event,
+            Some(PlaybackEvent::BackendExited(STOPPED_RESPONDING.into()))
+        );
+        assert!(elapsed >= timeout, "{elapsed:?}");
+        // Generous: a loaded CI machine may schedule the checks late.
+        assert!(elapsed < timeout + Duration::from_secs(2), "{elapsed:?}");
+        assert_eq!(fake.task.await.unwrap(), ShutdownOutcome::AlreadyExited);
+        // Killed and reaped.
+        assert!(!pid_exists(fake.pid), "stand-in mpv still exists");
+        assert!(fake.commands.send(PlaybackCommand::Stop).is_err());
+    }
+
+    #[tokio::test]
+    async fn mpv_that_stops_replying_later_is_reported() {
+        // Startup is answered; then one command goes unanswered.
+        let timeout = Duration::from_millis(400);
+        let (mut fake, peer) = fake_mpv(timeout);
+        let (read, mut write) = peer.into_split();
+        let mut lines = BufReader::new(read).lines();
+        for _ in state::OBSERVED_PROPERTIES {
+            let line = lines.next_line().await.unwrap().unwrap();
+            let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["request_id"]
+                .as_u64()
+                .unwrap();
+            let reply = format!("{{\"request_id\":{id},\"error\":\"success\"}}\n");
+            write.write_all(reply.as_bytes()).await.unwrap();
+        }
+        // Answered startup does not trip the watchdog.
+        let quiet = tokio::time::timeout(timeout * 3, fake.events.recv()).await;
+        assert!(quiet.is_err(), "unexpected {quiet:?}");
+        let sent = Instant::now();
+        fake.commands.send(PlaybackCommand::SetPause(true)).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), fake.events.recv())
+            .await
+            .expect("reported in time");
+        assert_eq!(
+            event,
+            Some(PlaybackEvent::BackendExited(STOPPED_RESPONDING.into()))
+        );
+        assert!(sent.elapsed() >= timeout);
+        assert_eq!(fake.task.await.unwrap(), ShutdownOutcome::AlreadyExited);
+        assert!(!pid_exists(fake.pid));
+    }
+
+    #[tokio::test]
+    async fn responsive_mpv_with_a_stalled_consumer_is_not_killed() {
+        // A fake mpv answers every request and also floods property
+        // changes. Nobody reads the events for well past the timeout, so
+        // the driver blocks delivering them and stops reading from mpv;
+        // that time must not count as mpv failing to reply.
+        let timeout = Duration::from_millis(400);
+        let (mut fake, peer) = fake_mpv(timeout);
+        let responder = tokio::spawn(async move {
+            let (read, mut write) = peer.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["request_id"]
+                    .as_u64()
+                    .unwrap();
+                let mut out = format!("{{\"request_id\":{id},\"error\":\"success\"}}\n");
+                for _ in 0..4 {
+                    out.push_str(
+                        "{\"event\":\"property-change\",\"id\":3,\"name\":\"pause\",\"data\":true}\n",
+                    );
+                }
+                if write.write_all(out.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        for i in 0..EVENT_CHANNEL_CAPACITY {
+            fake.commands
+                .send(PlaybackCommand::SetPause(i % 2 == 0))
+                .unwrap();
+        }
+        tokio::time::sleep(timeout * 4).await;
+        // Drain everything: no BackendExited among it.
+        fake.commands
+            .send(PlaybackCommand::SetPause(false))
+            .unwrap();
+        let mut drained = 0;
+        while let Ok(Some(event)) = tokio::time::timeout(timeout * 2, fake.events.recv()).await {
+            assert!(
+                !matches!(event, PlaybackEvent::BackendExited(_)),
+                "{event:?} after {drained} events"
+            );
+            drained += 1;
+        }
+        assert!(drained > EVENT_CHANNEL_CAPACITY, "{drained}");
+        assert!(pid_exists(fake.pid));
+        drop(fake.events);
+        drop(fake.commands);
+        // Graceful path; `sleep` ignores `quit`, so it is killed.
+        assert_eq!(fake.task.await.unwrap(), ShutdownOutcome::Killed);
+        responder.abort();
     }
 }

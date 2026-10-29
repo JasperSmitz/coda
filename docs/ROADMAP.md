@@ -30,13 +30,14 @@ Acceptance:
 - Network errors, credentials and stream failures are handled safely.
 - Distinguish sources clearly without unnecessary catalog deduplication.
 
-## M3 — Quality and convenience (in progress)
+## M3 — Quality and convenience (completed, reviewed)
 Brief: `docs/plans/m3-quality.md`. Chosen scope, in slices:
 1. Queue controls (move, clear, shuffle upcoming), repeat modes, session persistence. **(completed, reviewed)**
 2. Local search and Navidrome scrobbling. **(completed, reviewed)**
-3. Playback robustness: hung-mpv watchdog, timing-robust mpv tests, structured volume rejection. **(in progress)**
+3. Playback robustness: hung-mpv watchdog, timing-robust mpv tests, structured volume rejection. **(completed, reviewed)**
 
 Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlists, MPRIS.
 
 ## M4 — HEART integration (proposed)
+Recommendation (not approved for implementation): `docs/plans/m4-heart-integration.md`.
 Define a small command/state API that HEART can call while Coda remains independently operable. Choose library embedding or a process protocol based on real needs.

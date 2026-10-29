@@ -133,10 +133,16 @@ pub struct Player {
     /// from a stale value. mpv coalesces property changes (a burst of sets
     /// yields one echo of the final value; a burst ending on the previously
     /// reported value yields none), so its last echo is always the true
-    /// value. Known gap: a late echo of an earlier request equal to the
-    /// pending one clears it early; a following stale echo can then show
-    /// briefly until mpv's final echo arrives.
+    /// value. A rejection of the pending request drops it, falling back to
+    /// the last reported value. Known gap: a late echo (or a rejection) of
+    /// an earlier request equal to the pending one clears it early; a
+    /// following stale echo can then show briefly until mpv's final echo
+    /// arrives.
     requested_volume: Option<u8>,
+    /// The volume to save: the user's latest request (or the restored
+    /// value), or a change mpv reported on its own. A rejected request
+    /// changes what is shown, not this.
+    preferred_volume: u8,
     repeat: RepeatMode,
     /// Loads that failed or ended suspiciously since the last proven
     /// playback or user request. Under `All` it stops an endless loop over
@@ -167,6 +173,7 @@ impl Player {
             duration: None,
             volume: DEFAULT_VOLUME,
             requested_volume: None,
+            preferred_volume: DEFAULT_VOLUME,
             repeat: RepeatMode::Off,
             failures_in_a_row: 0,
             settings_revision: 0,
@@ -211,12 +218,19 @@ impl Player {
         self.requested_volume.unwrap_or(self.volume)
     }
 
+    /// The volume worth saving for the next session. It equals
+    /// [`Self::volume`] except after a rejected request, where the display
+    /// falls back to mpv's value but the user's preference is kept.
+    pub fn preferred_volume(&self) -> u8 {
+        self.preferred_volume
+    }
+
     pub fn repeat(&self) -> RepeatMode {
         self.repeat
     }
 
     /// Increases whenever something worth saving changes: the queue, its
-    /// current entry, the effective volume or the repeat mode.
+    /// current entry, the volume or the repeat mode.
     pub fn revision(&self) -> u64 {
         self.queue.revision() + self.settings_revision
     }
@@ -373,6 +387,7 @@ impl Player {
         // last reported) stays pending; that is harmless because it equals
         // mpv's actual value, and the next press replaces it.
         self.requested_volume = Some(volume);
+        self.preferred_volume = volume;
         self.settings_revision += 1;
         vec![PlayerCommand::SetVolume(volume)]
     }
@@ -438,6 +453,7 @@ impl Player {
         }
         self.set_repeat(repeat);
         let volume = volume.min(MAX_VOLUME);
+        self.preferred_volume = volume;
         if self.unavailable.is_some() || volume == self.volume() {
             return Vec::new();
         }
@@ -565,12 +581,35 @@ impl Player {
                 // Always recorded; only the echo of the pending request
                 // clears it. With nothing pending, a change is adopted.
                 let before = self.volume();
+                let confirmed_before = self.volume;
                 self.volume = volume.min(MAX_VOLUME);
                 if self.requested_volume == Some(self.volume) {
                     self.requested_volume = None;
                 }
+                // A change with nothing pending was not asked for (or is
+                // the final word on a burst): it becomes the preference. A
+                // repeated report of the same value is not a change, so it
+                // never overrides a preference kept after a rejection.
+                if self.requested_volume.is_none() && self.volume != confirmed_before {
+                    self.preferred_volume = self.volume;
+                }
                 if self.volume() != before {
                     self.settings_revision += 1;
+                }
+                Vec::new()
+            }
+            PlaybackEvent::VolumeRejected { volume, reason } => {
+                tracing::warn!(volume, %reason, "volume change rejected");
+                self.messages
+                    .push(format!("Could not set volume: {reason}"));
+                // Only a rejection of the pending request drops it: a later
+                // request of a burst is still on its way. mpv applies sets in
+                // order and echoes only its final value, so with nothing
+                // pending any later echo is adopted as usual. The display
+                // falls back; the saved preference is kept (as on
+                // `BackendExited`), so a rejected restore never saves 100.
+                if self.requested_volume == Some(volume) {
+                    self.requested_volume = None;
                 }
                 Vec::new()
             }
@@ -1068,6 +1107,97 @@ mod tests {
             p.handle_event(PlaybackEvent::Volume(*v));
         }
         assert_eq!(p.volume(), 95);
+    }
+
+    fn rejected(volume: u8) -> PlaybackEvent {
+        PlaybackEvent::VolumeRejected {
+            volume,
+            reason: "property unavailable".into(),
+        }
+    }
+
+    #[test]
+    fn rejected_volume_falls_back_to_the_last_reported_value() {
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        p.handle_event(PlaybackEvent::Volume(50));
+        p.take_messages();
+        assert_eq!(p.preferred_volume(), 50, "mpv's own change is adopted");
+        assert_eq!(volume_presses(&mut p, "+"), [55]);
+        assert_eq!(p.volume(), 55);
+        let revision = p.revision();
+        assert!(p.handle_event(rejected(55)).is_empty());
+        assert_eq!(p.volume(), 50, "the requested value is no longer shown");
+        assert_eq!(
+            p.take_messages(),
+            ["Could not set volume: property unavailable"]
+        );
+        // The user's preference is what gets saved, and it did not change.
+        assert_eq!(p.preferred_volume(), 55);
+        assert_eq!(p.revision(), revision);
+        // A repeated report of mpv's value does not override it.
+        p.handle_event(PlaybackEvent::Volume(50));
+        assert_eq!(p.preferred_volume(), 55);
+        // The next press steps from the shown value.
+        assert_eq!(volume_presses(&mut p, "+"), [55]);
+        p.handle_event(PlaybackEvent::Volume(55));
+        assert_eq!(p.volume(), 55);
+        // Nothing pending afterwards: changes are adopted.
+        p.handle_event(PlaybackEvent::Volume(30));
+        assert_eq!(p.volume(), 30);
+        assert_eq!(p.preferred_volume(), 30);
+    }
+
+    #[test]
+    fn rejecting_an_earlier_request_of_a_burst_keeps_the_pending_one() {
+        let (mut p, ids) = player_with(&["A"]);
+        start(&mut p, ids[0]);
+        assert_eq!(volume_presses(&mut p, "---"), [95, 90, 85]);
+        p.handle_event(rejected(90));
+        assert_eq!(p.volume(), 85, "85 is still on its way");
+        assert_eq!(p.take_messages().len(), 1);
+        p.handle_event(PlaybackEvent::Volume(95));
+        assert_eq!(p.volume(), 85, "stale echo does not show");
+        p.handle_event(PlaybackEvent::Volume(85));
+        assert_eq!(p.volume(), 85);
+
+        // The last request of a burst rejected: mpv's echo of the earlier
+        // successful request (it may arrive on either side of the
+        // rejection) ends up shown.
+        for echo_first in [false, true] {
+            let (mut p, ids) = player_with(&["A"]);
+            start(&mut p, ids[0]);
+            assert_eq!(volume_presses(&mut p, "--"), [95, 90]);
+            if echo_first {
+                p.handle_event(PlaybackEvent::Volume(95));
+                assert_eq!(p.volume(), 90);
+            }
+            p.handle_event(rejected(90));
+            if !echo_first {
+                assert_eq!(p.volume(), 100, "last reported value until the echo");
+                p.handle_event(PlaybackEvent::Volume(95));
+            }
+            assert_eq!(p.volume(), 95, "echo_first={echo_first}");
+        }
+    }
+
+    #[test]
+    fn rejected_restored_volume_falls_back() {
+        let mut p = Player::new();
+        let commands = p.restore(Vec::new(), None, RepeatMode::Off, 40);
+        assert_eq!(commands, [PlayerCommand::SetVolume(40)]);
+        assert_eq!(p.volume(), 40);
+        // mpv's startup report may come on either side of the rejection.
+        p.handle_event(PlaybackEvent::Volume(DEFAULT_VOLUME));
+        let revision = p.revision();
+        p.handle_event(rejected(40));
+        assert_eq!(p.volume(), DEFAULT_VOLUME, "shows what mpv really has");
+        p.handle_event(PlaybackEvent::Volume(DEFAULT_VOLUME));
+        assert_eq!(p.volume(), DEFAULT_VOLUME);
+        // The saved preference stays 40, and no save is triggered.
+        assert_eq!(p.preferred_volume(), 40);
+        assert_eq!(p.revision(), revision);
+        assert_eq!(crate::session::Session::from_player(&p).volume, 40);
     }
 
     #[test]
