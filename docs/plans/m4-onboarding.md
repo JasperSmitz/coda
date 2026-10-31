@@ -80,20 +80,75 @@
 - **Mock feature:** a `mock-secret-store` cargo feature exists only for PTY smoke runs. Because `--all-features` enables it, clippy also runs without features.
 - **Ready screen:** an extra confirmation screen after "Connected" shows the config path and the store before anything is written.
 
-## Slice 2 — connect, edit and disconnect from within the app
-- Pressing `2` without Navidrome configured offers "Connect to Navidrome…" (the same form as slice 1). A settings entry, with the key chosen with the owner in M6 and a temporary key until then, lets the user edit the URL, username or password, or disconnect.
-- Connecting or editing at runtime replaces the `navidrome::Client` in the running app: the browse cache is cleared, in-flight responses from the old client are ignored, and the scrobbler is restarted. Queued remote tracks keep their song ids and resolve against the new client.
-- Disconnecting removes the keychain entry and the `[navidrome]` section, and the remote tracks in the queue fail like any unresolved remote entry.
-- Only settings written by Coda (`password_keychain`) can be edited in the app. A hand-configured `password`/`password_command`, or `CODA_NAVIDROME_*` variables, show "configured outside Coda" read-only.
-- **Redo setup** (owner request, 2026-10-31):
-  - `coda --setup` reruns the setup flow, prefilled from the current config (password field empty). Finishing replaces the old settings and keychain entry; quitting changes nothing.
-  - In the app, the settings entry offers the same.
-  - Settings configured outside Coda (env vars, `password`/`password_command`) are shown, not overwritten without confirmation.
-  - This also replaces the clumsy "edit the config by hand" remedy for a missing keychain entry.
-- A detailed brief follows after slice 1, based on what slice 1 settles.
+## Slice 2 — redo setup, and connect, edit and disconnect from within the app
+Approved by the owner 2026-10-31. Delivered as two parts, each reviewed and committed.
+
+### Shared rules
+- **Who owns a setting.** Settings written by Coda (`password_keychain = true`) can be changed by Coda. Settings from `CODA_NAVIDROME_*` or `CODA_MUSIC_DIR`, a CLI music folder, or a hand-written `password`/`password_command` are "set outside Coda". They are shown, with where they come from (the variable or key name, never a value), and are never changed silently.
+- **Changing the account.** When the URL or username changes, or Navidrome is removed, the old keychain entry (the one Coda wrote) is deleted best-effort **after** the new config is written. On failure only the kind is logged. The entry for an unchanged account is overwritten in place.
+- **Preserving other settings.** The config writer keeps every setting it does not own: `scrobble`, and `music_dir` when only Navidrome changes (and the reverse). Atomic 0600 writes and the backup rules from slice 1 still apply.
+- **At least one source.** Removing the last source (no folder and no Navidrome) is refused with a short message; `coda --setup` is the way to start over.
+- **Redaction.** Everything from slice 1 still applies: no password, account or host in logs or error text. The URL and username may appear on screen.
+
+### Part A — `coda --setup`
+- `coda --setup` runs the slice 1 flow even when sources are configured.
+  - The folder, URL and username are prefilled from the config file; the password starts empty.
+  - Settings set outside Coda are explained on the screen they affect (e.g. "CODA_NAVIDROME_URL is set and overrides this").
+  - Hand-written `password`/`password_command`: the Ready screen states that saving replaces it with the keychain (the existing backup rule applies).
+- Finishing writes the config, updates the keychain (shared rules) and continues into the player, as on first run. Leaving changes nothing (exit 0).
+- **Redo-setup choices.** Skipping Navidrome removes `[navidrome]` and Coda's keychain entry. Skipping the folder removes `music_dir`. Skipping both is refused ("Keep at least one source"), unlike first run; on first run, skip/skip still exits.
+- `--setup` must not need a working password: it never reads the keychain or runs `password_command`. A config file that does not parse, or has bad permissions, still fails with its error (setup does not repair broken files). A partial `[navidrome]` (e.g. a missing username) is allowed and prefilled.
+- `--setup` without a terminal on stdin and stdout is a usage error (exit 2).
+- The "keychain entry not found" error (and any other keychain read failure) now says: run `coda --setup`.
+
+### Part B — settings inside the app
+- `,` opens a Settings overlay. `,` is free today; the final key is decided in M6. It is listed in help.
+- The overlay shows:
+  - **Music folder:** path or "none", with an outside-Coda note where relevant.
+  - **Navidrome:** "Connected as user @ host", "Not configured", "Configured outside Coda (…)", or the last connection error.
+- Actions (developer picks the exact keys; hints visible):
+  - **Connect** (when not configured) and **Edit** (Coda-owned only): the slice 1 Navidrome form (URL → username → password), prefilled except for the password, verified with `ping`, then saved (keychain + config) on blocking threads. Inline errors and retry work as in slice 1.
+  - **Disconnect** (Coda-owned only): press twice to confirm, like `C`. It removes `[navidrome]` and the keychain entry; refused if it is the last source.
+  - Changing the music folder in the app is **out of scope**; `coda --setup` covers it.
+- **Pressing `2` without Navidrome** offers "Press Enter to connect" and opens the same form, instead of only showing a message.
+- **Hot swap.** A successful connect or edit replaces the client in the running app without restarting mpv or stopping playback.
+  - **Browse state:** the browse state and cache are reset, and responses still in flight from the old client are ignored. Use a client generation and check it the way stale fetches are handled today.
+  - **Ping:** a new ping runs.
+  - **Scrobbler:** the old scrobbler is stopped and a new one started (if `scrobble` is on). A listen in progress for the old server is dropped, not sent to the new one.
+  - **Queue:** remote tracks keep their song ids and resolve against the new client from their next load. The track playing now continues on its existing stream.
+  - **Disconnect:** the client is removed, and queued remote tracks then fail like any unresolved remote entry (existing path; the queue advances to playable entries).
+- The state machine stays pure. Settings reuse the onboarding form state and its rendering rather than duplicating it; the developer may extract shared pieces. The event loop performs the requests, the same pattern as fetches and the saver, and never blocks on keychain or file I/O.
+
+### Tests
+- **Part A:**
+  - Prefill from config.
+  - Env/hand-written notes.
+  - Skip folder or Navidrome removes it; skip both is refused on redo but exits on first run.
+  - An account change deletes the old entry only after a successful write; an unchanged account is overwritten.
+  - Other settings are preserved.
+  - Config with `password_command` → keychain with a backup.
+  - `--setup` without a TTY exits 2.
+  - The new remedy text appears and contains no account.
+- **Part B:**
+  - Overlay states for each ownership case.
+  - Connect, edit and disconnect flows through the mock store.
+  - Disconnect of the last source refused.
+  - Hot swap:
+    - a stale response from the old client is ignored after the swap;
+    - the browser is reset;
+    - the scrobbler is replaced and an in-progress listen dropped;
+    - a queued remote track resolves with the new client;
+    - after disconnect, a remote track fails and the queue advances.
+  - Render tests for the overlay and the `2` prompt.
+  - wiremock for ping success and auth failure.
+- **PTY smoke runs (mock store, fake Subsonic, temp dirs):**
+  - `--setup` changing the account;
+  - in-app connect while a local track plays, where playback continues and then remote browsing works;
+  - in-app disconnect.
+- **Standard checks:** fmt, clippy with and without `--all-features`, `test --all-targets`, build, and the ignored mpv tests. Linux container: clippy and tests.
 
 ## Out of scope
-Multiple servers, OpenSubsonic API keys, editing the local music folder in the app (can come with slice 2 if cheap), localisation.
+Multiple servers, OpenSubsonic API keys, changing the local music folder inside the app (`coda --setup` covers it), localisation.
 
 ## Risks
 - The terminal lifecycle running twice (setup, then player), which is covered by the same discipline and a PTY smoke run.
