@@ -43,7 +43,8 @@ Brief: `docs/plans/m4-onboarding.md`. Decision: `docs/decisions/0004-keychain-pa
 1. First-run setup in the TUI: optional local music folder, optional Navidrome connection (URL → username → password, verified before saving), password stored in the OS keychain. Skipping both exits and asks again next launch. **(completed, reviewed)**
 2. Connect, edit or disconnect Navidrome from within the app, and redo setup (`coda --setup` or from the app). Part A, `coda --setup`: **(completed, reviewed)**. Part B, in-app settings (`,`): **(completed, reviewed)**.
 
-## M5 — Library home and playlists (proposed)
+## M5 — Library home and playlists (in progress)
+Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (read-only), album list with sort and paging, `A` play next. 2. Local home with tag-based artists/albums and `.m3u` playlists.
 - A home menu per source: Playlists, Artists, Albums (Songs only if it proves useful; search covers finding songs).
 - Navidrome playlists, read-only first (list, open, play, enqueue); creating, editing and saving the queue as a playlist in a later slice.
 - All-albums list (`getAlbumList2`, paged) with useful sort orders.
