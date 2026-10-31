@@ -81,8 +81,17 @@
 - Artists and albums are derived from tags. This needs an album-artist tag in `TrackMetadata` (fallback: artist) and grouping by (album artist, album), with track and disc order.
 - `.m3u`/`.m3u8` files found during the scan are local playlists. Relative paths resolve against the playlist's folder; entries outside the music folder, URLs and missing files are skipped and counted.
 
+## Slice 3 — Navidrome playlist editing (approved by owner 2026-11-01; briefed in detail after slice 2)
+- **Save the queue as a new playlist** (`createPlaylist`, name typed in a single-line input).
+- **Add to playlist:** add the selected song, album or playlist to a playlist picked from a short list, with "New playlist…" at the top. Uses `updatePlaylist` `songIdToAdd`, in order.
+- **Remove** a song from a playlist, with confirmation (`songIndexToRemove`).
+- **Reorder** songs with `J`/`K`, as in the queue. Subsonic has no move call, so this rewrites the playlist; define how to do that safely.
+- **Rename and delete** a playlist; delete asks for confirmation.
+- After every change, refresh the affected views. Show errors inline. Never let a partly applied change look applied.
+- Navidrome playlists only; local `.m3u` editing is not included.
+
 ## Later (not in M5 unless approved)
-Creating and editing playlists (Navidrome `createPlaylist`/`updatePlaylist`; "save queue as playlist"), starring/favourites, genre and year browsing.
+Editing local `.m3u` playlists, starring/favourites, genre and year browsing.
 
 ## Risks
 - Paging plus stale responses plus generations make the browser state machine bigger. Keep paging as one well-tested piece rather than special cases in views.
