@@ -38,6 +38,24 @@ Brief: `docs/plans/m3-quality.md`. Chosen scope, in slices:
 
 Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlists, MPRIS.
 
-## M4 — HEART integration (proposed)
-Recommendation (not approved for implementation): `docs/plans/m4-heart-integration.md`.
-Define a small command/state API that HEART can call while Coda remains independently operable. Choose library embedding or a process protocol based on real needs.
+## M4 — Onboarding (in progress)
+Brief: `docs/plans/m4-onboarding.md`. Decision: `docs/decisions/0004-keychain-password-storage.md`.
+1. First-run setup in the TUI: optional local music folder, optional Navidrome connection (URL → username → password, verified before saving), password stored in the OS keychain. Skipping both exits and asks again next launch.
+2. Connect, edit or disconnect Navidrome from within the app.
+
+## M5 — Library home and playlists (proposed)
+- A home menu per source: Playlists, Artists, Albums (Songs only if it proves useful; search covers finding songs).
+- Navidrome playlists, read-only first (list, open, play, enqueue); creating, editing and saving the queue as a playlist in a later slice.
+- All-albums list (`getAlbumList2`, paged) with useful sort orders.
+- Local `.m3u` playlists may follow the same layout.
+
+## M6 — Keybindings and interaction (proposed)
+- Rework keys that feel clunky, based on the owner's notes; e.g. `a` appends to the queue and `A` inserts as next.
+- Configurable keybindings only once the defaults are settled.
+
+## M7 — Visual extras (proposed)
+- Cover art: real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), a block-character fallback elsewhere.
+- Visualizer: a level meter from mpv's audio statistics is feasible; a real spectrum needs an audio tap and is exploratory.
+
+## Postponed indefinitely
+- **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.

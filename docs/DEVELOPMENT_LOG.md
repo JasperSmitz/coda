@@ -45,4 +45,4 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Tests:** fmt, clippy, build, `cargo test --all-targets` (319 lib + integration) pass; **all 20 ignored real-mpv tests pass** on this machine, including the watchdog SIGSTOP test and an end-of-track drain test.
 - **Review:** one round; fixed unbounded reap, wrong "replies are immediate" premise (+ drain test), restored volume overwritten by rejection, a tight timing bound in a default-suite test.
 - **Limitations:** an idle hung mpv is detected only at the next command; no mpv auto-restart (owner decision from M1); the bounded-reap timeout path has no automated test (needs an unkillable child).
-- **Next:** M4 needs owner input — see `docs/plans/m4-heart-integration.md` open questions. Candidate follow-ups: gapless lookahead (ADR 0002), a real-server smoke test by the owner, a Linux TUI run.
+- **Next:** M4 needs owner input — see `docs/plans/heart-integration.md` (since postponed indefinitely) open questions. Candidate follow-ups: gapless lookahead (ADR 0002), a real-server smoke test by the owner, a Linux TUI run.
