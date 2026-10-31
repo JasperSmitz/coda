@@ -85,6 +85,11 @@
 - Connecting or editing at runtime replaces the `navidrome::Client` in the running app: the browse cache is cleared, in-flight responses from the old client are ignored, and the scrobbler is restarted. Queued remote tracks keep their song ids and resolve against the new client.
 - Disconnecting removes the keychain entry and the `[navidrome]` section, and the remote tracks in the queue fail like any unresolved remote entry.
 - Only settings written by Coda (`password_keychain`) can be edited in the app. A hand-configured `password`/`password_command`, or `CODA_NAVIDROME_*` variables, show "configured outside Coda" read-only.
+- **Redo setup** (owner request, 2026-10-31):
+  - `coda --setup` reruns the setup flow, prefilled from the current config (password field empty). Finishing replaces the old settings and keychain entry; quitting changes nothing.
+  - In the app, the settings entry offers the same.
+  - Settings configured outside Coda (env vars, `password`/`password_command`) are shown, not overwritten without confirmation.
+  - This also replaces the clumsy "edit the config by hand" remedy for a missing keychain entry.
 - A detailed brief follows after slice 1, based on what slice 1 settles.
 
 ## Out of scope

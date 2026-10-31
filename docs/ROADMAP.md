@@ -41,7 +41,7 @@ Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlist
 ## M4 — Onboarding (in progress)
 Brief: `docs/plans/m4-onboarding.md`. Decision: `docs/decisions/0004-keychain-password-storage.md`.
 1. First-run setup in the TUI: optional local music folder, optional Navidrome connection (URL → username → password, verified before saving), password stored in the OS keychain. Skipping both exits and asks again next launch. **(completed, reviewed)**
-2. Connect, edit or disconnect Navidrome from within the app.
+2. Connect, edit or disconnect Navidrome from within the app, and redo setup (`coda --setup` or from the app).
 
 ## M5 — Library home and playlists (proposed)
 - A home menu per source: Playlists, Artists, Albums (Songs only if it proves useful; search covers finding songs).
