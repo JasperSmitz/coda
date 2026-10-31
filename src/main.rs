@@ -19,6 +19,7 @@ use coda_player::navidrome;
 use coda_player::onboarding::Outcome;
 use coda_player::playback;
 use coda_player::session;
+use coda_player::settings;
 use coda_player::setup;
 use tracing::{Level, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
@@ -121,6 +122,28 @@ async fn run() -> ExitCode {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
 
     let scrobble = config.navidrome.as_ref().is_some_and(|n| n.scrobble);
+    // What the in-app settings show and may change: names and ownership
+    // only, never a password.
+    let music_origin = music_arg.filter(|_| config.music_dir.is_some());
+    // A folder from the argument or `CODA_MUSIC_DIR` hides whether the
+    // file has its own; read it (it just loaded, values only, nothing is
+    // resolved). On any doubt, assume it has none: that only refuses
+    // Disconnect.
+    let file_has_music_dir = match music_origin {
+        None => config.music_dir.is_some(),
+        Some(_) => config::read_for_setup(&env).is_ok_and(|start| start.music_dir.is_some()),
+    };
+    let settings = settings::Context {
+        config_path: config::config_file_path(&env).map(|(path, _)| path),
+        music_dir: config.music_dir.clone(),
+        music_origin,
+        file_has_music_dir,
+        navidrome: settings::Navidrome::from_config(
+            config.navidrome.as_ref(),
+            &config::navidrome_env_overrides(&env),
+        ),
+        env_overrides: config::navidrome_env_overrides(&env),
+    };
     let navidrome = match config.navidrome {
         Some(settings) => {
             let password = match settings.password.resolve(PASSWORD_COMMAND_TIMEOUT).await {
@@ -163,7 +186,16 @@ async fn run() -> ExitCode {
         }
     };
 
-    match app::run(handle, config.music_dir, navidrome, scrobble, restored).await {
+    match app::run(
+        handle,
+        config.music_dir,
+        navidrome,
+        scrobble,
+        restored,
+        settings,
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!("coda exiting");
             ExitCode::SUCCESS

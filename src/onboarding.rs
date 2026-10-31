@@ -176,15 +176,25 @@ impl Redo {
     /// from the environment, without its password. Startup would then look
     /// the stored password up under another account than the one entered.
     pub fn navidrome_blocked_by(&self) -> Vec<&'static str> {
-        if self.navidrome_overrides.contains(&NAVIDROME_PASSWORD_ENV) {
-            return Vec::new();
-        }
-        self.navidrome_overrides
-            .iter()
-            .copied()
-            .filter(|name| [NAVIDROME_URL_ENV, NAVIDROME_USER_ENV].contains(name))
-            .collect()
+        navidrome_blocked_by(&self.navidrome_overrides)
     }
+}
+
+/// Of the set `CODA_NAVIDROME_*` variables (`overrides`), those that stop
+/// Coda from saving a server: the URL or user from the environment,
+/// without its password. Startup would then look the stored password up
+/// under another account than the one entered (LESSONS.md, "Setup and
+/// startup must derive a secret's key from the same inputs"). Used by
+/// `coda --setup` and the in-app settings alike.
+pub fn navidrome_blocked_by(overrides: &[&'static str]) -> Vec<&'static str> {
+    if overrides.contains(&NAVIDROME_PASSWORD_ENV) {
+        return Vec::new();
+    }
+    overrides
+        .iter()
+        .copied()
+        .filter(|name| [NAVIDROME_URL_ENV, NAVIDROME_USER_ENV].contains(name))
+        .collect()
 }
 
 /// Explains why a redo cannot save a server. Names only.
@@ -256,11 +266,7 @@ pub struct Onboarding {
     music_error: Option<String>,
     /// The accepted folder, as typed.
     music_dir: Option<String>,
-    url: LineInput,
-    username: LineInput,
-    password: LineInput,
-    focus: Field,
-    server_error: Option<String>,
+    form: ServerForm,
     /// The server being pinged.
     connecting: Option<Server>,
     /// The connected server, once the ping succeeded.
@@ -316,11 +322,7 @@ impl Onboarding {
             ),
             music_error: None,
             music_dir: None,
-            url: LineInput::new(),
-            username: LineInput::new(),
-            password: LineInput::new(),
-            focus: Field::Url,
-            server_error: None,
+            form: ServerForm::new("", ""),
             connecting: None,
             server: None,
             save_error: None,
@@ -357,8 +359,7 @@ impl Onboarding {
         };
         let music = if redo.is_empty() { suggestion } else { music };
         let mut setup = Self::new(music);
-        setup.url = LineInput::with_text(url.unwrap_or_default());
-        setup.username = LineInput::with_text(username.unwrap_or_default());
+        setup.form = ServerForm::new(url.unwrap_or_default(), username.unwrap_or_default());
         setup.not_prefilled = not_prefilled;
         setup.redo = Some(redo);
         setup
@@ -441,25 +442,30 @@ impl Onboarding {
         self.music_dir.as_deref()
     }
 
+    /// The server form (URL, username, password).
+    pub fn form(&self) -> &ServerForm {
+        &self.form
+    }
+
     pub fn url_input(&self) -> &str {
-        self.url.as_str()
+        self.form.url_input()
     }
 
     pub fn username_input(&self) -> &str {
-        self.username.as_str()
+        self.form.username_input()
     }
 
     /// The password as shown: masked.
     pub fn password_masked(&self) -> String {
-        self.password.masked()
+        self.form.password_masked()
     }
 
     pub fn focus(&self) -> Field {
-        self.focus
+        self.form.focus()
     }
 
     pub fn server_error(&self) -> Option<&str> {
-        self.server_error.as_deref()
+        self.form.error()
     }
 
     /// The (normalised) URL being connected to.
@@ -521,13 +527,7 @@ impl Onboarding {
                     self.source_error = None;
                     self.screen = Screen::Server;
                     // The first empty field: the password on a redo.
-                    self.focus = if self.url.is_empty() {
-                        Field::Url
-                    } else if self.username.is_empty() {
-                        Field::Username
-                    } else {
-                        Field::Password
-                    };
+                    self.form.focus_first_empty();
                 }
                 Input::Char('n' | 'N') => self.skip_navidrome(),
                 Input::Esc => {
@@ -569,7 +569,7 @@ impl Onboarding {
                         self.save_error = None;
                         self.screen = Screen::Ready;
                     }
-                    (Err(message), _) => self.server_error = Some(message),
+                    (Err(message), _) => self.form.set_error(message),
                     (Ok(()), None) => {}
                 }
             }
@@ -639,7 +639,7 @@ impl Onboarding {
         self.keep_navidrome = false;
         self.server = None;
         self.connecting = None;
-        self.server_error = None;
+        self.form.clear_error();
         self.save_error = None;
         self.screen = if self.music_dir.is_some() {
             Screen::Ready
@@ -658,30 +658,6 @@ impl Onboarding {
         };
     }
 
-    fn field(&mut self) -> &mut LineInput {
-        match self.focus {
-            Field::Url => &mut self.url,
-            Field::Username => &mut self.username,
-            Field::Password => &mut self.password,
-        }
-    }
-
-    fn next_field(&mut self) {
-        self.focus = match self.focus {
-            Field::Url => Field::Username,
-            Field::Username => Field::Password,
-            Field::Password => Field::Url,
-        };
-    }
-
-    fn previous_field(&mut self) {
-        self.focus = match self.focus {
-            Field::Url => Field::Password,
-            Field::Username => Field::Url,
-            Field::Password => Field::Username,
-        };
-    }
-
     fn server_key(&mut self, input: Input) {
         if self.pending.is_some() {
             if input == Input::Esc {
@@ -691,78 +667,18 @@ impl Onboarding {
             }
             return;
         }
-        match input {
-            Input::Char(c) => {
-                self.field().push_char(c);
-                self.server_error = None;
-            }
-            Input::Paste(text) => {
-                self.field().push_str(trim_line_end(&text));
-                self.server_error = None;
-            }
-            Input::Backspace => {
-                self.field().backspace();
-                self.server_error = None;
-            }
-            Input::Tab | Input::Down => self.next_field(),
-            Input::BackTab | Input::Up => self.previous_field(),
-            // Enter moves on from a filled field, and submits from the last
-            // field or once every field is filled (e.g. when retrying).
-            Input::Enter => {
-                let all_filled =
-                    !self.url.is_empty() && !self.username.is_empty() && !self.password.is_empty();
-                let current_filled = match self.focus {
-                    Field::Url => !self.url.is_empty(),
-                    Field::Username => !self.username.is_empty(),
-                    Field::Password => false,
-                };
-                if current_filled && !all_filled {
-                    self.next_field();
-                } else {
-                    self.submit_server();
+        match self.form.handle_input(input) {
+            FormEvent::None => {}
+            FormEvent::Cancel => self.skip_navidrome(),
+            FormEvent::Submit(server) => {
+                if !self.navidrome_blocked_by().is_empty() {
+                    // Not reachable through the screens; never ping or store.
+                    return;
                 }
+                self.connecting = Some(server.clone());
+                self.request(Busy::Connecting, |id| Request::Ping { id, server });
             }
-            Input::Esc => self.skip_navidrome(),
-            Input::Quit => {}
         }
-    }
-
-    fn submit_server(&mut self) {
-        if !self.navidrome_blocked_by().is_empty() {
-            // Not reachable through the screens; never ping or store.
-            return;
-        }
-        let url = match normalize_url(self.url.as_str()) {
-            Ok(url) => url,
-            Err(error) => {
-                self.server_error = Some(format!("Server URL: {error}"));
-                self.focus = Field::Url;
-                return;
-            }
-        };
-        // Show what will actually be contacted, unless the input could not
-        // hold all of it (it would then be cut off and submit another URL).
-        if url.as_str().chars().count() <= MAX_QUERY_CHARS {
-            self.url = LineInput::with_text(url.as_str());
-        }
-        if self.username.is_empty() {
-            self.server_error = Some(MISSING_USERNAME.into());
-            self.focus = Field::Username;
-            return;
-        }
-        if self.password.is_empty() {
-            self.server_error = Some(MISSING_PASSWORD.into());
-            self.focus = Field::Password;
-            return;
-        }
-        self.server_error = None;
-        let server = Server {
-            url,
-            username: self.username.as_str().to_owned(),
-            password: Password::new(self.password.as_str().to_owned()),
-        };
-        self.connecting = Some(server.clone());
-        self.request(Busy::Connecting, |id| Request::Ping { id, server });
     }
 
     fn ready_key(&mut self, input: Input) {
@@ -802,6 +718,191 @@ impl Onboarding {
 /// often ends in one).
 fn trim_line_end(text: &str) -> &str {
     text.trim_end_matches(['\r', '\n'])
+}
+
+/// What a key did to the [`ServerForm`].
+#[derive(Debug)]
+pub enum FormEvent {
+    None,
+    /// Esc: leave the form.
+    Cancel,
+    /// Every field is filled and the URL is valid: connect to this server.
+    Submit(Server),
+}
+
+/// The Navidrome form: URL, username and password, with inline errors.
+/// Shared by setup and the in-app settings, which decide what happens on
+/// submit and cancel. Pure; `Debug` shows no input.
+pub struct ServerForm {
+    url: LineInput,
+    username: LineInput,
+    password: LineInput,
+    focus: Field,
+    error: Option<String>,
+}
+
+impl std::fmt::Debug for ServerForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerForm")
+            .field("focus", &self.focus)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ServerForm {
+    /// A form with `url` and `username` filled in (they may be empty) and
+    /// an empty password, focused on the first empty field.
+    pub fn new(url: &str, username: &str) -> Self {
+        let mut form = Self {
+            url: LineInput::with_text(url),
+            username: LineInput::with_text(username),
+            password: LineInput::new(),
+            focus: Field::Url,
+            error: None,
+        };
+        form.focus_first_empty();
+        form
+    }
+
+    pub fn url_input(&self) -> &str {
+        self.url.as_str()
+    }
+
+    pub fn username_input(&self) -> &str {
+        self.username.as_str()
+    }
+
+    /// The password as shown: masked.
+    pub fn password_masked(&self) -> String {
+        self.password.masked()
+    }
+
+    pub fn focus(&self) -> Field {
+        self.focus
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Shows `message` under the form (e.g. a failed ping).
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
+    pub fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    /// Focuses the first empty field (the password when the rest is
+    /// prefilled).
+    pub fn focus_first_empty(&mut self) {
+        self.focus = if self.url.is_empty() {
+            Field::Url
+        } else if self.username.is_empty() {
+            Field::Username
+        } else {
+            Field::Password
+        };
+    }
+
+    /// Applies a key. Text and paste go into the focused field; Tab and
+    /// the arrows move between fields; Enter moves on from a filled field
+    /// and submits from the last field or once every field is filled (e.g.
+    /// when retrying); Esc cancels. `Quit` is the caller's.
+    pub fn handle_input(&mut self, input: Input) -> FormEvent {
+        match input {
+            Input::Char(c) => {
+                self.field().push_char(c);
+                self.error = None;
+            }
+            Input::Paste(text) => {
+                self.field().push_str(trim_line_end(&text));
+                self.error = None;
+            }
+            Input::Backspace => {
+                self.field().backspace();
+                self.error = None;
+            }
+            Input::Tab | Input::Down => self.next_field(),
+            Input::BackTab | Input::Up => self.previous_field(),
+            Input::Enter => {
+                let all_filled =
+                    !self.url.is_empty() && !self.username.is_empty() && !self.password.is_empty();
+                let current_filled = match self.focus {
+                    Field::Url => !self.url.is_empty(),
+                    Field::Username => !self.username.is_empty(),
+                    Field::Password => false,
+                };
+                if current_filled && !all_filled {
+                    self.next_field();
+                } else if let Some(server) = self.submit() {
+                    return FormEvent::Submit(server);
+                }
+            }
+            Input::Esc => return FormEvent::Cancel,
+            Input::Quit => {}
+        }
+        FormEvent::None
+    }
+
+    fn field(&mut self) -> &mut LineInput {
+        match self.focus {
+            Field::Url => &mut self.url,
+            Field::Username => &mut self.username,
+            Field::Password => &mut self.password,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.focus = match self.focus {
+            Field::Url => Field::Username,
+            Field::Username => Field::Password,
+            Field::Password => Field::Url,
+        };
+    }
+
+    fn previous_field(&mut self) {
+        self.focus = match self.focus {
+            Field::Url => Field::Password,
+            Field::Username => Field::Url,
+            Field::Password => Field::Username,
+        };
+    }
+
+    /// Validates the fields: the server to connect to, or `None` with an
+    /// inline error and the faulty field focused.
+    fn submit(&mut self) -> Option<Server> {
+        let url = match normalize_url(self.url.as_str()) {
+            Ok(url) => url,
+            Err(error) => {
+                self.error = Some(format!("Server URL: {error}"));
+                self.focus = Field::Url;
+                return None;
+            }
+        };
+        // Show what will actually be contacted, unless the input could not
+        // hold all of it (it would then be cut off and submit another URL).
+        if url.as_str().chars().count() <= MAX_QUERY_CHARS {
+            self.url = LineInput::with_text(url.as_str());
+        }
+        if self.username.is_empty() {
+            self.error = Some(MISSING_USERNAME.into());
+            self.focus = Field::Username;
+            return None;
+        }
+        if self.password.is_empty() {
+            self.error = Some(MISSING_PASSWORD.into());
+            self.focus = Field::Password;
+            return None;
+        }
+        self.error = None;
+        Some(Server {
+            url,
+            username: self.username.as_str().to_owned(),
+            password: Password::new(self.password.as_str().to_owned()),
+        })
+    }
 }
 
 #[cfg(test)]

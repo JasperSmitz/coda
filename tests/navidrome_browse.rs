@@ -39,6 +39,7 @@ async fn server() -> (MockServer, Client) {
 async fn run(client: &Client, id: u64, resource: Resource) -> FetchResponse {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let request = FetchRequest {
+        generation: Default::default(),
         id: RequestId(id),
         resource,
     };
@@ -192,6 +193,7 @@ async fn fetches_wait_for_a_permit() {
         client,
         limit.clone(),
         FetchRequest {
+            generation: Default::default(),
             id: RequestId(1),
             resource: Resource::Artists,
         },
@@ -219,6 +221,7 @@ async fn a_cancelled_fetch_still_answers_with_an_error() {
             client.clone(),
             limit,
             FetchRequest {
+                generation: Default::default(),
                 id: RequestId(7),
                 resource: Resource::Album("al".into()),
             },

@@ -233,6 +233,15 @@ impl Client {
         })
     }
 
+    /// The server's base URL (no credentials; may be shown, never logged).
+    pub fn base_url(&self) -> &Url {
+        &self.base
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
     /// Checks reachability and credentials.
     pub async fn ping(&self) -> Result<(), Error> {
         self.get("ping", &[]).await.map(drop)

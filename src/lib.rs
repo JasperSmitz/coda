@@ -4,7 +4,8 @@
 //! domain models, the queue, the pure player coordinator, the playback
 //! boundary (with its mpv backend), local library discovery, the
 //! Navidrome client, session persistence, the first-run setup
-//! (`onboarding` state, `setup` driver), the OS credential store
+//! (`onboarding` state, `setup` driver), the in-app settings (`settings`
+//! state, performed by `app`), the OS credential store
 //! (`secret_store`), and the terminal UI (`app`, `setup` and `ui`, the only
 //! modules that use Ratatui or Crossterm).
 
@@ -22,5 +23,6 @@ pub mod queue;
 pub mod resolve;
 pub mod secret_store;
 pub mod session;
+pub mod settings;
 pub mod setup;
 pub mod ui;

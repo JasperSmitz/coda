@@ -18,6 +18,14 @@
 //! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
 //! [`App::handle_fetch_response`].
 //!
+//! Settings (`,`) are a [`Settings`] overlay: like the browser, it emits
+//! requests (ping, save, disconnect) that the loop performs on tasks and
+//! blocking threads. A saved or removed Navidrome account is swapped in
+//! without touching playback: a new client generation (responses from
+//! the old client are ignored), a fresh browser, a new ping and a new
+//! scrobbler ([`App::take_client_change`]). Queued remote tracks resolve
+//! against whatever client is current at their next load.
+//!
 //! The session (queue, current entry, volume, repeat mode) is restored at
 //! startup ([`App::restore_session`]) and saved by the loop: [`App`] only
 //! reports that a save is due ([`App::take_due_save`], debounced by
@@ -54,14 +62,19 @@ use crate::model::Track;
 use crate::model::TrackSource;
 use crate::navidrome;
 use crate::navidrome::browse::{
-    self, Activated, Browser, FetchRequest, FetchResponse, JobOutcome, MAX_CONCURRENT_FETCHES,
+    self, Activated, Browser, FetchRequest, FetchResponse, Generation, JobOutcome,
+    MAX_CONCURRENT_FETCHES,
 };
 use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
 use crate::queue::{QueueEntryId, Rng};
 use crate::resolve;
+use crate::secret_store::{SecretError, SecretStore};
 use crate::session::{self, Session};
+use crate::settings::{self, Change, Settings};
+use crate::setup::{self, Reply, SaveNavidrome};
 use crate::ui::{help, keymap, render};
 
 /// Redraw interval when nothing else changes (progress, status expiry).
@@ -76,6 +89,8 @@ pub const SEEK_STEP: f64 = 5.0;
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Upper bound on waiting for the session save at quit.
 pub const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Upper bound on waiting at exit for a settings save that is running.
+pub const SETTINGS_SAVE_WAIT: Duration = Duration::from_secs(5);
 /// A second `C` within this time clears the queue.
 pub const CLEAR_CONFIRM: Duration = Duration::from_secs(3);
 /// Status after the first `C`.
@@ -104,8 +119,12 @@ pub enum Connection {
     Failed(String),
 }
 
-/// Status when `2` is pressed without a Navidrome configuration.
+/// Shown for the Navidrome source without a Navidrome configuration.
 pub const NAVIDROME_NOT_CONFIGURED: &str = "Navidrome is not configured";
+/// Below [`NAVIDROME_NOT_CONFIGURED`]: Enter opens the Connect form.
+pub const PRESS_ENTER_TO_CONNECT: &str = "Press Enter to connect";
+/// Status when quitting is refused while settings are being saved.
+pub const SAVING_SETTINGS: &str = "Saving settings… press Ctrl-C again to quit";
 /// Status when `/` is pressed on the local source without a music
 /// directory.
 pub const NO_LOCAL_LIBRARY: &str = "No local music directory configured";
@@ -164,7 +183,37 @@ pub enum Action {
     SwitchFocus,
     ToggleHelp,
     CloseHelp,
+    /// `,`: open the Settings overlay.
+    OpenSettings,
     Quit,
+}
+
+impl Action {
+    /// Library-panel actions that have nothing to act on while the
+    /// Navidrome source only offers to connect.
+    fn is_library_only(self) -> bool {
+        matches!(
+            self,
+            Self::Up
+                | Self::Down
+                | Self::Parent
+                | Self::Back
+                | Self::Enqueue
+                | Self::OpenSearch
+                | Self::Refresh
+        )
+    }
+}
+
+/// A new Navidrome client (or none) for the loop to start a ping and a
+/// scrobbler for; see [`App::take_client_change`].
+#[derive(Debug)]
+pub struct ClientChange {
+    /// The new client's generation, for its ping.
+    pub generation: Generation,
+    pub client: Option<navidrome::Client>,
+    /// Start a scrobbler for it.
+    pub scrobble: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +315,20 @@ pub struct App {
     scrobbles: Vec<ScrobbleRequest>,
     /// A scrobble failure has been shown; later ones are only logged.
     scrobble_failure_shown: bool,
+    /// The Settings overlay.
+    settings: Settings,
+    /// The current client's generation; fetch responses from another are
+    /// ignored.
+    generation: Generation,
+    /// A client swap the loop has not picked up yet.
+    client_change: Option<ClientChange>,
+    /// The load current at the last client swap: resolved for the old
+    /// server, so it is never reported as a listen to the new one (it may
+    /// still be loading when the swap lands).
+    unscrobbled_load: Option<LoadId>,
+    /// A first quit was refused while settings were being saved; the next
+    /// one quits (the exit still waits, bounded, for the save).
+    quit_armed: bool,
 }
 
 impl App {
@@ -284,6 +347,10 @@ impl App {
             None => ScanState::NoLibrary,
         };
         let navidrome_configured = navidrome.is_some();
+        let settings = Settings::new(settings::Context::unsaved(
+            music_dir.clone(),
+            navidrome.as_ref(),
+        ));
         let mut browser = navidrome.as_ref().map(|_| Browser::new());
         let source = match (&music_dir, &mut browser) {
             (None, Some(browser)) => {
@@ -319,7 +386,18 @@ impl App {
             listen: None,
             scrobbles: Vec::new(),
             scrobble_failure_shown: false,
+            settings,
+            generation: Generation::default(),
+            client_change: None,
+            unscrobbled_load: None,
+            quit_armed: false,
         }
+    }
+
+    /// Sets what the Settings overlay shows and may change (see
+    /// [`settings::Context`]).
+    pub fn set_settings_context(&mut self, context: settings::Context) {
+        self.settings = Settings::new(context);
     }
 
     /// Turns scrobbling of Navidrome plays on or off (on by default when
@@ -454,6 +532,26 @@ impl App {
         &self.connection
     }
 
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// `true` while the Settings overlay takes all keys.
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_open()
+    }
+
+    /// The Navidrome source is shown without Navidrome: the panel offers
+    /// to connect.
+    pub fn navidrome_prompt(&self) -> bool {
+        self.source == Source::Navidrome && self.browser.is_none()
+    }
+
+    /// The current Navidrome client, if any.
+    pub fn navidrome_client(&self) -> Option<&navidrome::Client> {
+        self.navidrome.as_ref()
+    }
+
     /// `true` while a search input (local or Navidrome) takes all keys.
     pub fn input_open(&self) -> bool {
         self.local_input.is_some() || self.browser.as_ref().is_some_and(|b| b.input().is_some())
@@ -484,6 +582,11 @@ impl App {
 
     fn remote_active(&self) -> bool {
         self.focus == Focus::Library && self.source == Source::Navidrome && self.browser.is_some()
+    }
+
+    /// Library keys act on the "Press Enter to connect" prompt.
+    fn prompt_active(&self) -> bool {
+        self.focus == Focus::Library && self.navidrome_prompt()
     }
 
     /// Library keys act on local search results.
@@ -583,6 +686,13 @@ impl App {
 
     /// Applies a user action and returns the commands to send.
     pub fn handle_action(&mut self, action: Action, now: Instant) -> Vec<PlaybackCommand> {
+        if self.settings.is_open() {
+            // The loop sends settings keys to `handle_settings_input`.
+            if action == Action::Quit {
+                self.request_quit(now);
+            }
+            return Vec::new();
+        }
         if let Some(input) = self.local_input.as_mut() {
             match action {
                 Action::InputChar(c) => input.push_char(c),
@@ -621,6 +731,12 @@ impl App {
         // Any other action cancels a pending `C`.
         let clear_armed = self.clear_armed_until.take();
         let commands = match action {
+            Action::Activate if self.prompt_active() => {
+                self.settings.open_connect();
+                Vec::new()
+            }
+            // Before Up/Down: the hidden local selection must not move.
+            _ if self.prompt_active() && action.is_library_only() => Vec::new(),
             Action::Up => {
                 self.move_selection(-1);
                 Vec::new()
@@ -675,14 +791,12 @@ impl App {
                 Vec::new()
             }
             Action::SelectNavidrome => {
-                match self.browser.as_mut() {
-                    Some(browser) => {
-                        browser.ensure_started();
-                        self.source = Source::Navidrome;
-                        self.focus = Focus::Library;
-                    }
-                    None => self.set_status(NAVIDROME_NOT_CONFIGURED, now),
+                if let Some(browser) = self.browser.as_mut() {
+                    browser.ensure_started();
                 }
+                // Without Navidrome the panel offers to connect.
+                self.source = Source::Navidrome;
+                self.focus = Focus::Library;
                 Vec::new()
             }
             Action::OpenSearch => {
@@ -757,6 +871,10 @@ impl App {
                 Vec::new()
             }
             Action::CloseHelp => Vec::new(),
+            Action::OpenSettings => {
+                self.settings.open();
+                Vec::new()
+            }
             Action::Quit => {
                 self.quit = true;
                 Vec::new()
@@ -806,6 +924,7 @@ impl App {
     fn listen_started(&mut self, load: LoadId) {
         if !self.scrobbling
             || self.player.current_load() != Some(load)
+            || self.unscrobbled_load == Some(load)
             || self.listen.as_ref().is_some_and(|l| l.load() == load)
         {
             return;
@@ -853,7 +972,22 @@ impl App {
         }
     }
 
-    /// Shows the result of the startup Navidrome ping.
+    /// A ping's result for the client of `generation`; ignored if that
+    /// client has since been replaced.
+    pub fn handle_ping(
+        &mut self,
+        generation: Generation,
+        result: Result<(), navidrome::Error>,
+        now: Instant,
+    ) {
+        if generation == self.generation {
+            self.handle_navidrome_ping(result, now);
+        } else {
+            tracing::debug!("ping result for an old client ignored");
+        }
+    }
+
+    /// Shows the result of the current client's Navidrome ping.
     pub fn handle_navidrome_ping(&mut self, result: Result<(), navidrome::Error>, now: Instant) {
         match result {
             Ok(()) => {
@@ -871,11 +1005,116 @@ impl App {
         }
     }
 
+    // ----- settings ------------------------------------------------------
+
+    /// A key while the Settings overlay is open. Ctrl-C, and `q` outside
+    /// the form, quit, except while a save is running.
+    pub fn handle_settings_input(&mut self, input: Input, now: Instant) {
+        let quit =
+            input == Input::Quit || (input == Input::Char('q') && self.settings.form().is_none());
+        if quit {
+            self.request_quit(now);
+        } else {
+            self.settings.handle_input(input, now);
+        }
+    }
+
+    /// Quits. While settings are being saved, the first request only
+    /// warns and the second quits; the exit then still waits (up to
+    /// [`SETTINGS_SAVE_WAIT`]) for the save, so the process does not stop
+    /// between the keychain write and the config write.
+    fn request_quit(&mut self, now: Instant) {
+        let saving = matches!(
+            self.settings.busy(),
+            Some(settings::Busy::Saving | settings::Busy::Disconnecting)
+        );
+        if saving && !self.quit_armed {
+            self.quit_armed = true;
+            self.set_status(SAVING_SETTINGS, now);
+        } else {
+            self.quit = true;
+        }
+    }
+
+    /// Settings requests to perform, in order.
+    pub fn take_settings_requests(&mut self) -> Vec<settings::Request> {
+        self.settings.take_requests()
+    }
+
+    /// Applies a finished settings request; a saved or removed account is
+    /// swapped in at once (see [`App::take_client_change`]).
+    pub fn handle_settings_response(&mut self, response: settings::Response, now: Instant) {
+        let change = self.settings.handle_response(response);
+        if self.settings.busy().is_none() {
+            self.quit_armed = false;
+        }
+        match change {
+            Some(Change::Connected(saved)) => {
+                // On screen only: the user typed it.
+                let label =
+                    settings::account_label(saved.client.base_url(), saved.client.username());
+                self.swap_client(Some(saved.client), saved.scrobble);
+                self.set_status(format!("Navidrome saved; connecting as {label}"), now);
+            }
+            Some(Change::Disconnected) => {
+                self.swap_client(None, false);
+                self.set_status("Disconnected from Navidrome", now);
+            }
+            None => {}
+        }
+    }
+
+    /// A client swap for the loop: ping the new client and replace the
+    /// scrobbler (stopping the old one). `None` until the next swap.
+    pub fn take_client_change(&mut self) -> Option<ClientChange> {
+        self.client_change.take()
+    }
+
+    /// Replaces the Navidrome client without touching playback: the track
+    /// playing keeps its stream, and queued remote tracks resolve with the
+    /// new client (or fail without one) at their next load. Browsing
+    /// starts over under a new generation, so responses still in flight
+    /// from the old client are ignored, and a listen in progress belongs
+    /// to the old server and is dropped.
+    fn swap_client(&mut self, client: Option<navidrome::Client>, scrobble: bool) {
+        self.generation = Generation(self.generation.0 + 1);
+        self.browser = client
+            .as_ref()
+            .map(|_| Browser::with_generation(self.generation));
+        match self.browser.as_mut() {
+            Some(browser) if self.source == Source::Navidrome => browser.ensure_started(),
+            None if self.source == Source::Navidrome && self.scan != ScanState::NoLibrary => {
+                self.source = Source::Local;
+            }
+            _ => {}
+        }
+        self.navidrome = client;
+        self.connection = Connection::Connecting;
+        self.listen = None;
+        self.unscrobbled_load = self.player.current_load();
+        self.scrobbles.clear();
+        self.scrobble_failure_shown = false;
+        self.scrobbling = scrobble && self.navidrome.is_some();
+        self.client_change = Some(ClientChange {
+            generation: self.generation,
+            client: self.navidrome.clone(),
+            scrobble: self.scrobbling,
+        });
+        tracing::info!(
+            generation = self.generation.0,
+            navidrome = self.navidrome.is_some(),
+            scrobble = self.scrobbling,
+            "navidrome client replaced"
+        );
+    }
+
     /// Bracketed paste: into the open search input, local or Navidrome
     /// (through the typed-character filter, so newlines never submit),
     /// ignored otherwise.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(input) = self.local_input.as_mut() {
+        if self.settings.is_open() {
+            self.settings.handle_paste(text);
+        } else if let Some(input) = self.local_input.as_mut() {
             input.push_str(text);
         } else if let Some(browser) = self.browser.as_mut() {
             browser.input_str(text);
@@ -889,6 +1128,14 @@ impl App {
         let Some(browser) = self.browser.as_mut() else {
             return;
         };
+        if response.generation != self.generation {
+            // From a client that has since been replaced or removed.
+            tracing::debug!(
+                id = response.id.0,
+                "fetch response for an old client ignored"
+            );
+            return;
+        }
         if response.result.is_ok() {
             self.connection = Connection::Connected;
         }
@@ -1322,12 +1569,16 @@ pub fn thousands(n: usize) -> String {
 ///
 /// With `scrobble` (and a client), plays of Navidrome tracks are reported
 /// to the server by a background [`Scrobbler`].
+///
+/// `settings` is what the Settings overlay shows and may change; a save
+/// still running at exit is awaited for up to [`SETTINGS_SAVE_WAIT`].
 pub async fn run(
     mut playback: PlaybackHandle,
     music_dir: Option<PathBuf>,
     navidrome: Option<navidrome::Client>,
     scrobble: bool,
     restored: session::Restored,
+    settings: settings::Context,
 ) -> io::Result<()> {
     let signals = match Signals::new() {
         Ok(signals) => signals,
@@ -1363,9 +1614,13 @@ pub async fn run(
     let mut terminal = ManuallyDrop::new(terminal);
 
     let scan = music_dir.clone().map(scan::spawn_scan);
-    let ping = navidrome.clone().map(spawn_ping);
+    let ping = navidrome
+        .clone()
+        .map(|client| spawn_ping(client, Generation::default()));
     let scrobbler = navidrome.clone().filter(|_| scrobble).map(Scrobbler::spawn);
-    let mut app = App::with_sources(music_dir, navidrome.clone());
+    let mut app = App::with_sources(music_dir, navidrome);
+    let mut settings_io = SettingsIo::new(settings.config_path.clone(), SecretStore::system);
+    app.set_settings_context(settings);
     app.set_scrobbling(scrobbler.is_some());
     let now = Instant::now();
     playback.send_all(app.restore_session(restored.session, now));
@@ -1377,7 +1632,6 @@ pub async fn run(
     let sources = Sources {
         scan,
         ping,
-        navidrome,
         scrobbler,
         scrobble_failure,
     };
@@ -1388,12 +1642,17 @@ pub async fn run(
         sources,
         signals,
         &mut saver,
+        &mut settings_io,
     )
     .await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
-    tokio::join!(saver.finish(&mut app), shutdown_backend(playback));
+    tokio::join!(
+        saver.finish(&mut app),
+        shutdown_backend(playback),
+        settings_io.finish(SETTINGS_SAVE_WAIT)
+    );
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
     result
@@ -1588,36 +1847,227 @@ type PingResult = Result<(), navidrome::Error>;
 /// Background work whose results arrive in the loop.
 struct Sources {
     scan: Option<mpsc::Receiver<ScanEvent>>,
-    ping: Option<oneshot::Receiver<PingResult>>,
-    /// Runs the app's fetch requests.
-    navidrome: Option<navidrome::Client>,
+    ping: Option<oneshot::Receiver<(Generation, PingResult)>>,
     /// Sends the app's scrobbles.
     scrobbler: Option<Scrobbler>,
     /// The first scrobble failure, if any.
     scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
 }
 
-/// Spawns the fetch tasks for `requests`; their responses arrive on
-/// `responses`. Concurrency is bounded by `limit`.
-fn spawn_fetches(
-    requests: Vec<FetchRequest>,
-    client: Option<&navidrome::Client>,
-    limit: &Arc<Semaphore>,
-    responses: &mpsc::UnboundedSender<FetchResponse>,
-) {
-    let Some(client) = client else {
-        return;
-    };
-    for request in requests {
-        browse::spawn_fetch(client.clone(), limit.clone(), request, responses.clone());
+/// Runs the browser's fetches for the current client, at most
+/// [`MAX_CONCURRENT_FETCHES`] at a time.
+struct Fetches {
+    limit: Arc<Semaphore>,
+    /// Fetch tasks that may still be running.
+    running: Vec<JoinHandle<()>>,
+}
+
+impl Fetches {
+    fn new() -> Self {
+        Self {
+            limit: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
+            running: Vec::new(),
+        }
+    }
+
+    /// Spawns the fetch tasks for `requests`; their responses arrive on
+    /// `responses`.
+    fn spawn(
+        &mut self,
+        requests: Vec<FetchRequest>,
+        client: Option<&navidrome::Client>,
+        responses: &mpsc::UnboundedSender<FetchResponse>,
+    ) {
+        let Some(client) = client else {
+            return;
+        };
+        if requests.is_empty() {
+            return;
+        }
+        self.running.retain(|task| !task.is_finished());
+        for request in requests {
+            self.running.push(browse::spawn_fetch(
+                client.clone(),
+                self.limit.clone(),
+                request,
+                responses.clone(),
+            ));
+        }
+    }
+
+    /// The client changed: aborts the old client's fetches (each still
+    /// answers, with `Aborted`, which the generation check drops) and gives
+    /// the new client its own permits, so nothing queued for the old server
+    /// runs or holds up the new one.
+    fn restart(&mut self) {
+        for task in self.running.drain(..) {
+            task.abort();
+        }
+        self.limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
     }
 }
 
-/// Pings the server on a Tokio task; the result arrives over a oneshot.
-fn spawn_ping(client: navidrome::Client) -> oneshot::Receiver<PingResult> {
+/// Performs the Settings overlay's requests: the ping on a Tokio task, the
+/// keychain and config writes on blocking threads. Each request answers
+/// exactly once, through a drop guard. Logs only kinds and outcomes.
+struct SettingsIo {
+    config_path: Option<PathBuf>,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    /// Saves and disconnects that may still be running.
+    writes: Vec<JoinHandle<()>>,
+}
+
+impl SettingsIo {
+    fn new(
+        config_path: Option<PathBuf>,
+        open_store: fn() -> Result<SecretStore, SecretError>,
+    ) -> Self {
+        Self {
+            config_path,
+            open_store,
+            writes: Vec::new(),
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        request: settings::Request,
+        tx: &mpsc::UnboundedSender<settings::Response>,
+    ) {
+        use settings::{NO_CONFIG_LOCATION, Request, Response};
+        self.writes.retain(|write| !write.is_finished());
+        fn interrupted<T>() -> Result<T, String> {
+            Err(setup::INTERRUPTED.to_owned())
+        }
+        let open_store = self.open_store;
+        match request {
+            Request::Ping { id, server } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Pinged {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                tokio::spawn(async move {
+                    let result = setup::ping(server).await;
+                    reply.send(Response::Pinged { id, result });
+                });
+            }
+            Request::Save {
+                id,
+                server,
+                previous_account,
+            } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Saved {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                let Some(path) = self.config_path.clone() else {
+                    reply.send(Response::Saved {
+                        id,
+                        result: Err(NO_CONFIG_LOCATION.into()),
+                    });
+                    return;
+                };
+                self.writes.push(tokio::task::spawn_blocking(move || {
+                    let result =
+                        save_server(&path, server, open_store, previous_account.as_deref());
+                    reply.send(Response::Saved { id, result });
+                }));
+            }
+            Request::Disconnect {
+                id,
+                previous_account,
+            } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Disconnected {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                let Some(path) = self.config_path.clone() else {
+                    reply.send(Response::Disconnected {
+                        id,
+                        result: Err(NO_CONFIG_LOCATION.into()),
+                    });
+                    return;
+                };
+                self.writes.push(tokio::task::spawn_blocking(move || {
+                    let result = setup::save_navidrome(
+                        &path,
+                        SaveNavidrome::Remove,
+                        open_store,
+                        previous_account.as_deref(),
+                    )
+                    .map(drop)
+                    .map_err(save_message);
+                    reply.send(Response::Disconnected { id, result });
+                }));
+            }
+        }
+    }
+
+    /// Waits up to `wait` for running saves, so the process does not exit
+    /// between the keychain write and the config write.
+    async fn finish(self, wait: Duration) {
+        if self.writes.iter().all(JoinHandle::is_finished) {
+            return;
+        }
+        let all = futures_util::future::join_all(self.writes);
+        if tokio::time::timeout(wait, all).await.is_err() {
+            tracing::warn!("a settings save did not finish before exit");
+        }
+    }
+}
+
+/// Builds the client for `server`, then stores the password and writes
+/// `[navidrome]` (keeping the folder and `scrobble`). Blocking.
+fn save_server(
+    path: &Path,
+    server: crate::onboarding::Server,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    previous_account: Option<&str>,
+) -> Result<settings::Saved, String> {
+    let client = navidrome::Client::new(
+        server.url.clone(),
+        server.username.clone(),
+        server.password.clone(),
+    )
+    .map_err(|error| {
+        tracing::warn!(detail = %error.detail(), "settings: could not set up the client");
+        "Could not set up the Navidrome client".to_owned()
+    })?;
+    let scrobble = setup::save_navidrome(
+        path,
+        SaveNavidrome::Server(server),
+        open_store,
+        previous_account,
+    )
+    .map_err(save_message)?;
+    Ok(settings::Saved { client, scrobble })
+}
+
+fn save_message(error: crate::onboarding::SaveError) -> String {
+    match error {
+        crate::onboarding::SaveError::Keychain(message)
+        | crate::onboarding::SaveError::Config(message) => message,
+    }
+}
+
+/// Pings the server on a Tokio task; the result arrives over a oneshot,
+/// tagged with the client's generation.
+fn spawn_ping(
+    client: navidrome::Client,
+    generation: Generation,
+) -> oneshot::Receiver<(Generation, PingResult)> {
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _ = tx.send(client.ping().await);
+        let _ = tx.send((generation, client.ping().await));
     });
     rx
 }
@@ -1647,6 +2097,7 @@ async fn event_loop(
     sources: Sources,
     mut signals: Signals,
     saver: &mut Saver,
+    settings_io: &mut SettingsIo,
 ) -> io::Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -1655,22 +2106,34 @@ async fn event_loop(
     let Sources {
         mut scan,
         mut ping,
-        navidrome,
-        scrobbler,
+        mut scrobbler,
         mut scrobble_failure,
     } = sources;
-    let fetch_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+    let mut fetches = Fetches::new();
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
+    let (settings_tx, mut settings_rx) = mpsc::unbounded_channel();
     let mut playback_open = true;
     let mut dirty = true;
 
     loop {
-        spawn_fetches(
-            app.take_fetch_requests(),
-            navidrome.as_ref(),
-            &fetch_limit,
-            &fetch_tx,
-        );
+        for request in app.take_settings_requests() {
+            settings_io.spawn(request, &settings_tx);
+        }
+        if let Some(change) = app.take_client_change() {
+            fetches.restart();
+            // Replacing the receivers drops the old ping's answer and the
+            // old scrobbler, whose worker ends once its queue is sent.
+            ping = change
+                .client
+                .clone()
+                .map(|client| spawn_ping(client, change.generation));
+            (scrobbler, scrobble_failure) = change
+                .client
+                .filter(|_| change.scrobble)
+                .map(Scrobbler::spawn)
+                .unzip();
+        }
+        fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
         for request in app.take_scrobble_requests() {
             if let Some(scrobbler) = &scrobbler {
                 scrobbler.send(request);
@@ -1683,6 +2146,14 @@ async fn event_loop(
         }
         tokio::select! {
             input_event = input.next() => match input_event {
+                Some(Ok(Event::Key(key))) if app.settings_open() => {
+                    if key.kind != KeyEventKind::Release
+                        && let Some(input) = crate::ui::onboarding::map_key(key)
+                    {
+                        app.handle_settings_input(input, Instant::now());
+                        dirty = true;
+                    }
+                }
                 Some(Ok(Event::Key(key))) => {
                     let action = if app.input_open() {
                         keymap::map_input_key(key)
@@ -1698,7 +2169,7 @@ async fn event_loop(
                     }
                 }
                 Some(Ok(Event::Paste(text))) => {
-                    if app.input_open() {
+                    if app.input_open() || app.settings_open() {
                         app.handle_paste(&text);
                         dirty = true;
                     }
@@ -1737,6 +2208,11 @@ async fn event_loop(
                 app.handle_fetch_response(response, Instant::now());
                 dirty = true;
             },
+            // Likewise.
+            Some(response) = settings_rx.recv() => {
+                app.handle_settings_response(response, Instant::now());
+                dirty = true;
+            },
             failure = next_once(&mut scrobble_failure) => {
                 scrobble_failure = None;
                 // `None`: the worker ended without a failure (at exit).
@@ -1748,8 +2224,8 @@ async fn event_loop(
             result = next_once(&mut ping) => {
                 ping = None;
                 // A dropped sender means the task panicked; it is logged.
-                if let Some(result) = result {
-                    app.handle_navidrome_ping(result, Instant::now());
+                if let Some((generation, result)) = result {
+                    app.handle_ping(generation, result, Instant::now());
                     dirty = true;
                 }
             },
@@ -2379,6 +2855,7 @@ mod tests {
     fn respond(app: &mut App, request: &FetchRequest, result: Result<Content, navidrome::Error>) {
         app.handle_fetch_response(
             FetchResponse {
+                generation: request.generation,
                 id: request.id,
                 resource: request.resource.clone(),
                 result,
@@ -2831,31 +3308,66 @@ mod tests {
     }
 
     #[test]
-    fn navidrome_keys_without_navidrome_show_a_message() {
-        let (mut app, now) = app_with(&["1.flac"]);
+    fn navidrome_without_navidrome_offers_to_connect() {
+        let (mut app, now) = app_with(&["1.flac", "2.flac"]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
         press(
             &mut app,
             &[Action::SwitchFocus, Action::SelectNavidrome],
             now,
         );
-        assert_eq!(app.source(), Source::Local);
-        assert_eq!(app.focus(), Focus::Queue);
-        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
-        assert!(app.browser().is_none());
-        assert!(requests(&mut app).is_empty());
-        press(&mut app, &[Action::SelectLocal, Action::Refresh], now);
+        assert_eq!(app.source(), Source::Navidrome);
         assert_eq!(app.focus(), Focus::Library);
+        assert!(app.navidrome_prompt());
+        assert_eq!(app.status(now), None);
+        assert!(app.browser().is_none());
+        // Library keys have nothing to act on; no local search opens.
+        press(
+            &mut app,
+            &[
+                Action::Refresh,
+                Action::OpenSearch,
+                Action::Enqueue,
+                Action::Down,
+                Action::Parent,
+            ],
+            now,
+        );
         assert!(!app.input_open());
-        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
+        assert!(app.player().queue().is_empty());
+        assert!(requests(&mut app).is_empty());
+        // The hidden local selection did not move.
+        assert_eq!(selected_name(&app), "1");
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Up, Action::Down],
+            now,
+        );
+        assert_eq!(app.library_selected(), 0);
         // A response without a browser is ignored.
         app.handle_fetch_response(
             FetchResponse {
+                generation: Generation::default(),
                 id: browse::RequestId(1),
                 resource: Resource::Artists,
                 result: Ok(Content::Artists(Vec::new())),
             },
             now,
         );
+        // Enter opens the Connect form.
+        press(&mut app, &[Action::Activate], now);
+        assert!(app.settings_open());
+        let (kind, _) = app.settings().form().unwrap();
+        assert_eq!(kind, settings::FormKind::Connect);
+        // `1` still shows the local library.
+        app.handle_settings_input(Input::Esc, now);
+        app.handle_settings_input(Input::Esc, now);
+        assert!(!app.settings_open());
+        press(&mut app, &[Action::SelectLocal], now);
+        assert!(!app.navidrome_prompt());
         assert_eq!(selected_name(&app), "1");
     }
 
@@ -3754,5 +4266,797 @@ mod tests {
         saver.finish(&mut app).await;
         let (session, _) = session::load(&path);
         assert_eq!(session.tracks.len(), 2);
+    }
+
+    // ----- settings and hot swap ----------------------------------------------
+
+    fn settings_context(music: Option<&str>, navidrome: settings::Navidrome) -> settings::Context {
+        settings::Context {
+            config_path: Some("/cfg/config.toml".into()),
+            music_dir: music.map(PathBuf::from),
+            music_origin: None,
+            file_has_music_dir: music.is_some(),
+            navidrome,
+            env_overrides: Vec::new(),
+        }
+    }
+
+    /// The account of [`client`], as Coda wrote it.
+    fn coda_owned() -> settings::Navidrome {
+        settings::Navidrome::Coda {
+            url: navidrome::client::parse_base_url("https://h.example/nd").unwrap(),
+            username: "u".into(),
+            account: "u@h.example".into(),
+        }
+    }
+
+    fn other_client() -> navidrome::Client {
+        navidrome::Client::new(
+            navidrome::client::parse_base_url("https://other.example/nd").unwrap(),
+            "v".into(),
+            navidrome::Password::new("q".into()),
+        )
+        .unwrap()
+    }
+
+    fn settings_type(app: &mut App, text: &str, now: Instant) {
+        for c in text.chars() {
+            app.handle_settings_input(Input::Char(c), now);
+        }
+        app.handle_settings_input(Input::Enter, now);
+    }
+
+    /// Connects (or, for a Coda-owned server, edits) through the overlay
+    /// up to the save; the loop's answers are faked. Returns the save's id.
+    fn settings_up_to_save(app: &mut App, now: Instant) -> settings::RequestId {
+        app.handle_action(Action::OpenSettings, now);
+        assert!(app.settings_open());
+        if matches!(app.settings().navidrome(), settings::Navidrome::Coda { .. }) {
+            app.handle_settings_input(Input::Char('e'), now);
+        } else {
+            app.handle_settings_input(Input::Char('c'), now);
+            settings_type(app, "other.example/nd", now);
+            settings_type(app, "v", now);
+        }
+        settings_type(app, "q", now);
+        let requests = app.take_settings_requests();
+        let [settings::Request::Ping { id, .. }] = requests.as_slice() else {
+            panic!("expected a ping, got {requests:?}");
+        };
+        app.handle_settings_response(
+            settings::Response::Pinged {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        let requests = app.take_settings_requests();
+        let [settings::Request::Save { id, .. }] = requests.as_slice() else {
+            panic!("expected a save, got {requests:?}");
+        };
+        *id
+    }
+
+    /// Connects or edits through the overlay, ending with `client`.
+    fn connect_in_app(app: &mut App, client: navidrome::Client, scrobble: bool, now: Instant) {
+        let id = settings_up_to_save(app, now);
+        app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Ok(settings::Saved { client, scrobble }),
+            },
+            now,
+        );
+    }
+
+    fn stream_host(commands: &[PlaybackCommand]) -> String {
+        match commands {
+            [
+                PlaybackCommand::Load {
+                    target: PlaybackTarget::Stream(url),
+                    ..
+                },
+            ] => url::Url::parse(url.expose())
+                .unwrap()
+                .host_str()
+                .unwrap()
+                .to_owned(),
+            other => panic!("expected a single stream Load, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connecting_in_the_app_keeps_playback_and_browses_the_new_server() {
+        let (mut app, now) = app_with(&["a.flac"]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        connect_in_app(&mut app, other_client(), true, now);
+        let change = app.take_client_change().expect("a client change");
+        assert!(change.client.is_some());
+        assert!(change.scrobble);
+        assert!(app.take_client_change().is_none(), "taken once");
+        // Playback is untouched.
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+        assert_eq!(app.player().current_load(), Some(load));
+        assert_eq!(app.connection(), &Connection::Connecting);
+        assert!(matches!(
+            app.settings().navidrome(),
+            settings::Navidrome::Coda { .. }
+        ));
+        assert!(app.settings().form().is_none());
+        assert_eq!(
+            app.status(now),
+            Some("Navidrome saved; connecting as v @ other.example")
+        );
+
+        app.handle_settings_input(Input::Esc, now);
+        assert!(!app.settings_open());
+        press(&mut app, &[Action::SelectNavidrome], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.generation, Generation(1));
+        assert_eq!(request.resource, Resource::Artists);
+        respond(&mut app, &request, Ok(Content::Artists(vec![artist("b1")])));
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(app.connection(), &Connection::Connected);
+    }
+
+    #[test]
+    fn a_stale_response_from_the_old_client_is_ignored_after_the_swap() {
+        let (mut app, now) = nav_app();
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let old = one_request(&mut app);
+        assert_eq!(old.generation, Generation(0));
+        // Browse a little first: the new browser starts over.
+        connect_in_app(&mut app, other_client(), true, now);
+        let new = one_request(&mut app);
+        assert_eq!(new.generation, Generation(1));
+        assert_eq!(
+            new.id, old.id,
+            "ids restart, so only the generation tells them apart"
+        );
+        assert_eq!(view_titles(&app), ["Artists"]);
+
+        respond(&mut app, &old, Ok(Content::Artists(vec![artist("old")])));
+        assert_eq!(current_load(&app), Load::Loading(new.id));
+        assert!(browser(&app).cached(&Resource::Artists).is_none());
+        assert_eq!(app.connection(), &Connection::Connecting);
+        // An old failure does not fail the new view either.
+        respond(&mut app, &old, Err(navidrome::Error::Auth));
+        assert_eq!(current_load(&app), Load::Loading(new.id));
+
+        respond(&mut app, &new, Ok(Content::Artists(vec![artist("new")])));
+        assert_eq!(current_load(&app), Load::Ready);
+        let Some(Content::Artists(artists)) = browser(&app).cached(&Resource::Artists) else {
+            panic!()
+        };
+        assert_eq!(artists[0].id, "new");
+    }
+
+    #[test]
+    fn the_swap_resets_the_browser() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+        requests(&mut app);
+        connect_in_app(&mut app, other_client(), true, now);
+        assert_eq!(view_titles(&app), ["Artists"]);
+        assert!(browser(&app).cached(&Resource::Artists).is_none());
+        assert_eq!(browser(&app).generation(), Generation(1));
+        assert_eq!(one_request(&mut app).resource, Resource::Artists);
+    }
+
+    #[test]
+    fn the_swap_drops_a_listen_in_progress_and_replaces_the_scrobbler() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180)]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = press(&mut app, &[Action::Activate], now);
+        started(&mut app, &commands, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing s1"]);
+        progress(&mut app, 0.0, 30.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(app.take_client_change().unwrap().scrobble);
+        // The listen belonged to the old server: its submission never
+        // goes to the new one.
+        progress(&mut app, 30.0, 170.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        // A file with `scrobble = false` turns scrobbling off.
+        connect_in_app(&mut app, client(), false, now);
+        let change = app.take_client_change().unwrap();
+        assert!(change.client.is_some());
+        assert!(!change.scrobble);
+        assert!(!app.scrobbling);
+    }
+
+    #[test]
+    fn a_queued_remote_track_resolves_with_the_new_client() {
+        let (mut app, now) = scrobble_app(vec![remote("r1"), remote("r2")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_host(&commands), "h.example");
+        let load = started(&mut app, &commands, now);
+
+        connect_in_app(&mut app, other_client(), true, now);
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        assert_eq!(stream_id(&commands), "r2");
+    }
+
+    #[test]
+    fn after_disconnect_remote_tracks_fail_and_the_queue_advances() {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        app.set_settings_context(settings_context(Some(ROOT), coda_owned()));
+        app.player.enqueue(remote("r1"));
+        app.player.enqueue(remote("r2"));
+        app.player.enqueue(track("b.flac"));
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_id(&commands), "r1");
+        let load = started(&mut app, &commands, now);
+        press(&mut app, &[Action::SelectNavidrome], now);
+        requests(&mut app);
+
+        app.handle_action(Action::OpenSettings, now);
+        app.handle_settings_input(Input::Char('d'), now);
+        app.handle_settings_input(Input::Char('d'), now);
+        let requests = app.take_settings_requests();
+        let [
+            settings::Request::Disconnect {
+                id,
+                previous_account,
+            },
+        ] = requests.as_slice()
+        else {
+            panic!("expected a disconnect, got {requests:?}");
+        };
+        assert_eq!(previous_account.as_deref(), Some("u@h.example"));
+        app.handle_settings_response(
+            settings::Response::Disconnected {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        let change = app.take_client_change().unwrap();
+        assert!(change.client.is_none());
+        assert!(!change.scrobble);
+        assert!(app.browser().is_none());
+        assert_eq!(app.source(), Source::Local);
+        // The current stream plays on.
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(load_path(&commands), PathBuf::from("/music/b.flac"));
+        assert_eq!(
+            app.status(now),
+            Some("Could not play Remote r2: Navidrome is not configured")
+        );
+    }
+
+    #[test]
+    fn a_second_quit_while_saving_quits() {
+        let (mut app, now) = app_with(&[]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
+        let id = settings_up_to_save(&mut app, now);
+        app.handle_settings_input(Input::Quit, now);
+        assert!(!app.should_quit());
+        assert_eq!(app.status(now), Some(SAVING_SETTINGS));
+        // The save ends (failing): the warning is reset, so quitting
+        // during the next save warns again.
+        app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Err("Could not write /cfg/config.toml: denied".into()),
+            },
+            now,
+        );
+        // The form stays open with the error; `q` is text there.
+        app.handle_settings_input(Input::Char('q'), now);
+        assert!(!app.should_quit());
+        app.handle_settings_input(Input::Enter, now);
+        let requests = app.take_settings_requests();
+        let [settings::Request::Ping { id, .. }] = requests.as_slice() else {
+            panic!("{requests:?}");
+        };
+        app.handle_settings_response(
+            settings::Response::Pinged {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        assert_eq!(app.settings().busy(), Some(settings::Busy::Saving));
+        app.handle_settings_input(Input::Quit, now);
+        assert!(!app.should_quit(), "warned again");
+        app.handle_settings_input(Input::Quit, now);
+        assert!(app.should_quit(), "the second Ctrl-C quits");
+    }
+
+    #[test]
+    fn a_load_still_loading_at_the_swap_is_not_scrobbled_to_the_new_server() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180), timed_remote("s2", 180)]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        // Resolved (and sent to mpv) with the old client...
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_host(&commands), "h.example");
+        // ...then the swap lands before it starts.
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(app.take_client_change().unwrap().scrobble);
+        let load = started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 170.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        // The next load is the new server's and is reported.
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        started(&mut app, &commands, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing s2"]);
+    }
+
+    #[test]
+    fn the_old_ping_racing_the_swap_is_ignored() {
+        let (mut app, now) = nav_app();
+        app.set_settings_context(settings_context(None, coda_owned()));
+        requests(&mut app);
+        connect_in_app(&mut app, other_client(), true, now);
+        let change = app.take_client_change().unwrap();
+        assert_eq!(change.generation, Generation(1));
+        // The startup ping of the old client answers late.
+        app.handle_ping(Generation(0), Err(navidrome::Error::Auth), now);
+        assert_eq!(app.connection(), &Connection::Connecting);
+        app.handle_ping(Generation(0), Ok(()), now);
+        assert_eq!(app.connection(), &Connection::Connecting);
+        app.handle_ping(Generation(1), Err(navidrome::Error::Auth), now);
+        assert_eq!(
+            app.connection(),
+            &Connection::Failed("authentication failed".into())
+        );
+    }
+
+    #[test]
+    fn q_quits_from_the_settings_overview_and_actions_are_swallowed() {
+        let (mut app, now) = app_with(&["a.flac"]);
+        app.handle_action(Action::OpenSettings, now);
+        assert!(app.settings_open());
+        assert!(press(&mut app, &[Action::Activate, Action::Next], now).is_empty());
+        app.handle_settings_input(Input::Char('q'), now);
+        assert!(app.should_quit());
+    }
+
+    // ----- settings I/O (mock store, temporary files, fake server) -------------
+
+    fn store_settings() -> Result<SecretStore, SecretError> {
+        static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+        Ok(STORE.get_or_init(SecretStore::mock).clone())
+    }
+
+    fn server(url: &str, username: &str, password: &str) -> crate::onboarding::Server {
+        crate::onboarding::Server {
+            url: navidrome::client::parse_base_url(url).unwrap(),
+            username: username.into(),
+            password: navidrome::Password::new(password.into()),
+        }
+    }
+
+    async fn perform(io: &mut SettingsIo, request: settings::Request) -> settings::Response {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        io.spawn(request, &tx);
+        rx.recv().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_saves_keep_other_settings_and_replace_the_account() {
+        use crate::config::{Cli, Config, Env, PasswordSource};
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let path = dir.path().join("coda").join("config.toml");
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let old = format!(
+            "music_dir = \"{}\"\n\n[navidrome]\nurl = \"https://old.example\"\nusername = \"me\"\npassword_keychain = true\nscrobble = false\n",
+            music.display()
+        );
+        std::fs::write(&path, &old).unwrap();
+        let store = store_settings().unwrap();
+        store
+            .set("me@old.example", &navidrome::Password::new("old-pw".into()))
+            .unwrap();
+        let env = Env {
+            config_path: Some(path.clone().into()),
+            ..Env::default()
+        };
+        let mut io = SettingsIo::new(Some(path.clone()), store_settings);
+
+        // Edit to another account.
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 1,
+                server: server("https://new.example:8443", "you", "new-pw"),
+                previous_account: Some("me@old.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 1,
+            result: Ok(saved),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(!saved.scrobble, "the file's scrobble = false is kept");
+        assert_eq!(
+            saved.client.base_url().as_str(),
+            "https://new.example:8443/"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("new-pw"), "{text}");
+        assert!(text.contains("scrobble = false"), "{text}");
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert_eq!(config.music_dir.unwrap(), music.canonicalize().unwrap());
+        let nd = config.navidrome.unwrap();
+        assert_eq!(nd.url.as_str(), "https://new.example:8443/");
+        assert!(!nd.scrobble);
+        let PasswordSource::Keychain { account, .. } = &nd.password else {
+            panic!()
+        };
+        assert_eq!(account, "you@new.example:8443");
+        assert_eq!(store.get(account).unwrap().expose(), "new-pw");
+        assert_eq!(store.get("me@old.example"), Err(SecretError::Missing));
+        // The previous file was backed up.
+        let backups = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".bak.")
+            })
+            .count();
+        assert!(backups >= 1);
+
+        // Disconnect: `[navidrome]` and the entry go, the folder stays.
+        let response = perform(
+            &mut io,
+            settings::Request::Disconnect {
+                id: 2,
+                previous_account: Some("you@new.example:8443".into()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                settings::Response::Disconnected {
+                    id: 2,
+                    result: Ok(())
+                }
+            ),
+            "{response:?}"
+        );
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert!(config.navidrome.is_none());
+        assert!(config.music_dir.is_some());
+        assert_eq!(store.get("you@new.example:8443"), Err(SecretError::Missing));
+        io.finish(SETTINGS_SAVE_WAIT).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_write_keeps_the_old_file_and_entry() {
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // The config's directory is a file: the write fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("config.toml");
+        let mut io = SettingsIo::new(Some(path), store);
+        store()
+            .unwrap()
+            .set("me@old.example", &navidrome::Password::new("old".into()))
+            .unwrap();
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 7,
+                server: server("https://new.example", "you", "pw"),
+                previous_account: Some("me@old.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 7,
+            result: Err(message),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(message.starts_with("Could not write"), "{message}");
+        for secret in ["pw", "you@", "new.example", "old.example"] {
+            assert!(!message.contains(secret), "{secret}: {message}");
+        }
+        // The new entry was removed again; the old one is still used.
+        assert_eq!(
+            store().unwrap().get("you@new.example"),
+            Err(SecretError::Missing)
+        );
+        assert_eq!(
+            store().unwrap().get("me@old.example").unwrap().expose(),
+            "old"
+        );
+        // Without a config location nothing is attempted.
+        let mut nowhere = SettingsIo::new(None, store);
+        let response = perform(
+            &mut nowhere,
+            settings::Request::Disconnect {
+                id: 8,
+                previous_account: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            response,
+            settings::Response::Disconnected {
+                id: 8,
+                result: Err(_)
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn settings_pings_against_a_fake_server() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let ok = json!({ "subsonic-response": { "status": "ok", "version": "1.16.1" } });
+        let auth = json!({ "subsonic-response": {
+            "status": "failed", "version": "1.16.1",
+            "error": { "code": 40, "message": "Wrong username or password" }
+        } });
+        for (body, expected) in [
+            (ok, Ok(())),
+            (auth, Err("Authentication failed".to_owned())),
+        ] {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/rest/ping"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&mock)
+                .await;
+            let mut io = SettingsIo::new(None, store_settings);
+            let response = perform(
+                &mut io,
+                settings::Request::Ping {
+                    id: 3,
+                    server: server(&mock.uri(), "me", "pass-word"),
+                },
+            )
+            .await;
+            let settings::Response::Pinged { id: 3, result } = response else {
+                panic!("{response:?}");
+            };
+            assert_eq!(result, expected);
+            for request in mock.received_requests().await.unwrap() {
+                assert!(!request.url.as_str().contains("pass-word"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_old_clients_fetches_are_aborted_and_never_block_the_new_one() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let artists = json!({ "subsonic-response": {
+            "status": "ok", "version": "1.16.1", "artists": { "index": [] }
+        } });
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(artists.clone())
+                    .set_delay(Duration::from_secs(20)),
+            )
+            .mount(&slow)
+            .await;
+        let fast = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(artists))
+            .mount(&fast)
+            .await;
+        let client_for = |server: &MockServer| {
+            navidrome::Client::new(
+                navidrome::client::parse_base_url(&server.uri()).unwrap(),
+                "u".into(),
+                navidrome::Password::new("p".into()),
+            )
+            .unwrap()
+        };
+        let request = |generation, id| FetchRequest {
+            generation: Generation(generation),
+            id: browse::RequestId(id),
+            resource: Resource::Search(format!("q{id}")),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut fetches = Fetches::new();
+        // More than the permits: some run (and hang), the rest queue.
+        let old: Vec<_> = (1..=MAX_CONCURRENT_FETCHES as u64 + 2)
+            .map(|id| request(0, id))
+            .collect();
+        fetches.spawn(old, Some(&client_for(&slow)), &tx);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        fetches.restart();
+        fetches.spawn(vec![request(1, 1)], Some(&client_for(&fast)), &tx);
+        let mut aborted = 0;
+        let new = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let response = rx.recv().await.unwrap();
+                if response.generation == Generation(1) {
+                    return response;
+                }
+                assert!(matches!(response.result, Err(navidrome::Error::Aborted)));
+                aborted += 1;
+            }
+        })
+        .await
+        .expect("the new client's fetch was not held up");
+        assert!(new.result.is_ok(), "{:?}", new.result);
+        // Every old fetch answers (aborted), and none ran after the swap.
+        while aborted < MAX_CONCURRENT_FETCHES + 2 {
+            let response = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.generation, Generation(0));
+            assert!(matches!(response.result, Err(navidrome::Error::Aborted)));
+            aborted += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let reached = slow.received_requests().await.unwrap().len();
+        assert!(reached <= MAX_CONCURRENT_FETCHES, "{reached}");
+    }
+
+    #[tokio::test]
+    async fn connect_from_not_configured_writes_navidrome_next_to_the_folder() {
+        use crate::config::{Cli, Config, Env, PasswordSource};
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let path = dir.path().join("config.toml");
+        let old = format!("music_dir = \"{}\"\n", music.display());
+        std::fs::write(&path, &old).unwrap();
+        let mut io = SettingsIo::new(Some(path.clone()), store);
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 1,
+                server: server("http://127.0.0.1:4533", "me", "pw"),
+                previous_account: None,
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 1,
+            result: Ok(saved),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(saved.scrobble, "the default");
+        let env = Env {
+            config_path: Some(path.clone().into()),
+            ..Env::default()
+        };
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert_eq!(config.music_dir.unwrap(), music.canonicalize().unwrap());
+        let nd = config.navidrome.unwrap();
+        assert!(nd.scrobble);
+        let PasswordSource::Keychain { account, .. } = &nd.password else {
+            panic!()
+        };
+        assert_eq!(account, "me@127.0.0.1:4533");
+        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw");
+        // The hand-written file was backed up; Coda's own is not, so a
+        // second save adds no backup.
+        let backups = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".bak.")
+                })
+                .count()
+        };
+        assert_eq!(backups(), 1);
+        perform(
+            &mut io,
+            settings::Request::Save {
+                id: 2,
+                server: server("http://127.0.0.1:4533", "me", "pw2"),
+                previous_account: Some("me@127.0.0.1:4533".into()),
+            },
+        )
+        .await;
+        assert_eq!(backups(), 1);
+        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw2");
+    }
+
+    #[tokio::test]
+    async fn disconnect_keeps_the_entry_when_the_file_has_no_folder() {
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[navidrome]\nurl = \"https://h.example\"\nusername = \"me\"\npassword_keychain = true\n";
+        std::fs::write(&path, text).unwrap();
+        store()
+            .unwrap()
+            .set("me@h.example", &navidrome::Password::new("pw".into()))
+            .unwrap();
+        let mut io = SettingsIo::new(Some(path.clone()), store);
+        let response = perform(
+            &mut io,
+            settings::Request::Disconnect {
+                id: 1,
+                previous_account: Some("me@h.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Disconnected {
+            id: 1,
+            result: Err(message),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(
+            message.contains(crate::config_writer::NO_SOURCE_LEFT),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(store().unwrap().get("me@h.example").unwrap().expose(), "pw");
     }
 }

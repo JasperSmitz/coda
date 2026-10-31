@@ -1,5 +1,6 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar, the status line, and the help overlay.
+//! now-playing bar, the status line, the help overlay and the Settings
+//! overlay (`crate::ui::settings`).
 //!
 //! Untrusted names (tags, file names, server responses, the search input)
 //! are sanitised and truncated by display width, so control characters and
@@ -15,13 +16,13 @@ use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, Connection, Focus, LibraryRow, LocalSearch, NO_LOCAL_LIBRARY, ScanState, Source, count,
-    thousands,
+    App, Connection, Focus, LibraryRow, LocalSearch, NAVIDROME_NOT_CONFIGURED, NO_LOCAL_LIBRARY,
+    PRESS_ENTER_TO_CONNECT, ScanState, Source, count, thousands,
 };
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
-use crate::ui::help;
+use crate::ui::{help, settings};
 
 /// Below this width only the focused panel is shown.
 pub const NARROW_WIDTH: u16 = 60;
@@ -45,6 +46,8 @@ pub struct ViewState {
     queue_offset: usize,
     /// The largest useful help scroll for the last frame's size.
     pub help_max_scroll: usize,
+    /// Advances the settings spinner, one step per frame.
+    spinner: usize,
 }
 
 /// The first visible row for a list of `len` rows in a viewport of
@@ -104,6 +107,12 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     if app.help_open() {
         view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
     }
+    if app.settings_open() {
+        if app.settings().busy().is_some() {
+            view.spinner = view.spinner.wrapping_add(1);
+        }
+        settings::draw(frame, app.settings(), app.connection(), view.spinner);
+    }
 }
 
 fn panel_block(title: String, focused: bool, width: u16) -> Block<'static> {
@@ -139,6 +148,22 @@ fn row_width(area: Rect) -> usize {
 fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, focused: bool) {
     if let (Source::Navidrome, Some(browser)) = (app.source(), app.browser()) {
         draw_remote(frame, app, browser, view, area, focused);
+        return;
+    }
+    if app.navidrome_prompt() {
+        let block = panel_block("Navidrome".to_owned(), focused, area.width);
+        let body = block.inner(area);
+        frame.render_widget(block, area);
+        let width = usize::from(body.width);
+        let mut lines = vec![Line::raw(fit(NAVIDROME_NOT_CONFIGURED, width))];
+        if focused {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                fit(PRESS_ENTER_TO_CONNECT, width),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), body);
         return;
     }
     let title = match app.local_search() {
@@ -805,6 +830,30 @@ mod tests {
             screen.contains("Navidrome: authentication failed"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn navidrome_prompt_and_settings_overlay() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_action(Action::SelectNavidrome, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Navidrome is not configured"), "{screen}");
+        assert!(screen.contains("Press Enter to connect"), "{screen}");
+        // The prompt is only offered while the panel is focused.
+        app.handle_action(Action::SwitchFocus, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Navidrome is not configured"), "{screen}");
+        assert!(!screen.contains("Press Enter"), "{screen}");
+        app.handle_action(Action::OpenSettings, now);
+        let screen = render(&app, 100, 24, now);
+        assert!(screen.contains(" Settings "), "{screen}");
+        assert!(screen.contains("Music folder  /music"), "{screen}");
+        // Help lists the key.
+        let mut app = App::new("/music".into());
+        app.handle_action(Action::ToggleHelp, now);
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Settings (Navidrome)"), "{screen}");
     }
 
     #[test]
@@ -1522,6 +1571,7 @@ mod tests {
     ) {
         app.handle_fetch_response(
             FetchResponse {
+                generation: Default::default(),
                 id: request.id,
                 resource: request.resource.clone(),
                 result,

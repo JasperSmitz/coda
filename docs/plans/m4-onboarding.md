@@ -50,7 +50,7 @@
   - Contents: `music_dir` (with the `~/` form kept if the user typed it), and `[navidrome]` with `url`, `username` and `password_keychain = true`. Add a short comment header saying the file was written by setup and may be edited.
   - If a file already exists at that path (only possible when it configures no source, e.g. comments only):
     - Keep any `scrobble` setting.
-    - Only if the file contains anything other than whitespace and comments, back it up to `config.toml.bak.<secs>` before replacing it.
+    - Only if the file contains anything other than whitespace and comments, back it up to `config.toml.bak.<secs>` before replacing it. *(Amended in slice 2: no backup when the file is byte for byte what Coda itself would write.)*
     - Use `toml`'s serializer or a small explicit writer. Do not add a TOML-editing crate for this.
 
 ### Structure
@@ -146,6 +146,18 @@ Approved by the owner 2026-10-31. Delivered as two parts, each reviewed and comm
   - in-app connect while a local track plays, where playback continues and then remote browsing works;
   - in-app disconnect.
 - **Standard checks:** fmt, clippy with and without `--all-features`, `test --all-targets`, build, and the ignored mpv tests. Linux container: clippy and tests.
+
+### Decisions made during Part B
+- A successful ping in the overlay saves immediately, with no Ready screen. Retrying a failed save pings again.
+- "Coda-owned" means `password_keychain = true` and no `CODA_NAVIDROME_*` variable set.
+- Disconnect is refused unless the config file itself has a music folder. The writer enforces this, and the overlay pre-checks it.
+- While a save runs, the first Ctrl-C warns and the second quits. The exit waits up to 5 s; the worst case is an unused keychain entry, never a config pointing at a missing one.
+- Hot swap:
+  - client generations on fetches and pings;
+  - old fetches aborted, with a fresh semaphore;
+  - the load in flight at the swap is never scrobbled;
+  - the old scrobbler drains its queue to the old server.
+- No backup when the file is exactly what Coda writes (applies to `--setup` too).
 
 ## Out of scope
 Multiple servers, OpenSubsonic API keys, changing the local music folder inside the app (`coda --setup` covers it), localisation.

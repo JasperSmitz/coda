@@ -1,5 +1,7 @@
 //! Draws the setup ([`Onboarding`], first run or `coda --setup`) and maps
-//! keys to its [`Input`]s. One compact centred panel per screen.
+//! keys to its [`Input`]s. One compact centred panel per screen. The panel
+//! and the server form are shared with the in-app settings
+//! (`crate::ui::settings`).
 //!
 //! Typed text is sanitised and truncated like every other untrusted
 //! string (the end of an input stays visible); the password is only ever
@@ -15,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::MusicDirArg;
 use crate::onboarding::{
-    Busy, Field, Input, Onboarding, SaveError, Screen, leftover_overrides_message,
+    Busy, Field, Input, Onboarding, SaveError, Screen, ServerForm, leftover_overrides_message,
     navidrome_blocked_message,
 };
 use crate::ui::render::{fit, fit_tail};
@@ -60,7 +62,7 @@ pub fn map_key(key: KeyEvent) -> Option<Input> {
 }
 
 /// Lines of the panel plus where the cursor goes (line, column).
-struct Panel {
+pub(crate) struct Panel {
     title: &'static str,
     lines: Vec<Line<'static>>,
     cursor: Option<(usize, usize)>,
@@ -68,7 +70,7 @@ struct Panel {
 }
 
 impl Panel {
-    fn new(title: &'static str, width: usize) -> Self {
+    pub(crate) fn new(title: &'static str, width: usize) -> Self {
         Self {
             title,
             lines: Vec::new(),
@@ -77,35 +79,35 @@ impl Panel {
         }
     }
 
-    fn text(&mut self, text: &str) {
+    pub(crate) fn text(&mut self, text: &str) {
         self.lines.push(Line::raw(fit(text, self.width)));
     }
 
-    fn blank(&mut self) {
+    pub(crate) fn blank(&mut self) {
         self.lines.push(Line::raw(""));
     }
 
-    fn styled(&mut self, text: &str, style: Style) {
+    pub(crate) fn styled(&mut self, text: &str, style: Style) {
         self.lines
             .push(Line::from(Span::styled(fit(text, self.width), style)));
     }
 
-    fn error(&mut self, text: &str) {
+    pub(crate) fn error(&mut self, text: &str) {
         self.styled(text, Style::default().fg(Color::Red));
     }
 
-    fn hint(&mut self, text: &str) {
+    pub(crate) fn hint(&mut self, text: &str) {
         self.styled(text, Style::default().fg(Color::DarkGray));
     }
 
     /// Something to be aware of, e.g. a setting made outside Coda.
-    fn note(&mut self, text: &str) {
+    pub(crate) fn note(&mut self, text: &str) {
         self.styled(text, Style::default().fg(Color::Yellow));
     }
 
     /// `text` word-wrapped to the panel width, one styled line per row.
     /// A word wider than the panel is truncated.
-    fn wrapped(&mut self, text: &str, style: Style) {
+    pub(crate) fn wrapped(&mut self, text: &str, style: Style) {
         let mut line = String::new();
         for word in text.split_whitespace() {
             if !line.is_empty() && line.width() + 1 + word.width() > self.width {
@@ -121,8 +123,8 @@ impl Panel {
         }
     }
 
-    fn spinner(&mut self, frame: usize, text: &str) {
-        let symbol = SPINNER[frame % SPINNER.len()];
+    pub(crate) fn spinner(&mut self, frame: usize, text: &str) {
+        let symbol = spinner_frame(frame);
         self.styled(
             &format!("{symbol} {text}"),
             Style::default().fg(Color::Cyan),
@@ -131,7 +133,7 @@ impl Panel {
 
     /// `label` then `value` (already masked if secret), with the cursor at
     /// its end when `focused`. Shows the end of a long value.
-    fn input(&mut self, label: &str, value: &str, focused: bool) {
+    pub(crate) fn input(&mut self, label: &str, value: &str, focused: bool) {
         let label = format!("{label:<LABEL_WIDTH$}");
         let room = self.width.saturating_sub(label.width() + 1);
         let shown = fit_tail(value, room);
@@ -153,7 +155,7 @@ impl Panel {
     }
 
     /// A `label: value` summary line.
-    fn field(&mut self, label: &str, value: &str) {
+    pub(crate) fn field(&mut self, label: &str, value: &str) {
         let label = format!("{label:<14}");
         let room = self.width.saturating_sub(label.width());
         self.lines.push(Line::from(vec![
@@ -164,6 +166,12 @@ impl Panel {
 }
 
 pub fn draw(frame: &mut Frame, setup: &Onboarding, view: &View) {
+    draw_panel(frame, |width| build(setup, view, width));
+}
+
+/// Draws the panel `build` makes for a given inner width, centred over
+/// the whole frame, with the cursor where the panel put it.
+pub(crate) fn draw_panel(frame: &mut Frame, build: impl FnOnce(usize) -> Panel) {
     let area = frame.area();
     let outer = area.centered(
         Constraint::Length(MAX_WIDTH.min(area.width)),
@@ -171,7 +179,7 @@ pub fn draw(frame: &mut Frame, setup: &Onboarding, view: &View) {
     );
     // Inside the border and one column of padding on each side.
     let width = usize::from(outer.width.saturating_sub(4));
-    let panel = build(setup, view, width);
+    let panel = build(width);
 
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::Cyan))
@@ -195,6 +203,28 @@ pub fn draw(frame: &mut Frame, setup: &Onboarding, view: &View) {
         let x = inner.x + (column as u16).min(inner.width - 1);
         frame.set_cursor_position((x, inner.y + row as u16));
     }
+}
+
+/// The URL, username and (masked) password inputs, with the cursor in the
+/// focused one when `editable`.
+pub(crate) fn server_form(p: &mut Panel, form: &ServerForm, editable: bool) {
+    let focus = editable.then_some(form.focus());
+    p.input("URL", form.url_input(), focus == Some(Field::Url));
+    p.input(
+        "Username",
+        form.username_input(),
+        focus == Some(Field::Username),
+    );
+    p.input(
+        "Password",
+        &form.password_masked(),
+        focus == Some(Field::Password),
+    );
+}
+
+/// The spinner frame for a counter.
+pub(crate) fn spinner_frame(counter: usize) -> &'static str {
+    SPINNER[counter % SPINNER.len()]
 }
 
 fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
@@ -294,18 +324,7 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
         Screen::Server => {
             let mut p = Panel::new("Navidrome server", width);
             let connecting = setup.busy() == Some(Busy::Connecting);
-            let focus = (!connecting).then_some(setup.focus());
-            p.input("URL", setup.url_input(), focus == Some(Field::Url));
-            p.input(
-                "Username",
-                setup.username_input(),
-                focus == Some(Field::Username),
-            );
-            p.input(
-                "Password",
-                &setup.password_masked(),
-                focus == Some(Field::Password),
-            );
+            server_form(&mut p, setup.form(), !connecting);
             p.blank();
             if let Some(names) = redo
                 .map(|r| &r.navidrome_overrides)

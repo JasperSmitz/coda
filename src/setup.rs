@@ -279,27 +279,29 @@ async fn leave_on_signal(
 
 /// Sends `fallback` unless [`Reply::send`] was called: a request whose
 /// task panics or is cancelled still answers (LESSONS.md, "Every spawned
-/// request must answer exactly once").
-struct Reply {
-    tx: mpsc::UnboundedSender<Response>,
-    fallback: Option<Response>,
+/// request must answer exactly once"). Also used by the app's settings.
+pub(crate) struct Reply<R> {
+    tx: mpsc::UnboundedSender<R>,
+    fallback: Option<R>,
 }
 
-impl Reply {
-    fn new(tx: &mpsc::UnboundedSender<Response>, fallback: Response) -> Self {
+impl<R> Reply<R> {
+    /// Built before spawning, so a task dropped before its first poll
+    /// still answers.
+    pub(crate) fn new(tx: &mpsc::UnboundedSender<R>, fallback: R) -> Self {
         Self {
             tx: tx.clone(),
             fallback: Some(fallback),
         }
     }
 
-    fn send(mut self, response: Response) {
+    pub(crate) fn send(mut self, response: R) {
         self.fallback = None;
         let _ = self.tx.send(response);
     }
 }
 
-impl Drop for Reply {
+impl<R> Drop for Reply<R> {
     fn drop(&mut self) {
         if let Some(response) = self.fallback.take() {
             let _ = self.tx.send(response);
@@ -307,7 +309,7 @@ impl Drop for Reply {
     }
 }
 
-const INTERRUPTED: &str = "Something went wrong; please try again";
+pub(crate) const INTERRUPTED: &str = "Something went wrong; please try again";
 
 fn spawn_request(request: Request, context: &Context, tx: &mpsc::UnboundedSender<Response>) {
     match request {
@@ -422,21 +424,15 @@ fn capitalize(text: &str) -> String {
 }
 
 /// What a save does with Navidrome.
-enum SaveNavidrome {
+pub enum SaveNavidrome {
     Remove,
     /// Keep `[navidrome]` as it is; the keychain is not touched.
     Keep,
     Server(Server),
 }
 
-/// Stores the password, then writes the config. Blocking.
-///
-/// If the config write fails after the password was stored, the new entry
-/// is removed again (best effort), so a failed setup leaves nothing
-/// behind, unless it is `previous`'s, which the old config still uses.
-/// Once the config is written, `previous` (the entry Coda wrote for the
-/// old config) is deleted best effort if it is no longer used: the account
-/// changed or Navidrome was removed (not when it is kept).
+/// Stores the password, then writes the config with `music_dir`. Blocking.
+/// See [`store_then_write`].
 fn save(
     path: &Path,
     music_dir: Option<String>,
@@ -444,6 +440,53 @@ fn save(
     open_store: fn() -> Result<SecretStore, SecretError>,
     previous: Option<&str>,
 ) -> Result<(), SaveError> {
+    store_then_write(path, navidrome, open_store, previous, |navidrome| {
+        let config = SetupConfig {
+            music_dir,
+            navidrome,
+        };
+        let backup = config_writer::write(path, &config)?;
+        tracing::info!(backup = backup.is_some(), "setup: config written");
+        Ok(())
+    })
+}
+
+/// The in-app settings' save: stores the password (for a server), then
+/// writes `[navidrome]`, keeping `music_dir` and `scrobble` as they are in
+/// the file. Returns the file's `scrobble` setting. Blocking. See
+/// [`store_then_write`].
+pub fn save_navidrome(
+    path: &Path,
+    navidrome: SaveNavidrome,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    previous: Option<&str>,
+) -> Result<bool, SaveError> {
+    store_then_write(path, navidrome, open_store, previous, |navidrome| {
+        let written = config_writer::write_navidrome(path, &navidrome)?;
+        tracing::info!(
+            backup = written.backup.is_some(),
+            "settings: config written"
+        );
+        Ok(written.scrobble)
+    })
+}
+
+/// Stores the password (for a server), then runs `write` with the
+/// resulting `[navidrome]` section. Blocking.
+///
+/// If the config write fails after the password was stored, the new entry
+/// is removed again (best effort), so a failed setup leaves nothing
+/// behind, unless it is `previous`'s, which the old config still uses.
+/// Once the config is written, `previous` (the entry Coda wrote for the
+/// old config) is deleted best effort if it is no longer used: the account
+/// changed or Navidrome was removed (not when it is kept).
+fn store_then_write<T>(
+    path: &Path,
+    navidrome: SaveNavidrome,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    previous: Option<&str>,
+    write: impl FnOnce(NavidromeSection) -> io::Result<T>,
+) -> Result<T, SaveError> {
     let mut stored = None;
     let mut new_account = None;
     let keep = matches!(navidrome, SaveNavidrome::Keep);
@@ -471,13 +514,8 @@ fn save(
         SaveNavidrome::Keep => NavidromeSection::Keep,
         SaveNavidrome::Remove => NavidromeSection::Remove,
     };
-    let config = SetupConfig {
-        music_dir,
-        navidrome,
-    };
-    match config_writer::write(path, &config) {
-        Ok(backup) => {
-            tracing::info!(backup = backup.is_some(), "setup: config written");
+    match write(navidrome) {
+        Ok(written) => {
             if let Some(previous) = previous.filter(|p| !keep && new_account.as_deref() != Some(*p))
             {
                 delete_previous(
@@ -486,7 +524,7 @@ fn save(
                     open_store,
                 );
             }
-            Ok(())
+            Ok(written)
         }
         Err(error) => {
             tracing::warn!(error = %error.kind(), "setup: could not write the config");

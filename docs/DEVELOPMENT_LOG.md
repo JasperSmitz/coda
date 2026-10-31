@@ -97,3 +97,31 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - two timing-fragile tests (`password_command` timeout, scrobbler queue)
 - **Earlier Linux exit 101:** most likely the container's OOM killer stopping the linker, which was observed once. Not confirmed, since the original output was not kept.
 - **Limitations:** every redo save leaves a `.bak.<secs>` behind, so backups accumulate. With `CODA_NAVIDROME_PASSWORD` set, the form pings the typed values, not the env ones (noted on screen).
+
+## 2026-10-31 — M4 slice 2 Part B: settings inside the app (M4 complete)
+- **Delivered:**
+  - A `,` Settings overlay. It shows the folder and the Navidrome status. Connect, Edit and Disconnect (`d d`) are available for Coda-owned settings; anything set outside Coda is read-only and named.
+  - `2` without Navidrome offers "Press Enter to connect".
+  - A hot client swap that leaves mpv alone: client generations on fetches and pings, old fetches aborted, the browser reset, the scrobbler replaced, and the load in flight at the swap never scrobbled.
+  - Disconnect is refused unless the config file keeps a music folder.
+  - A second Ctrl-C quits during a save.
+  - No backup for files that are exactly what Coda writes.
+- **Tests:**
+  - macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (448 lib tests plus integration) pass, as do the 20 ignored mpv tests.
+  - Linux container (`-j 2`, output kept): clippy and the tests pass.
+  - PTY smokes: connect while a local track plays (same mpv process, playback continues), edit to another account, disconnect, the `2` prompt, a server set outside Coda, and disconnect refused with a folder given only on the command line.
+- **Review:** two rounds. Fixed:
+  - disconnect leaving no source in the file
+  - a load in flight scrobbled to the new server
+  - old fetches holding permits after the swap
+  - an old ping racing the swap
+  - j/k under the prompt
+  - backups accumulating
+  - a hung keychain blocking quit
+  - the help text
+- **Limitations:**
+  - An old ping is not aborted at the swap; it sends one request and its answer is ignored.
+  - Quitting mid-save can leave an unused keychain entry.
+  - The folder can only be changed with `coda --setup`.
+  - The setup TUI has not been run on Linux.
+  - Not run against the real macOS Keychain or a real server by the agents.

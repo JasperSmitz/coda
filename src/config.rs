@@ -414,8 +414,8 @@ pub struct SetupStart {
     /// The file's URL does not parse and contains `@`, so it may hold
     /// credentials that cannot be separated reliably: `url` is `None`.
     pub url_withheld: bool,
-    /// The file holds more than whitespace and comments, so saving backs
-    /// it up first (the config writer's rule).
+    /// Saving backs the file up first: it holds settings and is not
+    /// exactly what Coda wrote (the config writer's rule).
     pub has_content: bool,
 }
 
@@ -435,7 +435,7 @@ impl fmt::Debug for SetupStart {
 pub fn read_for_setup(env: &Env) -> Result<SetupStart, ConfigError> {
     let (config_path, explicit) = config_file_path(env).ok_or(ConfigError::NoConfigLocation)?;
     let (file, has_content) = match read_config_file(&config_path, explicit)? {
-        Some((file, text)) => (file, crate::config_writer::has_content(&text)),
+        Some((file, text)) => (file, crate::config_writer::needs_backup(&text)),
         None => (FileConfig::default(), false),
     };
     let non_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
@@ -1704,6 +1704,12 @@ mod tests {
         assert!(!read_for_setup(&f.env).unwrap().has_content);
         f.write("[navidrome]\nscrobble = false\n", 0o644);
         assert!(read_for_setup(&f.env).unwrap().has_content);
+        // A file exactly as Coda writes it is not backed up.
+        let coda = "# Coda configuration, written by Coda's setup.\n\
+                    # You may edit this file; see the README for all settings.\n\
+                    \n[navidrome]\nscrobble = false\n";
+        f.write(coda, 0o644);
+        assert!(!read_for_setup(&f.env).unwrap().has_content);
     }
 
     #[test]

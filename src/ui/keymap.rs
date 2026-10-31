@@ -54,6 +54,8 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('-') => Action::VolumeDown,
         KeyCode::Tab => Action::SwitchFocus,
         KeyCode::Char('?') => Action::ToggleHelp,
+        // Provisional; the final key is decided in M6.
+        KeyCode::Char(',') => Action::OpenSettings,
         KeyCode::Char('q') => Action::Quit,
         _ => return None,
     };
@@ -121,6 +123,7 @@ mod tests {
             (ch('1'), Action::SelectLocal),
             (ch('2'), Action::SelectNavidrome),
             (ch('R'), Action::CycleRepeat),
+            (ch(','), Action::OpenSettings),
         ];
         for (k, action) in cases {
             assert_eq!(lib(k), Some(action), "library {k:?}");

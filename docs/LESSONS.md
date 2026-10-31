@@ -102,3 +102,9 @@ Each entry should state:
 - **Context / symptom:** with `CODA_NAVIDROME_USER` set, `coda --setup` pinged and stored the password under the typed account, while startup looked it up under the env-merged account. Startup then failed with "Run `coda --setup`", which repeated the failure.
 - **Rule:** when overrides can change the identity a secret is stored under, either have setup use exactly the identity startup will compute, or refuse to save while the override is active. Never verify and store credentials that startup will not read.
 - **Where verified:** M4 slice 2 Part A review; `Onboarding` blocked-server state, `keeping_navidrome_under_env_overrides_changes_only_the_folder`.
+
+### Swapping the identity behind async work must also cover events that arrive later
+- **Context / symptom:** in the in-app account swap, a track resolved with the old client but not yet started at the swap would have been scrobbled to the new server.
+- **Root cause:** the swap cleared the listen that existed at swap time, but mpv's `Started` for that load arrived afterwards and created a new one.
+- **Rule:** when swapping the identity behind async work, also invalidate events that arrive after the swap for work issued before it. Do this by recording the last pre-swap id, or by tagging work with a generation (as fetches and pings now are).
+- **Where verified:** M4 slice 2 Part B review; `a_load_still_loading_at_the_swap_is_not_scrobbled_to_the_new_server`, `the_old_ping_racing_the_swap_is_ignored`.

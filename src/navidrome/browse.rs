@@ -24,6 +24,10 @@
 //!   artist with hundreds of albums never queues view fetches behind it.
 //! - Every spawned fetch answers exactly once: if its task is dropped or
 //!   panics first, an [`Error::Aborted`] response is sent instead.
+//! - A browser belongs to one client [`Generation`] (the app starts a new
+//!   one when the Navidrome account changes). Its requests carry it, and
+//!   a response from another generation is ignored, so nothing fetched
+//!   from an old server lands in the new browser.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -72,14 +76,21 @@ impl Resource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
+/// Which Navidrome client a request was made for. Request ids restart in
+/// every new browser, so the id alone cannot tell responses apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Generation(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchRequest {
+    pub generation: Generation,
     pub id: RequestId,
     pub resource: Resource,
 }
 
 #[derive(Debug)]
 pub struct FetchResponse {
+    pub generation: Generation,
     pub id: RequestId,
     pub resource: Resource,
     pub result: Result<Content, Error>,
@@ -243,6 +254,8 @@ pub enum Activated {
 
 #[derive(Debug, Default)]
 pub struct Browser {
+    /// The client this browser fetches through.
+    generation: Generation,
     /// Navigation stack; the last view is shown. Empty until started.
     stack: Vec<View>,
     cache: HashMap<Resource, Content>,
@@ -257,8 +270,21 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// A browser for the first client ([`Generation`] 0).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A browser for the client of `generation`.
+    pub fn with_generation(generation: Generation) -> Self {
+        Self {
+            generation,
+            ..Self::default()
+        }
+    }
+
+    pub fn generation(&self) -> Generation {
+        self.generation
     }
 
     /// Opens the Artists root view the first time; later calls do nothing.
@@ -432,7 +458,11 @@ impl Browser {
         self.next_id += 1;
         let id = RequestId(self.next_id);
         self.in_flight.insert(resource.clone(), id);
-        self.outbox.push(FetchRequest { id, resource });
+        self.outbox.push(FetchRequest {
+            generation: self.generation,
+            id,
+            resource,
+        });
         id
     }
 
@@ -621,13 +651,18 @@ impl Browser {
     // ----- responses -------------------------------------------------------
 
     /// Applies a fetch result: the cache always, views only if they still
-    /// await `response.id`. Returns the enqueue jobs that completed.
+    /// await `response.id`. Returns the enqueue jobs that completed. A
+    /// response for another client generation is ignored.
     pub fn handle_response(&mut self, response: FetchResponse) -> Vec<JobOutcome> {
         let FetchResponse {
+            generation,
             id,
             resource,
             result,
         } = response;
+        if generation != self.generation {
+            return Vec::new();
+        }
         if self.in_flight.get(&resource) == Some(&id) {
             self.in_flight.remove(&resource);
         }
@@ -690,6 +725,7 @@ pub fn spawn_fetch(
     // answers.
     let reply = Reply {
         responses,
+        generation: request.generation,
         id: request.id,
         resource: Some(request.resource),
     };
@@ -718,6 +754,7 @@ pub fn spawn_fetch(
 /// the browser never awaits a request forever.
 struct Reply {
     responses: mpsc::UnboundedSender<FetchResponse>,
+    generation: Generation,
     id: RequestId,
     /// `None` once sent.
     resource: Option<Resource>,
@@ -731,6 +768,7 @@ impl Reply {
     fn send_once(&mut self, result: Result<Content, Error>) {
         if let Some(resource) = self.resource.take() {
             let _ = self.responses.send(FetchResponse {
+                generation: self.generation,
                 id: self.id,
                 resource,
                 result,
@@ -790,6 +828,7 @@ mod tests {
 
     fn ok(browser: &mut Browser, request: &FetchRequest, content: Content) -> Vec<JobOutcome> {
         browser.handle_response(FetchResponse {
+            generation: request.generation,
             id: request.id,
             resource: request.resource.clone(),
             result: Ok(content),
@@ -806,6 +845,26 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn responses_for_another_generation_are_ignored() {
+        let mut b = Browser::with_generation(Generation(2));
+        b.ensure_started();
+        let request = b.take_requests().pop().unwrap();
+        assert_eq!(request.generation, Generation(2));
+        let stale = FetchResponse {
+            generation: Generation(1),
+            id: request.id,
+            resource: Resource::Artists,
+            result: Ok(Content::Artists(vec![artist("old")])),
+        };
+        assert!(b.handle_response(stale).is_empty());
+        assert_eq!(b.current().unwrap().load, Load::Loading(request.id));
+        assert!(b.cached(&Resource::Artists).is_none());
+        assert!(b.is_in_flight(&Resource::Artists));
+        ok(&mut b, &request, Content::Artists(vec![artist("new")]));
+        assert_eq!(b.current().unwrap().load, Load::Ready);
     }
 
     #[test]
@@ -966,6 +1025,7 @@ mod tests {
         b.ensure_started();
         let root = b.take_requests().remove(0);
         b.handle_response(FetchResponse {
+            generation: Default::default(),
             id: root.id,
             resource: Resource::Artists,
             result: Err(Error::Http(500)),
@@ -973,6 +1033,7 @@ mod tests {
         assert!(matches!(b.current().unwrap().load, Load::Failed(_)));
         // Any successful answer for the list (e.g. one a job requested).
         b.handle_response(FetchResponse {
+            generation: Default::default(),
             id: RequestId(99),
             resource: Resource::Artists,
             result: Ok(Content::Artists(vec![artist("1")])),
@@ -980,6 +1041,7 @@ mod tests {
         assert_eq!(b.current().unwrap().load, Load::Ready);
         // A failure for an unrelated id leaves a ready view alone.
         b.handle_response(FetchResponse {
+            generation: Default::default(),
             id: RequestId(100),
             resource: Resource::Artists,
             result: Err(Error::Http(500)),
