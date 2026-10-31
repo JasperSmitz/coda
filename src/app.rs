@@ -1500,7 +1500,7 @@ async fn shutdown_backend(playback: PlaybackHandle) {
 /// retries a failed show-cursor with `eprintln!`, which panics when the
 /// terminal has hung up; in that case the terminal is leaked instead (the
 /// process is exiting).
-fn release_terminal(mut terminal: DefaultTerminal) {
+pub(crate) fn release_terminal(mut terminal: DefaultTerminal) {
     if let Err(error) = terminal.show_cursor() {
         tracing::warn!(%error, "could not show the cursor");
         std::mem::forget(terminal);
@@ -1509,7 +1509,7 @@ fn release_terminal(mut terminal: DefaultTerminal) {
 
 /// Restores the terminal without ever writing to stderr: after a hangup
 /// the terminal is gone and a failed write must not panic.
-fn restore_terminal() {
+pub(crate) fn restore_terminal() {
     if let Err(error) = crossterm::execute!(io::stdout(), DisableBracketedPaste) {
         tracing::warn!(%error, "could not disable bracketed paste");
     }

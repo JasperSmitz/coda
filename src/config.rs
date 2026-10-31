@@ -7,7 +7,9 @@
 //! - Music directory: CLI argument > `CODA_MUSIC_DIR` > `music_dir`.
 //! - Navidrome: `CODA_NAVIDROME_URL/USER/PASSWORD` override the file's
 //!   `[navidrome]` values. All of url, username and a password source are
-//!   required once any is given.
+//!   required once any is given. The file names at most one password
+//!   source: `password`, `password_command` or `password_keychain` (the OS
+//!   credential store, ADR 0004).
 //! - At least one source (music directory or Navidrome) is required.
 //!
 //! Error messages name files, fields and variables, never their values.
@@ -27,6 +29,7 @@ use url::Url;
 
 use crate::navidrome::Password;
 use crate::navidrome::client::{UrlError, parse_base_url};
+use crate::secret_store::{self, STORE_NAME, SecretError, SecretStore};
 
 pub const MUSIC_DIR_ENV: &str = "CODA_MUSIC_DIR";
 pub const CONFIG_ENV: &str = "CODA_CONFIG";
@@ -102,11 +105,19 @@ impl fmt::Debug for NavidromeConfig {
     }
 }
 
-/// Where the password comes from. `Debug` hides the password and argv.
+/// Where the password comes from. `Debug` hides the password, argv and
+/// account.
 pub enum PasswordSource {
     Value(Password),
     /// argv, run without a shell by [`PasswordSource::resolve`].
     Command(Vec<String>),
+    /// The OS credential store entry for this account (see
+    /// [`secret_store::account`]). `config_path` names the file that asked
+    /// for it, for error messages.
+    Keychain {
+        account: String,
+        config_path: Option<PathBuf>,
+    },
 }
 
 impl fmt::Debug for PasswordSource {
@@ -114,6 +125,7 @@ impl fmt::Debug for PasswordSource {
         match self {
             Self::Value(_) => f.write_str("Value(<redacted>)"),
             Self::Command(_) => f.write_str("Command(<redacted>)"),
+            Self::Keychain { .. } => f.write_str("Keychain(<redacted>)"),
         }
     }
 }
@@ -174,7 +186,10 @@ pub enum ConfigError {
         field: &'static str,
         env: &'static str,
     },
-    #[error("[navidrome] sets both password and password_command; keep one")]
+    #[error(
+        "[navidrome] sets more than one of password, password_command and \
+         password_keychain; keep one"
+    )]
     ConflictingPassword,
     #[error("[navidrome] password_command must not be empty")]
     EmptyPasswordCommand,
@@ -182,6 +197,27 @@ pub enum ConfigError {
     InvalidUrl(#[from] UrlError),
     #[error("password_command failed: {0}")]
     PasswordCommand(String),
+    #[error("{}", keychain_message(*.error, .config_path.as_deref()))]
+    Keychain {
+        error: SecretError,
+        config_path: Option<PathBuf>,
+    },
+}
+
+/// The message for a failed `password_keychain` lookup, with a remedy.
+fn keychain_message(error: SecretError, config_path: Option<&Path>) -> String {
+    let path = config_path.map_or_else(|| "the config file".into(), |p| p.display().to_string());
+    match error {
+        SecretError::Missing => format!(
+            "the Navidrome password was not found in the {STORE_NAME}.\n\
+             To repeat the setup, remove the [navidrome] section (and music_dir) from {path} \
+             and run coda again, or set {NAVIDROME_PASSWORD_ENV}."
+        ),
+        error => format!(
+            "could not read the Navidrome password from the {STORE_NAME}: {error}.\n\
+             Set {NAVIDROME_PASSWORD_ENV}, or use password_command in {path} instead."
+        ),
+    }
 }
 
 impl ConfigError {
@@ -205,7 +241,8 @@ impl ConfigError {
             | Self::ConfigUnreadable { .. }
             | Self::InsecurePermissions(_)
             | Self::WritableCommandConfig(_)
-            | Self::PasswordCommand(_) => 1,
+            | Self::PasswordCommand(_)
+            | Self::Keychain { .. } => 1,
         }
     }
 }
@@ -225,6 +262,7 @@ struct FileNavidrome {
     username: Option<String>,
     password: Option<FilePassword>,
     password_command: Option<Vec<String>>,
+    password_keychain: Option<bool>,
     scrobble: Option<bool>,
 }
 
@@ -294,7 +332,7 @@ impl Config {
         let config_path = location.map(|(path, _)| path);
         let file = file.unwrap_or_default();
 
-        let navidrome = merge_navidrome(file.navidrome, env)?;
+        let navidrome = merge_navidrome(file.navidrome, env, config_path.as_deref())?;
 
         let cli_dir = cli.music_dir.filter(|p| !p.is_empty()).map(PathBuf::from);
         let file_dir = match file.music_dir.filter(|s| !s.is_empty()) {
@@ -395,14 +433,25 @@ fn env_string(value: &Option<OsString>, name: &'static str) -> Result<Option<Str
     }
 }
 
+/// The password source before the URL is known.
+enum PasswordChoice {
+    Ready(PasswordSource),
+    Keychain,
+}
+
 /// Env values (non-empty) override file values. Returns `None` when
 /// nothing Navidrome-related is set anywhere.
 fn merge_navidrome(
     file: Option<FileNavidrome>,
     env: &Env,
+    config_path: Option<&Path>,
 ) -> Result<Option<NavidromeConfig>, ConfigError> {
     let file = file.unwrap_or_default();
-    if file.password.is_some() && file.password_command.is_some() {
+    let keychain = file.password_keychain == Some(true);
+    let sources = usize::from(file.password.is_some())
+        + usize::from(file.password_command.is_some())
+        + usize::from(keychain);
+    if sources > 1 {
         return Err(ConfigError::ConflictingPassword);
     }
     let scrobble = file.scrobble.unwrap_or(true);
@@ -411,15 +460,18 @@ fn merge_navidrome(
     let username =
         env_string(&env.navidrome_user, NAVIDROME_USER_ENV)?.or(non_empty(file.username));
     let password = match env_string(&env.navidrome_password, NAVIDROME_PASSWORD_ENV)? {
-        Some(password) => Some(PasswordSource::Value(Password::new(password))),
+        Some(password) => Some(PasswordChoice::Ready(PasswordSource::Value(Password::new(
+            password,
+        )))),
         None => match (file.password, file.password_command) {
-            (Some(FilePassword(p)), _) if !p.is_empty() => {
-                Some(PasswordSource::Value(Password::new(p)))
-            }
+            (Some(FilePassword(p)), _) if !p.is_empty() => Some(PasswordChoice::Ready(
+                PasswordSource::Value(Password::new(p)),
+            )),
             (_, Some(argv)) if argv.is_empty() || argv[0].is_empty() => {
                 return Err(ConfigError::EmptyPasswordCommand);
             }
-            (_, Some(argv)) => Some(PasswordSource::Command(argv)),
+            (_, Some(argv)) => Some(PasswordChoice::Ready(PasswordSource::Command(argv))),
+            _ if keychain => Some(PasswordChoice::Keychain),
             _ => None,
         },
     };
@@ -432,17 +484,34 @@ fn merge_navidrome(
             } else if username.is_none() {
                 ("username", NAVIDROME_USER_ENV)
             } else {
-                ("password (or password_command)", NAVIDROME_PASSWORD_ENV)
+                (
+                    "password (or password_command or password_keychain)",
+                    NAVIDROME_PASSWORD_ENV,
+                )
             };
             return Err(ConfigError::MissingNavidromeField { field, env });
         }
     };
+    let url = parse_base_url(&url)?;
+    let password = match password {
+        PasswordChoice::Ready(source) => source,
+        PasswordChoice::Keychain => PasswordSource::Keychain {
+            account: secret_store::account(&url, &username),
+            config_path: config_path.map(Path::to_owned),
+        },
+    };
     Ok(Some(NavidromeConfig {
-        url: parse_base_url(&url)?,
+        url,
         username,
         password,
         scrobble,
     }))
+}
+
+/// Expands a typed music directory (`~` or `~/…` with `$HOME`). `None` if
+/// the result is not absolute.
+pub fn expand_music_dir(typed: &str, env: &Env) -> Option<PathBuf> {
+    expand_home(typed, env)
 }
 
 /// Validates the directory: it must exist, be a directory and be
@@ -467,12 +536,38 @@ pub fn validate_music_dir(path: PathBuf) -> Result<PathBuf, ConfigError> {
 }
 
 impl PasswordSource {
-    /// The password, running `password_command` if needed (see
-    /// [`run_password_command`]).
+    /// The password, running `password_command` (see
+    /// [`run_password_command`]) or reading the OS credential store if
+    /// needed.
     pub async fn resolve(self, timeout: Duration) -> Result<Password, ConfigError> {
+        self.resolve_with(timeout, SecretStore::system).await
+    }
+
+    /// [`PasswordSource::resolve`] with the credential store from
+    /// `open_store`. The store is opened and read on a blocking thread;
+    /// the read may wait for an OS prompt, so it has no timeout.
+    pub async fn resolve_with(
+        self,
+        timeout: Duration,
+        open_store: impl FnOnce() -> Result<SecretStore, SecretError> + Send + 'static,
+    ) -> Result<Password, ConfigError> {
         match self {
             Self::Value(password) => Ok(password),
             Self::Command(argv) => run_password_command(&argv, timeout).await,
+            Self::Keychain {
+                account,
+                config_path,
+            } => {
+                let read = tokio::task::spawn_blocking(move || open_store()?.get(&account));
+                let error = match read.await {
+                    Ok(Ok(password)) => return Ok(password),
+                    Ok(Err(error)) => error,
+                    // The read panicked; its message is not shown.
+                    Err(_) => SecretError::Failed,
+                };
+                tracing::warn!(kind = error.kind(), "could not read the keychain");
+                Err(ConfigError::Keychain { error, config_path })
+            }
         }
     }
 }
@@ -636,7 +731,9 @@ mod tests {
     fn expose(source: &PasswordSource) -> &str {
         match source {
             PasswordSource::Value(p) => p.expose(),
-            PasswordSource::Command(_) => panic!("expected a value"),
+            PasswordSource::Command(_) | PasswordSource::Keychain { .. } => {
+                panic!("expected a value")
+            }
         }
     }
 
@@ -1093,6 +1190,166 @@ mod tests {
                 .expose(),
             "q"
         );
+    }
+
+    const KEYCHAIN: &str = "[navidrome]\nurl = \"https://music.example.org:8443/nd\"\n\
+                            username = \"me\"\npassword_keychain = true\n";
+
+    fn keychain_account(source: &PasswordSource) -> &str {
+        match source {
+            PasswordSource::Keychain { account, .. } => account,
+            other => panic!("expected the keychain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn password_keychain_parses_into_an_account() {
+        let f = Fixture::new();
+        // No secret in the file: any mode is fine.
+        f.write(KEYCHAIN, 0o644);
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(keychain_account(&nd.password), "me@music.example.org:8443");
+        assert_eq!(format!("{:?}", nd.password), "Keychain(<redacted>)");
+        // Env values change the account the entry is looked up under.
+        let mut f = f;
+        f.env.navidrome_user = Some("other".into());
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(
+            keychain_account(&nd.password),
+            "other@music.example.org:8443"
+        );
+        // `false` is the same as leaving it out.
+        f.env.navidrome_user = None;
+        f.write(&KEYCHAIN.replace("true", "false"), 0o600);
+        let err = f.load(cli(None)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::MissingNavidromeField { field, .. } if field.contains("password_keychain")),
+            "{err:?}"
+        );
+        // Not a boolean: a parse error.
+        f.write(&KEYCHAIN.replace("true", "\"yes\""), 0o600);
+        let err = f.load(cli(None)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::ConfigParse { line: 4, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn at_most_one_password_source_in_the_file() {
+        let f = Fixture::new();
+        for extra in ["password = \"p\"\n", "password_command = [\"pass\"]\n"] {
+            f.write(&format!("{KEYCHAIN}{extra}"), 0o600);
+            let err = f.load(cli(None)).unwrap_err();
+            assert!(matches!(err, ConfigError::ConflictingPassword), "{err:?}");
+            assert_eq!(err.exit_code(), 2);
+            assert!(err.to_string().contains("password_keychain"), "{err}");
+        }
+        f.write(
+            &format!("{KEYCHAIN}password = \"p\"\npassword_command = [\"x\"]\n"),
+            0o600,
+        );
+        assert!(matches!(
+            f.load(cli(None)).unwrap_err(),
+            ConfigError::ConflictingPassword
+        ));
+        // The env password overrides the keychain, but not a conflict.
+        let mut f = Fixture::new();
+        f.env.navidrome_password = Some("from-env".into());
+        f.write(KEYCHAIN, 0o600);
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(expose(&nd.password), "from-env");
+        f.write(&format!("{KEYCHAIN}password = \"p\"\n"), 0o600);
+        assert!(matches!(
+            f.load(cli(None)).unwrap_err(),
+            ConfigError::ConflictingPassword
+        ));
+    }
+
+    #[tokio::test]
+    async fn keychain_resolution_through_the_mock_store() {
+        let f = Fixture::new();
+        f.write(KEYCHAIN, 0o600);
+        let store = SecretStore::mock();
+        let account = "me@music.example.org:8443";
+        store
+            .set(account, &Password::new("from-keychain".into()))
+            .unwrap();
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let password = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap();
+        assert_eq!(password.expose(), "from-keychain");
+
+        // Missing entry: names the remedy and the file, not the account.
+        store.delete(account).unwrap();
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let err = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Missing,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 1);
+        let text = err.to_string();
+        assert!(text.contains("not found"), "{text}");
+        assert!(
+            text.contains(&f.config_path().display().to_string()),
+            "{text}"
+        );
+        assert!(text.contains(NAVIDROME_PASSWORD_ENV), "{text}");
+        assert!(!text.contains("me@"), "{text}");
+        assert!(!text.contains("music.example.org"), "{text}");
+
+        // Unavailable store and denied access.
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let err = source
+            .resolve_with(Duration::from_secs(1), || Err(SecretError::Unavailable))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Unavailable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("could not read"), "{err}");
+        assert_eq!(err.exit_code(), 1);
+
+        store.set(account, &Password::new("x".into())).unwrap();
+        store.fail_next(account, SecretError::Denied);
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let err = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Denied,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("from-keychain"), "{err}");
     }
 
     #[test]

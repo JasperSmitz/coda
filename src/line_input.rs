@@ -16,8 +16,25 @@ impl LineInput {
         Self::default()
     }
 
+    /// An input holding `text`, filtered like a paste.
+    pub fn with_text(text: &str) -> Self {
+        let mut input = Self::new();
+        input.push_str(text);
+        input
+    }
+
     pub fn as_str(&self) -> &str {
         &self.text
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The masked display mode for secrets: one `•` per char, so the
+    /// text itself never reaches the screen.
+    pub fn masked(&self) -> String {
+        "•".repeat(self.len)
     }
 
     /// Adds a typed char; see [`LineInput::push_str`].
@@ -81,5 +98,18 @@ mod tests {
         assert_eq!(input.as_str(), "");
         input.push_char('x');
         assert_eq!(input.as_str(), "x", "length tracking survives emptying");
+    }
+
+    #[test]
+    fn masked_mode_shows_one_bullet_per_char() {
+        let mut input = LineInput::with_text("pä ss\n");
+        assert_eq!(input.as_str(), "pä ss ");
+        assert_eq!(input.masked(), "••••••");
+        assert!(!input.is_empty());
+        for _ in 0..6 {
+            input.backspace();
+        }
+        assert!(input.is_empty());
+        assert_eq!(input.masked(), "");
     }
 }

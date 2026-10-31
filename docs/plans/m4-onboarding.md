@@ -75,6 +75,11 @@
 - A PTY smoke run, with `CODA_CONFIG` and `XDG_*` pointing into a temp dir and a fake Subsonic server, goes through: skip both → exit 0; folder only; Navidrome only with a wrong password and then the right one. The mock store or a test keychain must be used, since the smoke run must not write to the owner's login keychain. If a real-keychain run is wanted, leave it to the owner as a manual step.
 - README documents first-run setup and `password_keychain`. ARCHITECTURE describes the new modules.
 
+### Decisions made during slice 1
+- **Crates:** `keyring-core` with `apple-native-keyring-store` (macOS) and `zbus-secret-service-keyring-store` (Linux, pure Rust). These are the stores the `keyring` facade wraps. The facade would always install the platform store, so tests could not inject a mock.
+- **Mock feature:** a `mock-secret-store` cargo feature exists only for PTY smoke runs. Because `--all-features` enables it, clippy also runs without features.
+- **Ready screen:** an extra confirmation screen after "Connected" shows the config path and the store before anything is written.
+
 ## Slice 2 — connect, edit and disconnect from within the app
 - Pressing `2` without Navidrome configured offers "Connect to Navidrome…" (the same form as slice 1). A settings entry, with the key chosen with the owner in M6 and a temporary key until then, lets the user edit the URL, username or password, or disconnect.
 - Connecting or editing at runtime replaces the `navidrome::Client` in the running app: the browse cache is cleared, in-flight responses from the old client are ignored, and the scrobbler is restarted. Queued remote tracks keep their song ids and resolve against the new client.

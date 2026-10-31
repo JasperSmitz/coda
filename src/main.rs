@@ -1,22 +1,26 @@
-//! `coda` binary. Startup order: parse and validate the config, init
-//! logging, obtain the Navidrome password (possibly running
-//! `password_command`, which may prompt) and build the client, load the
+//! `coda` binary. Startup order: parse and validate the config (when no
+//! source is configured and stdin/stdout are terminals, run the first-run
+//! setup and load the config it wrote), init logging, obtain the Navidrome
+//! password (possibly running `password_command`, which may prompt, or
+//! reading the OS keychain) and build the client, load the
 //! saved session, spawn mpv and connect, then hand over to [`app::run`],
 //! which restores the session, enters the TUI, starts the scan and pings
 //! the server. Errors before the TUI are printed
 //! to stderr; the TUI never writes to stdout/stderr.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
 use coda_player::app;
-use coda_player::config::{self, Cli, Config, Env, PASSWORD_COMMAND_TIMEOUT};
+use coda_player::config::{self, Cli, Config, ConfigError, Env, PASSWORD_COMMAND_TIMEOUT};
 use coda_player::navidrome;
+use coda_player::onboarding::Outcome;
 use coda_player::playback;
 use coda_player::session;
+use coda_player::setup;
 use tracing::{Level, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
@@ -54,14 +58,49 @@ fn main() -> ExitCode {
 
 async fn run() -> ExitCode {
     let cli = Cli::parse();
-    let config = match Config::load(cli, &Env::from_process()) {
+    let env = Env::from_process();
+    let mut logging = false;
+    let config = match Config::load(cli, &env) {
         Ok(config) => config,
+        // Setup only fills in a missing source, and only interactively;
+        // scripts and pipes keep the usage error.
+        Err(ConfigError::NoSource {
+            config_path: Some(path),
+        }) if is_interactive() => {
+            init_logging();
+            logging = true;
+            tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
+            match setup::run(setup::Context::new(path, env.clone())).await {
+                Ok(Outcome::Saved) => {}
+                Ok(Outcome::Exit) => return ExitCode::SUCCESS,
+                Err(error) => {
+                    // The terminal may be gone (hangup); never panic here.
+                    let _ = writeln!(std::io::stderr(), "coda: setup failed: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            // Known gap: setup registered Tokio handlers for SIGTERM,
+            // SIGHUP and SIGINT, which stay installed for the process. A
+            // signal arriving from here until `app::run` listens again
+            // (keychain read, mpv start; normally well under a second) is
+            // swallowed rather than ending the process.
+            match Config::load(Cli { music_dir: None }, &env) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::error!("the config written by setup did not load");
+                    let _ = writeln!(std::io::stderr(), "coda: {error}");
+                    return ExitCode::from(error.exit_code());
+                }
+            }
+        }
         Err(error) => {
             eprintln!("coda: {error}");
             return ExitCode::from(error.exit_code());
         }
     };
-    init_logging();
+    if !logging {
+        init_logging();
+    }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
 
     let scrobble = config.navidrome.as_ref().is_some_and(|n| n.scrobble);
@@ -71,7 +110,7 @@ async fn run() -> ExitCode {
                 Ok(password) => password,
                 Err(error) => {
                     tracing::error!(%error, "could not obtain the Navidrome password");
-                    eprintln!("coda: {error}");
+                    let _ = writeln!(std::io::stderr(), "coda: {error}");
                     return ExitCode::from(error.exit_code());
                 }
             };
@@ -121,9 +160,19 @@ async fn run() -> ExitCode {
     }
 }
 
+/// Setup needs a terminal to talk to: both stdin and stdout.
+fn is_interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
 /// Logs to a file only, truncated at each launch. Level from `CODA_LOG`
 /// (EnvFilter syntax), default `info`. If the file cannot be opened,
 /// continue without logging rather than writing to the terminal.
+///
+/// Never add a `log` → `tracing` bridge (`tracing-log`) without clamping
+/// the keyring crates first: `keyring-core` and its stores log the
+/// keychain account (username and host) at debug through `log`, which
+/// today goes nowhere.
 fn init_logging() {
     let Some(path) =
         config::log_file_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
@@ -144,9 +193,10 @@ fn init_logging() {
 }
 
 /// HTTP/TLS crates that log server hostnames and addresses below `warn`
-/// (e.g. hyper-util's `connecting to <addr>`). ADR 0003: the log never
-/// records them, whatever `CODA_LOG` says.
-const CLAMPED_TARGETS: [&str; 5] = ["hyper_util", "hyper", "h2", "reqwest", "rustls"];
+/// (e.g. hyper-util's `connecting to <addr>`), and zbus, whose D-Bus
+/// messages to the Secret Service carry the keychain account (username and
+/// host). ADR 0003: the log never records them, whatever `CODA_LOG` says.
+const CLAMPED_TARGETS: [&str; 6] = ["hyper_util", "hyper", "h2", "reqwest", "rustls", "zbus"];
 
 fn is_clamped(target: &str) -> bool {
     CLAMPED_TARGETS.iter().any(|crate_name| {
@@ -252,6 +302,7 @@ mod tests {
         assert!(is_clamped("hyper::proto"));
         assert!(is_clamped("hyper_util::client"));
         assert!(is_clamped("h2"));
+        assert!(is_clamped("zbus::connection"));
         assert!(!is_clamped("hyperion"));
         assert!(!is_clamped("h2o::x"));
         assert!(!is_clamped("coda_player"));

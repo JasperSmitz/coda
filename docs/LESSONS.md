@@ -92,3 +92,8 @@ Each entry should state:
 - **Root cause:** mpv reports `end-file eof` when decoding ends, which can be early by up to the audio output's buffer: about 0.3 s for CD-quality audio on CoreAudio, and about 4 s for 8 kHz mono WAVs that CoreAudio rejects and avfoundation plays instead. On the last playlist entry mpv then blocks its core while that buffer drains, so replies to the next commands are delayed by up to the same amount. The buffered audio still plays out, so tracks are not cut off.
 - **Rule:** run timing-sensitive real-mpv tests with `--ao=null`; size reply timeouts to cover an audio-buffer drain; never treat EOF as a wall-clock signal.
 - **Where verified:** M3 slice 3 root-cause probes (mpv 0.41, `--msg-level=all=v`); reviewer IPC probes; `pause_volume_and_seek_are_reflected_in_events`, `rapid_loads_end_on_the_last_requested_track`.
+
+### A feature that swaps in a mock security backend is hidden by `--all-features`
+- **Context / symptom:** the `mock-secret-store` feature, which exists for PTY smoke runs, replaces the OS keychain with an in-memory store. The standard `clippy --all-features` check then linted only the mock path, and a build with all features said "macOS Keychain" while saving nothing.
+- **Rule:** also lint and build without features whenever a feature swaps out a shipping backend, and make a mock build announce itself (store name on screen, a warning in the log).
+- **Where verified:** M4 slice 1 review; `src/secret_store.rs`, `docs/ARCHITECTURE.md` verification list.

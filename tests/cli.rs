@@ -156,3 +156,14 @@ fn navidrome_from_env_alone_is_a_valid_source() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stderr(&output).contains("mpv was not found"));
 }
+
+#[test]
+fn without_a_terminal_setup_does_not_run_and_nothing_is_written() {
+    // `Command::output` gives the child no terminal on stdin or stdout.
+    let (output, state) = coda(&[], &[], None);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("no music source configured"), "{err}");
+    assert!(output.stdout.is_empty());
+    assert!(!state.path().join("config").exists());
+}

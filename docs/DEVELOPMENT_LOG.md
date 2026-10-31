@@ -46,3 +46,28 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Review:** one round; fixed unbounded reap, wrong "replies are immediate" premise (+ drain test), restored volume overwritten by rejection, a tight timing bound in a default-suite test.
 - **Limitations:** an idle hung mpv is detected only at the next command; no mpv auto-restart (owner decision from M1); the bounded-reap timeout path has no automated test (needs an unkillable child).
 - **Next:** M4 needs owner input — see `docs/plans/heart-integration.md` (since postponed indefinitely) open questions. Candidate follow-ups: gapless lookahead (ADR 0002), a real-server smoke test by the owner, a Linux TUI run.
+
+## 2026-10-31 — M4 slice 1: first-run setup
+- **Owner input:** HEART postponed indefinitely. New roadmap: M4 onboarding, M5 library home and playlists, M6 keybindings, M7 visual extras. The owner's first real-server run (macOS, `password_command` with the Keychain) worked.
+- **Delivered:**
+  - First-run setup in the TUI when no source is configured and Coda runs in a terminal: an optional music folder, then optional Navidrome (URL → username → masked password, checked with `ping`, a Ready confirmation), then the password goes into the OS keychain and the config file is written. Skipping both exits 0 without writing anything.
+  - Modules: `onboarding` (pure), `setup` (driver), `config_writer`, `secret_store`, `ui::onboarding`.
+  - `password_keychain = true` in the config (ADR 0004).
+- **Crates:** `keyring-core` with `apple-native-keyring-store` and `zbus-secret-service-keyring-store`. The Linux backend is pure Rust, with no libdbus or OpenSSL.
+- **Tests:**
+  - On macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (370 lib + integration) pass, as do all 20 ignored mpv tests.
+  - In a Linux container (`rust:1-bookworm`): clippy (both) and `cargo test --all-targets` pass.
+  - PTY smoke runs with the mock store and a fake Subsonic server cover skip, folder, Navidrome with a wrong then right password, Ctrl-C while saving, signals and hangup.
+- **Review:** one round, no blocking defects. Fixed:
+  - quit or a signal during a save abandoning it
+  - the mock-store feature being indistinguishable from the real store
+  - an orphaned keychain entry after a failed config write
+  - a relative `CODA_CONFIG`
+  - plus polish: back navigation, hints, the non-UTF-8 backup name, URL truncation, the `zbus` log clamp
+- **Limitations:**
+  - A signal between setup and the player loop is lost.
+  - No timeout on keychain reads.
+  - A cancelled macOS prompt shows a generic error.
+  - A missing keychain entry means editing the config by hand (slice 2 replaces this).
+  - A symlinked `config.toml` is replaced by a regular file (documented).
+  - Not yet run against the real macOS Keychain, or as a TUI on Linux.

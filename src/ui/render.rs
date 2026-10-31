@@ -419,7 +419,7 @@ fn draw_search_input(frame: &mut Frame, query: &str, area: Rect) {
 /// shortened. Bounded the same way: only the last [`MAX_FIT_CHARS`] chars
 /// are considered and the cut is found by binary search over measured
 /// suffixes.
-fn fit_tail(text: &str, width: usize) -> String {
+pub fn fit_tail(text: &str, width: usize) -> String {
     let skip = text.chars().count().saturating_sub(MAX_FIT_CHARS);
     let clean: String = text
         .chars()
