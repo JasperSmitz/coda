@@ -209,8 +209,8 @@ Navidrome, search, Play Folder / Play Album action, config file, persistence of 
 ## 7. Known limitations accepted for M1
 - **Gaps between tracks.** Feeding mpv one track at a time means a short audible gap, noticeable on live or classical albums. A later fix can keep Coda's queue authoritative while handing mpv a one-track lookahead (ADR 0002).
 - **SIGKILL orphans.** If Coda is killed with `SIGKILL`, an idle mpv remains. Every catchable exit path cleans up.
-- **No hung-mpv watchdog.** If mpv stays alive but stops responding, requests queue in memory and the UI is not told. A reply timeout producing `BackendExited` is a candidate follow-up.
+- **No hung-mpv watchdog.** *(Resolved in M3 slice 3.)* If mpv stays alive but stops responding, requests queue in memory and the UI is not told. A reply timeout producing `BackendExited` is a candidate follow-up.
 - **Early seeks are dropped.** A seek while a track is still loading is a no-op.
 - **Linux coverage is container-only.** Slice 1 passed on Debian bookworm (mpv 0.35.1, native arm64) and Arch (mpv 0.41, amd64 emulation) in Docker. No physical Linux desktop and no mpv 0.33/0.34 have been run.
-- **A rejected volume change can show the wrong volume.** A failed `set_property volume` reaches the player only as a generic error, so the requested value stays displayed until the next press or echo. Fixing it needs a structured backend event.
+- **A rejected volume change can show the wrong volume.** *(Resolved in M3 slice 3.)* A failed `set_property volume` reaches the player only as a generic error, so the requested value stays displayed until the next press or echo. Fixing it needs a structured backend event.
 - **No working audio device.** Every track ends with "audio output initialization failed" and the queue errors through to the end, one track at a time.

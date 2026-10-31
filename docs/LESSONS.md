@@ -44,3 +44,51 @@ Each entry should state:
 - **Rule:** measure the growing prefix (or grapheme clusters) with string width, use saturating arithmetic in layout code, and test truncation against emoji sequences, combining marks and bidi controls from untrusted metadata.
 - **Follow-up rule:** never re-measure a whole growing string per character. That is quadratic, and zero-width characters let a crafted tag make it unbounded (3.9 s per frame from a 100 KB tag). Cap untrusted strings at ingestion, cap again at render time, and find the truncation point by binary search over measured prefixes (3.9 s → 60 µs per call).
 - **Where verified:** M1 slice 2 review, pty reproduction; `fit` and `row_line` in `src/ui/render.rs`.
+
+### HTTP redirects leak signed URLs through `Referer`
+- **Context / symptom:** Subsonic auth puts a replayable token and salt in the query string of every request.
+- **Root cause:** reqwest's default redirect policy copies the previous URL, query included, into the `Referer` header sent to the redirect target. `reqwest::Error`'s `Display` also embeds the full URL.
+- **Rule:** for APIs that carry credentials in the query string, disable redirects (and test that a 3xx is not followed), call `.without_url()` on every `reqwest::Error`, and hold signed URLs in a type that redacts in `Debug`/`Display`.
+- **Where verified:** M2 slice 1 review; reqwest 0.13.5 `src/redirect.rs` (`make_referer`); `redirects_are_not_followed`.
+
+### Render config errors without the library's full `Display`
+- **Context / symptom:** a malformed `password = …` line in `config.toml` would be echoed back in the error.
+- **Root cause:** toml's `Display` for parse errors prints the offending source line.
+- **Rule:** build user-facing parse errors from the error message plus line/column only, and test with a malformed secret line.
+- **Where verified:** M2 slice 1; `unquoted_password_is_not_echoed`.
+
+### Clamp third-party HTTP crates in the log filter
+- **Context / symptom:** with `CODA_LOG=debug` the log contained `connecting to <server ip:port>`, despite all of Coda's own messages being redacted.
+- **Root cause:** hyper-util emits `tracing` events with peer addresses at debug and hosts at trace. A plain `crate=warn` directive is not enough: EnvFilter prefers more specific user directives (`hyper_util::client::legacy=trace`).
+- **Rule:** enforce a separate per-target filter layer (ANDed with the user's filter) that drops sub-warn events from HTTP crates, and test it by driving the real layer with hostile `CODA_LOG` values.
+- **Where verified:** M2 slice 2 review; `http_crates_are_clamped_to_warn_whatever_coda_log_says`, pty smoke log.
+
+### Every spawned request must answer exactly once
+- **Context / symptom:** a fetch task that panicked or was cancelled left its resource "in flight" forever: the view stayed on Loading and `r` could not recover.
+- **Root cause:** the response was only sent on the happy path; a guard created inside the task does not exist if the task is aborted before its first poll.
+- **Rule:** create a drop guard that sends an error response *before* spawning, consume it on the normal send, and test cancellation before first poll.
+- **Where verified:** M2 slice 2 review; `a_cancelled_fetch_still_answers_with_an_error`.
+
+### Cap untrusted JSON by what it parses into, not by file size
+- **Context / symptom:** a 64 MiB state file of small objects took 5.3 GB RSS to load.
+- **Root cause:** parsing into `serde_json::Value` first costs ~80× the input for small objects; entries past the item cap were fully built before being dropped.
+- **Rule:** deserialize untrusted files/bodies into typed structs, probe the version with a minimal struct, enforce item caps inside a sequence visitor (skip the rest with `IgnoredAny`, never preallocate from `size_hint`), and keep byte caps near realistic sizes.
+- **Where verified:** M3 slice 1 review measurement; `queue_is_capped_and_current_beyond_the_cap_is_dropped` in `src/session.rs`.
+
+### "Repeat" needs proof of progress, not just a clean end
+- **Context / symptom:** under repeat, a track that ended immediately (8-sample WAV, a stream that closes at once) reloaded as fast as mpv could open it; for Navidrome that is a request storm.
+- **Root cause:** EOF was trusted as "played"; and resetting the failure counter on `Started` let instant-EOF files reset it forever.
+- **Rule:** count an end as successful only after observed progress (position ≥ 1 s after `Started`); otherwise treat it as a failure for termination and advance. Prove termination with tests for all-failing and all-instant queues under every repeat mode.
+- **Where verified:** M3 slice 1 review; `files_that_end_at_once_never_loop_under_repeat`.
+
+### Capture wall-clock timestamps when the event happens
+- **Context / symptom:** scrobble submissions carried a play-start time that was too late by the length of any system sleep during the track.
+- **Root cause:** the start was stored as an `Instant` and converted to wall-clock time at send time; `Instant` does not advance during system sleep on macOS or Linux.
+- **Rule:** timestamps destined for external systems are captured as `SystemTime` at the event and carried as data; use `Instant` only for local durations and timeouts.
+- **Where verified:** M3 slice 2 review; `Listen::new(load, song_id, SystemTime)`.
+
+### mpv's `end-file eof` is not "the audio finished"
+- **Context / symptom:** two real-mpv tests failed on one Mac only, with "unexpected advance" and missing positions; in M3 the watchdog's assumption that "mpv replies at once" turned out to be false right after EOF.
+- **Root cause:** mpv reports `end-file eof` when decoding ends, which can be early by up to the audio output's buffer: about 0.3 s for CD-quality audio on CoreAudio, and about 4 s for 8 kHz mono WAVs that CoreAudio rejects and avfoundation plays instead. On the last playlist entry mpv then blocks its core while that buffer drains, so replies to the next commands are delayed by up to the same amount. The buffered audio still plays out, so tracks are not cut off.
+- **Rule:** run timing-sensitive real-mpv tests with `--ao=null`; size reply timeouts to cover an audio-buffer drain; never treat EOF as a wall-clock signal.
+- **Where verified:** M3 slice 3 root-cause probes (mpv 0.41, `--msg-level=all=v`); reviewer IPC probes; `pause_volume_and_seek_are_reflected_in_events`, `rapid_loads_end_on_the_last_requested_track`.

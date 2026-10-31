@@ -121,6 +121,18 @@ impl LibraryTree {
         }
     }
 
+    /// Calls `f` for every track in browse order: each directory's
+    /// sub-directories first (recursively), then its own tracks.
+    pub fn for_each_track(&self, mut f: impl FnMut(&Track)) {
+        fn visit(node: &DirNode, f: &mut impl FnMut(&Track)) {
+            for dir in &node.dirs {
+                visit(dir, f);
+            }
+            node.tracks.iter().for_each(f);
+        }
+        visit(&self.root, &mut f);
+    }
+
     /// The directory at `path` (directory names from the root), if any.
     pub fn dir(&self, path: &[&str]) -> Option<&DirNode> {
         let mut node = &self.root;
@@ -230,6 +242,24 @@ mod tests {
             files(tree.dir(&["al"]).unwrap()),
             ["a.flac", "B.flac", "x.flac", "w.flac", "y.flac", "z.flac"]
         );
+    }
+
+    #[test]
+    fn tracks_are_visited_in_browse_order() {
+        let mut tree = LibraryTree::new("/m".into());
+        tree.extend([
+            track("/m/top.mp3", None, None),
+            track("/m/b/2.mp3", None, None),
+            track("/m/a/x/1.mp3", None, None),
+            track("/m/a/0.mp3", None, None),
+        ]);
+        let mut seen = Vec::new();
+        tree.for_each_track(|t| seen.push(t.local_path().unwrap().to_owned()));
+        let expected: Vec<PathBuf> = ["/m/a/x/1.mp3", "/m/a/0.mp3", "/m/b/2.mp3", "/m/top.mp3"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(seen, expected);
     }
 
     #[test]

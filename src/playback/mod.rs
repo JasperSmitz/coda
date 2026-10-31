@@ -4,9 +4,12 @@
 //!
 //! Contracts every backend upholds:
 //! - `Load` always starts unpaused.
-//! - `Load` for a path that does not exist yields
+//! - `Load` of a [`PlaybackTarget::File`] that does not exist yields
 //!   `TrackEnded { reason: Error("file not found") }` without starting the
-//!   player.
+//!   player. Streams are not pre-checked; a failing stream ends with
+//!   `TrackEnded { reason: Error(..) }` from the player itself.
+//! - The backend never sees track sources or credentials: the app resolves
+//!   a queue entry's source into a [`PlaybackTarget`] right before sending.
 //! - `Started`/`TrackEnded` carry the [`LoadId`] of the `Load` they belong
 //!   to, so the coordinator can discard events for superseded loads.
 
@@ -40,9 +43,51 @@ pub enum EndReason {
     Stopped,
 }
 
+/// A signed `http`/`https` stream URL. It carries an authentication token,
+/// so `Debug` and `Display` are redacted and only the mpv protocol encoder
+/// reads the raw value. Built only by the Navidrome client.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StreamUrl(url::Url);
+
+impl StreamUrl {
+    /// Wraps `url` if its scheme is `http` or `https`.
+    pub(crate) fn new(url: url::Url) -> Option<Self> {
+        matches!(url.scheme(), "http" | "https").then_some(Self(url))
+    }
+
+    /// The raw URL, including credentials. Never log or display it.
+    pub(crate) fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for StreamUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamUrl(<redacted>)")
+    }
+}
+
+impl std::fmt::Display for StreamUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// What the backend should open.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaybackTarget {
+    /// A local file; pre-checked to be an existing regular file.
+    File(PathBuf),
+    /// A remote stream.
+    Stream(StreamUrl),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackCommand {
-    Load { load: LoadId, path: PathBuf },
+    Load {
+        load: LoadId,
+        target: PlaybackTarget,
+    },
     SetPause(bool),
     Stop,
     SeekRelative(f64),
@@ -64,9 +109,16 @@ pub enum PlaybackEvent {
     Duration(Option<Duration>),
     Paused(bool),
     Volume(u8),
+    /// The backend refused `SetVolume(volume)`; its volume is unchanged by
+    /// that request. `reason` is user-presentable.
+    VolumeRejected {
+        volume: u8,
+        reason: String,
+    },
     /// A non-fatal backend problem worth showing to the user.
     Error(String),
-    /// The backend is gone (crashed, or its connection closed). Terminal.
+    /// The backend is gone (crashed, its connection closed, or it stopped
+    /// answering requests and was killed). Terminal.
     BackendExited(String),
 }
 
@@ -197,6 +249,28 @@ mod tests {
             PlaybackHandle::new(command_tx, event_rx, task, None),
             event_tx,
         )
+    }
+
+    #[test]
+    fn stream_url_is_redacted_and_http_only() {
+        let url = url::Url::parse("https://h.example/rest/stream?id=1&t=tok&s=salt").unwrap();
+        let stream = StreamUrl::new(url).unwrap();
+        assert_eq!(format!("{stream:?}"), "StreamUrl(<redacted>)");
+        assert_eq!(stream.to_string(), "<redacted>");
+        let target = PlaybackTarget::Stream(stream.clone());
+        let command = PlaybackCommand::Load {
+            load: LoadId(1),
+            target,
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("tok") && !debug.contains("salt"), "{debug}");
+        assert!(stream.expose().contains("t=tok"));
+        for bad in ["file:///etc/passwd", "ftp://h/x", "data:,x"] {
+            assert!(
+                StreamUrl::new(url::Url::parse(bad).unwrap()).is_none(),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]

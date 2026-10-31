@@ -12,10 +12,11 @@ use std::time::Instant;
 
 use coda_player::model::{Track, TrackMetadata};
 use coda_player::playback::mpv::protocol::MpvCommand;
-use coda_player::playback::mpv::state::{MpvState, OutgoingRequest, Output};
+use coda_player::playback::mpv::state::{MpvState, OutgoingRequest, Output, POSITION_INTERVAL};
 use coda_player::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use coda_player::player::{PlaybackStatus, Player};
+use coda_player::player::{NO_PLAYABLE_TRACKS, PlaybackStatus, Player, PlayerCommand, RepeatMode};
 use coda_player::queue::QueueEntryId;
+use coda_player::resolve::resolve_command;
 use serde_json::json;
 
 /// One `loadfile` that reached mpv, with the request ids of its replies.
@@ -41,6 +42,10 @@ struct Sim {
     /// `Started` events for loads that were not current (stale).
     started_stale: usize,
     messages: Vec<String>,
+    /// Simulated time: each mpv message arrives one position interval
+    /// after the previous one, so position updates are never coalesced
+    /// away.
+    clock: Instant,
 }
 
 impl Sim {
@@ -49,10 +54,12 @@ impl Sim {
         let ids = names
             .iter()
             .map(|n| {
-                player.enqueue(Track::local(
-                    format!("/m/{n}.wav").into(),
-                    TrackMetadata::default(),
-                ))
+                player
+                    .enqueue(Track::local(
+                        format!("/m/{n}.wav").into(),
+                        TrackMetadata::default(),
+                    ))
+                    .unwrap()
             })
             .collect();
         let mut mpv = MpvState::new();
@@ -67,18 +74,24 @@ impl Sim {
             advances: 0,
             started_stale: 0,
             messages: Vec::new(),
+            clock: Instant::now(),
         };
         sim.process(startup);
         sim
     }
 
-    /// Applies player commands to mpv and feeds resulting events back,
-    /// until quiescent.
-    fn commands(&mut self, commands: Vec<PlaybackCommand>) {
+    /// Resolves player commands as the app does (local tracks only, no
+    /// Navidrome client), applies them to mpv and feeds resulting events
+    /// back, until quiescent.
+    fn commands(&mut self, commands: Vec<PlayerCommand>) {
         // Messages produced by the intent that created `commands`.
         self.messages.extend(self.player.take_messages());
-        let mut work: VecDeque<PlaybackCommand> = commands.into();
+        let mut work: VecDeque<PlayerCommand> = commands.into();
         while let Some(command) = work.pop_front() {
+            let command = match resolve_command(command, None) {
+                Ok(command) => command,
+                Err((load, reason)) => panic!("{load}: local load not resolved: {reason}"),
+            };
             if let PlaybackCommand::Load { load, .. } = &command {
                 self.loads.push(*load);
             }
@@ -89,7 +102,7 @@ impl Sim {
 
     /// Records requests and delivers events to the player; returns the
     /// player's follow-up commands.
-    fn process(&mut self, out: Output) -> Vec<PlaybackCommand> {
+    fn process(&mut self, out: Output) -> Vec<PlayerCommand> {
         self.sent.extend(out.requests);
         let mut follow_up = Vec::new();
         for event in out.events {
@@ -114,10 +127,8 @@ impl Sim {
     }
 
     fn mpv_message(&mut self, line: &str) {
-        let out = self
-            .mpv
-            .handle_line(line, Instant::now())
-            .expect("valid line");
+        self.clock += POSITION_INTERVAL;
+        let out = self.mpv.handle_line(line, self.clock).expect("valid line");
         let follow_up = self.process(out);
         self.commands(follow_up);
     }
@@ -184,6 +195,14 @@ impl Sim {
         self.mpv_message(&json!({"event": "start-file", "playlist_entry_id": entry}).to_string());
     }
 
+    /// mpv reports the playback position (`time-pos`).
+    fn position(&mut self, seconds: f64) {
+        self.mpv_message(
+            &json!({"event": "property-change", "id": 1, "name": "time-pos", "data": seconds})
+                .to_string(),
+        );
+    }
+
     fn file_loaded(&mut self) {
         self.mpv_message(r#"{"event": "file-loaded"}"#);
     }
@@ -213,6 +232,7 @@ impl Sim {
             Msg::Start(entry) => self.start_file(entry),
             Msg::Loaded => self.file_loaded(),
             Msg::End(entry, reason) => self.end_file(entry, reason),
+            Msg::Pos(seconds) => self.position(seconds),
         }
     }
 
@@ -252,6 +272,8 @@ enum Msg {
     Start(i64),
     Loaded,
     End(i64, &'static str),
+    /// `time-pos` in seconds.
+    Pos(f64),
 }
 
 // ----- rapid skipping ------------------------------------------------------
@@ -414,7 +436,7 @@ fn started_waits_for_file_loaded() {
     assert_eq!(sim.player.status(), PlaybackStatus::Playing);
     assert_eq!(
         sim.player.seek_relative(5.0),
-        [PlaybackCommand::SeekRelative(5.0)]
+        [PlayerCommand::SeekRelative(5.0)]
     );
 }
 
@@ -546,7 +568,7 @@ fn failed_load_at_end_of_queue_stops() {
 
 fn reject_next(sim: &mut Sim, reason: &str) {
     let commands = sim.player.play_next();
-    let [PlaybackCommand::Load { load, .. }] = commands.as_slice() else {
+    let [PlayerCommand::Load { load, .. }] = commands.as_slice() else {
         panic!("expected Load");
     };
     sim.loads.push(*load);
@@ -826,7 +848,7 @@ fn every_interleaving_of_stop_while_a_load_is_in_flight() {
         let mut sim = playing_then_next(&["A", "B"])();
         let id = sim.ids[1];
         let commands = sim.player.remove(id);
-        assert_eq!(commands, [PlaybackCommand::Stop]);
+        assert_eq!(commands, [PlayerCommand::Stop]);
         sim.commands(commands);
         sim
     };
@@ -976,4 +998,218 @@ fn every_interleaving_of_a_redirecting_file() {
         });
     }
     assert_eq!(runs, 2 * (105 * 30 + 105));
+}
+
+// ----- repeat --------------------------------------------------------------
+
+fn repeating(names: &[&str], mode: RepeatMode) -> Sim {
+    let mut sim = Sim::new(names);
+    sim.player.set_repeat(mode);
+    sim
+}
+
+#[test]
+fn repeat_one_reload_is_never_confused_with_the_old_end_file() {
+    use Msg::*;
+    // A plays as entry 1 and ends: the player reloads A (load index 1).
+    let setup = || {
+        let mut sim = repeating(&["A", "B"], RepeatMode::One);
+        sim.play(0);
+        sim.complete_load(0, 1);
+        sim.position(2.0);
+        sim.end_file(1, "eof");
+        assert_eq!(sim.loads.len(), 2);
+        sim
+    };
+    let mut runs = 0;
+    // The reload plays; a duplicate end-file for the old entry (stop or
+    // eof) arrives anywhere and must be stale.
+    for old in ["stop", "eof"] {
+        let msgs = [
+            LoadfileOk(1, 2),
+            EntryId(1, 2),
+            Start(2),
+            Loaded,
+            End(1, old),
+        ];
+        runs += exhaust(&setup, &[group(&msgs, &[(0, 1), (2, 3)])], &|sim, label| {
+            assert_eq!(sim.advances, 1, "{label}");
+            assert_eq!(sim.current_index(), Some(0), "{label}");
+            assert_eq!(sim.loads.len(), 2, "{label}");
+            assert_eq!(sim.sent_paths(), [path("A"), path("A")], "{label}");
+            assert_eq!(sim.started_current, [sim.loads[0], sim.loads[1]], "{label}");
+            assert_eq!(sim.started_stale, 0, "{label}");
+            assert_eq!(sim.player.status(), PlaybackStatus::Playing, "{label}");
+            assert_eq!(sim.stops_sent(), 0, "{label}");
+        });
+    }
+    // The reload plays (its position passes a second) and ends: repeated
+    // once more.
+    let msgs = [
+        LoadfileOk(1, 2),
+        EntryId(1, 2),
+        Start(2),
+        Loaded,
+        Pos(2.0),
+        End(2, "eof"),
+    ];
+    runs += exhaust(
+        &setup,
+        &[group(&msgs, &[(0, 1), (2, 3), (3, 4), (1, 4), (4, 5)])],
+        &|sim, label| {
+            assert_eq!(sim.advances, 2, "{label}");
+            assert_eq!(sim.current_index(), Some(0), "{label}");
+            assert_eq!(sim.loads.len(), 3, "{label}");
+            assert_eq!(
+                sim.sent_paths(),
+                [path("A"), path("A"), path("A")],
+                "{label}"
+            );
+            assert_eq!(sim.started_current, [sim.loads[0], sim.loads[1]], "{label}");
+            assert_eq!(sim.player.status(), PlaybackStatus::Loading, "{label}");
+        },
+    );
+    // The reload ends without playing (e.g. the file was truncated), in any
+    // order, even before its entry id is known: never reloaded again; the
+    // queue moves on to B.
+    let msgs = [
+        LoadfileOk(1, 2),
+        EntryId(1, 2),
+        Start(2),
+        Loaded,
+        End(2, "eof"),
+    ];
+    runs += exhaust(
+        &setup,
+        &[group(&msgs, &[(0, 1), (2, 3), (3, 4)])],
+        &|sim, label| {
+            assert_eq!(sim.advances, 2, "{label}");
+            assert_eq!(sim.current_index(), Some(1), "{label}");
+            assert_eq!(sim.loads.len(), 3, "{label}");
+            assert_eq!(
+                sim.sent_paths(),
+                [path("A"), path("A"), path("B")],
+                "{label}"
+            );
+        },
+    );
+    assert_eq!(runs, 2 * 30 + 6 + 10);
+}
+
+#[test]
+fn next_during_a_repeat_one_reload_wins() {
+    let mut sim = repeating(&["A", "B"], RepeatMode::One);
+    sim.play(0);
+    sim.complete_load(0, 1);
+    sim.position(2.0);
+    sim.end_file(1, "eof");
+    // `n` while the reload is in flight: B collapses behind it.
+    sim.press_n();
+    assert_eq!(sim.loads.len(), 3);
+    sim.loadfile_ok(1, 2);
+    sim.entry_id(1, 2);
+    sim.start_file(2);
+    sim.file_loaded();
+    sim.loadfile_ok(2, 3);
+    sim.end_file(2, "stop");
+    sim.entry_id(2, 3);
+    sim.start_file(3);
+    sim.file_loaded();
+    sim.assert_outcome(1, 3);
+    assert_eq!(sim.advances, 1);
+    assert_eq!(sim.started_stale, 1, "the reload's start was stale");
+    assert_eq!(sim.sent_paths(), [path("A"), path("A"), path("B")]);
+    assert_eq!(sim.player.status(), PlaybackStatus::Playing);
+}
+
+#[test]
+fn repeat_all_wraps_and_ignores_the_last_entrys_old_end_file() {
+    let mut sim = repeating(&["A", "B"], RepeatMode::All);
+    sim.play(1);
+    sim.complete_load(0, 1);
+    sim.position(2.0);
+    sim.end_file(1, "eof");
+    sim.assert_outcome(0, 2);
+    sim.loadfile_ok(1, 2);
+    sim.end_file(1, "stop");
+    sim.entry_id(1, 2);
+    sim.start_file(2);
+    sim.file_loaded();
+    sim.end_file(1, "eof");
+    sim.assert_outcome(0, 2);
+    assert_eq!(sim.advances, 1);
+    assert_eq!(sim.player.status(), PlaybackStatus::Playing);
+    // `n` at the end wraps as well.
+    sim.press_n();
+    sim.complete_load(2, 3);
+    sim.press_n();
+    sim.assert_outcome(0, 4);
+    assert_eq!(
+        sim.sent_paths(),
+        [path("B"), path("A"), path("B"), path("A")]
+    );
+}
+
+/// Every loadfile fails; returns the sim once nothing more is sent.
+fn fail_every_load(mode: RepeatMode) -> Sim {
+    let mut sim = repeating(&["A", "B", "C"], mode);
+    sim.play(1);
+    let mut n = 0;
+    while n < sim.sent_loads().len() {
+        assert!(n < 30, "did not terminate");
+        sim.loadfile_err(n);
+        sim.entry_id(n, 99);
+        n += 1;
+    }
+    sim
+}
+
+#[test]
+fn all_failing_queue_terminates_under_repeat() {
+    // All: B, C, A fail (one full round), then stop.
+    let sim = fail_every_load(RepeatMode::All);
+    assert_eq!(sim.sent_paths(), [path("B"), path("C"), path("A")]);
+    assert_eq!(sim.advances, 3);
+    assert_eq!(sim.player.status(), PlaybackStatus::Stopped);
+    assert_eq!(sim.stops_sent(), 1);
+    assert_eq!(
+        sim.messages.last().map(String::as_str),
+        Some(NO_PLAYABLE_TRACKS)
+    );
+    assert_eq!(sim.current_index(), Some(0));
+    // One: errors advance without wrapping, so the end of the queue stops.
+    let sim = fail_every_load(RepeatMode::One);
+    assert_eq!(sim.sent_paths(), [path("B"), path("C")]);
+    assert_eq!(sim.player.status(), PlaybackStatus::Stopped);
+    assert_eq!(sim.stops_sent(), 1);
+    assert_eq!(sim.current_index(), Some(2));
+}
+
+#[test]
+fn files_that_end_at_once_never_loop_under_repeat() {
+    for mode in [RepeatMode::One, RepeatMode::All] {
+        let mut sim = repeating(&["A", "B", "C"], mode);
+        sim.play(0);
+        let mut n = 0;
+        while n < sim.sent_loads().len() {
+            assert!(n < 30, "{mode:?}: did not terminate");
+            let entry = n as i64 + 1;
+            sim.complete_load(n, entry);
+            sim.position(0.2);
+            sim.end_file(entry, "eof");
+            n += 1;
+        }
+        assert_eq!(
+            sim.sent_paths(),
+            [path("A"), path("B"), path("C")],
+            "{mode:?}"
+        );
+        assert_eq!(sim.player.status(), PlaybackStatus::Stopped, "{mode:?}");
+        assert_eq!(
+            sim.messages.last().map(String::as_str) == Some(NO_PLAYABLE_TRACKS),
+            mode == RepeatMode::All,
+            "{mode:?}: {:?}",
+            sim.messages
+        );
+    }
 }

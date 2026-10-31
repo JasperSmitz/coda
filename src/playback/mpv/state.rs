@@ -20,9 +20,19 @@
 //! 5. mpv may expand a file into several entries (content-detected
 //!    playlists end with `redirect`). A mapped `redirect` is an error, and
 //!    an unmapped `start-file` with no load in flight is stopped.
+//!
+//! Reply watchdog: the driver stamps each request when it hands it to the
+//! writer ([`MpvState::requests_sent`]) and asks
+//! [`MpvState::overdue_reply`] at least every [`POSITION_INTERVAL`]. mpv
+//! usually answers at once, even `loadfile` of a stream that stalls
+//! (probed on mpv 0.41). It does block its core while draining the audio
+//! output's buffer after the last entry ends: replies then wait as long as
+//! the buffered audio lasts (seen: about 2 s on real devices, 3 s with
+//! `--ao-null-buffer=3`). [`REPLY_TIMEOUT`] leaves room for that; a reply
+//! missing for that long means mpv is hung. Time the driver itself was not
+//! reading from mpv does not count.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -30,7 +40,7 @@ use serde_json::Value;
 use super::protocol::{
     self, EndFileReason, MpvCommand, MpvEvent, MpvMessage, ProtocolError, SeekMode,
 };
-use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
+use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackTarget};
 
 /// Minimum spacing between emitted `Position` events (at most 4/s).
 pub const POSITION_INTERVAL: Duration = Duration::from_millis(250);
@@ -47,6 +57,19 @@ pub const OBSERVED_PROPERTIES: [&str; 4] = ["time-pos", "duration", "pause", "vo
 pub const FILE_NOT_FOUND: &str = "file not found";
 pub const NOT_A_REGULAR_FILE: &str = "not a regular file";
 pub const NOT_AUDIO: &str = "not an audio file (playlist or directory)";
+
+/// How long a request may go unanswered before mpv is considered hung.
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `BackendExited` reason when mpv stops answering requests.
+pub const STOPPED_RESPONDING: &str = "mpv stopped responding";
+
+/// The driver checks the watchdog at least every [`POSITION_INTERVAL`]. A
+/// longer gap between two checks means it was not reading from mpv (blocked
+/// delivering events to a stalled consumer, prechecking a file on a slow
+/// mount, or the whole process was suspended); that time is not held
+/// against mpv.
+pub const MAX_CHECK_GAP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutgoingRequest {
@@ -75,6 +98,9 @@ enum Pending {
     Ignore,
     /// Failure is reported to the user as `PlaybackEvent::Error`.
     Report(&'static str),
+    /// `set_property volume` to this value; failure is reported as
+    /// `PlaybackEvent::VolumeRejected`.
+    Volume(u8),
     LoadFile(LoadId),
     EntryId(LoadId),
 }
@@ -142,12 +168,69 @@ impl PositionCoalescer {
     }
 }
 
+/// Send times of requests still waiting for their reply. Pure: the caller
+/// supplies every `now`. Request ids and send times both only increase, so
+/// the lowest id is the oldest request.
+#[derive(Debug)]
+struct ReplyWatchdog {
+    timeout: Duration,
+    sent: BTreeMap<u64, Instant>,
+    last_check: Option<Instant>,
+}
+
+impl Default for ReplyWatchdog {
+    fn default() -> Self {
+        Self::new(REPLY_TIMEOUT)
+    }
+}
+
+impl ReplyWatchdog {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            sent: BTreeMap::new(),
+            last_check: None,
+        }
+    }
+
+    fn sent(&mut self, request_id: u64, now: Instant) {
+        self.sent.insert(request_id, now);
+    }
+
+    fn answered(&mut self, request_id: u64) {
+        self.sent.remove(&request_id);
+    }
+
+    /// The oldest unanswered request and how long it has waited, if that
+    /// is at least the timeout. A gap since the previous check longer than
+    /// [`MAX_CHECK_GAP`] is excused: every send time moves forward by it.
+    /// Requests are stamped with the time of a check, so none is newer than
+    /// the previous check, none moves past `now`, and their order holds.
+    fn check(&mut self, now: Instant) -> Option<(u64, Duration)> {
+        let gap = self
+            .last_check
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        self.last_check = Some(now);
+        if gap > MAX_CHECK_GAP {
+            tracing::debug!(?gap, "not reading from mpv for a while; excused");
+            for sent in self.sent.values_mut() {
+                *sent = sent.checked_add(gap).unwrap_or(now).min(now);
+            }
+        }
+        self.sent
+            .first_key_value()
+            .map(|(&id, &sent)| (id, now.saturating_duration_since(sent)))
+            .filter(|&(_, waited)| waited >= self.timeout)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct MpvState {
     next_request_id: u64,
     pending: HashMap<u64, Pending>,
+    watchdog: ReplyWatchdog,
     in_flight: Option<InFlight>,
-    queued: Option<(LoadId, PathBuf)>,
+    queued: Option<(LoadId, PlaybackTarget)>,
     entries: HashMap<i64, LoadId>,
     /// Highest entry id ever mapped. mpv entry ids only increase, so an
     /// unmapped id at or below this can never become ours.
@@ -162,6 +245,30 @@ pub struct MpvState {
 impl MpvState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A state whose watchdog allows `timeout` per reply instead of
+    /// [`REPLY_TIMEOUT`] (tests use short timeouts).
+    pub fn with_reply_timeout(timeout: Duration) -> Self {
+        Self {
+            watchdog: ReplyWatchdog::new(timeout),
+            ..Self::default()
+        }
+    }
+
+    /// Records that `requests` were handed to the writer at `now`. Call it
+    /// with the `now` of the latest [`Self::overdue_reply`] check.
+    pub fn requests_sent(&mut self, requests: &[OutgoingRequest], now: Instant) {
+        for request in requests {
+            self.watchdog.sent(request.request_id, now);
+        }
+    }
+
+    /// Checks the reply watchdog; call it at least every
+    /// [`POSITION_INTERVAL`] while reading from mpv. Returns the oldest
+    /// request that has gone unanswered for the timeout, with its wait.
+    pub fn overdue_reply(&mut self, now: Instant) -> Option<(u64, Duration)> {
+        self.watchdog.check(now)
     }
 
     /// Requests to send once connected: observe the reported properties.
@@ -186,14 +293,14 @@ impl MpvState {
     pub fn handle_command(&mut self, command: PlaybackCommand) -> Output {
         let mut out = Output::default();
         match command {
-            PlaybackCommand::Load { load, path } => {
+            PlaybackCommand::Load { load, target } => {
                 if self.in_flight.is_some() {
                     // Collapse: only the latest queued load survives.
-                    if let Some((dropped, _)) = self.queued.replace((load, path)) {
+                    if let Some((dropped, _)) = self.queued.replace((load, target)) {
                         tracing::debug!(%load, %dropped, "load superseded before reaching mpv");
                     }
                 } else {
-                    self.start_load(&mut out, load, path);
+                    self.start_load(&mut out, load, target);
                 }
             }
             PlaybackCommand::SetPause(paused) => self.request(
@@ -216,14 +323,17 @@ impl MpvState {
             PlaybackCommand::SeekAbsolute(seconds) => {
                 self.seek(&mut out, seconds, SeekMode::Absolute);
             }
-            PlaybackCommand::SetVolume(volume) => self.request(
-                &mut out,
-                MpvCommand::SetProperty {
-                    name: "volume",
-                    value: volume.min(100).into(),
-                },
-                Pending::Report("volume"),
-            ),
+            PlaybackCommand::SetVolume(volume) => {
+                let volume = volume.min(100);
+                self.request(
+                    &mut out,
+                    MpvCommand::SetProperty {
+                        name: "volume",
+                        value: volume.into(),
+                    },
+                    Pending::Volume(volume),
+                );
+            }
             PlaybackCommand::Shutdown => self.request(&mut out, MpvCommand::Quit, Pending::Ignore),
         }
         out
@@ -283,10 +393,18 @@ impl MpvState {
         }
     }
 
-    fn start_load(&mut self, out: &mut Output, load: LoadId, path: PathBuf) {
-        let Some(path) = path.to_str().map(str::to_owned) else {
-            self.reject_load(out, load, "path is not valid UTF-8".to_owned());
-            return;
+    fn start_load(&mut self, out: &mut Output, load: LoadId, target: PlaybackTarget) {
+        let command = match target {
+            PlaybackTarget::File(path) => match path.to_str() {
+                Some(path) => MpvCommand::LoadFile {
+                    path: path.to_owned(),
+                },
+                None => {
+                    self.reject_load(out, load, "path is not valid UTF-8".to_owned());
+                    return;
+                }
+            },
+            PlaybackTarget::Stream(url) => MpvCommand::LoadStream { url },
         };
         tracing::debug!(%load, "sending load to mpv");
         self.position.clear();
@@ -302,7 +420,7 @@ impl MpvState {
             },
             Pending::Ignore,
         );
-        self.request(out, MpvCommand::LoadFile { path }, Pending::LoadFile(load));
+        self.request(out, command, Pending::LoadFile(load));
         self.request(
             out,
             MpvCommand::GetProperty {
@@ -330,6 +448,7 @@ impl MpvState {
         request_id: u64,
         result: Result<Option<Value>, String>,
     ) {
+        self.watchdog.answered(request_id);
         let Some(pending) = self.pending.remove(&request_id) else {
             tracing::debug!(request_id, "reply for unknown request ignored");
             return;
@@ -346,6 +465,13 @@ impl MpvState {
                     out.events.push(PlaybackEvent::Error(format!(
                         "Could not set {what}: {error}"
                     )));
+                }
+            }
+            Pending::Volume(volume) => {
+                if let Err(reason) = result {
+                    tracing::warn!(request_id, %reason, volume, "mpv rejected volume");
+                    out.events
+                        .push(PlaybackEvent::VolumeRejected { volume, reason });
                 }
             }
             Pending::LoadFile(load) => {
@@ -403,8 +529,8 @@ impl MpvState {
                 }
             }
         }
-        if let Some((next, path)) = self.queued.take() {
-            self.start_load(out, next, path);
+        if let Some((next, target)) = self.queued.take() {
+            self.start_load(out, next, target);
         }
     }
 
@@ -569,7 +695,7 @@ mod tests {
     fn load(state: &mut MpvState, n: u64, path: &str) -> Output {
         state.handle_command(PlaybackCommand::Load {
             load: l(n),
-            path: path.into(),
+            target: PlaybackTarget::File(path.into()),
         })
     }
 
@@ -621,7 +747,12 @@ mod tests {
                 .expect("request present")
         };
         (
-            find(|c| matches!(c, MpvCommand::LoadFile { .. })),
+            find(|c| {
+                matches!(
+                    c,
+                    MpvCommand::LoadFile { .. } | MpvCommand::LoadStream { .. }
+                )
+            }),
             find(|c| matches!(c, MpvCommand::GetProperty { .. })),
         )
     }
@@ -994,7 +1125,7 @@ mod tests {
         let path = std::ffi::OsStr::from_bytes(b"/m/\xff.flac");
         let out = s.handle_command(PlaybackCommand::Load {
             load: l(1),
-            path: path.into(),
+            target: PlaybackTarget::File(path.into()),
         });
         assert!(out.requests.is_empty());
         assert!(matches!(
@@ -1004,6 +1135,23 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn stream_load_sends_loadfile_with_the_url() {
+        let mut s = MpvState::new();
+        let url = url::Url::parse("http://127.0.0.1:1/rest/stream?id=x").unwrap();
+        let stream = crate::playback::StreamUrl::new(url).unwrap();
+        let out = s.handle_command(PlaybackCommand::Load {
+            load: l(1),
+            target: PlaybackTarget::Stream(stream.clone()),
+        });
+        assert!(out.events.is_empty());
+        assert!(out.requests.iter().any(|r| r.command
+            == MpvCommand::LoadStream {
+                url: stream.clone()
+            }));
+        assert!(load_ids(&out).1 > 0, "entry id is queried as for files");
     }
 
     #[test]
@@ -1155,5 +1303,154 @@ mod tests {
         assert!(line(&mut s, &pos(0.7), at(700)).events.is_empty());
         load(&mut s, 1, "/m/a.flac");
         assert!(s.tick(at(2000)).events.is_empty());
+    }
+
+    #[test]
+    fn rejected_volume_is_a_structured_event() {
+        let mut s = MpvState::new();
+        let out = s.handle_command(PlaybackCommand::SetVolume(130));
+        assert_eq!(
+            out.requests[0].command,
+            MpvCommand::SetProperty {
+                name: "volume",
+                value: 100.into()
+            }
+        );
+        // The event names the clamped value that was actually requested.
+        assert_eq!(
+            reply_err(&mut s, out.requests[0].request_id, "property unavailable").events,
+            [PlaybackEvent::VolumeRejected {
+                volume: 100,
+                reason: "property unavailable".into()
+            }]
+        );
+        let out = s.handle_command(PlaybackCommand::SetVolume(40));
+        assert!(
+            reply_ok(&mut s, out.requests[0].request_id, Value::Null)
+                .events
+                .is_empty(),
+            "success is confirmed by the property echo, not the reply"
+        );
+    }
+
+    /// Checks the watchdog every `step` from `from` (exclusive) to `to`
+    /// (inclusive), returning the first overdue report and when it came.
+    fn watch(
+        s: &mut MpvState,
+        from: Instant,
+        to: Instant,
+        step: Duration,
+    ) -> Option<(Instant, (u64, Duration))> {
+        let mut now = from;
+        while now < to {
+            now = (now + step).min(to);
+            if let Some(overdue) = s.overdue_reply(now) {
+                return Some((now, overdue));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn unanswered_request_is_overdue_after_the_timeout() {
+        let t0 = Instant::now();
+        let secs = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut s = MpvState::with_reply_timeout(Duration::from_secs(10));
+        assert_eq!(s.overdue_reply(t0), None);
+        let out = s.startup();
+        s.requests_sent(&out.requests, t0);
+        // Startup replies arrive; a later pause request never gets one.
+        for r in &out.requests {
+            reply_ok(&mut s, r.request_id, Value::Null);
+        }
+        assert_eq!(watch(&mut s, t0, secs(30.0), POSITION_INTERVAL), None);
+        let pause = s.handle_command(PlaybackCommand::SetPause(true));
+        s.requests_sent(&pause.requests, secs(30.0));
+        let (at, (id, waited)) =
+            watch(&mut s, secs(30.0), secs(60.0), POSITION_INTERVAL).expect("overdue");
+        assert_eq!(id, pause.requests[0].request_id);
+        assert_eq!(at, secs(40.0));
+        assert_eq!(waited, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn answered_requests_never_become_overdue_and_the_oldest_is_reported() {
+        let t0 = Instant::now();
+        let secs = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut s = MpvState::with_reply_timeout(Duration::from_secs(10));
+        s.overdue_reply(t0);
+        let first = load(&mut s, 1, "/m/a.flac");
+        s.requests_sent(&first.requests, t0);
+        assert_eq!(watch(&mut s, t0, secs(5.0), POSITION_INTERVAL), None);
+        let volume = s.handle_command(PlaybackCommand::SetVolume(50));
+        s.requests_sent(&volume.requests, secs(5.0));
+        // The load is answered in full; only the volume request is left.
+        let (file_q, entry_q) = load_ids(&first);
+        reply_ok(&mut s, first.requests[0].request_id, Value::Null);
+        reply_ok(&mut s, file_q, Value::Null);
+        reply_ok(&mut s, entry_q, json!(1));
+        // A reply for an unknown id changes nothing.
+        reply_ok(&mut s, 9999, Value::Null);
+        assert_eq!(
+            watch(&mut s, secs(5.0), secs(14.9), POSITION_INTERVAL),
+            None
+        );
+        let (at, (id, _)) =
+            watch(&mut s, secs(14.9), secs(20.0), Duration::from_millis(100)).expect("overdue");
+        assert_eq!(id, volume.requests[0].request_id);
+        assert_eq!(at, secs(15.0));
+
+        // Two unanswered requests: the oldest is reported.
+        let mut s = MpvState::with_reply_timeout(Duration::from_secs(10));
+        s.overdue_reply(t0);
+        let a = s.handle_command(PlaybackCommand::SetPause(true));
+        s.requests_sent(&a.requests, t0);
+        s.overdue_reply(secs(1.0));
+        let b = s.handle_command(PlaybackCommand::SetPause(false));
+        s.requests_sent(&b.requests, secs(1.0));
+        let (_, (id, _)) = watch(&mut s, secs(1.0), secs(20.0), POSITION_INTERVAL).unwrap();
+        assert_eq!(id, a.requests[0].request_id);
+    }
+
+    #[test]
+    fn time_not_spent_reading_from_mpv_is_excused() {
+        // The driver was blocked for 30 s (a stalled event consumer, or the
+        // process was suspended): mpv could not have replied meanwhile.
+        let t0 = Instant::now();
+        let secs = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut s = MpvState::with_reply_timeout(Duration::from_secs(10));
+        s.overdue_reply(t0);
+        let pause = s.handle_command(PlaybackCommand::SetPause(true));
+        s.requests_sent(&pause.requests, t0);
+        assert_eq!(watch(&mut s, t0, secs(2.0), POSITION_INTERVAL), None);
+        assert_eq!(s.overdue_reply(secs(32.0)), None, "the gap is excused");
+        // Only listening time counts: 2 s before the gap, 8 s after it.
+        assert_eq!(
+            watch(&mut s, secs(32.0), secs(39.9), POSITION_INTERVAL),
+            None
+        );
+        let (at, _) =
+            watch(&mut s, secs(39.9), secs(45.0), Duration::from_millis(100)).expect("overdue");
+        assert_eq!(at, secs(40.0));
+
+        // Gaps up to `MAX_CHECK_GAP` are normal scheduling and count.
+        let mut s = MpvState::with_reply_timeout(Duration::from_secs(10));
+        s.overdue_reply(t0);
+        let stop = s.handle_command(PlaybackCommand::Stop);
+        s.requests_sent(&stop.requests, t0);
+        let (at, _) = watch(&mut s, t0, secs(20.0), MAX_CHECK_GAP).expect("overdue");
+        assert_eq!(at, secs(10.0));
+    }
+
+    #[test]
+    fn default_reply_timeout_is_ten_seconds() {
+        let t0 = Instant::now();
+        let mut s = MpvState::new();
+        s.overdue_reply(t0);
+        let startup = s.startup();
+        s.requests_sent(&startup.requests, t0);
+        let (at, _) =
+            watch(&mut s, t0, t0 + Duration::from_secs(60), POSITION_INTERVAL).expect("overdue");
+        assert_eq!(at, t0 + REPLY_TIMEOUT);
     }
 }
