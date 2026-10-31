@@ -1,6 +1,6 @@
 //! `coda` binary. Startup order: parse and validate the config (when no
-//! source is configured and stdin/stdout are terminals, run the first-run
-//! setup and load the config it wrote), init logging, obtain the Navidrome
+//! source is configured and stdin/stdout are terminals, or with `--setup`,
+//! run the setup and load the config it wrote), init logging, obtain the Navidrome
 //! password (possibly running `password_command`, which may prompt, or
 //! reading the OS keychain) and build the client, load the
 //! saved session, spawn mpv and connect, then hand over to [`app::run`],
@@ -13,7 +13,6 @@ use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Parser;
 use coda_player::app;
 use coda_player::config::{self, Cli, Config, ConfigError, Env, PASSWORD_COMMAND_TIMEOUT};
 use coda_player::navidrome;
@@ -57,45 +56,63 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> ExitCode {
-    let cli = Cli::parse();
+    let (cli, music_arg) = match Cli::try_parse_with_source(std::env::args_os()) {
+        Ok(parsed) => parsed,
+        Err(error) => error.exit(),
+    };
     let env = Env::from_process();
     let mut logging = false;
-    let config = match Config::load(cli, &env) {
-        Ok(config) => config,
-        // Setup only fills in a missing source, and only interactively;
-        // scripts and pipes keep the usage error.
-        Err(ConfigError::NoSource {
-            config_path: Some(path),
-        }) if is_interactive() => {
-            init_logging();
-            logging = true;
-            tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
-            match setup::run(setup::Context::new(path, env.clone())).await {
-                Ok(Outcome::Saved) => {}
-                Ok(Outcome::Exit) => return ExitCode::SUCCESS,
-                Err(error) => {
-                    // The terminal may be gone (hangup); never panic here.
-                    let _ = writeln!(std::io::stderr(), "coda: setup failed: {error}");
-                    return ExitCode::FAILURE;
-                }
-            }
-            // Known gap: setup registered Tokio handlers for SIGTERM,
-            // SIGHUP and SIGINT, which stay installed for the process. A
-            // signal arriving from here until `app::run` listens again
-            // (keychain read, mpv start; normally well under a second) is
-            // swallowed rather than ending the process.
-            match Config::load(Cli { music_dir: None }, &env) {
-                Ok(config) => config,
-                Err(error) => {
-                    tracing::error!("the config written by setup did not load");
-                    let _ = writeln!(std::io::stderr(), "coda: {error}");
-                    return ExitCode::from(error.exit_code());
-                }
-            }
-        }
-        Err(error) => {
+    // Kept for loading the config again after setup.
+    let music_dir_arg = cli.music_dir.clone();
+    let config = if cli.setup {
+        // `coda --setup`: run the setup whatever is configured. A folder
+        // given to this run is checked first, as on a normal start.
+        if let Some(dir) = music_dir_arg.as_ref().filter(|d| !d.is_empty())
+            && let Err(error) = config::validate_music_dir(dir.into())
+        {
             eprintln!("coda: {error}");
             return ExitCode::from(error.exit_code());
+        }
+        if !is_interactive() {
+            eprintln!("coda: --setup needs a terminal on stdin and stdout");
+            return ExitCode::from(2);
+        }
+        let start = match config::read_for_setup(&env) {
+            Ok(start) => start,
+            Err(error) => {
+                eprintln!("coda: {error}");
+                return ExitCode::from(error.exit_code());
+            }
+        };
+        init_logging();
+        logging = true;
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
+        let redo = setup::RedoContext::from_start(&start, music_arg, &env);
+        let context = setup::Context::redo(start.config_path, env.clone(), redo);
+        match run_setup(context, music_dir_arg, &env).await {
+            Ok(config) => config,
+            Err(code) => return code,
+        }
+    } else {
+        match Config::load(cli, &env) {
+            Ok(config) => config,
+            // Setup only fills in a missing source, and only interactively;
+            // scripts and pipes keep the usage error.
+            Err(ConfigError::NoSource {
+                config_path: Some(path),
+            }) if is_interactive() => {
+                init_logging();
+                logging = true;
+                tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
+                match run_setup(setup::Context::new(path, env.clone()), None, &env).await {
+                    Ok(config) => config,
+                    Err(code) => return code,
+                }
+            }
+            Err(error) => {
+                eprintln!("coda: {error}");
+                return ExitCode::from(error.exit_code());
+            }
         }
     };
     if !logging {
@@ -158,6 +175,39 @@ async fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Runs setup, then loads the config it wrote (with the same music
+/// directory argument as this run). `Err` carries the exit status: success
+/// when the user left setup without saving.
+async fn run_setup(
+    context: setup::Context,
+    music_dir: Option<std::ffi::OsString>,
+    env: &Env,
+) -> Result<Config, ExitCode> {
+    match setup::run(context).await {
+        Ok(Outcome::Saved) => {}
+        Ok(Outcome::Exit) => return Err(ExitCode::SUCCESS),
+        Err(error) => {
+            // The terminal may be gone (hangup); never panic here.
+            let _ = writeln!(std::io::stderr(), "coda: setup failed: {error}");
+            return Err(ExitCode::FAILURE);
+        }
+    }
+    // Known gap: setup registered Tokio handlers for SIGTERM, SIGHUP and
+    // SIGINT, which stay installed for the process. A signal arriving from
+    // here until `app::run` listens again (keychain read, mpv start;
+    // normally well under a second) is swallowed rather than ending the
+    // process.
+    let cli = Cli {
+        music_dir,
+        setup: false,
+    };
+    Config::load(cli, env).map_err(|error| {
+        tracing::error!("the config written by setup did not load");
+        let _ = writeln!(std::io::stderr(), "coda: {error}");
+        ExitCode::from(error.exit_code())
+    })
 }
 
 /// Setup needs a terminal to talk to: both stdin and stdout.

@@ -1,26 +1,58 @@
 //! A single-line text input for search queries, shared by the local and
 //! Navidrome searches. No Ratatui: keys and pastes arrive as text.
 
-/// Upper bound on the input, in chars.
+/// Upper bound on the input, in chars, unless set otherwise.
 pub const MAX_QUERY_CHARS: usize = 256;
+/// Upper bound for inputs holding a file system path (Linux `PATH_MAX`).
+pub const MAX_PATH_CHARS: usize = 4096;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineInput {
     text: String,
     /// `text.chars().count()`, kept so appends never rescan the text.
     len: usize,
+    /// Most chars the input holds.
+    limit: usize,
+}
+
+impl Default for LineInput {
+    fn default() -> Self {
+        Self::with_limit(MAX_QUERY_CHARS)
+    }
 }
 
 impl LineInput {
+    /// An empty input of at most [`MAX_QUERY_CHARS`].
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// An empty input of at most `limit` chars.
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            text: String::new(),
+            len: 0,
+            limit,
+        }
+    }
+
     /// An input holding `text`, filtered like a paste.
     pub fn with_text(text: &str) -> Self {
-        let mut input = Self::new();
+        Self::with_limit_and_text(MAX_QUERY_CHARS, text)
+    }
+
+    /// An input of at most `limit` chars holding `text`, filtered like a
+    /// paste.
+    pub fn with_limit_and_text(limit: usize, text: &str) -> Self {
+        let mut input = Self::with_limit(limit);
         input.push_str(text);
         input
+    }
+
+    /// `true` if `text` would be held exactly as it is: no longer than
+    /// `limit` and nothing that filtering would change.
+    pub fn holds_exactly(limit: usize, text: &str) -> bool {
+        Self::with_limit_and_text(limit, text).as_str() == text
     }
 
     pub fn as_str(&self) -> &str {
@@ -45,12 +77,13 @@ impl LineInput {
 
     /// Adds pasted (or typed) text. Line breaks and tabs become a single
     /// space (`\r\n` gives one space, not two); other control characters
-    /// are dropped, so a paste never submits. Input stops at
-    /// [`MAX_QUERY_CHARS`]; work is bounded by the cap, not the paste size.
+    /// are dropped, so a paste never submits. Input stops at the limit
+    /// ([`MAX_QUERY_CHARS`] by default); work is bounded by the cap, not the
+    /// paste size.
     pub fn push_str(&mut self, text: &str) {
         let mut previous = None;
         for c in text.chars() {
-            if self.len >= MAX_QUERY_CHARS {
+            if self.len >= self.limit {
                 break;
             }
             let crlf = previous == Some('\r') && c == '\n';
@@ -98,6 +131,25 @@ mod tests {
         assert_eq!(input.as_str(), "");
         input.push_char('x');
         assert_eq!(input.as_str(), "x", "length tracking survives emptying");
+    }
+
+    #[test]
+    fn limits_can_be_raised_and_exact_holding_is_checked() {
+        let path = format!("/{}", "a".repeat(1000));
+        let input = LineInput::with_limit_and_text(MAX_PATH_CHARS, &path);
+        assert_eq!(input.as_str(), path);
+        assert_eq!(
+            LineInput::with_text(&path).as_str().chars().count(),
+            MAX_QUERY_CHARS
+        );
+        let mut input = LineInput::with_limit(3);
+        input.push_str("abcd");
+        assert_eq!(input.as_str(), "abc");
+        assert!(LineInput::holds_exactly(MAX_PATH_CHARS, &path));
+        assert!(!LineInput::holds_exactly(MAX_QUERY_CHARS, &path));
+        assert!(!LineInput::holds_exactly(MAX_PATH_CHARS, "/a\tb"));
+        assert!(!LineInput::holds_exactly(MAX_PATH_CHARS, "/a\u{1b}b"));
+        assert!(LineInput::holds_exactly(MAX_PATH_CHARS, "~/Mü sic"));
     }
 
     #[test]

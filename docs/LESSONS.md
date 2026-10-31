@@ -97,3 +97,8 @@ Each entry should state:
 - **Context / symptom:** the `mock-secret-store` feature, which exists for PTY smoke runs, replaces the OS keychain with an in-memory store. The standard `clippy --all-features` check then linted only the mock path, and a build with all features said "macOS Keychain" while saving nothing.
 - **Rule:** also lint and build without features whenever a feature swaps out a shipping backend, and make a mock build announce itself (store name on screen, a warning in the log).
 - **Where verified:** M4 slice 1 review; `src/secret_store.rs`, `docs/ARCHITECTURE.md` verification list.
+
+### Setup and startup must derive a secret's key from the same inputs
+- **Context / symptom:** with `CODA_NAVIDROME_USER` set, `coda --setup` pinged and stored the password under the typed account, while startup looked it up under the env-merged account. Startup then failed with "Run `coda --setup`", which repeated the failure.
+- **Rule:** when overrides can change the identity a secret is stored under, either have setup use exactly the identity startup will compute, or refuse to save while the override is active. Never verify and store credentials that startup will not read.
+- **Where verified:** M4 slice 2 Part A review; `Onboarding` blocked-server state, `keeping_navidrome_under_env_overrides_changes_only_the_folder`.

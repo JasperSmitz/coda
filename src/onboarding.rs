@@ -9,13 +9,24 @@
 //! (Ctrl-C) works everywhere except while saving. Skipping both ends on a
 //! "nothing to play" screen that writes nothing.
 //!
+//! `coda --setup` runs the same screens as a redo ([`Onboarding::redo`]):
+//! the folder, URL and username start from the config file (the password
+//! is asked again), settings made outside Coda are reported for the screens
+//! they affect, and skipping a source removes it. Skipping both is refused
+//! there ("keep at least one source") instead of ending. While
+//! `CODA_NAVIDROME_URL` or `CODA_NAVIDROME_USER` is set without
+//! `CODA_NAVIDROME_PASSWORD`, startup would look the password up under the
+//! account those variables name, so a redo cannot save a server: it offers
+//! keeping `[navidrome]` as it is, or removing it.
+//!
 //! The password is held as a [`Password`] in requests and only ever shown
 //! masked. The server URL may be shown (the user typed it); nothing here
 //! logs it.
 
 use url::Url;
 
-use crate::line_input::{LineInput, MAX_QUERY_CHARS};
+use crate::config::{MusicDirArg, NAVIDROME_PASSWORD_ENV, NAVIDROME_URL_ENV, NAVIDROME_USER_ENV};
+use crate::line_input::{LineInput, MAX_PATH_CHARS, MAX_QUERY_CHARS};
 use crate::navidrome::Password;
 use crate::navidrome::client::{UrlError, is_insecure, parse_base_url};
 
@@ -86,10 +97,13 @@ pub enum Request {
     /// Connect with these credentials.
     Ping { id: RequestId, server: Server },
     /// Store the password (if any) in the keychain, then write the config.
+    /// With `keep_navidrome` (and no `server`), `[navidrome]` is kept as it
+    /// is in the file.
     Save {
         id: RequestId,
         music_dir: Option<String>,
         server: Option<Server>,
+        keep_navidrome: bool,
     },
 }
 
@@ -126,6 +140,111 @@ pub enum Busy {
     Saving,
 }
 
+/// What `coda --setup` starts from: the config file's values and the
+/// settings made outside Coda (names only). `Debug` hides the values.
+#[derive(Clone, Default)]
+pub struct Redo {
+    pub music_dir: Option<String>,
+    pub url: Option<String>,
+    pub username: Option<String>,
+    /// A folder given on the command line or in `CODA_MUSIC_DIR`, which
+    /// overrides the file's.
+    pub music_override: Option<MusicDirArg>,
+    /// The `CODA_NAVIDROME_*` variables that are set.
+    pub navidrome_overrides: Vec<&'static str>,
+    /// `password` or `password_command` in the file, which saving
+    /// Navidrome replaces with the keychain.
+    pub hand_written_password: Option<&'static str>,
+    /// The file configures Navidrome (so skipping it removes it).
+    pub has_navidrome: bool,
+    /// The file's URL held credentials, which were left out of `url`.
+    pub url_had_credentials: bool,
+    /// The file's URL was not prefilled because it may hold credentials
+    /// (see `config::SetupStart::url_withheld`).
+    pub url_withheld: bool,
+    /// Saving backs the current file up (it holds settings).
+    pub file_has_content: bool,
+}
+
+impl Redo {
+    /// `true` if the file has no folder, URL or username to start from.
+    pub fn is_empty(&self) -> bool {
+        self.music_dir.is_none() && self.url.is_none() && self.username.is_none()
+    }
+
+    /// The variables that make saving a server pointless: the URL or user
+    /// from the environment, without its password. Startup would then look
+    /// the stored password up under another account than the one entered.
+    pub fn navidrome_blocked_by(&self) -> Vec<&'static str> {
+        if self.navidrome_overrides.contains(&NAVIDROME_PASSWORD_ENV) {
+            return Vec::new();
+        }
+        self.navidrome_overrides
+            .iter()
+            .copied()
+            .filter(|name| [NAVIDROME_URL_ENV, NAVIDROME_USER_ENV].contains(name))
+            .collect()
+    }
+}
+
+/// Explains why a redo cannot save a server. Names only.
+pub fn navidrome_blocked_message(names: &[&str]) -> String {
+    match names {
+        [name] => {
+            format!("{name} is set and would be used instead; unset it to change the server here.")
+        }
+        names => format!(
+            "{} are set and would be used instead; unset them to change the server here.",
+            names.join(" and ")
+        ),
+    }
+}
+
+/// Warns that removing Navidrome leaves these variables behind. Names
+/// only.
+pub fn leftover_overrides_message(names: &[&str]) -> String {
+    let (verb, pronoun) = if names.len() == 1 {
+        ("is", "it")
+    } else {
+        ("are", "them")
+    };
+    format!(
+        "{} {verb} still set; unset {pronoun} too, or Coda will report Navidrome as partly configured.",
+        names.join(" and ")
+    )
+}
+
+/// Prefilled values that were left out because the input could not hold
+/// them exactly (too long, or with control characters).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NotPrefilled {
+    pub music_dir: bool,
+    pub url: bool,
+    pub username: bool,
+}
+
+impl std::fmt::Debug for Redo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redo")
+            .field("music_override", &self.music_override)
+            .field("navidrome_overrides", &self.navidrome_overrides)
+            .field("hand_written_password", &self.hand_written_password)
+            .field("has_navidrome", &self.has_navidrome)
+            .field("url_had_credentials", &self.url_had_credentials)
+            .field("url_withheld", &self.url_withheld)
+            .field("file_has_content", &self.file_has_content)
+            .finish_non_exhaustive()
+    }
+}
+
+pub const KEEP_ONE_SOURCE: &str =
+    "Keep at least one source: y sets up Navidrome, Esc goes to the folder";
+/// The same while a server cannot be saved (env overrides), when the file
+/// has one to keep.
+pub const KEEP_ONE_SOURCE_BLOCKED: &str =
+    "Keep at least one source: k keeps Navidrome, Esc goes to the folder";
+/// The same while a server cannot be saved and there is none to keep.
+pub const KEEP_ONE_SOURCE_FOLDER: &str = "Keep at least one source: Esc goes to the folder";
 const MISSING_FOLDER: &str = "Type a folder, or press Esc to skip";
 const MISSING_USERNAME: &str = "Enter your username";
 const MISSING_PASSWORD: &str = "Enter your password";
@@ -147,6 +266,15 @@ pub struct Onboarding {
     /// The connected server, once the ping succeeded.
     server: Option<Server>,
     save_error: Option<SaveError>,
+    /// Shown on the Navidrome question when a redo would remove both
+    /// sources.
+    source_error: Option<&'static str>,
+    /// Set for `coda --setup`.
+    redo: Option<Redo>,
+    /// Redo values that could not be prefilled.
+    not_prefilled: NotPrefilled,
+    /// A redo keeps `[navidrome]` as it is (see the module docs).
+    keep_navidrome: bool,
     pending: Option<(RequestId, Busy)>,
     next_id: RequestId,
     requests: Vec<Request>,
@@ -182,7 +310,10 @@ impl Onboarding {
     pub fn new(music_prefill: Option<&str>) -> Self {
         Self {
             screen: Screen::Welcome,
-            music: music_prefill.map(LineInput::with_text).unwrap_or_default(),
+            music: LineInput::with_limit_and_text(
+                MAX_PATH_CHARS,
+                music_prefill.unwrap_or_default(),
+            ),
             music_error: None,
             music_dir: None,
             url: LineInput::new(),
@@ -193,6 +324,10 @@ impl Onboarding {
             connecting: None,
             server: None,
             save_error: None,
+            source_error: None,
+            redo: None,
+            not_prefilled: NotPrefilled::default(),
+            keep_navidrome: false,
             pending: None,
             next_id: 0,
             requests: Vec::new(),
@@ -200,7 +335,87 @@ impl Onboarding {
         }
     }
 
+    /// `coda --setup`: the folder, URL and username start from `redo`; the
+    /// password starts empty.
+    ///
+    /// A value the input cannot hold exactly is left out (and reported by
+    /// [`Onboarding::not_prefilled`]). With nothing to start from,
+    /// `suggestion` fills the folder as on first run.
+    pub fn redo(redo: Redo, suggestion: Option<&str>) -> Self {
+        fn fits(value: &Option<String>, limit: usize) -> Option<&str> {
+            value
+                .as_deref()
+                .filter(|v| LineInput::holds_exactly(limit, v))
+        }
+        let music = fits(&redo.music_dir, MAX_PATH_CHARS);
+        let url = fits(&redo.url, MAX_QUERY_CHARS);
+        let username = fits(&redo.username, MAX_QUERY_CHARS);
+        let not_prefilled = NotPrefilled {
+            music_dir: redo.music_dir.is_some() && music.is_none(),
+            url: redo.url_withheld || (redo.url.is_some() && url.is_none()),
+            username: redo.username.is_some() && username.is_none(),
+        };
+        let music = if redo.is_empty() { suggestion } else { music };
+        let mut setup = Self::new(music);
+        setup.url = LineInput::with_text(url.unwrap_or_default());
+        setup.username = LineInput::with_text(username.unwrap_or_default());
+        setup.not_prefilled = not_prefilled;
+        setup.redo = Some(redo);
+        setup
+    }
+
     // ----- read access for the UI and driver ------------------------------
+
+    /// What a redo started from; `None` on first run.
+    pub fn redo_info(&self) -> Option<&Redo> {
+        self.redo.as_ref()
+    }
+
+    /// Redo values that could not be prefilled.
+    pub fn not_prefilled(&self) -> NotPrefilled {
+        self.not_prefilled
+    }
+
+    /// The variables that stop a redo from saving a server; empty if none.
+    pub fn navidrome_blocked_by(&self) -> Vec<&'static str> {
+        self.redo
+            .as_ref()
+            .map(Redo::navidrome_blocked_by)
+            .unwrap_or_default()
+    }
+
+    /// The `CODA_NAVIDROME_*` variables that would leave Navidrome partly
+    /// configured once this redo removes it from the file: some, but not
+    /// all three, are set.
+    pub fn leftover_overrides(&self) -> Vec<&'static str> {
+        match &self.redo {
+            Some(redo)
+                if self.server.is_none()
+                    && !self.keep_navidrome
+                    && redo.navidrome_overrides.len() < 3 =>
+            {
+                redo.navidrome_overrides.clone()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The redo keeps `[navidrome]` as it is.
+    pub fn keeps_navidrome(&self) -> bool {
+        self.keep_navidrome
+    }
+
+    /// Keeping `[navidrome]` is offered: the server cannot be saved, and
+    /// the file has one to keep.
+    pub fn can_keep_navidrome(&self) -> bool {
+        self.redo.as_ref().is_some_and(|r| r.has_navidrome)
+            && !self.navidrome_blocked_by().is_empty()
+    }
+
+    /// Why skipping Navidrome was refused, if it was.
+    pub fn source_error(&self) -> Option<&'static str> {
+        self.source_error
+    }
 
     pub fn screen(&self) -> Screen {
         self.screen
@@ -293,12 +508,32 @@ impl Onboarding {
             },
             Screen::Music => self.music_input_key(input),
             Screen::AskNavidrome => match input {
+                // The server cannot be saved; the screen says why.
+                Input::Char('y' | 'Y') if !self.navidrome_blocked_by().is_empty() => {}
+                Input::Char('k' | 'K') if self.can_keep_navidrome() => {
+                    self.source_error = None;
+                    self.server = None;
+                    self.keep_navidrome = true;
+                    self.save_error = None;
+                    self.screen = Screen::Ready;
+                }
                 Input::Char('y' | 'Y') => {
+                    self.source_error = None;
                     self.screen = Screen::Server;
-                    self.focus = Field::Url;
+                    // The first empty field: the password on a redo.
+                    self.focus = if self.url.is_empty() {
+                        Field::Url
+                    } else if self.username.is_empty() {
+                        Field::Username
+                    } else {
+                        Field::Password
+                    };
                 }
                 Input::Char('n' | 'N') => self.skip_navidrome(),
-                Input::Esc => self.screen = Screen::Music,
+                Input::Esc => {
+                    self.source_error = None;
+                    self.screen = Screen::Music;
+                }
                 _ => {}
             },
             Screen::Server => self.server_key(input),
@@ -321,6 +556,7 @@ impl Onboarding {
             Response::FolderChecked { result, .. } => match result {
                 Ok(()) => {
                     self.music_dir = Some(self.music.as_str().trim().to_owned());
+                    self.source_error = None;
                     self.screen = Screen::AskNavidrome;
                 }
                 Err(message) => self.music_error = Some(message),
@@ -392,6 +628,7 @@ impl Onboarding {
             Input::Esc => {
                 self.music_dir = None;
                 self.music_error = None;
+                self.source_error = None;
                 self.screen = Screen::AskNavidrome;
             }
             _ => {}
@@ -399,12 +636,23 @@ impl Onboarding {
     }
 
     fn skip_navidrome(&mut self) {
+        self.keep_navidrome = false;
         self.server = None;
         self.connecting = None;
         self.server_error = None;
         self.save_error = None;
         self.screen = if self.music_dir.is_some() {
             Screen::Ready
+        } else if self.redo.is_some() {
+            // A redo must leave a source; leaving setup changes nothing.
+            self.source_error = Some(if self.navidrome_blocked_by().is_empty() {
+                KEEP_ONE_SOURCE
+            } else if self.can_keep_navidrome() {
+                KEEP_ONE_SOURCE_BLOCKED
+            } else {
+                KEEP_ONE_SOURCE_FOLDER
+            });
+            Screen::AskNavidrome
         } else {
             Screen::Nothing
         };
@@ -480,6 +728,10 @@ impl Onboarding {
     }
 
     fn submit_server(&mut self) {
+        if !self.navidrome_blocked_by().is_empty() {
+            // Not reachable through the screens; never ping or store.
+            return;
+        }
         let url = match normalize_url(self.url.as_str()) {
             Ok(url) => url,
             Err(error) => {
@@ -522,18 +774,22 @@ impl Onboarding {
                 self.save_error = None;
                 let music_dir = self.music_dir.clone();
                 let server = self.server.clone();
+                let keep_navidrome = self.keep_navidrome;
                 self.request(Busy::Saving, |id| Request::Save {
                     id,
                     music_dir,
                     server,
+                    keep_navidrome,
                 });
             }
             Input::Char('s') if self.server.is_some() => self.skip_navidrome(),
             Input::Esc => {
                 self.save_error = None;
+                self.keep_navidrome = false;
                 if self.server.take().is_some() {
                     self.screen = Screen::Server;
                 } else {
+                    self.source_error = None;
                     self.screen = Screen::AskNavidrome;
                 }
             }
@@ -717,6 +973,7 @@ mod tests {
             id,
             music_dir,
             server,
+            ..
         } = one_request(&mut setup)
         else {
             panic!()
@@ -1053,6 +1310,354 @@ mod tests {
         setup.handle_input(Input::Enter);
         assert_eq!(setup.outcome(), Some(Outcome::Exit));
         assert!(setup.take_requests().is_empty());
+    }
+
+    fn redo(music_dir: Option<&str>, navidrome: bool) -> Onboarding {
+        Onboarding::redo(
+            Redo {
+                music_dir: music_dir.map(Into::into),
+                url: navidrome.then(|| "https://h.example/".into()),
+                username: navidrome.then(|| "me".into()),
+                has_navidrome: navidrome,
+                ..Redo::default()
+            },
+            None,
+        )
+    }
+
+    fn save_request(setup: &mut Onboarding) -> (RequestId, Option<String>, Option<Server>) {
+        match one_request(setup) {
+            Request::Save {
+                id,
+                music_dir,
+                server,
+                ..
+            } => (id, music_dir, server),
+            other => panic!("expected a save, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redo_prefills_folder_url_and_username_but_not_the_password() {
+        let mut setup = redo(Some("~/Music"), true);
+        assert!(setup.redo_info().is_some());
+        setup.handle_input(Input::Enter);
+        assert_eq!(setup.music_input(), "~/Music");
+        setup.handle_input(Input::Enter);
+        let Request::CheckFolder { id, typed: folder } = one_request(&mut setup) else {
+            panic!()
+        };
+        assert_eq!(folder, "~/Music");
+        setup.handle_response(Response::FolderChecked { id, result: Ok(()) });
+        setup.handle_input(Input::Char('y'));
+        assert_eq!(setup.screen(), Screen::Server);
+        assert_eq!(setup.url_input(), "https://h.example/");
+        assert_eq!(setup.username_input(), "me");
+        assert_eq!(setup.password_masked(), "");
+        assert_eq!(setup.focus(), Field::Password, "the empty field");
+        typed(&mut setup, "pw");
+        setup.handle_input(Input::Enter);
+        let (id, server) = ping(&mut setup);
+        assert_eq!(server.url.as_str(), "https://h.example/");
+        assert_eq!(server.username, "me");
+        setup.handle_response(Response::Pinged { id, result: Ok(()) });
+        setup.handle_input(Input::Enter);
+        let (_, music_dir, server) = save_request(&mut setup);
+        assert_eq!(music_dir.as_deref(), Some("~/Music"));
+        assert_eq!(server.unwrap().password.expose(), "pw");
+
+        // A partial setup focuses the first missing field.
+        let mut setup = Onboarding::redo(
+            Redo {
+                url: Some("h.example".into()),
+                has_navidrome: true,
+                ..Redo::default()
+            },
+            None,
+        );
+        send_all(&mut setup, &[Input::Enter, Input::Esc, Input::Char('y')]);
+        assert_eq!(setup.focus(), Field::Username);
+        assert_eq!(setup.url_input(), "h.example");
+    }
+
+    fn send_all(setup: &mut Onboarding, inputs: &[Input]) {
+        for input in inputs {
+            setup.handle_input(input.clone());
+        }
+    }
+
+    #[test]
+    fn redo_skipping_a_source_removes_it() {
+        // Skipping the folder: saved without one.
+        let mut setup = redo(Some("/m"), true);
+        send_all(&mut setup, &[Input::Enter, Input::Esc, Input::Char('y')]);
+        typed(&mut setup, "pw");
+        setup.handle_input(Input::Enter);
+        let (id, _) = ping(&mut setup);
+        setup.handle_response(Response::Pinged { id, result: Ok(()) });
+        setup.handle_input(Input::Enter);
+        let (_, music_dir, server) = save_request(&mut setup);
+        assert_eq!(music_dir, None);
+        assert!(server.is_some());
+
+        // Skipping Navidrome: saved without it.
+        let mut setup = redo(Some("/m"), true);
+        setup.handle_input(Input::Enter);
+        choose_folder(&mut setup, "");
+        setup.handle_input(Input::Char('n'));
+        assert_eq!(setup.screen(), Screen::Ready);
+        setup.handle_input(Input::Enter);
+        let (_, music_dir, server) = save_request(&mut setup);
+        assert_eq!(music_dir.as_deref(), Some("/m"));
+        assert!(server.is_none());
+    }
+
+    #[test]
+    fn redo_refuses_to_skip_both_but_first_run_exits() {
+        let mut setup = redo(Some("/m"), true);
+        send_all(&mut setup, &[Input::Enter, Input::Esc, Input::Char('n')]);
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+        assert_eq!(setup.source_error(), Some(KEEP_ONE_SOURCE));
+        assert_eq!(setup.outcome(), None);
+        assert!(setup.take_requests().is_empty());
+        // Esc in the form is refused the same way, keeping what was typed.
+        setup.handle_input(Input::Char('y'));
+        assert_eq!(setup.source_error(), None);
+        typed(&mut setup, "pw");
+        setup.handle_input(Input::Esc);
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+        assert_eq!(setup.source_error(), Some(KEEP_ONE_SOURCE));
+        setup.handle_input(Input::Char('y'));
+        assert_eq!(setup.password_masked(), "••");
+        // So is "s" after a failed save.
+        setup.handle_input(Input::Enter);
+        let (id, _) = ping(&mut setup);
+        setup.handle_response(Response::Pinged { id, result: Ok(()) });
+        setup.handle_input(Input::Enter);
+        let (id, _, _) = save_request(&mut setup);
+        setup.handle_response(Response::Saved {
+            id,
+            result: Err(SaveError::Keychain("locked".into())),
+        });
+        setup.handle_input(Input::Char('s'));
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+        assert_eq!(setup.source_error(), Some(KEEP_ONE_SOURCE));
+        // Going back for a folder clears the message; leaving changes nothing.
+        setup.handle_input(Input::Esc);
+        assert_eq!(setup.screen(), Screen::Music);
+        assert_eq!(setup.source_error(), None);
+        setup.handle_input(Input::Quit);
+        assert_eq!(setup.outcome(), Some(Outcome::Exit));
+        assert!(setup.take_requests().is_empty());
+
+        // First run: skipping both still ends.
+        let mut setup = Onboarding::new(None);
+        send_all(&mut setup, &[Input::Enter, Input::Esc, Input::Char('n')]);
+        assert_eq!(setup.screen(), Screen::Nothing);
+        assert_eq!(setup.source_error(), None);
+    }
+
+    fn blocked(overrides: Vec<&'static str>, has_navidrome: bool) -> Onboarding {
+        Onboarding::redo(
+            Redo {
+                music_dir: Some("/m".into()),
+                url: has_navidrome.then(|| "https://h.example/".into()),
+                username: has_navidrome.then(|| "me".into()),
+                navidrome_overrides: overrides,
+                has_navidrome,
+                ..Redo::default()
+            },
+            None,
+        )
+    }
+
+    /// Welcome → folder accepted → the Navidrome question.
+    fn at_question(setup: &mut Onboarding) {
+        setup.handle_input(Input::Enter);
+        choose_folder(setup, "");
+    }
+
+    #[test]
+    fn env_url_or_user_without_password_blocks_saving_a_server() {
+        use crate::config::{NAVIDROME_PASSWORD_ENV, NAVIDROME_URL_ENV, NAVIDROME_USER_ENV};
+        let mut setup = blocked(vec![NAVIDROME_USER_ENV], true);
+        assert_eq!(setup.navidrome_blocked_by(), [NAVIDROME_USER_ENV]);
+        assert!(setup.can_keep_navidrome());
+        at_question(&mut setup);
+        // The form never opens, so nothing is pinged or stored.
+        setup.handle_input(Input::Char('y'));
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+        assert!(setup.take_requests().is_empty());
+        // Changing only the folder keeps [navidrome] as it is.
+        setup.handle_input(Input::Char('k'));
+        assert_eq!(setup.screen(), Screen::Ready);
+        assert!(setup.keeps_navidrome());
+        setup.handle_input(Input::Enter);
+        let Request::Save {
+            music_dir,
+            server,
+            keep_navidrome,
+            ..
+        } = one_request(&mut setup)
+        else {
+            panic!()
+        };
+        assert_eq!(music_dir.as_deref(), Some("/m"));
+        assert!(server.is_none());
+        assert!(keep_navidrome);
+
+        // Esc on Ready drops the choice; removing still works.
+        let mut setup = blocked(vec![NAVIDROME_URL_ENV, NAVIDROME_USER_ENV], true);
+        at_question(&mut setup);
+        setup.handle_input(Input::Char('k'));
+        setup.handle_input(Input::Esc);
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+        assert!(!setup.keeps_navidrome());
+        setup.handle_input(Input::Char('n'));
+        assert_eq!(setup.screen(), Screen::Ready);
+        setup.handle_input(Input::Enter);
+        let Request::Save {
+            server,
+            keep_navidrome,
+            ..
+        } = one_request(&mut setup)
+        else {
+            panic!()
+        };
+        assert!(server.is_none() && !keep_navidrome);
+
+        assert_eq!(
+            setup.leftover_overrides(),
+            [NAVIDROME_URL_ENV, NAVIDROME_USER_ENV]
+        );
+
+        // Removing the last source names only what works here.
+        let mut no_folder = blocked(vec![NAVIDROME_USER_ENV], true);
+        no_folder.handle_input(Input::Enter);
+        no_folder.handle_input(Input::Esc);
+        no_folder.handle_input(Input::Char('n'));
+        assert_eq!(no_folder.source_error(), Some(KEEP_ONE_SOURCE_BLOCKED));
+        let mut nothing = blocked(vec![NAVIDROME_USER_ENV], false);
+        nothing.handle_input(Input::Enter);
+        nothing.handle_input(Input::Esc);
+        nothing.handle_input(Input::Char('n'));
+        assert_eq!(nothing.source_error(), Some(KEEP_ONE_SOURCE_FOLDER));
+
+        // Nothing to keep without [navidrome] in the file.
+        let mut setup = blocked(vec![NAVIDROME_URL_ENV], false);
+        assert!(!setup.can_keep_navidrome());
+        at_question(&mut setup);
+        setup.handle_input(Input::Char('k'));
+        assert_eq!(setup.screen(), Screen::AskNavidrome);
+
+        // With the password from the environment too, the stored entry is
+        // never looked up, so nothing is blocked.
+        let setup = blocked(
+            vec![
+                NAVIDROME_URL_ENV,
+                NAVIDROME_USER_ENV,
+                NAVIDROME_PASSWORD_ENV,
+            ],
+            true,
+        );
+        assert!(setup.navidrome_blocked_by().is_empty());
+        assert!(!setup.can_keep_navidrome());
+        // All three set: the environment alone configures Navidrome.
+        assert!(setup.leftover_overrides().is_empty());
+        // First run never has overrides (they would be a config error).
+        assert!(Onboarding::new(None).navidrome_blocked_by().is_empty());
+        assert_eq!(
+            navidrome_blocked_message(&[NAVIDROME_USER_ENV]),
+            "CODA_NAVIDROME_USER is set and would be used instead; unset it to change the server here."
+        );
+    }
+
+    #[test]
+    fn values_an_input_cannot_hold_exactly_are_not_prefilled() {
+        let long_dir = format!("/{}", "d".repeat(1000));
+        let mut setup = Onboarding::redo(
+            Redo {
+                music_dir: Some(long_dir.clone()),
+                url: Some(format!("https://{}", "h".repeat(300))),
+                username: Some("me\u{1b}[31m".into()),
+                has_navidrome: true,
+                ..Redo::default()
+            },
+            Some("~/Music"),
+        );
+        // A long path fits the folder input (4096 chars).
+        assert_eq!(setup.music_input(), long_dir);
+        assert_eq!(
+            setup.not_prefilled(),
+            NotPrefilled {
+                music_dir: false,
+                url: true,
+                username: true
+            }
+        );
+        assert_eq!(setup.url_input(), "");
+        assert_eq!(setup.username_input(), "");
+        setup.handle_input(Input::Enter);
+        setup.handle_input(Input::Paste("x".repeat(5000)));
+        assert_eq!(setup.music_input().chars().count(), MAX_PATH_CHARS);
+
+        let setup = Onboarding::redo(
+            Redo {
+                music_dir: Some(format!("/{}", "d".repeat(MAX_PATH_CHARS))),
+                ..Redo::default()
+            },
+            None,
+        );
+        assert!(setup.not_prefilled().music_dir);
+        assert_eq!(setup.music_input(), "");
+    }
+
+    #[test]
+    fn a_withheld_url_is_reported_as_not_prefilled() {
+        let setup = Onboarding::redo(
+            Redo {
+                url_withheld: true,
+                username: Some("me".into()),
+                has_navidrome: true,
+                ..Redo::default()
+            },
+            None,
+        );
+        assert!(setup.not_prefilled().url);
+        assert_eq!(setup.url_input(), "");
+    }
+
+    #[test]
+    fn an_empty_redo_suggests_the_music_folder_like_first_run() {
+        let mut setup = Onboarding::redo(Redo::default(), Some("~/Music"));
+        setup.handle_input(Input::Enter);
+        assert_eq!(setup.music_input(), "~/Music");
+        // With something to start from, the file wins.
+        let mut setup = Onboarding::redo(
+            Redo {
+                url: Some("h".into()),
+                ..Redo::default()
+            },
+            Some("~/Music"),
+        );
+        setup.handle_input(Input::Enter);
+        assert_eq!(setup.music_input(), "");
+    }
+
+    #[test]
+    fn redo_debug_hides_the_prefilled_values() {
+        let info = Redo {
+            music_dir: Some("/secret-dir".into()),
+            url: Some("https://secret-host".into()),
+            username: Some("secret-user".into()),
+            navidrome_overrides: vec!["CODA_NAVIDROME_URL"],
+            ..Redo::default()
+        };
+        let text = format!("{info:?}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("CODA_NAVIDROME_URL"), "{text}");
+        let text = format!("{:?}", Onboarding::redo(info, None));
+        assert!(!text.contains("secret"), "{text}");
     }
 
     #[test]

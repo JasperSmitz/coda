@@ -1,5 +1,5 @@
-//! Draws the first-run setup ([`Onboarding`]) and maps keys to its
-//! [`Input`]s. One compact centred panel per screen.
+//! Draws the setup ([`Onboarding`], first run or `coda --setup`) and maps
+//! keys to its [`Input`]s. One compact centred panel per screen.
 //!
 //! Typed text is sanitised and truncated like every other untrusted
 //! string (the end of an input stays visible); the password is only ever
@@ -13,11 +13,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::onboarding::{Busy, Field, Input, Onboarding, SaveError, Screen};
+use crate::config::MusicDirArg;
+use crate::onboarding::{
+    Busy, Field, Input, Onboarding, SaveError, Screen, leftover_overrides_message,
+    navidrome_blocked_message,
+};
 use crate::ui::render::{fit, fit_tail};
 
 const MAX_WIDTH: u16 = 76;
-const MAX_HEIGHT: u16 = 16;
+const MAX_HEIGHT: u16 = 18;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// Width of the form labels, including the gap after them.
 const LABEL_WIDTH: usize = 10;
@@ -92,6 +96,29 @@ impl Panel {
 
     fn hint(&mut self, text: &str) {
         self.styled(text, Style::default().fg(Color::DarkGray));
+    }
+
+    /// Something to be aware of, e.g. a setting made outside Coda.
+    fn note(&mut self, text: &str) {
+        self.styled(text, Style::default().fg(Color::Yellow));
+    }
+
+    /// `text` word-wrapped to the panel width, one styled line per row.
+    /// A word wider than the panel is truncated.
+    fn wrapped(&mut self, text: &str, style: Style) {
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            if !line.is_empty() && line.width() + 1 + word.width() > self.width {
+                self.styled(&std::mem::take(&mut line), style);
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            self.styled(&line, style);
+        }
     }
 
     fn spinner(&mut self, frame: usize, text: &str) {
@@ -171,7 +198,18 @@ pub fn draw(frame: &mut Frame, setup: &Onboarding, view: &View) {
 }
 
 fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
+    let redo = setup.redo_info();
     match setup.screen() {
+        Screen::Welcome if redo.is_some_and(|r| !r.is_empty()) => {
+            let mut p = Panel::new("Coda setup", width);
+            p.text("Change where your music comes from.");
+            p.blank();
+            p.text("Your current folder and server are filled in; the");
+            p.text("password is asked again. Nothing changes until you save.");
+            p.blank();
+            p.hint("Enter continue · Esc or Ctrl-C leave without changes");
+            p
+        }
         Screen::Welcome => {
             let mut p = Panel::new("Welcome to Coda", width);
             p.text("Coda plays music from a folder on this computer,");
@@ -189,6 +227,18 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
             let checking = setup.busy() == Some(Busy::CheckingFolder);
             p.input("Folder", setup.music_input(), !checking);
             p.blank();
+            match redo.and_then(|r| r.music_override) {
+                Some(MusicDirArg::Env) => {
+                    p.note("CODA_MUSIC_DIR is set and overrides this folder.");
+                }
+                Some(MusicDirArg::Argument) => {
+                    p.note("The folder given on the command line overrides this one.");
+                }
+                None => {}
+            }
+            if setup.not_prefilled().music_dir {
+                p.note("The folder in the config file cannot be shown here; type it again.");
+            }
             if checking {
                 p.spinner(view.spinner, "Checking the folder…");
                 p.blank();
@@ -199,20 +249,46 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
                     None => p.blank(),
                 }
                 p.blank();
-                p.hint("Enter use this folder · Esc skip · Ctrl-C quit");
+                p.hint(if redo.is_some() {
+                    "Enter use this folder · Esc no local folder · Ctrl-C quit"
+                } else {
+                    "Enter use this folder · Esc skip · Ctrl-C quit"
+                });
             }
             p
         }
         Screen::AskNavidrome => {
             let mut p = Panel::new("Navidrome", width);
-            p.text("Do you have a Navidrome server?");
+            let configured = redo.is_some_and(|r| r.has_navidrome);
+            if configured {
+                p.text("Keep using a Navidrome server?");
+            } else {
+                p.text("Do you have a Navidrome server?");
+            }
             p.blank();
             match setup.music_dir() {
                 Some(dir) => p.field("Music folder", dir),
                 None => p.field("Music folder", "none"),
             }
             p.blank();
-            p.hint("y set it up · n skip · Esc back · Ctrl-C quit");
+            let blocked = setup.navidrome_blocked_by();
+            if !blocked.is_empty() {
+                p.wrapped(
+                    &navidrome_blocked_message(&blocked),
+                    Style::default().fg(Color::Yellow),
+                );
+            }
+            match setup.source_error() {
+                Some(error) => p.error(error),
+                None => p.blank(),
+            }
+            p.blank();
+            p.hint(match (blocked.is_empty(), configured) {
+                (true, true) => "y keep or change · n remove · Esc back · Ctrl-C quit",
+                (true, false) => "y set it up · n skip · Esc back · Ctrl-C quit",
+                (false, true) => "k keep as it is · n remove · Esc back · Ctrl-C quit",
+                (false, false) => "n skip · Esc back · Ctrl-C quit",
+            });
             p
         }
         Screen::Server => {
@@ -231,6 +307,20 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
                 focus == Some(Field::Password),
             );
             p.blank();
+            if let Some(names) = redo
+                .map(|r| &r.navidrome_overrides)
+                .filter(|names| !names.is_empty())
+            {
+                p.note("Set outside Coda, and used instead of these:");
+                p.note(&names.join(", "));
+            }
+            if redo.is_some_and(|r| r.url_had_credentials) {
+                p.note("The login in the saved URL was removed; it is not used.");
+            }
+            let hidden = setup.not_prefilled();
+            if hidden.url || hidden.username {
+                p.note("A saved value cannot be shown here; type it again.");
+            }
             if let Some(url) = setup.connecting_to().filter(|_| connecting) {
                 p.spinner(view.spinner, &format!("Connecting to {url}"));
                 p.blank();
@@ -241,13 +331,22 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
                     None => p.hint("Without http:// or https://, https:// is used."),
                 }
                 p.blank();
-                p.hint("Enter next/connect · Tab field · Esc skip Navidrome · Ctrl-C quit");
+                p.hint(if redo.is_some_and(|r| r.has_navidrome) {
+                    "Enter next/connect · Tab field · Esc remove Navidrome · Ctrl-C quit"
+                } else {
+                    "Enter next/connect · Tab field · Esc skip Navidrome · Ctrl-C quit"
+                });
             }
             p
         }
         Screen::Ready => {
             let mut p = Panel::new("Ready", width);
-            p.field("Music folder", setup.music_dir().unwrap_or("none"));
+            let had_music = redo.is_some_and(|r| r.music_dir.is_some());
+            let removed = |had: bool| if had { "none (removed)" } else { "none" };
+            p.field(
+                "Music folder",
+                setup.music_dir().unwrap_or(removed(had_music)),
+            );
             match setup.connected() {
                 Some((url, username)) => {
                     p.field("Navidrome", &format!("Connected as {username}"));
@@ -256,12 +355,40 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
                         p.error("Plain http: others on the network can observe your login.");
                     }
                 }
+                None if setup.keeps_navidrome() => p.field("Navidrome", "kept as it is"),
+                None if redo.is_some_and(|r| r.has_navidrome) => p.field("Navidrome", "removed"),
                 None => p.field("Navidrome", "not set up"),
             }
             p.blank();
             p.field("Settings", &view.config_path);
             if setup.connected().is_some() {
                 p.field("Password", view.store_name);
+            }
+            if let Some(key) = redo
+                .and_then(|r| r.hand_written_password)
+                .filter(|_| setup.connected().is_some())
+            {
+                p.note(&format!("Saving replaces the hand-written {key}."));
+            }
+            let leftover = setup.leftover_overrides();
+            if !leftover.is_empty() {
+                p.wrapped(
+                    &leftover_overrides_message(&leftover),
+                    Style::default().fg(Color::Yellow),
+                );
+            }
+            let file_has_content = redo.is_some_and(|r| r.file_has_content);
+            if file_has_content {
+                p.hint("The current file is kept as a backup next to it.");
+            }
+            if file_has_content
+                && !setup.keeps_navidrome()
+                && redo.and_then(|r| r.hand_written_password) == Some("password")
+            {
+                p.wrapped(
+                    "The backup still holds the old password; delete it when you no longer need it.",
+                    Style::default().fg(Color::Yellow),
+                );
             }
             p.blank();
             if setup.busy() == Some(Busy::Saving) {
@@ -505,6 +632,228 @@ mod tests {
         );
     }
 
+    fn redo_setup() -> Onboarding {
+        Onboarding::redo(
+            crate::onboarding::Redo {
+                music_dir: Some("~/Music".into()),
+                url: Some("https://nd.example/".into()),
+                username: Some("me".into()),
+                music_override: Some(MusicDirArg::Env),
+                navidrome_overrides: vec!["CODA_NAVIDROME_URL", "CODA_NAVIDROME_PASSWORD"],
+                hand_written_password: Some("password_command"),
+                has_navidrome: true,
+                url_had_credentials: false,
+                url_withheld: false,
+                file_has_content: true,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn redo_screens_explain_outside_settings() {
+        let mut setup = redo_setup();
+        let text = screen(&setup);
+        assert!(text.contains("Coda setup"), "{text}");
+        assert!(text.contains("leave without changes"), "{text}");
+
+        setup.handle_input(Input::Enter);
+        let text = screen(&setup);
+        assert!(text.contains("Folder    ~/Music"), "{text}");
+        assert!(
+            text.contains("CODA_MUSIC_DIR is set and overrides this folder."),
+            "{text}"
+        );
+        assert!(text.contains("Esc no local folder"), "{text}");
+
+        setup.handle_input(Input::Esc);
+        let text = screen(&setup);
+        assert!(text.contains("Keep using a Navidrome server?"), "{text}");
+        assert!(text.contains("y keep or change · n remove"), "{text}");
+        setup.handle_input(Input::Char('n'));
+        let text = screen(&setup);
+        assert!(text.contains("Keep at least one source"), "{text}");
+
+        setup.handle_input(Input::Char('y'));
+        let text = screen(&setup);
+        assert!(text.contains("URL       https://nd.example/"), "{text}");
+        assert!(text.contains("Username  me"), "{text}");
+        assert!(
+            text.contains("Set outside Coda, and used instead"),
+            "{text}"
+        );
+        assert!(
+            text.contains("CODA_NAVIDROME_URL, CODA_NAVIDROME_PASSWORD"),
+            "{text}"
+        );
+        assert!(text.contains("Esc remove Navidrome"), "{text}");
+        assert!(!text.contains("Keep at least one source"), "{text}");
+
+        typed(&mut setup, "pw-secret");
+        setup.handle_input(Input::Enter);
+        answer(&mut setup, true, "");
+        let text = screen(&setup);
+        assert!(text.contains("Music folder  none (removed)"), "{text}");
+        assert!(text.contains("Connected as me"), "{text}");
+        assert!(
+            text.contains("Saving replaces the hand-written password_command."),
+            "{text}"
+        );
+        assert!(text.contains("kept as a backup"), "{text}");
+        assert!(!text.contains("pw-secret"), "{text}");
+    }
+
+    #[test]
+    fn redo_ready_shows_a_removed_navidrome() {
+        let mut setup = redo_setup();
+        setup.handle_input(Input::Enter);
+        setup.handle_input(Input::Enter);
+        answer(&mut setup, true, "");
+        setup.handle_input(Input::Char('n'));
+        let text = screen(&setup);
+        assert!(text.contains("Music folder  ~/Music"), "{text}");
+        assert!(text.contains("Navidrome     removed"), "{text}");
+        assert!(!text.contains("hand-written"), "{text}");
+        assert!(!text.contains("Password "), "{text}");
+    }
+
+    #[test]
+    fn env_overrides_block_the_server_and_offer_keeping_it() {
+        let mut setup = Onboarding::redo(
+            crate::onboarding::Redo {
+                music_dir: Some("/m".into()),
+                url: Some("https://nd.example/".into()),
+                username: Some("me".into()),
+                navidrome_overrides: vec!["CODA_NAVIDROME_URL", "CODA_NAVIDROME_USER"],
+                hand_written_password: Some("password"),
+                has_navidrome: true,
+                file_has_content: true,
+                ..Default::default()
+            },
+            None,
+        );
+        send(&mut setup, &[Input::Enter, Input::Enter]);
+        answer(&mut setup, true, "");
+        let text = screen(&setup);
+        assert!(
+            text.contains("CODA_NAVIDROME_URL and CODA_NAVIDROME_USER are set and would be"),
+            "{text}"
+        );
+        assert!(
+            text.contains("unset them to change the server here."),
+            "{text}"
+        );
+        assert!(text.contains("k keep as it is · n remove"), "{text}");
+        assert!(
+            !text.contains("nd.example") && !text.contains(" me"),
+            "{text}"
+        );
+        setup.handle_input(Input::Char('n'));
+        let text = screen(&setup);
+        assert!(text.contains("Navidrome     removed"), "{text}");
+        assert!(
+            text.contains("CODA_NAVIDROME_URL and CODA_NAVIDROME_USER are still set; unset them"),
+            "{text}"
+        );
+        setup.handle_input(Input::Esc);
+        setup.handle_input(Input::Char('k'));
+        let text = screen(&setup);
+        assert!(text.contains("Navidrome     kept as it is"), "{text}");
+        assert!(!text.contains("still set"), "{text}");
+        assert!(!text.contains("hand-written"), "{text}");
+        assert!(!text.contains("still holds the old password"), "{text}");
+    }
+
+    #[test]
+    fn plaintext_password_backup_and_hidden_values_are_explained() {
+        let mut setup = Onboarding::redo(
+            crate::onboarding::Redo {
+                music_dir: Some("/m\u{7}".into()),
+                url: Some("https://nd.example/".into()),
+                username: Some("x".repeat(300)),
+                hand_written_password: Some("password"),
+                has_navidrome: true,
+                url_had_credentials: true,
+                file_has_content: true,
+                ..Default::default()
+            },
+            None,
+        );
+        setup.handle_input(Input::Enter);
+        let text = screen(&setup);
+        assert!(
+            text.contains("cannot be shown here; type it again"),
+            "{text}"
+        );
+        typed(&mut setup, "/m");
+        setup.handle_input(Input::Enter);
+        answer(&mut setup, true, "");
+        setup.handle_input(Input::Char('y'));
+        let text = screen(&setup);
+        assert!(
+            text.contains("The login in the saved URL was removed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("A saved value cannot be shown here"),
+            "{text}"
+        );
+        typed(&mut setup, "me");
+        setup.handle_input(Input::Tab);
+        typed(&mut setup, "pw");
+        setup.handle_input(Input::Enter);
+        answer(&mut setup, true, "");
+        let text = screen(&setup);
+        assert!(
+            text.contains("Saving replaces the hand-written password."),
+            "{text}"
+        );
+        assert!(
+            text.contains("The backup still holds the old password"),
+            "{text}"
+        );
+        assert!(text.contains("delete it when you no longer"), "{text}");
+        // Removing Navidrome leaves the password in the backup too.
+        setup.handle_input(Input::Char('s'));
+        let text = screen(&setup);
+        assert!(
+            text.contains("The backup still holds the old password"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn backup_note_follows_the_writers_rule_and_empty_redo_welcomes() {
+        // Values only from outside the file: nothing to back up, and the
+        // first-run welcome.
+        let setup = Onboarding::redo(
+            crate::onboarding::Redo {
+                music_override: Some(MusicDirArg::Argument),
+                ..Default::default()
+            },
+            Some("~/Music"),
+        );
+        let text = screen(&setup);
+        assert!(text.contains("Welcome to Coda"), "{text}");
+        let mut setup = setup;
+        setup.handle_input(Input::Enter);
+        assert_eq!(setup.music_input(), "~/Music", "the first-run suggestion");
+        let mut setup = Onboarding::redo(
+            crate::onboarding::Redo {
+                file_has_content: false,
+                music_dir: Some("/m".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        send(&mut setup, &[Input::Enter, Input::Enter]);
+        answer(&mut setup, true, "");
+        setup.handle_input(Input::Char('n'));
+        let text = screen(&setup);
+        assert_eq!(setup.screen(), Screen::Ready);
+        assert!(!text.contains("backup"), "{text}");
+    }
+
     #[test]
     fn hostile_input_is_sanitised_and_tiny_terminals_do_not_panic() {
         let mut setup = Onboarding::new(None);
@@ -564,5 +913,76 @@ mod hint_tests {
         for hint in &seen {
             assert!(hint.contains("Ctrl-C"), "{hint}");
         }
+    }
+
+    /// The same for `coda --setup`, including the refusal message.
+    #[test]
+    fn redo_hints_fit_untruncated() {
+        let width = usize::from(MAX_WIDTH - 4);
+        let view = View {
+            config_path: "/c".into(),
+            store_name: "store",
+            spinner: 0,
+        };
+        let check = |setup: &Onboarding| {
+            for line in build(setup, &view, width).lines {
+                let line = line.to_string();
+                assert!(!line.contains('…'), "truncated: {line}");
+            }
+        };
+        let mut setup = Onboarding::redo(
+            crate::onboarding::Redo {
+                music_override: Some(MusicDirArg::Argument),
+                navidrome_overrides: vec![
+                    "CODA_NAVIDROME_URL",
+                    "CODA_NAVIDROME_USER",
+                    "CODA_NAVIDROME_PASSWORD",
+                ],
+                hand_written_password: Some("password_command"),
+                has_navidrome: true,
+                music_dir: Some("/m".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        check(&setup);
+        for input in [Input::Enter, Input::Esc, Input::Char('n')] {
+            setup.handle_input(input);
+            check(&setup);
+        }
+        setup.handle_input(Input::Char('y'));
+        check(&setup);
+        for input in [
+            Input::Paste("h".into()),
+            Input::Tab,
+            Input::Paste("u".into()),
+            Input::Tab,
+            Input::Paste("p".into()),
+            Input::Enter,
+        ] {
+            setup.handle_input(input);
+        }
+        let Some(Request::Ping { id, .. }) = setup.take_requests().pop() else {
+            panic!()
+        };
+        setup.handle_response(crate::onboarding::Response::Pinged { id, result: Ok(()) });
+        check(&setup);
+        // The blocked question, with the longest message.
+        let mut blocked = Onboarding::redo(
+            crate::onboarding::Redo {
+                navidrome_overrides: vec!["CODA_NAVIDROME_URL", "CODA_NAVIDROME_USER"],
+                has_navidrome: true,
+                music_dir: Some("/m".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        blocked.handle_input(Input::Enter);
+        blocked.handle_input(Input::Esc);
+        check(&blocked);
+        assert!(
+            build(&setup, &view, width).lines.len() <= usize::from(MAX_HEIGHT - 2),
+            "the Ready panel fits"
+        );
     }
 }

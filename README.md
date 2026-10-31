@@ -28,6 +28,16 @@ coda
 
 The first time, with no music source configured, Coda runs a short setup in the terminal: an optional local music folder (`~/Music` is suggested when it exists) and an optional Navidrome server (URL, username, password). It checks the folder, tests the connection, stores the password in the OS keychain, writes the config file below, and starts the player. Skipping both writes nothing; Coda asks again next time. If `config.toml` is a symlink (e.g. into a dotfiles repository), setup replaces the link with a regular file and leaves the link's target unchanged. Setup only runs when stdin and stdout are terminals; otherwise Coda prints the usage error as before.
 
+To change the folder or server later, run the setup again:
+
+```sh
+coda --setup
+```
+
+It starts from the current config file: the folder, URL and username are filled in and the password is asked again (Coda never reads the old one for this). A login embedded in the saved URL is never shown. Skipping the folder or Navidrome removes it from the config, and Navidrome's stored password with it; at least one of the two must stay. Settings made outside Coda are pointed out where they apply: `CODA_MUSIC_DIR` or a folder argument (checked before setup starts), the `CODA_NAVIDROME_*` variables (which keep overriding the file), and a hand-written `password` or `password_command`, which saving replaces with the keychain. While `CODA_NAVIDROME_URL` or `CODA_NAVIDROME_USER` is set without `CODA_NAVIDROME_PASSWORD`, setup cannot save a server (Coda would look its password up under the account those variables name); it offers keeping `[navidrome]` as it is, or removing it (then unset the variables too). If the account changes, the old keychain entry is deleted after the new config is written. Leaving with `Ctrl-C` changes nothing. A config file that does not parse, or has unsafe permissions, must be fixed by hand first. `--setup` needs a terminal; without one it exits with status 2.
+
+A file with settings is kept as `config.toml.bak.<time>` before it is replaced; only `scrobble` (and a kept `[navidrome]`) is carried over. **If the old file held a plaintext `password`, the backup still contains it: delete the backup once you no longer need it.**
+
 A folder can also be given directly, which skips setup:
 
 ```sh
@@ -52,7 +62,7 @@ scrobble = true            # report plays to Navidrome (default)
 # password = "..."                                    # only if the file is chmod 600
 ```
 
-`password_keychain = true` reads the password from the macOS Keychain or, on Linux, the Secret Service (GNOME Keyring, KWallet; it must be running and unlocked), under the service `coda` and the account `<username>@<host>[:<port>]`. macOS may ask once whether Coda may read it. Without a keychain, use `password_command` or `password`; Coda never writes a plaintext password itself.
+`password_keychain = true` reads the password from the macOS Keychain or, on Linux, the Secret Service (GNOME Keyring, KWallet; it must be running and unlocked), under the service `coda` and the account `<username>@<host>[:<port>]`. macOS may ask once whether Coda may read it. If the entry is missing or the keychain cannot be read, Coda exits with a message suggesting `coda --setup`. Without a keychain, use `password_command` or `password`; Coda never writes a plaintext password itself.
 
 `CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file. Coda uses salted-token auth and never logs URLs, tokens or passwords. With only Navidrome configured, Coda starts on the Navidrome library.
 

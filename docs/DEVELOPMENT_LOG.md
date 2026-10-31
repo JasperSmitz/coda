@@ -71,3 +71,29 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - A missing keychain entry means editing the config by hand (slice 2 replaces this).
   - A symlinked `config.toml` is replaced by a regular file (documented).
   - Not yet run against the real macOS Keychain, or as a TUI on Linux.
+
+## 2026-10-31 — M4 slice 2 Part A: `coda --setup`
+- **Delivered:**
+  - `coda --setup` reruns setup, prefilled from the file. It never reads the keychain or runs `password_command`.
+  - Skipping a source removes it, and skipping both is refused on a redo.
+  - A Coda-owned keychain entry is deleted only after a successful write that changes or removes the account.
+  - Settings set outside Coda are named on the screens they affect.
+  - With `CODA_NAVIDROME_URL`/`_USER` set and no password variable, the server form is blocked: `k` keeps `[navidrome]` verbatim, `n` removes it.
+  - The keychain error remedy now points to `coda --setup`.
+- **Tests:**
+  - macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (404 lib tests plus the integration suites) pass, as do the 20 ignored mpv tests.
+  - Linux container: three runs of clippy and the full tests passed, with output kept.
+  - PTY smokes: account change, removing Navidrome, skip-both refused, no TTY, and the env-override keep and remove cases.
+- **Review:** two rounds plus a follow-up. Fixed:
+  - the env-override setup loop
+  - a userinfo password shown in a prefilled URL
+  - prefill truncation
+  - plaintext-backup notes
+  - the backup note rule
+  - early validation of the folder argument
+  - authority parsing via `Url`
+  - the blocked-state refusal text
+  - Keep failing loudly when the file changed
+  - two timing-fragile tests (`password_command` timeout, scrobbler queue)
+- **Earlier Linux exit 101:** most likely the container's OOM killer stopping the linker, which was observed once. Not confirmed, since the original output was not kept.
+- **Limitations:** every redo save leaves a `.bak.<secs>` behind, so backups accumulate. With `CODA_NAVIDROME_PASSWORD` set, the form pings the typed values, not the env ones (noted on screen).

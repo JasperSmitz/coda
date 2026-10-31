@@ -1,4 +1,4 @@
-//! Writes the config file chosen by the first-run setup.
+//! Writes the config file chosen by the setup (first run or `coda --setup`).
 //!
 //! The file is small and fixed in shape, so it is written by hand (with
 //! TOML basic-string escaping) rather than through a TOML editor. The
@@ -10,10 +10,12 @@
 //! file (rename semantics); nothing is written through it, and its target
 //! is left as it was.
 //!
-//! Setup only runs when the existing file (if any) configures no source,
-//! so replacing it loses nothing but a `scrobble` setting, which is kept,
-//! and comments. A file with anything but whitespace and comments is
-//! first hard-linked to `config.toml.bak.<secs>`.
+//! Setup decides every setting the file can hold except `scrobble`, which
+//! is kept, and `[navidrome]` as a whole when setup keeps it
+//! ([`NavidromeSection::Keep`]): its keys are then written back by value. Replacing the file therefore loses only comments and the
+//! settings setup replaced (e.g. a hand-written `password_command`); a
+//! file with anything but whitespace and comments is first hard-linked to
+//! `config.toml.bak.<secs>`.
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
@@ -29,7 +31,19 @@ use url::Url;
 pub struct SetupConfig {
     /// As the user typed it (`~/Music` stays `~/Music`).
     pub music_dir: Option<String>,
-    pub navidrome: Option<SetupNavidrome>,
+    pub navidrome: NavidromeSection,
+}
+
+/// What happens to `[navidrome]`. `scrobble` is kept in every case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NavidromeSection {
+    /// No server.
+    Remove,
+    /// Every key as it is in the existing file (including a hand-written
+    /// `password` or `password_command`).
+    Keep,
+    /// This server, with `password_keychain = true`.
+    Write(SetupNavidrome),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -44,18 +58,28 @@ impl std::fmt::Debug for SetupNavidrome {
     }
 }
 
-const HEADER: &str = "# Coda configuration, written by the first-run setup.\n\
+const HEADER: &str = "# Coda configuration, written by Coda's setup.\n\
                       # You may edit this file; see the README for all settings.\n";
 
-/// The parts of an existing file that setup keeps. Lenient: anything else
-/// is ignored here (and was validated by `Config::load` before setup).
+/// An existing file, read for what setup keeps. Strict like the loader
+/// (unknown keys are errors), so a file changed during setup into
+/// something Coda would not load is never carried over.
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Existing {
+    #[allow(dead_code, reason = "parsed only so the key is accepted")]
+    music_dir: Option<String>,
     navidrome: Option<ExistingNavidrome>,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExistingNavidrome {
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    password_command: Option<Vec<String>>,
+    password_keychain: Option<bool>,
     scrobble: Option<bool>,
 }
 
@@ -73,17 +97,32 @@ pub fn write(path: &Path, config: &SetupConfig) -> io::Result<Option<PathBuf>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let scrobble = existing
-        .as_deref()
-        .and_then(|text| toml::from_str::<Existing>(text).ok())
-        .and_then(|e| e.navidrome)
-        .and_then(|n| n.scrobble);
+    let keep = config.navidrome == NavidromeSection::Keep;
+    let parsed = match existing.as_deref().map(toml::from_str::<Existing>) {
+        Some(Ok(existing)) => existing.navidrome,
+        // Never drop a section that was meant to be kept. The parser's
+        // message is not passed on: it can quote the file.
+        Some(Err(_)) if keep => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the current [navidrome] settings could not be read",
+            ));
+        }
+        Some(Err(_)) | None => None,
+    };
+    if keep && parsed.is_none() {
+        // The file changed (or went away) since setup read it.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the [navidrome] settings to keep are no longer in the file",
+        ));
+    }
     let backup = match &existing {
         Some(text) if has_content(text) => Some(back_up(path)?),
         _ => None,
     };
 
-    let text = render(config, scrobble);
+    let text = render(config, parsed.unwrap_or_default());
     let file_name = path.file_name().map_or_else(
         || "config.toml".into(),
         |n| n.to_string_lossy().into_owned(),
@@ -115,8 +154,9 @@ fn parent_dir(path: &Path) -> io::Result<&Path> {
     }
 }
 
-/// `true` if `text` has anything besides whitespace and `#` comments.
-fn has_content(text: &str) -> bool {
+/// `true` if `text` has anything besides whitespace and `#` comments: the
+/// rule for backing a file up before it is replaced.
+pub(crate) fn has_content(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim();
         !line.is_empty() && !line.starts_with('#')
@@ -150,23 +190,47 @@ fn back_up(path: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-fn render(config: &SetupConfig, scrobble: Option<bool>) -> String {
+fn render(config: &SetupConfig, existing: ExistingNavidrome) -> String {
     let mut out = String::from(HEADER);
     if let Some(dir) = &config.music_dir {
         out.push_str(&format!("\nmusic_dir = {}\n", toml_string(dir)));
     }
-    if config.navidrome.is_some() || scrobble.is_some() {
-        out.push_str("\n[navidrome]\n");
-    }
-    if let Some(navidrome) = &config.navidrome {
-        out.push_str(&format!(
+    let mut section = String::new();
+    match &config.navidrome {
+        NavidromeSection::Remove => {}
+        NavidromeSection::Write(navidrome) => section.push_str(&format!(
             "url = {}\nusername = {}\npassword_keychain = true\n",
             toml_string(navidrome.url.as_str()),
             toml_string(&navidrome.username),
-        ));
+        )),
+        NavidromeSection::Keep => {
+            let mut key = |name: &str, value: Option<String>| {
+                if let Some(value) = value {
+                    section.push_str(&format!("{name} = {value}\n"));
+                }
+            };
+            key("url", existing.url.as_deref().map(toml_string));
+            key("username", existing.username.as_deref().map(toml_string));
+            key("password", existing.password.as_deref().map(toml_string));
+            key(
+                "password_command",
+                existing.password_command.as_ref().map(|argv| {
+                    let items: Vec<String> = argv.iter().map(|a| toml_string(a)).collect();
+                    format!("[{}]", items.join(", "))
+                }),
+            );
+            key(
+                "password_keychain",
+                existing.password_keychain.map(|b| b.to_string()),
+            );
+        }
     }
-    if let Some(scrobble) = scrobble {
-        out.push_str(&format!("scrobble = {scrobble}\n"));
+    if let Some(scrobble) = existing.scrobble {
+        section.push_str(&format!("scrobble = {scrobble}\n"));
+    }
+    if !section.is_empty() {
+        out.push_str("\n[navidrome]\n");
+        out.push_str(&section);
     }
     out
 }
@@ -224,7 +288,7 @@ mod tests {
         }
 
         fn load(&self) -> Config {
-            Config::load(Cli { music_dir: None }, &self.env()).unwrap()
+            Config::load(Cli::default(), &self.env()).unwrap()
         }
 
         fn files(&self) -> Vec<String> {
@@ -250,7 +314,10 @@ mod tests {
         fs::create_dir_all(f.home().join("My \"Music\"")).unwrap();
         let config = SetupConfig {
             music_dir: Some("~/My \"Music\"".into()),
-            navidrome: Some(navidrome("http://localhost:4533/nd", "me \\ \"you\" ü")),
+            navidrome: NavidromeSection::Write(navidrome(
+                "http://localhost:4533/nd",
+                "me \\ \"you\" ü",
+            )),
         };
         assert_eq!(write(&f.path(), &config).unwrap(), None);
 
@@ -292,7 +359,7 @@ mod tests {
         let f = Fixture::new();
         let config = SetupConfig {
             music_dir: None,
-            navidrome: Some(navidrome("https://h", "a\tb\u{1b}c")),
+            navidrome: NavidromeSection::Write(navidrome("https://h", "a\tb\u{1b}c")),
         };
         write(&f.path(), &config).unwrap();
         assert_eq!(f.load().navidrome.unwrap().username, "a\tb\u{1b}c");
@@ -308,7 +375,7 @@ mod tests {
         fs::create_dir(&music).unwrap();
         let config = SetupConfig {
             music_dir: Some(music.to_str().unwrap().into()),
-            navidrome: None,
+            navidrome: NavidromeSection::Remove,
         };
         write(&f.path(), &config).unwrap();
         assert_eq!(
@@ -351,7 +418,7 @@ mod tests {
             std::os::unix::fs::symlink(&target, f.path()).unwrap();
             let config = SetupConfig {
                 music_dir: None,
-                navidrome: Some(navidrome("https://h", "u")),
+                navidrome: NavidromeSection::Write(navidrome("https://h", "u")),
             };
             write(&f.path(), &config).unwrap();
             let meta = fs::symlink_metadata(f.path()).unwrap();
@@ -397,12 +464,84 @@ mod tests {
         }
         let config = SetupConfig {
             music_dir: None,
-            navidrome: Some(navidrome("https://h", "u")),
+            navidrome: NavidromeSection::Write(navidrome("https://h", "u")),
         };
         let backup = write(&path, &config).unwrap().unwrap();
         let name = backup.file_name().unwrap().as_bytes();
         assert!(name.starts_with(b"conf\xff.toml.bak."), "{name:?}");
         assert_eq!(fs::read_to_string(backup).unwrap(), "music_dir = \"/x\"\n");
+    }
+
+    fn keep(music_dir: Option<&str>) -> SetupConfig {
+        SetupConfig {
+            music_dir: music_dir.map(Into::into),
+            navidrome: NavidromeSection::Keep,
+        }
+    }
+
+    #[test]
+    fn keep_fails_when_the_section_is_gone_or_unreadable() {
+        let f = Fixture::new();
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        // No file, or a file without [navidrome] (changed during setup).
+        let error = write(&f.path(), &keep(Some("/m"))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!f.path().exists());
+        for text in [
+            "music_dir = \"/m\"\n",
+            "[navidrome]\nurl = \"https://h\"\npasword = \"hunter2\"\n",
+            "[navidrome]\nurl = \"https://h\"\n[other]\nx = 1\n",
+        ] {
+            fs::write(f.path(), text).unwrap();
+            let error = write(&f.path(), &keep(Some("/m"))).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text}");
+            assert!(!error.to_string().contains("hunter2"), "{error}");
+            assert_eq!(fs::read_to_string(f.path()).unwrap(), text, "untouched");
+        }
+        assert_eq!(f.files(), ["config.toml"], "no backup or temp file left");
+    }
+
+    #[test]
+    fn keep_round_trips_a_hand_written_password_exactly() {
+        let f = Fixture::new();
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        // A multi-line literal string: backslashes, quotes, non-ASCII, a
+        // line break and a tab, all taken as they are.
+        let old = "music_dir = \"/old\"\n[navidrome]\nurl = \"https://h.example\"\n\
+                   username = \"m\u{e9}\"\n\
+                   password = '''a\\b \"q\" \u{fc}\u{1f3b5}\nline two\ttab'''\n\
+                   scrobble = false\n";
+        fs::write(f.path(), old).unwrap();
+        fs::set_permissions(f.path(), Permissions::from_mode(0o600)).unwrap();
+        let music = f.dir.path().join("m");
+        fs::create_dir(&music).unwrap();
+        write(&f.path(), &keep(Some(music.to_str().unwrap()))).unwrap();
+        assert_eq!(
+            fs::metadata(f.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let nd = f.load().navidrome.unwrap();
+        assert_eq!(nd.username, "m\u{e9}");
+        assert!(!nd.scrobble);
+        let PasswordSource::Value(password) = nd.password else {
+            panic!("expected the hand-written password")
+        };
+        assert_eq!(
+            password.expose(),
+            "a\\b \"q\" \u{fc}\u{1f3b5}\nline two\ttab"
+        );
+        // A control character from a basic-string escape survives too.
+        fs::write(
+            f.path(),
+            "[navidrome]\nurl = \"https://h\"\nusername = \"u\"\npassword = \"x\\u0001y\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(f.path(), Permissions::from_mode(0o600)).unwrap();
+        write(&f.path(), &keep(Some(music.to_str().unwrap()))).unwrap();
+        let PasswordSource::Value(password) = f.load().navidrome.unwrap().password else {
+            panic!("expected the hand-written password")
+        };
+        assert_eq!(password.expose(), "x\u{1}y");
     }
 
     #[test]
@@ -412,7 +551,7 @@ mod tests {
         fs::write(f.path(), "# my notes\n\n   # more\n").unwrap();
         let config = SetupConfig {
             music_dir: None,
-            navidrome: Some(navidrome("https://h", "u")),
+            navidrome: NavidromeSection::Write(navidrome("https://h", "u")),
         };
         assert_eq!(write(&f.path(), &config).unwrap(), None);
         assert_eq!(f.files(), ["config.toml"]);
@@ -426,7 +565,7 @@ mod tests {
         fs::write(f.path(), old).unwrap();
         let config = SetupConfig {
             music_dir: None,
-            navidrome: Some(navidrome("https://h", "u")),
+            navidrome: NavidromeSection::Write(navidrome("https://h", "u")),
         };
         let backup = write(&f.path(), &config).unwrap().unwrap();
         assert_eq!(fs::read_to_string(&backup).unwrap(), old);
@@ -445,7 +584,7 @@ mod tests {
         fs::create_dir(&music).unwrap();
         let config = SetupConfig {
             music_dir: Some(music.to_str().unwrap().into()),
-            navidrome: None,
+            navidrome: NavidromeSection::Remove,
         };
         write(&f.path(), &config).unwrap();
         let text = fs::read_to_string(f.path()).unwrap();

@@ -577,10 +577,13 @@ async fn scrobbler_drops_requests_beyond_its_queue() {
     let (scrobbler, _failure) = Scrobbler::spawn(client_at(&server.uri()));
     // The first request reaches the server and holds the worker busy...
     scrobbler.send(ScrobbleRequest::now_playing("0".into()));
-    for _ in 0..100 {
-        if !server.received_requests().await.unwrap().is_empty() {
-            break;
-        }
+    let received = || async { server.received_requests().await.unwrap().len() };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received().await == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first request never reached the server"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     // ...so the queue holds exactly `QUEUE_CAPACITY` of the rest.
@@ -589,8 +592,17 @@ async fn scrobbler_drops_requests_beyond_its_queue() {
         // Never blocks, however many are sent.
         scrobbler.send(ScrobbleRequest::now_playing(i.to_string()));
     }
-    // Let the queue drain completely.
-    tokio::time::sleep(Duration::from_millis(300 * (QUEUE_CAPACITY as u64 + 3))).await;
+    // Wait until everything the queue held has arrived (each request
+    // takes 300 ms), then two more request times, in which anything sent
+    // beyond the queue's capacity would have arrived too.
+    let expected_count = QUEUE_CAPACITY + 1;
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(300 * (expected_count as u64)) * 4
+        + Duration::from_secs(5);
+    while received().await < expected_count && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let ids: Vec<String> = server
         .received_requests()
         .await
