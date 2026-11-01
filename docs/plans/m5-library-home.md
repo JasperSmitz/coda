@@ -153,14 +153,68 @@
 - "Missing" in a playlist row covers unmatched files, entries outside the music folder, refused `..` paths and URLs.
 - Unknown artist and Unknown album sort last.
 
-## Slice 3 — Navidrome playlist editing (approved by owner 2026-11-01; briefed in detail after slice 2)
-- **Save the queue as a new playlist** (`createPlaylist`, name typed in a single-line input).
-- **Add to playlist:** add the selected song, album or playlist to a playlist picked from a short list, with "New playlist…" at the top. Uses `updatePlaylist` `songIdToAdd`, in order.
-- **Remove** a song from a playlist, with confirmation (`songIndexToRemove`).
-- **Reorder** songs with `J`/`K`, as in the queue. Subsonic has no move call, so this rewrites the playlist; define how to do that safely.
-- **Rename and delete** a playlist; delete asks for confirmation.
-- After every change, refresh the affected views. Show errors inline. Never let a partly applied change look applied.
-- Navidrome playlists only; local `.m3u` editing is not included.
+## Slice 3 — Navidrome playlist editing
+Approved by owner 2026-11-01. Navidrome playlists only.
+
+### Operations and keys
+Keys are provisional, and M6 decides the final keymap. Check that each one is free in its context; they are listed in help.
+
+| Where | Key | Action |
+|---|---|---|
+| Queue panel | `S` | Save the queue as a new playlist (name prompt, default "Queue <date>") |
+| Library: song, album, artist, playlist, search result (Navidrome) | `P` | Add to playlist: a picker with "New playlist…" first, then the user's own playlists A–Z |
+| Playlists list | `N` | New empty playlist (name prompt) |
+| Playlists list | `e` | Rename (prompt prefilled) |
+| Playlists list | `D` `D` | Delete, confirmed by pressing twice like `C` |
+| Playlist view | `d` | Remove the selected song (the second `d` confirms) |
+| Playlist view | `J`/`K` | Move the selected song; the title shows "(modified)" |
+| Playlist view | `w` / `Esc` | Save / discard the reordering |
+
+- Only the user's own playlists are editable. `getPlaylists` reports `owner`, so compare it with the configured username. Other users' public playlists stay read-only, with a short message when an edit key is pressed.
+- "Add to playlist" from local tracks is not possible (Navidrome needs song ids). Show a short message instead.
+- Name prompts reuse `line_input`: single line, capped, control characters stripped. An empty name cancels.
+
+### API
+- New calls:
+  - `createPlaylist(name, songId…)`
+  - `createPlaylist(playlistId, songId…)`, which replaces the playlist's songs
+  - `updatePlaylist(playlistId, name?, songIdToAdd…, songIndexToRemove…)`
+  - `deletePlaylist(id)`
+  - `getPlaylists` gains `owner`.
+- **Request size:** id lists can be long.
+  - If the server advertises the OpenSubsonic `formPost` extension (`getOpenSubsonicExtensions`, fetched once per client), send writes as `application/x-www-form-urlencoded` POST, with the auth parameters in the body.
+  - Otherwise use GET, keeping the URL under 8 KiB. Batch adds into several `updatePlaylist` calls. Refuse a replace (reorder) that doesn't fit, with a clear message.
+  - Verify what Navidrome actually supports from its source or docs, and record it.
+- **Redaction:** POST bodies and URLs carry the token. Never log them. Errors are stripped of URLs, as today. Redirects stay disabled.
+
+### Never apply an edit against a stale playlist
+- Removing by index and replacing for a reorder both depend on the playlist the user saw. Before either, refetch `getPlaylist`. If its entries (ids in order) differ from the version the edit was based on, refuse: "Playlist changed on the server; reloaded", then show the fresh version.
+- **Multi-request operations** (batched adds, create-then-add):
+  - On partial failure, refresh the playlist and report what actually happened, e.g. "Added 400 of 1,000 songs; could not add the rest". Never show the full change as applied.
+  - Requests run in order, one at a time per playlist.
+- **After every change**, refetch the affected playlist and the Playlists list: update the cache, and the open view if it is still showing them. The generation rules apply; a swap during an edit drops its results.
+- **Queue entries are unaffected.** Removing a song from a playlist does not touch the queue.
+
+### Tests
+- **Client (wiremock):**
+  - Every new call: its parameters, the GET/POST choice, formPost detection, GET batching under 8 KiB, and a replace that doesn't fit being refused.
+  - Errors, and no token in error text.
+- **State:**
+  - The picker, prompts, the double-press confirms, read-only for playlists owned by others.
+  - Reorder with save and with discard.
+  - The stale-check refusal.
+  - Partial batch failure reporting.
+  - Refresh after a change.
+  - Generation drop.
+- **Render:** the picker, prompts, the "(modified)" title, the read-only message, and help still fitting 80x24.
+- **PTY smoke** against a fake Subsonic server that records writes:
+  - save the queue as a playlist (with more than one batch);
+  - add an album to a playlist;
+  - remove a song;
+  - reorder and save;
+  - a concurrent server-side change triggering the stale refusal;
+  - rename;
+  - delete.
 
 ## Later (not in M5 unless approved)
 Editing local `.m3u` playlists, starring/favourites, genre and year browsing.
