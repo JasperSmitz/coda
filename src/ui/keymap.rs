@@ -56,6 +56,8 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('s') if focus == Focus::Queue => Action::ShuffleUpcoming,
         KeyCode::Char('S') if focus == Focus::Queue => Action::SaveQueueAsPlaylist,
         KeyCode::Char('R') => Action::CycleRepeat,
+        // Provisional; settled in M7.
+        KeyCode::Char('v') => Action::ToggleVisualizer,
         KeyCode::Char(' ') => Action::TogglePause,
         KeyCode::Char('n') => Action::Next,
         KeyCode::Char('p') => Action::Previous,
@@ -134,6 +136,7 @@ mod tests {
             (ch('1'), Action::SelectLocal),
             (ch('2'), Action::SelectNavidrome),
             (ch('R'), Action::CycleRepeat),
+            (ch('v'), Action::ToggleVisualizer),
             (ch(','), Action::OpenSettings),
         ];
         for (k, action) in cases {

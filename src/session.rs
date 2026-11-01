@@ -1,5 +1,5 @@
-//! Session persistence: the queue, its current entry, the volume and the
-//! repeat mode, saved as versioned JSON in `$XDG_STATE_HOME/coda/state.json`
+//! Session persistence: the queue, its current entry, the volume, the
+//! repeat mode and whether the visualizer is shown, saved as versioned JSON in `$XDG_STATE_HOME/coda/state.json`
 //! (see [`crate::config::session_file_path`]).
 //!
 //! The file holds track sources (local paths and opaque Navidrome song
@@ -45,6 +45,8 @@ pub struct Session {
     /// Index into `tracks`.
     pub current: Option<usize>,
     pub tracks: Vec<Track>,
+    /// The visualizer is shown (off by default).
+    pub visualizer: bool,
 }
 
 impl Default for Session {
@@ -54,12 +56,14 @@ impl Default for Session {
             repeat: RepeatMode::Off,
             current: None,
             tracks: Vec::new(),
+            visualizer: false,
         }
     }
 }
 
 impl Session {
-    /// A snapshot of what `player` would restore to.
+    /// A snapshot of what `player` would restore to, with the visualizer
+    /// off (the application sets it).
     pub fn from_player(player: &Player) -> Self {
         let queue = player.queue();
         Self {
@@ -67,6 +71,7 @@ impl Session {
             repeat: player.repeat(),
             current: queue.current().and_then(|id| queue.position(id)),
             tracks: queue.entries().iter().map(|e| e.track.clone()).collect(),
+            visualizer: false,
         }
     }
 }
@@ -150,6 +155,10 @@ struct FileV1Out {
     repeat: RepeatFile,
     current: Option<usize>,
     queue: Vec<EntryFile>,
+    /// Added after version 1 shipped: written only when on, so files with
+    /// and without it are both version 1.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    visualizer: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +167,51 @@ struct FileV1In {
     repeat: RepeatFile,
     current: Option<usize>,
     queue: CappedQueue,
+    #[serde(default, deserialize_with = "lenient_bool")]
+    visualizer: bool,
+}
+
+/// A display preference: anything but `true` is off, rather than making
+/// the whole session unusable.
+fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    struct LenientBool;
+
+    impl<'de> Visitor<'de> for LenientBool {
+        type Value = bool;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any value")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<bool, E> {
+            Ok(value)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_unit<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(false)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            Ok(false)
+        }
+    }
+
+    deserializer.deserialize_any(LenientBool)
 }
 
 /// The first [`MAX_QUEUE_ENTRIES`] entries; the rest are skipped unparsed
@@ -331,6 +385,7 @@ fn encode(session: &Session) -> serde_json::Result<Vec<u8>> {
         repeat: session.repeat.into(),
         current,
         queue,
+        visualizer: session.visualizer,
     })
 }
 
@@ -359,6 +414,7 @@ fn decode(bytes: &[u8]) -> Result<(Session, usize), String> {
         repeat: file.repeat.into(),
         current,
         tracks,
+        visualizer: file.visualizer,
     };
     let skipped = total - session.tracks.len();
     Ok((session, skipped))
@@ -546,6 +602,7 @@ mod tests {
                 ),
                 local("/music/c.mp3", "C"),
             ],
+            visualizer: true,
         }
     }
 
@@ -610,6 +667,51 @@ mod tests {
     }
 
     #[test]
+    fn the_visualizer_setting_is_optional_within_version_1() {
+        // A version 1 file written before the setting existed: off.
+        let old = br#"{"version":1,"volume":50,"repeat":"off","current":null,"queue":[]}"#;
+        let (session, _) = decode(old).unwrap();
+        assert!(!session.visualizer);
+        // Off: left out of the file, which is then what older builds wrote.
+        let json = String::from_utf8(encode(&session).unwrap()).unwrap();
+        assert!(!json.contains("visualizer"), "{json}");
+        assert!(json.contains(r#""version":1"#), "{json}");
+        // On: kept through a round trip, still version 1.
+        let on = Session {
+            visualizer: true,
+            ..Session::default()
+        };
+        let json = encode(&on).unwrap();
+        let text = String::from_utf8_lossy(&json);
+        assert!(text.contains(r#""visualizer":true"#), "{text}");
+        assert!(text.contains(r#""version":1"#), "{text}");
+        assert_eq!(decode(&json).unwrap().0, on);
+        // Not a bool: off, and the rest of the session is kept.
+        for value in [
+            r#""yes""#,
+            "1",
+            "-1",
+            "0.5",
+            "null",
+            "[true, [1, {}]]",
+            r#"{"on": true}"#,
+        ] {
+            let text = format!(
+                r#"{{"version":1,"volume":50,"repeat":"all","current":0,"queue":[{{"source":{{"local":"/m/a.flac"}}}}],"visualizer":{value}}}"#
+            );
+            let (session, skipped) =
+                decode(text.as_bytes()).unwrap_or_else(|e| panic!("{value}: {e}"));
+            assert!(!session.visualizer, "{value}");
+            assert_eq!((session.tracks.len(), skipped), (1, 0), "{value}");
+            assert_eq!(session.repeat, RepeatMode::All, "{value}");
+        }
+        // Malformed JSON is still malformed.
+        let broken =
+            br#"{"version":1,"volume":50,"repeat":"off","current":null,"queue":[],"visualizer":[}"#;
+        assert!(decode(broken).is_err());
+    }
+
+    #[test]
     fn missing_file_is_an_empty_session() {
         let dir = tempfile::tempdir().unwrap();
         let (session, outcome) = load(&state_path(&dir));
@@ -647,7 +749,8 @@ mod tests {
         let json = String::from_utf8(encode(&sample()).unwrap()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 5, "{keys:?}");
+        // version, volume, repeat, current, queue and (on) visualizer.
+        assert_eq!(keys.len(), 6, "{keys:?}");
         for needle in ["http", "token", "password", "salt", "server", "url"] {
             assert!(!json.to_lowercase().contains(needle), "{needle}: {json}");
         }
@@ -909,5 +1012,6 @@ mod tests {
         assert_eq!(session.volume, 70);
         assert_eq!(session.repeat, RepeatMode::All);
         assert_eq!(session.tracks, sample().tracks);
+        assert!(!session.visualizer, "the application's setting");
     }
 }

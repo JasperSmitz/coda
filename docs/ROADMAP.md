@@ -50,10 +50,10 @@ Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (re
 - All-albums list (`getAlbumList2`, paged) with useful sort orders.
 - Local `.m3u` playlists may follow the same layout.
 
-## M6 — Audio visualizer (in progress)
+## M6 — Audio visualizer (completed, reviewed)
 Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11-01) so the owner can try the current keys first.
-1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation.
-2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder.
+1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation. **(completed)**
+2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder. **(completed, reviewed: 7 bands plus an L/R meter, always-stereo output)**
 
 ## M7 — Keybindings and quality of life (proposed)
 The owner is trying the current keys first; their notes set the scope.

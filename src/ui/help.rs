@@ -24,7 +24,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("N / e / D D", "Playlists: new / rename / delete"),
     ("d d / J K", "Playlist: remove / move song"),
     ("w / Esc", "Playlist: save / discard order"),
-    ("R", "Repeat: off / all / one"),
+    ("R / v", "Repeat (off/all/one) / visualizer"),
     ("Space  n / p", "Pause / next / previous"),
     ("← → / + -", "Seek ±5 s / volume up, down"),
     ("Tab", "Switch panel"),

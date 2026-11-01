@@ -637,6 +637,8 @@ impl Player {
                 self.messages.push(message);
                 Vec::new()
             }
+            // Display only; the application keeps the visualizer state.
+            PlaybackEvent::Visualizer { .. } | PlaybackEvent::VisualizerUnavailable => Vec::new(),
             PlaybackEvent::BackendExited(reason) => {
                 tracing::warn!(%reason, "playback backend exited");
                 self.clear_load();
@@ -677,7 +679,8 @@ impl Player {
                     .current_entry()
                     .map(|e| e.track.display_name())
                     .unwrap_or_else(|| "track".into());
-                tracing::info!(%load, track = %name, error = %message, "track failed");
+                // Never the track's name: titles and paths stay out of logs.
+                tracing::info!(%load, error = %message, "track failed");
                 self.messages
                     .push(format!("Could not play {name}: {message}"));
                 if let Some(stop) = self.count_failure() {
@@ -759,11 +762,11 @@ impl Player {
             return Vec::new();
         };
         let source = entry.track.source.clone();
-        let name = entry.track.display_name();
         self.queue.set_current(id);
         self.last_load += 1;
         let load = LoadId(self.last_load);
-        tracing::info!(%load, track = %name, "loading track");
+        let remote = matches!(source, TrackSource::Navidrome { .. });
+        tracing::info!(%load, remote, "loading track");
         self.current_load = Some(load);
         self.started = false;
         self.proven = false;

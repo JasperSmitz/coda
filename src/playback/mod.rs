@@ -12,6 +12,12 @@
 //!   a queue entry's source into a [`PlaybackTarget`] right before sending.
 //! - `Started`/`TrackEnded` carry the [`LoadId`] of the `Load` they belong
 //!   to, so the coordinator can discard events for superseded loads.
+//! - The visualizer is off until `SetVisualizer(true)`. While it is on and
+//!   a track is playing (not paused), the backend sends coalesced
+//!   [`PlaybackEvent::Visualizer`] frames, each shown when playback reaches
+//!   the audio it describes; otherwise it sends none. If the backend cannot
+//!   analyse audio, it says so once with
+//!   [`PlaybackEvent::VisualizerUnavailable`] and playback is unaffected.
 
 pub mod mpv;
 
@@ -93,7 +99,27 @@ pub enum PlaybackCommand {
     SeekRelative(f64),
     SeekAbsolute(f64),
     SetVolume(u8),
+    /// Show (`true`) or hide the visualizer. Hiding stops its updates at
+    /// once.
+    SetVisualizer(bool),
     Shutdown,
+}
+
+/// Number of frequency bands in a [`VisualizerFrame`].
+pub const VISUALIZER_BANDS: usize = 7;
+
+/// Centre frequencies of the visualizer bands, in Hz, low to high.
+pub const VISUALIZER_BAND_HZ: [u32; VISUALIZER_BANDS] = [63, 160, 400, 1000, 2500, 6300, 16000];
+
+/// One backend-neutral visualizer reading. Every value is in `0.0..=1.0`
+/// (silence is 0).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct VisualizerFrame {
+    /// Left and right level.
+    pub levels: [f32; 2],
+    /// Band levels, low to high (see [`VISUALIZER_BAND_HZ`]). `None` for a
+    /// band the track cannot contain (at or above half its sample rate).
+    pub bands: [Option<f32>; VISUALIZER_BANDS],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +143,15 @@ pub enum PlaybackEvent {
     },
     /// A non-fatal backend problem worth showing to the user.
     Error(String),
+    /// What the current track of `load` sounds like right now. At most
+    /// about 30 a second, only while the visualizer is on and playing.
+    Visualizer {
+        load: LoadId,
+        frame: VisualizerFrame,
+    },
+    /// The visualizer cannot work with this backend; sent at most once.
+    /// Playback is unaffected.
+    VisualizerUnavailable,
     /// The backend is gone (crashed, its connection closed, or it stopped
     /// answering requests and was killed). Terminal.
     BackendExited(String),

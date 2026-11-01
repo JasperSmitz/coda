@@ -73,6 +73,10 @@ pub fn mpv_args(socket: &Path, extra: &[&str]) -> Vec<OsString> {
         // playlist (e.g. `#EXTM3U` in a `.mp3`) is rejected instead of
         // expanding into entries Coda never requested.
         "--access-references=no".into(),
+        // Always stereo: the visualizer's filter graph needs one fixed
+        // channel layout, and with this, adding it never changes what is
+        // heard. Mono plays as left = right; surround is downmixed.
+        "--audio-channels=stereo".into(),
     ];
     args.extend(extra.iter().map(OsString::from));
     args.push(ipc);
@@ -319,6 +323,7 @@ mod tests {
                 "--ytdl=no",
                 "--network-timeout=15",
                 "--access-references=no",
+                "--audio-channels=stereo",
                 "--input-ipc-server=/run/user/1000/coda-x/mpv.sock",
             ]
         );

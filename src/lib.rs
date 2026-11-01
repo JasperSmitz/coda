@@ -3,7 +3,8 @@
 //! The library holds the program logic so it can be tested directly:
 //! domain models, the queue, the pure player coordinator, the playback
 //! boundary (with its mpv backend), local library discovery, the
-//! Navidrome client, session persistence, the first-run setup
+//! Navidrome client, session persistence, the visualizer's display state,
+//! the first-run setup
 //! (`onboarding` state, `setup` driver), the in-app settings (`settings`
 //! state, performed by `app`), the OS credential store
 //! (`secret_store`), and the terminal UI (`app`, `setup` and `ui`, the only
@@ -26,3 +27,4 @@ pub mod session;
 pub mod settings;
 pub mod setup;
 pub mod ui;
+pub mod visualizer;

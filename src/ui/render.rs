@@ -1,5 +1,5 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar, the status line, the help overlay, the playlist
+//! now-playing bar (with the visualizer when shown), the status line, the help overlay, the playlist
 //! picker and name prompt, and the Settings overlay
 //! (`crate::ui::settings`).
 //!
@@ -10,10 +10,11 @@
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, LineGauge, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, LineGauge, List, ListItem, ListState, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
@@ -31,6 +32,19 @@ use crate::ui::{help, settings};
 pub const NARROW_WIDTH: u16 = 60;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 const NOW_PLAYING_HEIGHT: u16 = 4;
+/// Rows the visualizer adds to the now-playing bar.
+pub const VISUALIZER_HEIGHT: u16 = 3;
+/// Smaller terminals do not show the visualizer, so the panels keep room.
+pub const VISUALIZER_MIN_SCREEN: (u16, u16) = (20, 16);
+/// Bands at their narrowest: one column each, one apart.
+const NARROW_BANDS_WIDTH: u16 = 13;
+/// The level meter is left out when it would be narrower than this.
+const MIN_METER_WIDTH: u16 = 6;
+const WIDEST_METER: u16 = 24;
+/// Vertical bar cells from 1/8 to 8/8 full.
+const VERTICAL_EIGHTHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Horizontal bar cells from 1/8 to 8/8 full.
+const HORIZONTAL_EIGHTHS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 /// Marks tracks streamed from Navidrome in the queue and now-playing bar.
 /// U+2601 has no emoji presentation by default, so terminals draw it as a
 /// one-column text glyph (and `unicode-width` agrees).
@@ -57,6 +71,13 @@ pub struct ViewState {
     pub help_max_scroll: usize,
     /// Advances the settings spinner, one step per frame.
     spinner: usize,
+    /// Where the last frame drew the visualizer, if it can be redrawn on
+    /// its own (no overlay or text input on top, so no cursor either).
+    pub visualizer_area: Option<Rect>,
+    /// The last frame had room for the visualizer and no overlay (help,
+    /// settings, the picker or the name prompt) covered it, whether or not
+    /// it is shown. The app polls for readings only while this holds.
+    pub visualizer_drawable: bool,
 }
 
 /// The first visible row for a list of `len` rows in a viewport of
@@ -92,12 +113,26 @@ fn note_row_built() {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
+    let screen = frame.area();
+    let room = screen.width >= VISUALIZER_MIN_SCREEN.0 && screen.height >= VISUALIZER_MIN_SCREEN.1;
+    let overlay = app.help_open()
+        || app.settings_open()
+        || app
+            .browser()
+            .is_some_and(|b| b.picker().is_some() || b.prompt().is_some());
+    view.visualizer_drawable = room && !overlay;
+    let visualizer = app.visualizer_shown() && room;
+    let now_playing_height = if visualizer {
+        NOW_PLAYING_HEIGHT + VISUALIZER_HEIGHT
+    } else {
+        NOW_PLAYING_HEIGHT
+    };
     let [panels, now_playing, status] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(NOW_PLAYING_HEIGHT),
+        Constraint::Length(now_playing_height),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(screen);
 
     if panels.width < NARROW_WIDTH {
         match app.focus() {
@@ -111,7 +146,10 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         draw_library(frame, app, view, left, app.focus() == Focus::Library);
         draw_queue(frame, app, view, right, app.focus() == Focus::Queue);
     }
-    draw_now_playing(frame, app, now_playing);
+    let visualizer_area = draw_now_playing(frame, app, now_playing, visualizer);
+    // A text input shows a cursor, which a visualizer-only redraw would
+    // hide; while one is open the visualizer waits for full redraws.
+    view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
     draw_status(frame, app, status, now);
     if app.help_open() {
         view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
@@ -814,15 +852,21 @@ fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
     }
 }
 
-fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
+/// Draws the now-playing bar; with `visualizer`, the visualizer below the
+/// progress line. Returns the visualizer's area.
+fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) -> Option<Rect> {
     let player = app.player();
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Now Playing ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [info, progress] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+    let [info, progress, visualizer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(if visualizer { VISUALIZER_HEIGHT } else { 0 }),
+    ])
+    .areas(inner);
 
     let (label, color) = status_label(player.status());
     let label = format!("[{label}] ");
@@ -891,6 +935,108 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
         gauge_area,
     );
     frame.render_widget(Paragraph::new(volume), volume_area);
+    let visualizer_area = visualizer_area.inner(ratatui::layout::Margin::new(1, 0));
+    (visualizer && !visualizer_area.is_empty()).then(|| {
+        draw_visualizer(frame.buffer_mut(), app, visualizer_area);
+        visualizer_area
+    })
+}
+
+/// Draws the visualizer into `area` of `buffer`, replacing what was there.
+/// Shape carries all the meaning (block characters), so it reads the same
+/// without colour (`NO_COLOR`) and with 16 colours. Silent unless the
+/// current track is playing. Too narrow for even one-column bands, it
+/// draws nothing.
+pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
+    Clear.render(area, buffer);
+    if area.width < NARROW_BANDS_WIDTH || area.height == 0 {
+        return;
+    }
+    let player = app.player();
+    let meter = app.meter();
+    let live = player.status() == PlaybackStatus::Playing
+        && meter.load().is_some()
+        && meter.load() == player.current_load();
+    let (levels, bands) = if live {
+        (meter.levels(), meter.bands())
+    } else {
+        ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
+    };
+
+    // Bands: three columns each when there is room for them and a meter.
+    let (band_width, gap) = if area.width >= 42 { (3, 1) } else { (1, 1) };
+    let count = bands.len() as u16;
+    let bands_width = count * (band_width + gap) - gap;
+    let band_style = Style::default().fg(Color::Cyan);
+    for (i, band) in bands.iter().enumerate() {
+        let x = area.x + i as u16 * (band_width + gap);
+        // A band the track cannot contain stays empty.
+        let Some(value) = band else { continue };
+        let eighths = eighths(*value, area.height);
+        for row in 0..area.height {
+            let filled = eighths.saturating_sub(row * 8).min(8);
+            if filled == 0 {
+                break;
+            }
+            let symbol = VERTICAL_EIGHTHS[usize::from(filled - 1)];
+            let y = area.y + area.height - 1 - row;
+            for dx in 0..band_width {
+                buffer[(x + dx, y)].set_char(symbol).set_style(band_style);
+            }
+        }
+    }
+
+    // Left/right meter on the bottom two rows, to the right of the bands.
+    let room = area.width.saturating_sub(bands_width + 2);
+    if room < MIN_METER_WIDTH || area.height < 2 {
+        return;
+    }
+    let width = room.min(WIDEST_METER);
+    let x = area.x + area.width - width;
+    let label_style = Style::default().fg(Color::DarkGray);
+    let bar_style = Style::default().fg(Color::Green);
+    for (row, (label, value)) in ["L", "R"].iter().zip(levels).enumerate() {
+        let y = area.y + area.height - 2 + row as u16;
+        buffer.set_string(x, y, label, label_style);
+        let bar = width - 2;
+        let eighths = eighths(value, bar);
+        for cell in 0..bar {
+            let filled = eighths.saturating_sub(cell * 8).min(8);
+            if filled == 0 {
+                break;
+            }
+            buffer[(x + 2 + cell, y)]
+                .set_char(HORIZONTAL_EIGHTHS[usize::from(filled - 1)])
+                .set_style(bar_style);
+        }
+    }
+}
+
+/// Redraws only the visualizer: draws it into `last_frame` (a copy of the
+/// last full frame, which `area` belongs to) and sends the terminal the
+/// difference, which is just the visualizer's cells. Only valid while
+/// nothing covers `area` and no cursor is shown (see
+/// [`ViewState::visualizer_area`]).
+pub fn redraw_visualizer<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    last_frame: &mut Buffer,
+    app: &App,
+    area: Rect,
+) -> Result<(), B::Error> {
+    draw_visualizer(last_frame, app, area);
+    terminal.current_buffer_mut().clone_from(last_frame);
+    terminal.apply_buffer()?;
+    Ok(())
+}
+
+/// `value` (`0.0..=1.0`) in eighths of `cells` cells.
+fn eighths(value: f32, cells: u16) -> u16 {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (value * f32::from(cells) * 8.0).round() as u16
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
@@ -1204,6 +1350,268 @@ mod tests {
         assert!(render(&app, 100, 20, now).contains("[Paused]"));
     }
 
+    /// An app playing one track with the visualizer shown and fed
+    /// `frame` twice (so the smoothed bars are near it).
+    fn visualizer_app(frame: crate::playback::VisualizerFrame, now: Instant) -> App {
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("song.flac", "Song", "Artist", 100)]),
+            now,
+        );
+        open_folders(&mut app, now);
+        let commands = app.handle_action(Action::Activate, now);
+        let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
+            panic!("{commands:?}");
+        };
+        let load = *load;
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        app.handle_action(Action::ToggleVisualizer, now);
+        assert!(app.handle_visualizer(load, &frame, now));
+        assert!(app.handle_visualizer(load, &frame, now));
+        app
+    }
+
+    fn loud() -> crate::playback::VisualizerFrame {
+        crate::playback::VisualizerFrame {
+            levels: [1.0, 0.5],
+            bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+        }
+    }
+
+    fn drawn(
+        app: &App,
+        width: u16,
+        height: u16,
+        now: Instant,
+    ) -> (Terminal<TestBackend>, ViewState) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut view = ViewState::default();
+        terminal
+            .draw(|frame| draw(frame, app, &mut view, now))
+            .unwrap();
+        (terminal, view)
+    }
+
+    /// The text of `area` in the backend's buffer, row by row.
+    fn area_text(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_visualizer_is_off_by_default_and_takes_three_rows_when_shown() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.expect("shown");
+        assert_eq!(area.height, VISUALIZER_HEIGHT);
+        // Below the progress line, inside the now-playing box.
+        let screen = buffer_text(&terminal);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[usize::from(area.y) - 1].contains("Vol"), "{screen}");
+        assert!(
+            rows[usize::from(area.bottom())].starts_with('└'),
+            "{screen}"
+        );
+        assert!(rows[23].contains("Playing"), "{screen}");
+        // Hidden: back to the plain bar, with no visualizer rows.
+        app.handle_action(Action::ToggleVisualizer, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        let hidden = buffer_text(&terminal);
+        assert!(!hidden.contains('█') && !hidden.contains('▏'), "{hidden}");
+        assert_eq!(
+            hidden.lines().position(|l| l.contains("Now Playing")),
+            Some(24 - 1 - 4)
+        );
+    }
+
+    #[test]
+    fn the_visualizer_draws_bands_and_meter_at_several_sizes() {
+        let now = Instant::now();
+        let app = visualizer_app(loud(), now);
+        for (width, height) in [(80, 24), (120, 40), (60, 20), (40, 18), (20, 16)] {
+            let (terminal, view) = drawn(&app, width, height, now);
+            let area = view
+                .visualizer_area
+                .unwrap_or_else(|| panic!("{width}x{height}"));
+            let rows = area_text(&terminal, area);
+            let text = rows.join("\n");
+            // Loud bands (smoothed to 0.91 of full) fill the lower rows and
+            // most of the top one.
+            assert!(
+                rows[1..].iter().all(|r| r.contains('█')),
+                "{width}x{height}:\n{text}"
+            );
+            assert!(rows[0].contains('▆'), "{width}x{height}:\n{text}");
+            let meter = area.width >= 13 + 2 + MIN_METER_WIDTH;
+            assert_eq!(rows[1].contains('L'), meter, "{width}x{height}:\n{text}");
+            assert_eq!(rows[2].contains('R'), meter, "{width}x{height}:\n{text}");
+            // Nothing escapes the area: the panels and status are intact.
+            let screen = buffer_text(&terminal);
+            assert!(screen.contains("Now Playing"), "{screen}");
+            for line in screen.lines() {
+                assert_eq!(line.width(), usize::from(width), "{screen}");
+            }
+        }
+    }
+
+    #[test]
+    fn small_terminals_leave_the_visualizer_out() {
+        let now = Instant::now();
+        let app = visualizer_app(loud(), now);
+        for (width, height) in [(80, 15), (19, 30), (10, 5), (1, 1)] {
+            let (terminal, view) = drawn(&app, width, height, now);
+            assert_eq!(view.visualizer_area, None, "{width}x{height}");
+            let screen = buffer_text(&terminal);
+            assert!(!screen.contains('█'), "{width}x{height}: {screen}");
+        }
+        // At the smallest size that shows it, the panels keep their rows.
+        let (terminal, _) = drawn(&app, 20, 16, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.lines().next().unwrap().starts_with('┌'), "{screen}");
+    }
+
+    #[test]
+    fn the_visualizer_is_silent_unless_playing() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        app.handle_playback_event(PlaybackEvent::Paused(true), now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let rows = area_text(&terminal, view.visualizer_area.unwrap());
+        assert!(
+            rows.iter().all(|r| !r.contains(['█', '▏', '▁'])),
+            "{rows:?}"
+        );
+        // The meter labels stay, so the layout does not jump.
+        assert!(rows[1].contains('L') && rows[2].contains('R'), "{rows:?}");
+    }
+
+    #[test]
+    fn unreachable_bands_stay_empty_and_quiet_bands_are_low() {
+        let now = Instant::now();
+        let mut frame = loud();
+        frame.bands[5] = None;
+        frame.bands[6] = None;
+        frame.bands[0] = Some(0.1);
+        let app = visualizer_app(frame, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let rows = area_text(&terminal, area);
+        let column = |band: usize| -> String {
+            let x = band * 4;
+            rows.iter().map(|r| r.chars().nth(x).unwrap()).collect()
+        };
+        // Band 0 at 0.091 of 24 eighths: two eighths, bottom row only.
+        assert_eq!(column(0), "  ▂", "{rows:?}");
+        assert_eq!(column(3), "▆██", "{rows:?}");
+        assert_eq!(column(5), "   ", "{rows:?}");
+        assert_eq!(column(6), "   ", "{rows:?}");
+    }
+
+    #[test]
+    fn the_visualizer_reads_without_colour() {
+        // With NO_COLOR, crossterm drops every colour; the bars must still
+        // read. Every cell the visualizer sets is a block character or a
+        // label, in one of the 16 basic colours, and bar heights differ by
+        // shape alone.
+        let now = Instant::now();
+        let mut frame = loud();
+        frame.bands[2] = Some(0.5);
+        let app = visualizer_app(frame, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    matches!(
+                        cell.fg,
+                        Color::Reset | Color::Cyan | Color::Green | Color::DarkGray
+                    ),
+                    "{:?}",
+                    cell.fg
+                );
+                assert_eq!(cell.bg, Color::Reset);
+                let c = cell.symbol().chars().next().unwrap();
+                assert!(
+                    c == ' '
+                        || c == 'L'
+                        || c == 'R'
+                        || VERTICAL_EIGHTHS.contains(&c)
+                        || HORIZONTAL_EIGHTHS.contains(&c),
+                    "{c:?}"
+                );
+            }
+        }
+        let rows = area_text(&terminal, area);
+        let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
+        let half: String = rows.iter().map(|r| r.chars().nth(8).unwrap()).collect();
+        assert_ne!(full, half, "{rows:?}");
+    }
+
+    #[test]
+    fn a_visualizer_only_redraw_matches_a_full_redraw() {
+        let now = Instant::now();
+        let later = now + Duration::from_millis(40);
+        let mut app = visualizer_app(loud(), now);
+        let (mut terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let mut last = terminal.backend().buffer().clone();
+        let mut quiet = loud();
+        quiet.levels = [0.0, 0.0];
+        quiet.bands = [Some(0.0); crate::playback::VISUALIZER_BANDS];
+        let load = app.player().current_load().unwrap();
+        assert!(app.handle_visualizer(load, &quiet, later));
+        redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
+        let partial = terminal.backend().buffer().clone();
+        let (full, _) = drawn(&app, 80, 24, now);
+        assert_eq!(&partial, full.backend().buffer());
+        assert_eq!(&last, full.backend().buffer());
+        // A full draw after a partial one still works (buffers swapped).
+        terminal
+            .draw(|frame| draw(frame, &app, &mut ViewState::default(), now))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), full.backend().buffer());
+    }
+
+    #[test]
+    fn overlays_and_inputs_turn_off_visualizer_only_redraws() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        assert!(drawn(&app, 80, 24, now).1.visualizer_drawable);
+        app.handle_action(Action::ToggleHelp, now);
+        let (_, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        assert!(!view.visualizer_drawable, "help covers it: no polling");
+        app.handle_action(Action::CloseHelp, now);
+        app.handle_action(Action::OpenSettings, now);
+        assert!(!drawn(&app, 80, 24, now).1.visualizer_drawable);
+        app.handle_settings_input(crate::onboarding::Input::Esc, now);
+        assert!(!app.settings_open());
+        app.handle_action(Action::OpenSearch, now);
+        assert!(app.input_open());
+        let (_, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        assert!(
+            view.visualizer_drawable,
+            "still shown, updated by full redraws"
+        );
+        // Too small: not drawable, whatever the setting.
+        app.handle_action(Action::InputCancel, now);
+        assert!(!drawn(&app, 80, 15, now).1.visualizer_drawable);
+        app.handle_action(Action::ToggleVisualizer, now);
+        assert!(drawn(&app, 80, 24, now).1.visualizer_drawable);
+        assert!(!drawn(&app, 19, 24, now).1.visualizer_drawable);
+    }
+
     #[test]
     fn help_overlay_lists_keys() {
         let now = Instant::now();
@@ -1221,7 +1629,7 @@ mod tests {
             "Playlists: new / rename / delete",
             "Playlist: remove / move song",
             "Playlist: save / discard order",
-            "Repeat: off / all / one",
+            "Repeat (off/all/one) / visualizer",
             "Streamed from Navidrome",
         ] {
             assert!(screen.contains(text), "{text}: {screen}");

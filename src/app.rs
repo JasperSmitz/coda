@@ -56,6 +56,7 @@ use crossterm::event::{
 };
 use futures_util::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
+use ratatui::buffer::Buffer;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -86,6 +87,7 @@ use crate::session::{self, Session};
 use crate::settings::{self, Change, Settings};
 use crate::setup::{self, Reply, SaveNavidrome};
 use crate::ui::{help, keymap, render};
+use crate::visualizer::Meter;
 
 /// Redraw interval when nothing else changes (progress, status expiry).
 pub const TICK: Duration = Duration::from_millis(250);
@@ -146,6 +148,8 @@ pub const SAVING_SETTINGS: &str = "Saving settings… press Ctrl-C again to quit
 /// Status when `/` is pressed on the local source without a music
 /// directory.
 pub const NO_LOCAL_LIBRARY: &str = "No local music directory configured";
+/// Status when the visualizer cannot work (shown once, and on `v`).
+pub const VISUALIZER_UNAVAILABLE: &str = "Visualizer unavailable";
 
 /// A user intent, already resolved from a key by [`keymap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +227,8 @@ pub enum Action {
     RemoveFromPlaylist,
     /// Playlist view (`w`): save the changed order.
     SaveOrder,
+    /// `v`: show or hide the visualizer.
+    ToggleVisualizer,
     Quit,
 }
 
@@ -387,6 +393,22 @@ pub struct App {
     /// browser's pending edits, it survives an account swap, so an edit
     /// still running for the old account warns at quit too.
     edit_in_flight: bool,
+    /// The visualizer is shown (`v`; saved with the session).
+    visualizer: bool,
+    /// The backend cannot run the visualizer this session.
+    visualizer_unavailable: bool,
+    /// The last frame had room for the visualizer, uncovered by an
+    /// overlay (assumed until a frame says otherwise).
+    visualizer_drawable: bool,
+    /// What the backend was last told (`SetVisualizer`): on only while
+    /// shown and drawable, so nothing is polled for a visualizer nobody
+    /// sees.
+    visualizer_sent: bool,
+    /// The visualizer's bars.
+    meter: Meter,
+    /// Bumped when an application setting worth saving changes (the
+    /// visualizer); added to the player's revision.
+    settings_revision: u64,
 }
 
 impl App {
@@ -453,6 +475,12 @@ impl App {
             quit_armed: false,
             edit_quit_armed: false,
             edit_in_flight: false,
+            visualizer: false,
+            visualizer_unavailable: false,
+            visualizer_drawable: true,
+            visualizer_sent: false,
+            meter: Meter::default(),
+            settings_revision: 0,
         }
     }
 
@@ -472,10 +500,10 @@ impl App {
     }
 
     /// Restores a saved session: the queue, its current entry (selected in
-    /// the Queue panel) and the repeat mode, without playing anything.
-    /// Returns the command that applies the saved volume, if it differs
-    /// from the backend's startup volume. The restored state counts as
-    /// saved.
+    /// the Queue panel), the repeat mode and the visualizer, without
+    /// playing anything. Returns the commands that apply the saved volume
+    /// (if it differs from the backend's startup volume) and turn the
+    /// visualizer on (if it was). The restored state counts as saved.
     pub fn restore_session(&mut self, session: Session, now: Instant) -> Vec<PlaybackCommand> {
         let restored = session.tracks.len();
         let commands = self.player.restore(
@@ -484,7 +512,9 @@ impl App {
             session.repeat,
             session.volume,
         );
-        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        let mut commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        self.visualizer = session.visualizer;
+        commands.extend(self.sync_visualizer());
         let queue = self.player.queue();
         self.queue_selected = queue
             .current()
@@ -493,17 +523,22 @@ impl App {
         if restored > 0 {
             self.set_status(format!("Restored queue: {}", count(restored, "track")), now);
         }
-        self.seen_revision = self.player.revision();
+        self.seen_revision = self.revision();
         self.saved_revision = Some(self.seen_revision);
         self.save_due = None;
         commands
+    }
+
+    /// Increases whenever something worth saving changes.
+    fn revision(&self) -> u64 {
+        self.player.revision() + self.settings_revision
     }
 
     // ----- session saving ----------------------------------------------
 
     /// Starts (or restarts) the save debounce if the saved state changed.
     fn note_changes(&mut self, now: Instant) {
-        let revision = self.player.revision();
+        let revision = self.revision();
         if revision != self.seen_revision {
             self.seen_revision = revision;
             self.save_due = Some(now + SAVE_DEBOUNCE);
@@ -524,7 +559,7 @@ impl App {
     /// (or the last save failed). Cancels a pending debounce.
     pub fn take_final_save(&mut self) -> Option<Session> {
         self.save_due = None;
-        (self.saved_revision != Some(self.player.revision())).then(|| self.save_snapshot())
+        (self.saved_revision != Some(self.revision())).then(|| self.save_snapshot())
     }
 
     /// The last snapshot could not be written; the exit save retries.
@@ -533,14 +568,27 @@ impl App {
     }
 
     fn save_snapshot(&mut self) -> Session {
-        self.saved_revision = Some(self.player.revision());
-        Session::from_player(&self.player)
+        self.saved_revision = Some(self.revision());
+        Session {
+            visualizer: self.visualizer,
+            ..Session::from_player(&self.player)
+        }
     }
 
     // ----- read access for rendering -----------------------------------
 
     pub fn player(&self) -> &Player {
         &self.player
+    }
+
+    /// The visualizer is to be drawn (shown, and the backend supports it).
+    pub fn visualizer_shown(&self) -> bool {
+        self.visualizer && !self.visualizer_unavailable
+    }
+
+    /// The visualizer's bars; silent unless a track is playing.
+    pub fn meter(&self) -> &Meter {
+        &self.meter
     }
 
     pub fn library(&self) -> &Library {
@@ -804,6 +852,7 @@ impl App {
         // Any other action cancels a pending `C`, `D` or `d`.
         let clear_armed = self.clear_armed_until.take();
         let edit_armed = self.edit_armed.take();
+        let mut backend = Vec::new();
         let commands = match action {
             Action::Activate if self.prompt_active() => {
                 self.settings.open_connect();
@@ -1035,14 +1084,69 @@ impl App {
                 self.settings.open();
                 Vec::new()
             }
+            Action::ToggleVisualizer => {
+                backend.extend(self.toggle_visualizer(now));
+                Vec::new()
+            }
             Action::Quit => {
                 self.request_quit(now);
                 Vec::new()
             }
         };
-        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        let mut commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        commands.extend(backend);
         self.after_player_call(now);
         commands
+    }
+
+    /// `v`: flips (and saves) the setting. Hidden, the bars drop at once.
+    fn toggle_visualizer(&mut self, now: Instant) -> Option<PlaybackCommand> {
+        self.visualizer = !self.visualizer;
+        self.settings_revision += 1;
+        self.meter.reset();
+        if self.visualizer && self.visualizer_unavailable {
+            self.set_status(VISUALIZER_UNAVAILABLE, now);
+        }
+        self.sync_visualizer()
+    }
+
+    /// Whether the last frame could show the visualizer (enough room, no
+    /// overlay on top), whatever the setting. Returns the command that
+    /// starts or stops the backend's readings if that changes what it
+    /// should do.
+    pub fn set_visualizer_drawable(&mut self, drawable: bool) -> Option<PlaybackCommand> {
+        self.visualizer_drawable = drawable;
+        if !drawable {
+            self.meter.reset();
+        }
+        self.sync_visualizer()
+    }
+
+    /// `SetVisualizer` if the backend's state differs from what is wanted.
+    fn sync_visualizer(&mut self) -> Option<PlaybackCommand> {
+        let wanted = self.visualizer && self.visualizer_drawable;
+        (wanted != self.visualizer_sent).then(|| {
+            self.visualizer_sent = wanted;
+            PlaybackCommand::SetVisualizer(wanted)
+        })
+    }
+
+    /// A visualizer reading. Returns `true` if the bars changed and the
+    /// visualizer should be redrawn; readings are dropped while it is
+    /// hidden or the track is not playing (or is not the current one).
+    pub fn handle_visualizer(
+        &mut self,
+        load: LoadId,
+        frame: &crate::playback::VisualizerFrame,
+        now: Instant,
+    ) -> bool {
+        let current = self.player.current_load() == Some(load)
+            && self.player.status() == PlaybackStatus::Playing;
+        if !self.visualizer_shown() || !self.visualizer_drawable || !current {
+            return false;
+        }
+        self.meter.update(load, frame, now);
+        true
     }
 
     pub fn handle_playback_event(
@@ -1050,6 +1154,21 @@ impl App {
         event: PlaybackEvent,
         now: Instant,
     ) -> Vec<PlaybackCommand> {
+        match &event {
+            PlaybackEvent::Visualizer { load, frame } => {
+                self.handle_visualizer(*load, frame, now);
+                return Vec::new();
+            }
+            PlaybackEvent::VisualizerUnavailable => {
+                if !self.visualizer_unavailable {
+                    self.visualizer_unavailable = true;
+                    self.meter.reset();
+                    self.set_status(VISUALIZER_UNAVAILABLE, now);
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
         let started = match event {
             PlaybackEvent::Started { load } => Some(load),
             _ => None,
@@ -1062,6 +1181,7 @@ impl App {
         if let Some(load) = started {
             self.listen_started(load);
         }
+
         if let Some(position) = position {
             self.listen_progressed(position);
         }
@@ -1397,12 +1517,15 @@ impl App {
 
     /// Drops the status message once it has expired. Returns `true` if
     /// anything visible changed.
+    /// Also lets the visualizer's bars fall when readings stopped coming
+    /// while playing (a stall: buffering, or a seek mpv did not perform).
     pub fn tick(&mut self, now: Instant) -> bool {
+        let faded = self.meter.fade(now);
         if self.status.as_ref().is_some_and(|s| now >= s.expires_at) {
             self.status = None;
             return true;
         }
-        false
+        faded
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, now: Instant) {
@@ -1414,7 +1537,15 @@ impl App {
 
     // ----- helpers -----------------------------------------------------
 
+    fn meter_load_is_stale(&self) -> bool {
+        !self.meter.is_empty() && self.meter.load() != self.player.current_load()
+    }
+
     fn after_player_call(&mut self, now: Instant) {
+        // Paused, stopped or another track: the bars drop to silence.
+        if self.player.status() != PlaybackStatus::Playing || self.meter_load_is_stale() {
+            self.meter.reset();
+        }
         // A new load, a stop or a backend exit ends the current listen.
         if self
             .listen
@@ -2527,6 +2658,10 @@ async fn event_loop(
     let (edit_tx, mut edit_rx) = mpsc::unbounded_channel();
     let mut playback_open = true;
     let mut dirty = true;
+    // Only the visualizer changed: redraw just its area over a copy of the
+    // last full frame (`last_frame`, kept only while it is shown).
+    let mut visualizer_dirty = false;
+    let mut last_frame: Option<Buffer> = None;
 
     loop {
         for request in app.take_settings_requests() {
@@ -2554,7 +2689,13 @@ async fn event_loop(
             }
         }
         if dirty {
-            terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            let completed =
+                terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            last_frame = view.visualizer_area.map(|_| completed.buffer.clone());
+            visualizer_dirty = false;
+            if let Some(command) = app.set_visualizer_drawable(view.visualizer_drawable) {
+                playback.send(command);
+            }
             app.clamp_help_scroll(view.help_max_scroll);
             app.set_remote_rows(view.remote_rows);
             // A larger screen may want the next page of a list at once;
@@ -2564,6 +2705,11 @@ async fn event_loop(
             fetches.spawn(requests, app.navidrome_client(), &fetch_tx);
             if dirty {
                 continue;
+            }
+        } else if visualizer_dirty {
+            visualizer_dirty = false;
+            if let (Some(area), Some(frame)) = (view.visualizer_area, last_frame.as_mut()) {
+                render::redraw_visualizer(terminal, frame, app, area)?;
             }
         }
         tokio::select! {
@@ -2607,6 +2753,11 @@ async fn event_loop(
                 }
             },
             event = playback.recv(), if playback_open => match event {
+                Some(PlaybackEvent::Visualizer { load, frame }) => {
+                    if app.handle_visualizer(load, &frame, Instant::now()) {
+                        visualizer_dirty = true;
+                    }
+                }
                 Some(event) => {
                     let commands = app.handle_playback_event(event, Instant::now());
                     playback.send_all(commands);
@@ -4808,6 +4959,155 @@ mod tests {
         *load
     }
 
+    fn reading(value: f32) -> crate::playback::VisualizerFrame {
+        crate::playback::VisualizerFrame {
+            levels: [value; 2],
+            bands: [Some(value); crate::playback::VISUALIZER_BANDS],
+        }
+    }
+
+    #[test]
+    fn v_toggles_the_visualizer_and_the_setting_is_saved_and_restored() {
+        let (mut app, now) = queued_app(&["A"]);
+        assert!(!app.visualizer_shown(), "off by default");
+        let commands = press(&mut app, &[Action::ToggleVisualizer], now);
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(true)]);
+        assert!(app.visualizer_shown());
+        let saved = app.take_due_save(now + SAVE_DEBOUNCE).expect("saved");
+        assert!(saved.visualizer);
+        let commands = press(&mut app, &[Action::ToggleVisualizer], now);
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(false)]);
+        assert!(!app.take_final_save().expect("changed again").visualizer);
+
+        // Restored on: the backend is told at startup.
+        let (mut app, now) = app_with(&[]);
+        let commands = app.restore_session(
+            Session {
+                visualizer: true,
+                ..Session::default()
+            },
+            now,
+        );
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(true)]);
+        assert!(app.visualizer_shown());
+        assert_eq!(app.take_final_save(), None, "restored counts as saved");
+        // Restored off: nothing to tell.
+        let (mut app, now) = app_with(&[]);
+        assert!(app.restore_session(Session::default(), now).is_empty());
+        // The key does nothing while help is open.
+        press(&mut app, &[Action::ToggleHelp], now);
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert!(!app.visualizer_shown());
+    }
+
+    #[test]
+    fn readings_redraw_only_while_shown_and_playing_the_current_track() {
+        let (mut app, now) = queued_app(&["A", "B"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        // Hidden: dropped, nothing to redraw.
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        assert!(app.meter().is_empty());
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        assert!(app.meter().levels()[0] > 0.0);
+        // Another load's reading is stale.
+        assert!(!app.handle_visualizer(LoadId(load.0 + 100), &reading(1.0), now));
+        // Paused: the bars drop and readings are dropped.
+        app.handle_playback_event(PlaybackEvent::Paused(true), now);
+        assert!(app.meter().is_empty());
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        app.handle_playback_event(PlaybackEvent::Paused(false), now);
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        // Hidden again: the bars drop at once.
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        assert!(app.meter().is_empty());
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        // Next track: loading, so the old load's readings are dropped.
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        press(&mut app, &[Action::Next], now);
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        // Through the event path as well.
+        app.handle_playback_event(
+            PlaybackEvent::Visualizer {
+                load,
+                frame: reading(1.0),
+            },
+            now,
+        );
+        assert!(app.meter().is_empty());
+        // Stopped.
+        press(&mut app, &[Action::ClearQueue, Action::ClearQueue], now);
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+    }
+
+    #[test]
+    fn readings_are_requested_only_while_the_visualizer_can_be_seen() {
+        let (mut app, now) = queued_app(&["A"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        // Not shown: drawability alone asks for nothing.
+        assert_eq!(app.set_visualizer_drawable(false), None);
+        assert_eq!(app.set_visualizer_drawable(true), None);
+        assert_eq!(
+            press(&mut app, &[Action::ToggleVisualizer], now),
+            [PlaybackCommand::SetVisualizer(true)]
+        );
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        // Covered or too small: readings stop and the bars drop.
+        assert_eq!(
+            app.set_visualizer_drawable(false),
+            Some(PlaybackCommand::SetVisualizer(false))
+        );
+        assert!(app.meter().is_empty());
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        assert_eq!(app.set_visualizer_drawable(false), None, "no repeats");
+        // `v` while covered changes the setting only.
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert_eq!(
+            app.set_visualizer_drawable(true),
+            Some(PlaybackCommand::SetVisualizer(true))
+        );
+        assert!(app.take_due_save(now + SAVE_DEBOUNCE).unwrap().visualizer);
+    }
+
+    #[test]
+    fn the_bars_fall_on_the_tick_when_readings_stop() {
+        let (mut app, now) = queued_app(&["A"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        app.handle_visualizer(load, &reading(1.0), now);
+        let level = app.meter().levels()[0];
+        assert!(!app.tick(now + Duration::from_millis(100)));
+        assert!(app.tick(now + Duration::from_millis(400)));
+        assert!(app.meter().levels()[0] < level);
+        for i in 0..10 {
+            app.tick(now + Duration::from_millis(650 + 250 * i));
+        }
+        assert_eq!(app.meter().levels(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn an_unavailable_visualizer_is_reported_once_and_on_v() {
+        let (mut app, now) = queued_app(&["A"]);
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        app.handle_playback_event(PlaybackEvent::VisualizerUnavailable, now);
+        assert_eq!(app.status(now), Some(VISUALIZER_UNAVAILABLE));
+        assert!(!app.visualizer_shown());
+        let later = now + STATUS_TTL * 2;
+        app.tick(later);
+        app.handle_playback_event(PlaybackEvent::VisualizerUnavailable, later);
+        assert_eq!(app.status(later), None, "only once");
+        // Turning it off and on again says why nothing shows.
+        press(&mut app, &[Action::ToggleVisualizer], later);
+        assert_eq!(app.status(later), None);
+        press(&mut app, &[Action::ToggleVisualizer], later);
+        assert_eq!(app.status(later), Some(VISUALIZER_UNAVAILABLE));
+        assert!(!app.visualizer_shown());
+    }
+
     #[test]
     fn move_keys_reorder_and_the_selection_follows() {
         let (mut app, now) = queued_app(&["A", "B", "C"]);
@@ -4986,6 +5286,7 @@ mod tests {
             repeat: crate::player::RepeatMode::All,
             current: Some(2),
             tracks: vec![track("a.flac"), remote("r1"), track("c.flac")],
+            visualizer: false,
         };
         let commands = app.restore_session(session, now);
         assert_eq!(commands, [PlaybackCommand::SetVolume(60)]);

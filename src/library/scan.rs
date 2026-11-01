@@ -132,7 +132,9 @@ fn scan_inner(
             },
             Err(error) => {
                 errors += 1;
-                tracing::warn!(%error, "scan error");
+                // walkdir's message names the path; log only the kind.
+                let kind = error.io_error().map(std::io::Error::kind);
+                tracing::warn!(?kind, depth = error.depth(), "scan error");
             }
         }
         // Checked for every walked entry, so a slow stretch of non-audio

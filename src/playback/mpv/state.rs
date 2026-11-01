@@ -31,6 +31,12 @@
 //! `--ao-null-buffer=3`). [`REPLY_TIMEOUT`] leaves room for that; a reply
 //! missing for that long means mpv is hung. Time the driver itself was not
 //! reading from mpv does not count.
+//!
+//! Visualizer: [`super::visualizer`] decides when to add or remove its
+//! filter graph and when to poll; this state sends those requests, feeds it
+//! mpv's pause, position, sample rate and file events, and passes its
+//! readings on as [`PlaybackEvent::Visualizer`]. The driver calls
+//! [`MpvState::visualizer_tick`] at [`MpvState::visualizer_deadline`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -40,6 +46,7 @@ use serde_json::Value;
 use super::protocol::{
     self, EndFileReason, MpvCommand, MpvEvent, MpvMessage, ProtocolError, SeekMode,
 };
+use super::visualizer::{self, Visualizer};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackTarget};
 
 /// Minimum spacing between emitted `Position` events (at most 4/s).
@@ -53,7 +60,16 @@ pub const MAX_BUFFERED_EVENTS: usize = 16;
 const MAX_ENTRY_MAPPINGS: usize = 64;
 
 pub const ENTRY_ID_PROPERTY: &str = "playlist/0/id";
-pub const OBSERVED_PROPERTIES: [&str; 4] = ["time-pos", "duration", "pause", "volume"];
+pub const OBSERVED_PROPERTIES: [&str; 5] = [
+    "time-pos",
+    "duration",
+    "pause",
+    "volume",
+    SAMPLE_RATE_PROPERTY,
+];
+/// The current track's decoded sample rate; the visualizer hides bands it
+/// cannot contain.
+pub const SAMPLE_RATE_PROPERTY: &str = "audio-params/samplerate";
 pub const FILE_NOT_FOUND: &str = "file not found";
 pub const NOT_A_REGULAR_FILE: &str = "not a regular file";
 pub const NOT_AUDIO: &str = "not an audio file (playlist or directory)";
@@ -103,6 +119,9 @@ enum Pending {
     Volume(u8),
     LoadFile(LoadId),
     EntryId(LoadId),
+    VisualizerAttach,
+    /// A visualizer poll of this generation.
+    VisualizerPoll(u64),
 }
 
 #[derive(Debug)]
@@ -240,6 +259,7 @@ pub struct MpvState {
     opening: Option<i64>,
     buffered: VecDeque<FileEvent>,
     position: PositionCoalescer,
+    visualizer: Visualizer,
 }
 
 impl MpvState {
@@ -254,6 +274,13 @@ impl MpvState {
             watchdog: ReplyWatchdog::new(timeout),
             ..Self::default()
         }
+    }
+
+    /// A state whose visualizer adds `graph` instead of
+    /// [`visualizer::GRAPH`] (tests use a broken one).
+    pub fn with_visualizer_graph(mut self, graph: String) -> Self {
+        self.visualizer = Visualizer::new(graph);
+        self
     }
 
     /// Records that `requests` were handed to the writer at `now`. Call it
@@ -315,7 +342,12 @@ impl MpvState {
                 if let Some((dropped, _)) = self.queued.take() {
                     tracing::debug!(%dropped, "queued load cancelled by stop");
                 }
+                self.visualizer_track_change(&mut out, None);
                 self.request(&mut out, MpvCommand::Stop, Pending::Ignore);
+            }
+            PlaybackCommand::SetVisualizer(on) => {
+                self.visualizer.set_wanted(on);
+                self.visualizer_attach(&mut out);
             }
             PlaybackCommand::SeekRelative(seconds) => {
                 self.seek(&mut out, seconds, SeekMode::Relative);
@@ -362,8 +394,33 @@ impl MpvState {
     pub fn handle_message(&mut self, message: MpvMessage, now: Instant) -> Output {
         let mut out = Output::default();
         match message {
-            MpvMessage::Reply { request_id, result } => self.on_reply(&mut out, request_id, result),
+            MpvMessage::Reply { request_id, result } => {
+                self.on_reply(&mut out, request_id, result, now);
+            }
             MpvMessage::Event(event) => self.on_event(&mut out, event, now),
+        }
+        out
+    }
+
+    /// When [`Self::visualizer_tick`] is due; `None` while the visualizer
+    /// has nothing to do (hidden, paused, stopped or unavailable).
+    pub fn visualizer_deadline(&self, now: Instant) -> Option<Instant> {
+        self.visualizer.deadline(now)
+    }
+
+    /// Shows the newest due visualizer reading and polls for the next.
+    pub fn visualizer_tick(&mut self, now: Instant) -> Output {
+        let mut out = Output::default();
+        let tick = self.visualizer.tick(now);
+        out.events.extend(tick.event);
+        if let Some(generation) = tick.poll {
+            self.request(
+                &mut out,
+                MpvCommand::GetProperty {
+                    name: visualizer::METADATA_PROPERTY,
+                },
+                Pending::VisualizerPoll(generation),
+            );
         }
         out
     }
@@ -389,8 +446,37 @@ impl MpvState {
 
     fn seek(&mut self, out: &mut Output, seconds: f64, mode: SeekMode) {
         if seconds.is_finite() {
+            self.visualizer.seek_sent();
             self.request(out, MpvCommand::Seek { seconds, mode }, Pending::Ignore);
         }
+    }
+
+    /// Adds the visualizer graph if it is wanted and a track is playing.
+    fn visualizer_attach(&mut self, out: &mut Output) {
+        if self.in_flight.is_none()
+            && self.visualizer.is_playing()
+            && let Some(graph) = self.visualizer.take_attach()
+        {
+            self.request(out, MpvCommand::AfAdd { graph }, Pending::VisualizerAttach);
+        }
+    }
+
+    /// A load (`Some`) or stop (`None`) is about to be sent; removes a
+    /// hidden graph first.
+    fn visualizer_track_change(&mut self, out: &mut Output, next: Option<LoadId>) {
+        if self.visualizer.track_change(next) {
+            self.visualizer_detach(out);
+        }
+    }
+
+    fn visualizer_detach(&mut self, out: &mut Output) {
+        self.request(
+            out,
+            MpvCommand::AfRemove {
+                labels: visualizer::GRAPH_LABELS,
+            },
+            Pending::Ignore,
+        );
     }
 
     fn start_load(&mut self, out: &mut Output, load: LoadId, target: PlaybackTarget) {
@@ -408,6 +494,7 @@ impl MpvState {
         };
         tracing::debug!(%load, "sending load to mpv");
         self.position.clear();
+        self.visualizer_track_change(out, Some(load));
         self.in_flight = Some(InFlight {
             load,
             failed: false,
@@ -447,6 +534,7 @@ impl MpvState {
         out: &mut Output,
         request_id: u64,
         result: Result<Option<Value>, String>,
+        now: Instant,
     ) {
         self.watchdog.answered(request_id);
         let Some(pending) = self.pending.remove(&request_id) else {
@@ -488,6 +576,14 @@ impl MpvState {
                 }
             }
             Pending::EntryId(load) => self.on_entry_id(out, load, result),
+            Pending::VisualizerAttach => {
+                if self.visualizer.attach_answered(result.map(|_| ())) {
+                    out.events.push(PlaybackEvent::VisualizerUnavailable);
+                }
+            }
+            Pending::VisualizerPoll(generation) => {
+                self.visualizer.poll_answered(generation, result, now);
+            }
         }
     }
 
@@ -532,6 +628,9 @@ impl MpvState {
         if let Some((next, target)) = self.queued.take() {
             self.start_load(out, next, target);
         }
+        // Once, after the replayed events (and only if what they started
+        // is still playing: a queued load just superseded it).
+        self.visualizer_attach(out);
     }
 
     fn map_entry(&mut self, entry_id: i64, load: LoadId) {
@@ -586,6 +685,14 @@ impl MpvState {
                 self.on_property(out, &name, data, now);
                 return;
             }
+            MpvEvent::Seek => {
+                self.visualizer.seeking();
+                return;
+            }
+            MpvEvent::PlaybackRestart => {
+                self.visualizer.restarted();
+                return;
+            }
             MpvEvent::Other { .. } => return,
         };
         self.route(out, file_event);
@@ -594,6 +701,7 @@ impl MpvState {
     fn route(&mut self, out: &mut Output, event: FileEvent) {
         if let Some(&load) = self.entries.get(&event.entry_id) {
             self.deliver(out, event, load);
+            self.visualizer_attach(out);
             return;
         }
         let mapping_pending = self.in_flight.as_ref().is_some_and(|f| !f.failed);
@@ -628,9 +736,14 @@ impl MpvState {
         self.position.clear();
         match event.kind {
             FileEventKind::Start => tracing::debug!(%load, "mpv opening file"),
-            FileEventKind::Loaded => out.events.push(PlaybackEvent::Started { load }),
+            FileEventKind::Loaded => {
+                out.events.push(PlaybackEvent::Started { load });
+                // Attached by the caller, once its events are delivered.
+                self.visualizer.started(load);
+            }
             FileEventKind::End { reason, file_error } => {
                 self.entries.remove(&event.entry_id);
+                let failed = reason == EndFileReason::Error;
                 let reason = match reason {
                     EndFileReason::Eof => EndReason::Eof,
                     EndFileReason::Error => {
@@ -644,6 +757,10 @@ impl MpvState {
                     }
                 };
                 out.events.push(PlaybackEvent::TrackEnded { load, reason });
+                if self.visualizer.ended(load, failed) {
+                    self.visualizer_detach(out);
+                    out.events.push(PlaybackEvent::VisualizerUnavailable);
+                }
             }
         }
     }
@@ -651,18 +768,24 @@ impl MpvState {
     fn on_property(&mut self, out: &mut Output, name: &str, data: Option<Value>, now: Instant) {
         match name {
             "time-pos" => {
-                if let Some(position) = data.and_then(|v| seconds(&v))
-                    && let Some(position) = self.position.offer(position, now)
-                {
-                    out.events.push(PlaybackEvent::Position(position));
+                if let Some(position) = data.and_then(|v| seconds(&v)) {
+                    self.visualizer.position(position.as_secs_f64(), now);
+                    if let Some(position) = self.position.offer(position, now) {
+                        out.events.push(PlaybackEvent::Position(position));
+                    }
                 }
             }
+            SAMPLE_RATE_PROPERTY => self
+                .visualizer
+                .set_sample_rate(data.and_then(|v| v.as_f64())),
             "duration" => out
                 .events
                 .push(PlaybackEvent::Duration(data.and_then(|v| seconds(&v)))),
             "pause" => {
                 if let Some(paused) = data.and_then(|v| v.as_bool()) {
                     out.events.push(PlaybackEvent::Paused(paused));
+                    self.visualizer.set_paused(paused, now);
+                    self.visualizer_attach(out);
                 }
             }
             "volume" => {
@@ -1440,6 +1563,254 @@ mod tests {
         s.requests_sent(&stop.requests, t0);
         let (at, _) = watch(&mut s, t0, secs(20.0), MAX_CHECK_GAP).expect("overdue");
         assert_eq!(at, secs(10.0));
+    }
+
+    /// Load 1 mapped to entry 1 and started; returns the `file-loaded`
+    /// output.
+    fn started(s: &mut MpvState) -> Output {
+        let out = load(s, 1, "/m/a.flac");
+        let (file_q, entry_q) = load_ids(&out);
+        reply_ok(s, file_q, Value::Null);
+        reply_ok(s, entry_q, json!(1));
+        ev(s, &start_file(1));
+        line(s, FILE_LOADED, Instant::now())
+    }
+
+    fn af_requests(out: &Output) -> Vec<MpvCommand> {
+        out.requests
+            .iter()
+            .map(|r| r.command.clone())
+            .filter(|c| matches!(c, MpvCommand::AfAdd { .. } | MpvCommand::AfRemove { .. }))
+            .collect()
+    }
+
+    fn request_id(out: &Output, pred: fn(&MpvCommand) -> bool) -> u64 {
+        out.requests
+            .iter()
+            .find(|r| pred(&r.command))
+            .expect("request present")
+            .request_id
+    }
+
+    const ADD: fn(&MpvCommand) -> bool = |c| matches!(c, MpvCommand::AfAdd { .. });
+    const REMOVE: MpvCommand = MpvCommand::AfRemove {
+        labels: visualizer::GRAPH_LABELS,
+    };
+
+    fn add() -> MpvCommand {
+        MpvCommand::AfAdd {
+            graph: visualizer::GRAPH.into(),
+        }
+    }
+
+    fn property(name: &str, data: Value) -> String {
+        json!({"event": "property-change", "id": 1, "name": name, "data": data}).to_string()
+    }
+
+    #[test]
+    fn the_visualizer_attaches_lazily_while_playing() {
+        let mut s = MpvState::new();
+        // Wanted while idle: nothing is added and nothing polled.
+        let out = s.handle_command(PlaybackCommand::SetVisualizer(true));
+        assert_eq!(out, Output::default());
+        assert_eq!(s.visualizer_deadline(Instant::now()), None);
+        // The track starts: added once.
+        let out = started(&mut s);
+        assert_eq!(out.events, [PlaybackEvent::Started { load: l(1) }]);
+        assert_eq!(af_requests(&out), [add()]);
+        // Not polled until mpv accepts it.
+        assert_eq!(s.visualizer_deadline(Instant::now()), None);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        let now = Instant::now();
+        assert_eq!(s.visualizer_deadline(now), Some(now));
+        let tick = s.visualizer_tick(now);
+        assert_eq!(
+            tick.requests
+                .iter()
+                .map(|r| r.command.clone())
+                .collect::<Vec<_>>(),
+            [MpvCommand::GetProperty {
+                name: visualizer::METADATA_PROPERTY
+            }]
+        );
+        // A pause stops the polls; nothing is added twice.
+        let out = line(&mut s, &property("pause", json!(true)), now);
+        assert!(af_requests(&out).is_empty());
+        assert_eq!(s.visualizer_deadline(now), None);
+        assert_eq!(s.visualizer_tick(now), Output::default());
+    }
+
+    #[test]
+    fn the_visualizer_is_not_added_while_paused_and_is_on_resume() {
+        let mut s = MpvState::new();
+        let out = started(&mut s);
+        assert!(af_requests(&out).is_empty(), "not wanted");
+        ev(&mut s, &property("pause", json!(true)));
+        let out = s.handle_command(PlaybackCommand::SetVisualizer(true));
+        assert!(af_requests(&out).is_empty(), "paused");
+        let out = line(&mut s, &property("pause", json!(false)), Instant::now());
+        assert_eq!(af_requests(&out), [add()]);
+    }
+
+    #[test]
+    fn a_hidden_visualizer_is_removed_before_the_next_load_or_stop() {
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        // Hidden: no removal mid-track, and no polls.
+        let out = s.handle_command(PlaybackCommand::SetVisualizer(false));
+        assert_eq!(out, Output::default());
+        assert_eq!(s.visualizer_deadline(Instant::now()), None);
+        let out = s.handle_command(PlaybackCommand::SeekRelative(5.0));
+        assert!(af_requests(&out).is_empty());
+        // The next load removes it before anything else.
+        let out = load(&mut s, 2, "/m/b.flac");
+        assert_eq!(out.requests[0].command, REMOVE);
+        assert_eq!(loadfile_paths(&out), ["/m/b.flac"]);
+        // Removed once only.
+        let out = s.handle_command(PlaybackCommand::Stop);
+        assert_eq!(af_requests(&out), []);
+
+        // Visible at a stop: kept.
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        let out = s.handle_command(PlaybackCommand::Stop);
+        assert_eq!(af_requests(&out), []);
+        // Hidden later: removed at the following stop.
+        s.handle_command(PlaybackCommand::SetVisualizer(false));
+        let out = s.handle_command(PlaybackCommand::Stop);
+        assert_eq!(out.requests[0].command, REMOVE);
+    }
+
+    #[test]
+    fn a_refused_graph_is_reported_once_and_playback_goes_on() {
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        let failed = reply_err(&mut s, request_id(&out, ADD), "error running command");
+        assert_eq!(failed.events, [PlaybackEvent::VisualizerUnavailable]);
+        assert!(failed.requests.is_empty());
+        // Never retried, never polled; the track still ends normally.
+        s.handle_command(PlaybackCommand::SetVisualizer(false));
+        assert_eq!(
+            s.handle_command(PlaybackCommand::SetVisualizer(true)),
+            Output::default()
+        );
+        assert_eq!(s.visualizer_deadline(Instant::now()), None);
+        assert_eq!(
+            ev(&mut s, &end_file(1, "eof")),
+            [PlaybackEvent::TrackEnded {
+                load: l(1),
+                reason: EndReason::Eof
+            }]
+        );
+    }
+
+    #[test]
+    fn a_track_failing_on_an_unproven_graph_removes_it() {
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        let out = line(&mut s, &end_file(1, "error"), Instant::now());
+        assert_eq!(af_requests(&out), [REMOVE]);
+        assert!(out.events.contains(&PlaybackEvent::VisualizerUnavailable));
+        assert!(matches!(
+            out.events[0],
+            PlaybackEvent::TrackEnded {
+                reason: EndReason::Error(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_load_superseded_while_its_events_were_buffered_is_not_attached() {
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let first = load(&mut s, 1, "/m/a.flac");
+        let (_, entry_q) = load_ids(&first);
+        load(&mut s, 2, "/m/b.flac");
+        // Load 1's file events arrive before its entry id.
+        ev(&mut s, &start_file(1));
+        ev(&mut s, FILE_LOADED);
+        let out = reply_ok(&mut s, entry_q, json!(1));
+        assert!(out.events.contains(&PlaybackEvent::Started { load: l(1) }));
+        assert_eq!(loadfile_paths(&out), ["/m/b.flac"]);
+        assert!(af_requests(&out).is_empty(), "{out:?}");
+        // Load 2 starts: added once.
+        let (_, entry_q) = load_ids(&out);
+        reply_ok(&mut s, entry_q, json!(2));
+        ev(&mut s, &start_file(2));
+        let out = line(&mut s, FILE_LOADED, Instant::now());
+        assert_eq!(af_requests(&out), [add()]);
+    }
+
+    #[test]
+    fn only_mpvs_seek_event_holds_readings_back() {
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        let now = Instant::now();
+        line(&mut s, r#"{"event":"playback-restart"}"#, now);
+        line(&mut s, &property("time-pos", json!(1.0)), now);
+        s.handle_command(PlaybackCommand::SeekRelative(5.0));
+        assert!(!s.visualizer.restarting_for_tests(), "a sent seek alone");
+        ev(&mut s, r#"{"event":"seek"}"#);
+        assert!(s.visualizer.restarting_for_tests());
+        ev(&mut s, r#"{"event":"playback-restart"}"#);
+        assert!(!s.visualizer.restarting_for_tests());
+    }
+
+    #[test]
+    fn readings_reach_the_boundary_aligned_and_coalesced() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut s = MpvState::new();
+        s.handle_command(PlaybackCommand::SetVisualizer(true));
+        let out = started(&mut s);
+        reply_ok(&mut s, request_id(&out, ADD), Value::Null);
+        line(&mut s, r#"{"event":"playback-restart"}"#, at(0));
+        line(&mut s, &property("time-pos", json!(1.0)), at(0));
+        let reading = |t: f64, db: &str| {
+            let mut map = serde_json::Map::new();
+            map.insert("lavfi.astats.1.RMS_level".into(), json!(db));
+            map.insert("lavfi.astats.2.RMS_level".into(), json!(db));
+            let tc = format!("{:.6}", 20.0 * (t / 32.0).log10());
+            map.insert("lavfi.astats.10.Peak_level".into(), json!(tc));
+            Value::Object(map)
+        };
+        let poll = |s: &mut MpvState, now| {
+            let out = s.visualizer_tick(now);
+            (out.events, out.requests.first().map(|r| r.request_id))
+        };
+        let mut shown = Vec::new();
+        // Three readings 50 ms apart, 0.25 s ahead of the position.
+        for (i, ms) in [0u64, 50, 100].into_iter().enumerate() {
+            let (events, id) = poll(&mut s, at(ms));
+            shown.extend(events);
+            let t = 1.25 + i as f64 * 0.05;
+            let db = ["-60", "-30", "0"][i];
+            s.handle_message(
+                MpvMessage::Reply {
+                    request_id: id.expect("poll sent"),
+                    result: Ok(Some(reading(t, db))),
+                },
+                at(ms + 1),
+            );
+        }
+        assert!(shown.is_empty(), "nothing is due yet: {shown:?}");
+        // At 1.40 s all three are due; only the newest is sent.
+        let (events, _) = poll(&mut s, at(400));
+        let [PlaybackEvent::Visualizer { load, frame }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*load, l(1));
+        assert_eq!(frame.levels, [1.0, 1.0]);
     }
 
     #[test]

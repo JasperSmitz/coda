@@ -206,3 +206,35 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Queued edits that never started are dropped at quit, counted in the log.
   - On servers without `formPost`, playlists over about 250 songs can't be reordered or have songs removed.
   - Not yet run against the owner's real server.
+
+## 2026-11-01 — M6: audio visualizer (complete)
+- **Slice 1, spike:**
+  - Levels and frequency bands are available from mpv over IPC (lavfi `astats` on a split, band-passed copy). The played audio stays bit-identical when the output is forced to stereo.
+  - Analysis runs about 0.25 s ahead of the speaker; a time-code channel measures the lead exactly.
+  - A bad graph passed at spawn or while idle breaks every file, so the filter is attached lazily.
+  - Findings are in `docs/plans/m6-visualizer.md`.
+- **Owner decisions:** the full visualizer with always-stereo output (`--audio-channels=stereo`), and the graph stays attached while hidden until the next track.
+- **Slice 2:**
+  - `v` toggles 7 bands plus an L/R meter in the now-playing box. It is off by default and persisted.
+  - The filter is attached lazily with `af add`, polled at up to 30 Hz with one request in flight, and aligned by time code.
+  - Smoothing is fast attack, slow decay, and the bars fade after 300 ms without readings.
+  - A visualizer-only redraw is used.
+  - No polling while hidden, paused, stopped or covered.
+  - An unavailable filter is reported once, and playback continues.
+- **Privacy:** logs no longer contain track titles, artists, albums or file paths (`loadfile` is marked sensitive, and scan errors log only the kind).
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (613 lib plus integration) pass, and the ignored mpv tests pass 25/25. The real-mpv tests cover tones peaking in the right band, bit-identity, an unavailable graph, and a seek mpv cannot perform.
+  - Linux container (mpv 0.35.1): the same, 25/25.
+  - PTY smoke: 46/46.
+- **Review:** one round plus follow-ups. Fixed:
+  - a freeze after a seek mpv acknowledges but does not perform
+  - stale readings after rapid seeks
+  - superseded-load attach races
+  - over-eager "unavailable"
+  - polling while not drawn
+  - a lenient session field
+- **Limitations:**
+  - Surround output is gone (always stereo).
+  - Bands show about 50–130 ms after the sound.
+  - The Linux PulseAudio/PipeWire lead has not been measured acoustically.
+  - The graph stays attached while hidden until the next track (about 3.5–6 % of a core).

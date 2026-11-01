@@ -94,6 +94,7 @@ Each entry should state:
 - **Root cause:** mpv reports `end-file eof` when decoding ends, which can be early by up to the audio output's buffer: about 0.3 s for CD-quality audio on CoreAudio, and about 4 s for 8 kHz mono WAVs that CoreAudio rejects and avfoundation plays instead. On the last playlist entry mpv then blocks its core while that buffer drains, so replies to the next commands are delayed by up to the same amount. The buffered audio still plays out, so tracks are not cut off.
 - **Rule:** run timing-sensitive real-mpv tests with `--ao=null`; size reply timeouts to cover an audio-buffer drain; never treat EOF as a wall-clock signal.
 - **Where verified:** M3 slice 3 root-cause probes (mpv 0.41, `--msg-level=all=v`); reviewer IPC probes; `pause_volume_and_seek_are_reflected_in_events`, `rapid_loads_end_on_the_last_requested_track`.
+- **Note (M6):** the avfoundation case predates `--audio-channels=stereo`. Coda now always outputs stereo, so mono reaches CoreAudio rather than avfoundation (seen via `current-ao`; not checked on Bluetooth). The rule still holds: any output can buffer, and the visualizer measures a 2.5–3 s lead on avfoundation.
 
 ### A feature that swaps in a mock security backend is hidden by `--all-features`
 - **Context / symptom:** the `mock-secret-store` feature, which exists for PTY smoke runs, replaces the OS keychain with an in-memory store. The standard `clippy --all-features` check then linted only the mock path, and a build with all features said "macOS Keychain" while saving nothing.
@@ -128,3 +129,15 @@ Each entry should state:
 - **Root cause:** Navidrome's `getPlaylist` omits entries whose file is missing and songs in libraries the user cannot access, while the stored playlist keeps them; a replace writes only what was shown. Its `songCount` counts every stored entry.
 - **Rule:** before rewriting a server-side list from what the API shows, check for entries the API hides (compare the stored count with the returned entries). If some are hidden, say so and require confirmation, and recheck at write time that no more are hidden than the user confirmed.
 - **Where verified:** M5 slice 3 re-review, traced in Navidrome's source (`GetWithTracks`, `refreshCounters`); `removing_from_a_playlist_with_hidden_entries_warns_first`, `saving_an_order_over_hidden_entries_needs_a_second_w` in `src/app.rs`, `more_hidden_entries_than_confirmed_on_the_refetch_is_stale` in `tests/navidrome_edit.rs`.
+
+### mpv's `--ao=pcm` renders as fast as it can
+- **Context / symptom:** a bit-identity test meant to compare output with and without the visualizer could not exercise Coda's lazy `af add`: a 60 s file had already played to the end about 10 ms after `playback-restart`.
+- **Root cause:** the `pcm` output is not timed by a clock; mpv decodes and writes the whole file as fast as it can, so anything Coda sends "while playing" lands after the end, or while idle.
+- **Rule:** use `--ao=pcm` only to compare output bytes, with everything under test in place before the load (here, the graph passed at spawn in a test-only option). Test behaviour that depends on playback time with `--ao=null`, which follows mpv's clock.
+- **Where verified:** M6 slice 2 IPC probe on mpv 0.41; `visualizer_graph_leaves_the_audio_bit_identical`, `visualizer_tones_peak_in_their_band_when_they_are_heard`.
+
+### mpv answers `seek` with `success` even when it does not seek
+- **Context / symptom:** review of M6 slice 2. The visualizer held its readings from the moment a seek was sent until `playback-restart`. A seek that mpv acknowledges but does not perform (a non-seekable stream, beyond what is cached) brings no `seek` event and no `playback-restart`, so the bars would have frozen for the rest of the track.
+- **Root cause:** the reply to `seek` only says the command was accepted. Whether a seek happens is reported by mpv's `seek` event, and its end by `playback-restart`.
+- **Rule:** never gate state on an expected `playback-restart` after sending a seek. Arm the gate on mpv's own `seek` event. On send, only invalidate what is already in flight. Give anything that waits for readings a timeout of its own: the bars fall after 300 ms without a reading.
+- **Where verified:** M6 slice 2 review follow-up; `only_mpvs_seek_event_holds_readings_back`, `a_seek_mpv_does_not_perform_does_not_freeze_the_readings`, `bars_fall_when_readings_stop`.
