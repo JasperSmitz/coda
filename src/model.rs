@@ -92,6 +92,19 @@ impl Track {
     }
 }
 
+/// Formats with `,` thousands separators.
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Upper bound on the length of metadata strings, in chars.
 pub const MAX_METADATA_CHARS: usize = 512;
 

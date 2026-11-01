@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use url::{Host, Url};
 
-use super::api::{self, AUTH_ERROR_CODES};
-use super::{Album, Artist, SearchResults};
+use super::api::{self, AUTH_ERROR_CODES, MAX_ALBUM_LIST_SIZE};
+use super::{Album, AlbumPage, AlbumSort, Artist, Playlist, PlaylistSongs, SearchResults};
 use crate::model::Track;
 use crate::playback::StreamUrl;
 
@@ -21,6 +21,12 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Upper bound on a response body (large `getArtists` responses fit).
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Upper bound on a `getPlaylist` body. A realistic OpenSubsonic entry
+/// (several artists, contributors, a long path) is about 2 KB, so 10,000
+/// entries take about 20.6 MB (19.7 MiB); this leaves about 20 % headroom.
+/// Parsing never builds a `serde_json::Value` (see [`api`]), so memory
+/// stays close to the body size.
+pub const MAX_PLAYLIST_BODY_BYTES: usize = 24 * 1024 * 1024;
 /// Random bytes per salt (hex-encoded, so twice as many characters).
 const SALT_BYTES: usize = 12;
 pub const SEARCH_ARTIST_COUNT: u32 = 20;
@@ -244,13 +250,13 @@ impl Client {
 
     /// Checks reachability and credentials.
     pub async fn ping(&self) -> Result<(), Error> {
-        self.get("ping", &[]).await.map(drop)
+        self.get::<api::EmptyReply>("ping", &[]).await.map(drop)
     }
 
     /// All artists, flattened from the index in served order.
     pub async fn artists(&self) -> Result<Vec<Artist>, Error> {
         let index = self
-            .get("getArtists", &[])
+            .get::<api::ArtistsReply>("getArtists", &[])
             .await?
             .artists
             .ok_or_else(|| Error::Decode("getArtists: missing artists".into()))?;
@@ -265,7 +271,7 @@ impl Client {
     /// The albums of one artist, in served order.
     pub async fn artist(&self, id: &str) -> Result<Vec<Album>, Error> {
         let artist = self
-            .get("getArtist", &[("id", id)])
+            .get::<api::ArtistReply>("getArtist", &[("id", id)])
             .await?
             .artist
             .ok_or_else(|| Error::Decode("getArtist: missing artist".into()))?;
@@ -279,7 +285,7 @@ impl Client {
     /// The songs of one album, in served order.
     pub async fn album(&self, id: &str) -> Result<Vec<Track>, Error> {
         let album = self
-            .get("getAlbum", &[("id", id)])
+            .get::<api::AlbumReply>("getAlbum", &[("id", id)])
             .await?
             .album
             .ok_or_else(|| Error::Decode("getAlbum: missing album".into()))?;
@@ -288,6 +294,73 @@ impl Client {
             .into_iter()
             .filter_map(api::RawSong::into_track)
             .collect())
+    }
+
+    /// One page of albums in `sort` order (`getAlbumList2`), starting at
+    /// `offset`. `size` is clamped to `1..=500`.
+    pub async fn album_list(
+        &self,
+        sort: AlbumSort,
+        offset: usize,
+        size: usize,
+    ) -> Result<AlbumPage, Error> {
+        let size = size.clamp(1, MAX_ALBUM_LIST_SIZE);
+        let size_param = size.to_string();
+        let offset_param = offset.to_string();
+        let params = [
+            ("type", sort.param()),
+            ("size", size_param.as_str()),
+            ("offset", offset_param.as_str()),
+        ];
+        let list = self
+            .get::<api::AlbumListReply>("getAlbumList2", &params)
+            .await?
+            .album_list2
+            .ok_or_else(|| Error::Decode("getAlbumList2: missing albumList2".into()))?;
+        Ok(AlbumPage {
+            served: list.album.served.min(size),
+            albums: list
+                .album
+                .items
+                .into_iter()
+                .take(size)
+                .filter_map(api::RawAlbum::into_album)
+                .collect(),
+        })
+    }
+
+    /// The user's playlists, in served order (`getPlaylists`).
+    pub async fn playlists(&self) -> Result<Vec<Playlist>, Error> {
+        let playlists = self
+            .get::<api::PlaylistsReply>("getPlaylists", &[])
+            .await?
+            .playlists
+            .ok_or_else(|| Error::Decode("getPlaylists: missing playlists".into()))?;
+        Ok(playlists
+            .playlist
+            .items
+            .into_iter()
+            .filter_map(api::RawPlaylist::into_playlist)
+            .collect())
+    }
+
+    /// The songs of one playlist in playlist order, duplicates included
+    /// (`getPlaylist`), with how many entries the server sent.
+    pub async fn playlist(&self, id: &str) -> Result<PlaylistSongs, Error> {
+        let playlist = self
+            .get_capped::<api::PlaylistReply>("getPlaylist", &[("id", id)], MAX_PLAYLIST_BODY_BYTES)
+            .await?
+            .playlist
+            .ok_or_else(|| Error::Decode("getPlaylist: missing playlist".into()))?;
+        Ok(PlaylistSongs {
+            served: playlist.entry.served,
+            tracks: playlist
+                .entry
+                .items
+                .into_iter()
+                .filter_map(api::RawSong::into_track)
+                .collect(),
+        })
     }
 
     /// `search3` with bounded result counts. A response without a result
@@ -303,7 +376,7 @@ impl Client {
             ("songCount", songs.as_str()),
         ];
         let result = self
-            .get("search3", &params)
+            .get::<api::SearchReply>("search3", &params)
             .await?
             .search_result3
             .unwrap_or_default();
@@ -346,7 +419,9 @@ impl Client {
         if let Some(time) = &time {
             params.push(("time", time.as_str()));
         }
-        self.get("scrobble", &params).await.map(drop)
+        self.get::<api::EmptyReply>("scrobble", &params)
+            .await
+            .map(drop)
     }
 
     /// A freshly signed stream URL for `song_id`. Pure apart from the salt.
@@ -379,7 +454,21 @@ impl Client {
         Ok(url)
     }
 
-    async fn get(&self, endpoint: &str, params: &[(&str, &str)]) -> Result<api::Response, Error> {
+    async fn get<R: api::Reply>(
+        &self,
+        endpoint: &str,
+        params: &[(&str, &str)],
+    ) -> Result<R, Error> {
+        self.get_capped(endpoint, params, MAX_BODY_BYTES).await
+    }
+
+    /// Like [`Self::get`], with a body cap of `max_body` bytes.
+    async fn get_capped<R: api::Reply>(
+        &self,
+        endpoint: &str,
+        params: &[(&str, &str)],
+        max_body: usize,
+    ) -> Result<R, Error> {
         let url = self.signed_url(endpoint, params)?;
         tracing::debug!(endpoint, "navidrome request");
         let mut response = self.http.get(url).send().await.map_err(Error::network)?;
@@ -398,18 +487,18 @@ impl Client {
         }
         if response
             .content_length()
-            .is_some_and(|len| len > MAX_BODY_BYTES as u64)
+            .is_some_and(|len| len > max_body as u64)
         {
             return Err(Error::TooLarge);
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(Error::network)? {
-            if body.len() + chunk.len() > MAX_BODY_BYTES {
+            if body.len() + chunk.len() > max_body {
                 return Err(Error::TooLarge);
             }
             body.extend_from_slice(&chunk);
         }
-        let envelope: api::Envelope = serde_json::from_slice(&body).map_err(|e| {
+        let response: R = api::parse(&body).map_err(|e| {
             Error::Decode(format!(
                 "{endpoint}: {:?} error at line {} column {}",
                 e.classify(),
@@ -417,15 +506,15 @@ impl Client {
                 e.column()
             ))
         })?;
-        check_status(endpoint, envelope.response)
+        check_status(endpoint, response)
     }
 }
 
-fn check_status(endpoint: &str, response: api::Response) -> Result<api::Response, Error> {
-    match response.status.as_deref() {
+fn check_status<R: api::Reply>(endpoint: &str, mut response: R) -> Result<R, Error> {
+    match response.status() {
         Some("ok") => Ok(response),
         Some("failed") => {
-            let error = response.error.unwrap_or_default();
+            let error = response.take_error().unwrap_or_default();
             match error.code {
                 Some(code) if AUTH_ERROR_CODES.contains(&code) => Err(Error::Auth),
                 code => Err(Error::Server {

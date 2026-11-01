@@ -20,7 +20,7 @@ use crate::app::{
     PRESS_ENTER_TO_CONNECT, ScanState, Source, count, thousands,
 };
 use crate::model::Track;
-use crate::navidrome::browse::{Browser, Load, Resource, Row};
+use crate::navidrome::browse::{Browser, Load, More, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
 use crate::ui::{help, settings};
 
@@ -44,6 +44,8 @@ pub struct ViewState {
     local_search_offset: usize,
     remote_offset: usize,
     queue_offset: usize,
+    /// Navidrome list rows shown in the last frame (0 if none).
+    pub remote_rows: usize,
     /// The largest useful help scroll for the last frame's size.
     pub help_max_scroll: usize,
     /// Advances the settings spinner, one step per frame.
@@ -295,19 +297,31 @@ fn draw_local_search(
     frame.render_stateful_widget(list_widget(items, Block::new(), focused), area, &mut state);
 }
 
-/// `Navidrome (<state>): Artists / <artist> / <album>`, fitted to a panel
-/// of `width` columns. When too long, the start of the path is cut so the
-/// shown view stays visible.
+/// Separates the views of the path in the Navidrome panel title.
+pub const PATH_SEPARATOR: &str = " › ";
+
+/// `Navidrome (<state>) › Albums (newest) › <album>`, fitted to a panel
+/// of `width` columns; Home is the bare `Navidrome (<state>)`. When too
+/// long, the start of the path is cut so the shown view stays visible.
 fn remote_title(connection: &Connection, browser: &Browser, width: u16) -> String {
     let state = match connection {
         Connection::Connecting => "connecting…",
         Connection::Connected => "connected",
         Connection::Failed(_) => "not connected",
     };
-    let prefix = format!("Navidrome ({state}): ");
-    let path: Vec<&str> = browser.stack().iter().map(|v| v.title.as_str()).collect();
+    let prefix = format!("Navidrome ({state})");
+    let path: Vec<String> = browser
+        .stack()
+        .iter()
+        .filter(|v| v.resource != Resource::Home)
+        .map(|v| browser.title(v))
+        .collect();
+    if path.is_empty() {
+        return prefix;
+    }
+    let prefix = format!("{prefix}{PATH_SEPARATOR}");
     let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
-    format!("{prefix}{}", fit_tail(&path.join(" / "), room))
+    format!("{prefix}{}", fit_tail(&path.join(PATH_SEPARATOR), room))
 }
 
 fn draw_remote(
@@ -332,6 +346,7 @@ fn draw_remote(
         let line = Line::styled(fit(text, usize::from(body.width)), style);
         frame.render_widget(Paragraph::new(line), body);
     };
+    view.remote_rows = 0;
     let Some(current) = browser.current() else {
         return;
     };
@@ -348,17 +363,41 @@ fn draw_remote(
             };
             if content.is_empty() {
                 let text = match current.resource {
+                    Resource::Home => "",
                     Resource::Artists => "No artists",
-                    Resource::Artist(_) => "No albums",
-                    Resource::Album(_) => "No songs",
+                    Resource::Artist(_) | Resource::Albums(_) | Resource::AlbumPage { .. } => {
+                        "No albums"
+                    }
+                    Resource::Album(_) | Resource::Playlist(_) => "No songs",
                     Resource::Search(_) => "No results",
+                    Resource::Playlists => "No playlists",
                 };
                 message(frame, text, Style::default().fg(Color::DarkGray));
                 return;
             }
-            let in_search = matches!(current.resource, Resource::Search(_));
+            let footer = match browser.more(current) {
+                More::Idle => None,
+                More::Loading => Some(Line::styled(
+                    fit("Loading more…", usize::from(body.width)),
+                    Style::default().fg(Color::Yellow),
+                )),
+                More::Failed(_) => Some(Line::styled(
+                    fit("Could not load more — r to retry", usize::from(body.width)),
+                    Style::default().fg(Color::Red),
+                )),
+            };
+            if let Some(footer) = footer
+                && body.height > 1
+            {
+                let [list, footer_area] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+                frame.render_widget(Paragraph::new(footer), footer_area);
+                body = list;
+            }
+            let style = RowStyle::of(&current.resource);
             let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
             let height = usize::from(body.height);
+            view.remote_rows = height;
             let offset = scroll_offset(view.remote_offset, current.selected, content.len(), height);
             view.remote_offset = offset;
             let items: Vec<ListItem> = content
@@ -366,7 +405,7 @@ fn draw_remote(
                 .into_iter()
                 .map(|row| {
                     note_row_built();
-                    ListItem::new(remote_row(row, in_search, width))
+                    ListItem::new(remote_row(row, style, width))
                 })
                 .collect();
             let mut state =
@@ -380,7 +419,29 @@ fn draw_remote(
     }
 }
 
-fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
+/// How rows of a remote view show their item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowStyle {
+    /// Albums with their artist (lists across artists).
+    album_artist: bool,
+    /// Songs as `artist - title` rather than `NN title` (lists that are
+    /// not one album).
+    song_artist: bool,
+}
+
+impl RowStyle {
+    fn of(resource: &Resource) -> Self {
+        Self {
+            album_artist: matches!(
+                resource,
+                Resource::Search(_) | Resource::Albums(_) | Resource::AlbumPage { .. }
+            ),
+            song_artist: matches!(resource, Resource::Search(_) | Resource::Playlist(_)),
+        }
+    }
+}
+
+fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
     match row {
         Row::Header(section) => Line::styled(
             fit(section.label(), width),
@@ -388,20 +449,29 @@ fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        Row::Home(entry) => Line::raw(fit(entry.label(), width)),
+        Row::Playlist(playlist) => {
+            let songs = playlist.song_count.map(|n| count(n as usize, "song"));
+            let right = match (songs, playlist.duration.map(format_time)) {
+                (Some(songs), Some(time)) => Some(format!("{songs} · {time}")),
+                (songs, time) => songs.or(time),
+            };
+            row_line(&playlist.name, right, width)
+        }
         Row::Artist(artist) => row_line(
             &artist.name,
             artist.album_count.map(|n| count(n as usize, "album")),
             width,
         ),
         Row::Album(album) => {
-            let left = match (&album.artist, in_search) {
+            let left = match (&album.artist, style.album_artist) {
                 (Some(artist), true) => format!("{} — {artist}", album.name),
                 _ => album.name.clone(),
             };
             row_line(&left, album.year.map(|y| y.to_string()), width)
         }
         Row::Song(track) => {
-            let left = if in_search {
+            let left = if style.song_artist {
                 track.display_name()
             } else {
                 match track.track_no {
@@ -809,10 +879,7 @@ mod tests {
         .unwrap();
         let mut app = App::with_sources(None, Some(client));
         let screen = render(&app, 100, 20, now);
-        assert!(
-            screen.contains("Navidrome (connecting…): Artists"),
-            "{screen}"
-        );
+        assert!(screen.contains("Navidrome (connecting…) "), "{screen}");
         assert!(!screen.contains("Scanning"), "{screen}");
         assert!(screen.contains("? help"), "{screen}");
         app.handle_action(Action::SelectLocal, now);
@@ -1557,9 +1624,13 @@ mod tests {
         .unwrap()
     }
 
-    /// Navidrome only; the startup Artists request is returned unanswered.
+    /// Navidrome only, with Artists opened from Home; its request is
+    /// returned unanswered.
     fn nav_app() -> (App, FetchRequest) {
         let mut app = App::with_sources(None, Some(nav_client()));
+        let now = Instant::now();
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
         let request = app.take_fetch_requests().remove(0);
         (app, request)
     }
@@ -1623,7 +1694,7 @@ mod tests {
         );
         let screen = render(&app, 100, 14, now);
         assert!(
-            screen.contains("Navidrome (connected): Artists"),
+            screen.contains("Navidrome (connected) › Artists"),
             "{screen}"
         );
         assert!(screen.contains("> Miles Davis"), "{screen}");
@@ -1638,7 +1709,7 @@ mod tests {
         app.handle_action(Action::Activate, now);
         let screen = render(&app, 100, 14, now);
         assert!(
-            screen.contains("Navidrome (connected): Artists / Miles Davis"),
+            screen.contains("Navidrome (connected) › Artists › Miles Davis"),
             "{screen}"
         );
         assert!(screen.contains("Loading…"), "{screen}");
@@ -1737,13 +1808,13 @@ mod tests {
         let screen = render(&app, 140, 14, now);
         assert!(!screen.contains("Search: "), "{screen}");
         assert!(
-            screen.contains("Navidrome (connected): Artists / Search \"blue x\""),
+            screen.contains("Navidrome (connected) › Artists › Search \"blue x\""),
             "{screen}"
         );
         // A narrow panel cuts the start of the path, not the shown view.
         let screen = render(&app, 40, 14, now);
         assert!(
-            screen.contains("(connected): …") && screen.contains("\"blue x\" ┐"),
+            screen.contains("(connected) › …") && screen.contains("\"blue x\" ┐"),
             "{screen}"
         );
         answer(
@@ -1790,6 +1861,8 @@ mod tests {
         );
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::SelectNavidrome, now);
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
         let request = app.take_fetch_requests().remove(0);
         answer(
             &mut app,
@@ -1861,5 +1934,221 @@ mod tests {
                 assert_full_width(&screen, width);
             }
         }
+    }
+
+    // ----- Navidrome Home, playlists and album lists ---------------------
+
+    use crate::navidrome::browse::Resource as Res;
+    use crate::navidrome::{AlbumPage, AlbumSort, Playlist};
+
+    /// Navidrome only, connected, on Home.
+    fn nav_home() -> App {
+        let mut app = App::with_sources(None, Some(nav_client()));
+        app.handle_navidrome_ping(Ok(()), Instant::now());
+        app
+    }
+
+    fn press(app: &mut App, actions: &[Action]) {
+        for action in actions {
+            app.handle_action(*action, Instant::now());
+        }
+    }
+
+    fn nav_album(id: &str, name: &str, artist: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: name.into(),
+            artist: Some(artist.into()),
+            year: Some(1959),
+            song_count: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn home_and_playlists_render() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        let screen = render(&app, 100, 14, now);
+        for expected in [
+            "┌ Navidrome (connected) ─",
+            "> Playlists",
+            "Artists",
+            "Albums",
+        ] {
+            assert!(screen.contains(expected), "{expected}:\n{screen}");
+        }
+        assert!(!screen.contains("›"), "Home has no path: {screen}");
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        assert_eq!(request.resource, Res::Playlists);
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![
+                Playlist {
+                    id: "p1".into(),
+                    name: "Road Trip".into(),
+                    song_count: Some(12),
+                    duration: Some(Duration::from_secs(2712)),
+                },
+                Playlist {
+                    id: "p2".into(),
+                    name: "\u{202E}Huge\u{1b}[2J".into(),
+                    song_count: Some(u32::MAX),
+                    duration: Some(Duration::MAX),
+                },
+                Playlist {
+                    id: "p3".into(),
+                    name: "Bare".into(),
+                    song_count: None,
+                    duration: None,
+                },
+            ])),
+        );
+        let screen = render(&app, 100, 14, now);
+        for expected in [
+            "Navidrome (connected) › Playlists",
+            "> Road Trip",
+            "12 songs · 45:12",
+            "4,294,967,295 songs",
+            "Bare",
+        ] {
+            assert!(screen.contains(expected), "{expected}:\n{screen}");
+        }
+        assert!(!screen.contains('\u{1b}') && !screen.contains('\u{202E}'));
+        assert_full_width(&screen, 100);
+        assert_full_width(&render(&app, 30, 14, now), 30);
+        // A playlist's songs show their artist.
+        press(&mut app, &[Action::Activate]);
+        let songs = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &songs,
+            Ok(Content::Songs(vec![
+                nav_track("s1", "So What", "Miles Davis", 562),
+                nav_track("s1", "So What", "Miles Davis", 562),
+            ])),
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Playlists › Road Trip"),
+            "{screen}"
+        );
+        assert_eq!(
+            screen.matches("Miles Davis - So What").count(),
+            2,
+            "{screen}"
+        );
+        assert!(screen.contains("9:22"), "{screen}");
+    }
+
+    #[test]
+    fn album_lists_show_the_sort_and_a_paging_footer() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        press(&mut app, &[Action::Down, Action::Down, Action::Activate]);
+        let first = app.take_fetch_requests().remove(0);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Albums (A–Z)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Loading…"), "{screen}");
+        let albums: Vec<Album> = (0..500)
+            .map(|i| nav_album(&format!("al{i}"), &format!("Record {i:03}"), "Band"))
+            .collect();
+        answer(
+            &mut app,
+            &first,
+            Ok(Content::AlbumPage(AlbumPage {
+                albums,
+                served: 500,
+            })),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut view = ViewState::default();
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> Record 000 — Band"), "{screen}");
+        assert!(screen.contains("1959"), "{screen}");
+        assert!(!screen.contains("Loading more"), "{screen}");
+        // 14 rows - 5 (now playing, status) - 2 borders.
+        assert_eq!(view.remote_rows, 7);
+        app.set_remote_rows(view.remote_rows);
+        for _ in 0..493 {
+            press(&mut app, &[Action::Down]);
+        }
+        let more = app.take_fetch_requests().remove(0);
+        assert_eq!(
+            more.resource,
+            Res::AlbumPage {
+                sort: AlbumSort::Name,
+                offset: 500
+            }
+        );
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> Record 493 — Band"), "{screen}");
+        assert!(screen.contains("Loading more…"), "{screen}");
+        assert_eq!(view.remote_rows, 6, "the footer takes a row");
+        answer(&mut app, &more, Err(crate::navidrome::Error::Http(500)));
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("Could not load more — r to retry"),
+            "{screen}"
+        );
+        assert!(!screen.contains("secret-host"), "{screen}");
+        // The sort shows in the title.
+        press(&mut app, &[Action::CycleSort, Action::CycleSort]);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Albums (newest)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_huge_playlist_renders_only_visible_rows() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        press(&mut app, &[Action::Activate]);
+        let lists = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![Playlist {
+                id: "big".into(),
+                name: "Big".into(),
+                song_count: Some(10_000),
+                duration: None,
+            }])),
+        );
+        press(&mut app, &[Action::Activate]);
+        let songs = app.take_fetch_requests().remove(0);
+        let tracks: Vec<Track> = (0..10_000)
+            .map(|i| nav_track(&format!("s{i}"), &format!("Song {i:05}"), "x", 60))
+            .collect();
+        answer(&mut app, &songs, Ok(Content::Songs(tracks)));
+        for _ in 0..9_990 {
+            press(&mut app, &[Action::Down]);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut view = ViewState::default();
+        let started = Instant::now();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(1), "render took {elapsed:?}");
+        assert!(built <= 2 * 19, "built {built} rows");
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> x - Song 09990"), "{screen}");
+    }
+
+    #[test]
+    fn help_lists_play_next_and_sort() {
+        let keys: Vec<&str> = help::BINDINGS.iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"a / A"), "{keys:?}");
+        assert!(keys.contains(&"r / o"), "{keys:?}");
     }
 }

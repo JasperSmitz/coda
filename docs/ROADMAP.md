@@ -44,7 +44,7 @@ Brief: `docs/plans/m4-onboarding.md`. Decision: `docs/decisions/0004-keychain-pa
 2. Connect, edit or disconnect Navidrome from within the app, and redo setup (`coda --setup` or from the app). Part A, `coda --setup`: **(completed, reviewed)**. Part B, in-app settings (`,`): **(completed, reviewed)**.
 
 ## M5 — Library home and playlists (in progress)
-Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (read-only), album list with sort and paging, `A` play next. 2. Local home with tag-based artists/albums and `.m3u` playlists. 3. Navidrome playlist editing: save queue as playlist, add to playlist, remove, reorder, rename, delete.
+Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (read-only), album list with sort and paging, `A` play next. **(completed, reviewed)** 2. Local home with tag-based artists/albums and `.m3u` playlists. 3. Navidrome playlist editing: save queue as playlist, add to playlist, remove, reorder, rename, delete.
 - A home menu per source: Playlists, Artists, Albums (Songs only if it proves useful; search covers finding songs).
 - Navidrome playlists: read-only in slice 1; creating, editing and saving the queue as a playlist in slice 3.
 - All-albums list (`getAlbumList2`, paged) with useful sort orders.

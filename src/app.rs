@@ -69,7 +69,7 @@ use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
 use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
-use crate::queue::{QueueEntryId, Rng};
+use crate::queue::{Placement, QueueEntryId, Rng};
 use crate::resolve;
 use crate::secret_store::{SecretError, SecretStore};
 use crate::session::{self, Session};
@@ -140,8 +140,13 @@ pub enum Action {
     /// Library: go to the parent directory or previous view.
     Parent,
     /// Library: enqueue the track, all tracks below the directory, or a
-    /// remote album or artist.
+    /// remote album, playlist or artist.
     Enqueue,
+    /// Library (`A`): like [`Action::Enqueue`], but "play next": after the
+    /// current entry, behind earlier "play next" tracks.
+    EnqueueNext,
+    /// Library (`o`): show a Navidrome album list in the next sort order.
+    CycleSort,
     /// `1`: show the local library (focuses the Library panel).
     SelectLocal,
     /// `2`: show Navidrome (focuses the Library panel).
@@ -199,6 +204,8 @@ impl Action {
                 | Self::Parent
                 | Self::Back
                 | Self::Enqueue
+                | Self::EnqueueNext
+                | Self::CycleSort
                 | Self::OpenSearch
                 | Self::Refresh
         )
@@ -511,6 +518,16 @@ impl App {
         self.help_scroll = self.help_scroll.min(max);
     }
 
+    /// The number of Navidrome list rows the last frame showed, so paged
+    /// lists load ahead by a screen. Ignored while nothing was shown.
+    pub fn set_remote_rows(&mut self, rows: usize) {
+        if rows > 0
+            && let Some(browser) = self.browser.as_mut()
+        {
+            browser.set_viewport_rows(rows);
+        }
+    }
+
     pub fn scan_state(&self) -> ScanState {
         self.scan
     }
@@ -774,14 +791,25 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::Enqueue => {
+            Action::Enqueue | Action::EnqueueNext => {
+                let placement = if action == Action::EnqueueNext {
+                    Placement::Next
+                } else {
+                    Placement::End
+                };
                 if self.remote_active() {
-                    let outcomes = self.browser_mut().enqueue_selected();
+                    let outcomes = self.browser_mut().enqueue_selected(placement);
                     self.apply_job_outcomes(outcomes, now);
                 } else if self.local_results_active() {
-                    self.enqueue_search_result(now);
+                    self.enqueue_search_result(placement, now);
                 } else if self.focus == Focus::Library {
-                    self.enqueue_selected(now);
+                    self.enqueue_selected(placement, now);
+                }
+                Vec::new()
+            }
+            Action::CycleSort => {
+                if self.remote_active() {
+                    self.browser_mut().cycle_album_sort();
                 }
                 Vec::new()
             }
@@ -1320,9 +1348,9 @@ impl App {
         }
     }
 
-    fn enqueue_search_result(&mut self, now: Instant) {
+    fn enqueue_search_result(&mut self, placement: Placement, now: Instant) {
         if let Some(track) = self.selected_search_result() {
-            self.enqueue_with_status(vec![track], now);
+            self.enqueue_with_status(vec![track], placement, now);
         }
     }
 
@@ -1352,13 +1380,18 @@ impl App {
         let mut last = None;
         for outcome in outcomes {
             match outcome {
-                JobOutcome::Added { label, tracks } => {
+                JobOutcome::Added {
+                    label,
+                    tracks,
+                    placement,
+                } => {
+                    let verb = self.added_verb(placement);
                     last = Some(match tracks.as_slice() {
                         [] => format!("Nothing to add from {label}"),
-                        [one] => format!("Added {}", one.display_name()),
-                        many => format!("Added {} from {label}", count(many.len(), "track")),
+                        [one] => format!("{verb} {}", one.display_name()),
+                        many => format!("{verb} {} from {label}", count(many.len(), "track")),
                     });
-                    let (n, dropped) = self.enqueue_tracks(tracks);
+                    let (n, dropped) = self.enqueue_tracks(tracks, placement);
                     added += n;
                     not_added += dropped;
                 }
@@ -1395,15 +1428,21 @@ impl App {
         self.clamp_selections();
     }
 
-    /// Appends `tracks` up to the queue's cap. Returns how many were added
-    /// and how many were dropped.
-    fn enqueue_tracks(&mut self, tracks: Vec<Track>) -> (usize, usize) {
+    /// Adds `tracks` in order at `placement`, up to the queue's cap.
+    /// Returns how many were added and how many were dropped.
+    fn enqueue_tracks(&mut self, tracks: Vec<Track>, placement: Placement) -> (usize, usize) {
         let total = tracks.len();
-        let added = tracks
-            .into_iter()
-            .map_while(|track| self.player.enqueue(track))
-            .count();
+        let added = self.player.enqueue_all(tracks, placement);
         (added, total - added)
+    }
+
+    /// How the status line reports tracks added at `placement`: "play
+    /// next" without a current entry just appends, so it says so.
+    fn added_verb(&self, placement: Placement) -> &'static str {
+        match placement {
+            Placement::Next if self.player.queue().current().is_some() => "Playing next:",
+            _ => "Added",
+        }
     }
 
     fn activate_queue(&mut self) -> Vec<PlayerCommand> {
@@ -1423,7 +1462,7 @@ impl App {
         self.library_selected = self.row_index(&RowKey::Dir(left)).unwrap_or(0);
     }
 
-    fn enqueue_selected(&mut self, now: Instant) {
+    fn enqueue_selected(&mut self, placement: Placement, now: Instant) {
         let tracks: Vec<Track> = match self.selected_row() {
             Some(LibraryRow::Track(track)) => vec![track.clone()],
             Some(LibraryRow::Dir(dir)) => {
@@ -1433,20 +1472,22 @@ impl App {
             }
             None => return,
         };
-        self.enqueue_with_status(tracks, now);
+        self.enqueue_with_status(tracks, placement, now);
     }
 
-    /// Appends `tracks` and reports what was added in the status line.
-    fn enqueue_with_status(&mut self, tracks: Vec<Track>, now: Instant) {
+    /// Adds `tracks` at `placement` and reports what was added in the
+    /// status line.
+    fn enqueue_with_status(&mut self, tracks: Vec<Track>, placement: Placement, now: Instant) {
+        let verb = self.added_verb(placement);
         let text = match tracks.as_slice() {
-            [one] => format!("Added {}", one.display_name()),
-            many => format!("Added {}", count(many.len(), "track")),
+            [one] => format!("{verb} {}", one.display_name()),
+            many => format!("{verb} {}", count(many.len(), "track")),
         };
-        let text = match self.enqueue_tracks(tracks) {
+        let text = match self.enqueue_tracks(tracks, placement) {
             (_, 0) => text,
             (0, _) => QUEUE_FULL.to_owned(),
             (added, dropped) => format!(
-                "Added {}; queue full, {} not added",
+                "{verb} {}; queue full, {} not added",
                 count(added, "track"),
                 thousands(dropped)
             ),
@@ -1538,18 +1579,7 @@ pub fn count(n: usize, noun: &str) -> String {
     format!("{} {noun}{plural}", thousands(n))
 }
 
-/// Formats with `,` thousands separators.
-pub fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use crate::model::thousands;
 
 // ----- terminal lifecycle and event loop -------------------------------
 
@@ -2142,7 +2172,15 @@ async fn event_loop(
         if dirty {
             terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
             app.clamp_help_scroll(view.help_max_scroll);
-            dirty = false;
+            app.set_remote_rows(view.remote_rows);
+            // A larger screen may want the next page of a list at once;
+            // draw again right away so "Loading more…" shows.
+            let requests = app.take_fetch_requests();
+            dirty = !requests.is_empty();
+            fetches.spawn(requests, app.navidrome_client(), &fetch_tx);
+            if dirty {
+                continue;
+            }
         }
         tokio::select! {
             input_event = input.next() => match input_event {
@@ -2836,9 +2874,16 @@ mod tests {
         Content::Songs(ids.iter().map(|id| remote(id)).collect())
     }
 
-    /// Navidrome only: the Navidrome source is active and the artists are
-    /// requested at once.
+    /// Navidrome only: the Navidrome source is active on Home; Artists is
+    /// opened from it, so the artists are requested.
     fn nav_app() -> (App, Instant) {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        (app, now)
+    }
+
+    /// Navidrome only, on Home.
+    fn nav_home() -> (App, Instant) {
         (App::with_sources(None, Some(client())), Instant::now())
     }
 
@@ -2881,12 +2926,11 @@ mod tests {
         app.browser().unwrap()
     }
 
+    /// The titles of the views below Home (which is always the root).
     fn view_titles(app: &App) -> Vec<String> {
-        browser(app)
-            .stack()
-            .iter()
-            .map(|v| v.title.clone())
-            .collect()
+        let stack = browser(app).stack();
+        assert_eq!(stack[0].resource, Resource::Home);
+        stack[1..].iter().map(|v| v.title.clone()).collect()
     }
 
     fn current_load(app: &App) -> Load {
@@ -2898,10 +2942,23 @@ mod tests {
     }
 
     #[test]
-    fn navidrome_only_starts_on_the_navidrome_source_and_fetches_artists() {
-        let (mut app, _) = nav_app();
+    fn navidrome_only_starts_on_home_and_fetches_nothing_until_opened() {
+        let (mut app, now) = nav_home();
         assert_eq!(app.source(), Source::Navidrome);
         assert_eq!(app.connection(), &Connection::Connecting);
+        assert_eq!(current_load(&app), Load::Ready);
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty(), "Home is static");
+        // `h` and `a` on Home do nothing; `r` fetches nothing.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Enqueue, Action::Refresh],
+            now,
+        );
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty());
+        assert!(app.player().queue().is_empty());
+        press(&mut app, &[Action::Down, Action::Activate], now);
         assert!(matches!(current_load(&app), Load::Loading(_)));
         assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(one_request(&mut app).resource, Resource::Artists);
@@ -2950,15 +3007,19 @@ mod tests {
         assert_eq!(queue_titles(&app), ["Remote s1", "Remote s2*", "Remote s3"]);
         assert_eq!(app.status(now), Some("Playing Remote s2"));
 
-        // Up the stack: each view keeps its selection; the root stays.
+        // Up the stack: each view keeps its selection; Home stays.
         press(&mut app, &[Action::Parent], now);
         assert_eq!(view_titles(&app), ["Artists", "Artist a2"]);
         assert_eq!(current_selected(&app), 1);
-        press(&mut app, &[Action::Parent, Action::Parent], now);
+        press(&mut app, &[Action::Parent], now);
         assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(current_selected(&app), 1);
+        press(&mut app, &[Action::Parent, Action::Parent], now);
+        assert!(view_titles(&app).is_empty());
+        assert_eq!(current_selected(&app), 1, "Home keeps its selection");
         // Re-opening a cached list needs no request.
         press(&mut app, &[Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(current_load(&app), Load::Ready);
         assert!(requests(&mut app).is_empty());
     }
@@ -3143,6 +3204,191 @@ mod tests {
         assert_eq!(one_request(&mut app).resource, Resource::Album("x".into()));
     }
 
+    // ----- play next (`A`) ------------------------------------------------
+
+    #[test]
+    fn local_play_next_on_a_folder_and_tracks_keeps_press_order() {
+        let (mut app, now) = app_with(&["a.flac", "b.flac", "d/1.flac", "d/2.flac"]);
+        assert_eq!(row_names(&app), ["d/", "a", "b"]);
+        // Play a, append b.
+        press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Down,
+                Action::Enqueue,
+            ],
+            now,
+        );
+        assert_eq!(queue_titles(&app), ["a*", "b"]);
+        // `A` on the folder, then on b: both right after a, in that order.
+        let commands = press(
+            &mut app,
+            &[Action::Up, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        assert!(commands.is_empty(), "play next never starts playback");
+        assert_eq!(app.status(now), Some("Playing next: 2 tracks"));
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::EnqueueNext],
+            now,
+        );
+        assert_eq!(app.status(now), Some("Playing next: b"));
+        assert_eq!(queue_titles(&app), ["a*", "1", "2", "b", "b"]);
+        // Playing another track starts a new run.
+        press(&mut app, &[Action::Up, Action::Activate], now);
+        press(&mut app, &[Action::Down, Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["a", "a*", "b", "1", "2", "b", "b"]);
+    }
+
+    #[test]
+    fn play_next_with_nothing_current_appends() {
+        let (mut app, now) = app_with(&["a.flac", "b.flac"]);
+        press(
+            &mut app,
+            &[Action::EnqueueNext, Action::Down, Action::EnqueueNext],
+            now,
+        );
+        assert_eq!(queue_titles(&app), ["a", "b"]);
+        // Local search results too.
+        local_search_for(&mut app, "a", now);
+        press(&mut app, &[Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["a", "b", "a"]);
+        assert_eq!(app.status(now), Some("Added a"), "nothing plays next");
+    }
+
+    #[test]
+    fn remote_play_next_jobs_keep_their_turn() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        let albums = one_request(&mut app);
+        respond(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let y = one_request(&mut app);
+        respond(&mut app, &y, Ok(songs(&["y1", "y2"])));
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(queue_titles(&app), ["Remote y1*"]);
+        // `A` on album x (not fetched yet), then on song y2 (ready).
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        let x = one_request(&mut app);
+        assert_eq!(app.status(now), Some("Fetching Album x…"));
+        press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Down,
+                Action::EnqueueNext,
+            ],
+            now,
+        );
+        assert_eq!(app.status(now), Some("Queued Remote y2 after Album x…"));
+        assert_eq!(queue_titles(&app), ["Remote y1*"]);
+        respond(&mut app, &x, Ok(songs(&["x1", "x2"])));
+        assert_eq!(
+            queue_titles(&app),
+            ["Remote y1*", "Remote x1", "Remote x2", "Remote y2"]
+        );
+        assert_eq!(app.status(now), Some("Playing next: Remote y2"));
+    }
+
+    #[test]
+    fn a_pending_play_next_job_keeps_press_order_after_an_unrelated_remove() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        let albums = one_request(&mut app);
+        respond(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let y = one_request(&mut app);
+        respond(&mut app, &y, Ok(songs(&["y1", "y2", "y3"])));
+        // Play y1, append y3, `A` y2: y1* y2 y3.
+        press(&mut app, &[Action::Activate], now);
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Enqueue],
+            now,
+        );
+        press(&mut app, &[Action::Up, Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["Remote y1*", "Remote y2", "Remote y3"]);
+        // `A` on album x (still to fetch), then remove y3 meanwhile.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        let x = one_request(&mut app);
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::Down, Action::Down, Action::Remove], now);
+        app.focus = Focus::Library;
+        respond(&mut app, &x, Ok(songs(&["x1", "x2"])));
+        assert_eq!(
+            queue_titles(&app),
+            ["Remote y1*", "Remote y2", "Remote x1", "Remote x2"]
+        );
+    }
+
+    #[test]
+    fn o_cycles_the_album_sort_only_in_an_album_list() {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::CycleSort], now);
+        assert!(requests(&mut app).is_empty(), "nothing on Home");
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(view_titles(&app), ["Albums (A–Z)"]);
+        let first = one_request(&mut app);
+        assert_eq!(
+            first.resource,
+            Resource::AlbumPage {
+                sort: navidrome::AlbumSort::Name,
+                offset: 0
+            }
+        );
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(view_titles(&app), ["Albums (by artist)"]);
+        let next = one_request(&mut app);
+        assert_eq!(
+            next.resource,
+            Resource::AlbumPage {
+                sort: navidrome::AlbumSort::Artist,
+                offset: 0
+            }
+        );
+        // The first order still lands in its cache.
+        respond(
+            &mut app,
+            &first,
+            Ok(Content::AlbumPage(navidrome::AlbumPage {
+                albums: vec![album("a")],
+                served: 1,
+            })),
+        );
+        assert!(
+            browser(&app)
+                .cached(&Resource::Albums(navidrome::AlbumSort::Name))
+                .is_some()
+        );
+        // `o` in the local source does nothing.
+        press(&mut app, &[Action::SelectLocal, Action::CycleSort], now);
+        assert!(requests(&mut app).is_empty());
+    }
+
     #[test]
     fn failed_job_reports_its_error() {
         let (mut app, now) = nav_app_with_artists(&["a1"]);
@@ -3278,6 +3524,8 @@ mod tests {
         );
         assert_eq!(app.focus(), Focus::Library);
         assert_eq!(app.source(), Source::Navidrome);
+        assert!(requests(&mut app).is_empty(), "Home fetches nothing");
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let request = one_request(&mut app);
         respond(
             &mut app,
@@ -4398,6 +4646,8 @@ mod tests {
         app.handle_settings_input(Input::Esc, now);
         assert!(!app.settings_open());
         press(&mut app, &[Action::SelectNavidrome], now);
+        assert!(requests(&mut app).is_empty(), "Home fetches nothing");
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let request = one_request(&mut app);
         assert_eq!(request.generation, Generation(1));
         assert_eq!(request.resource, Resource::Artists);
@@ -4412,8 +4662,12 @@ mod tests {
         app.set_settings_context(settings_context(None, coda_owned()));
         let old = one_request(&mut app);
         assert_eq!(old.generation, Generation(0));
-        // Browse a little first: the new browser starts over.
+        // Browse a little first: the new browser starts over, on Home.
         connect_in_app(&mut app, other_client(), true, now);
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty());
+        app.handle_settings_input(Input::Esc, now);
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let new = one_request(&mut app);
         assert_eq!(new.generation, Generation(1));
         assert_eq!(
@@ -4446,10 +4700,10 @@ mod tests {
         assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
         requests(&mut app);
         connect_in_app(&mut app, other_client(), true, now);
-        assert_eq!(view_titles(&app), ["Artists"]);
+        assert!(view_titles(&app).is_empty(), "back on Home");
         assert!(browser(&app).cached(&Resource::Artists).is_none());
         assert_eq!(browser(&app).generation(), Generation(1));
-        assert_eq!(one_request(&mut app).resource, Resource::Artists);
+        assert!(requests(&mut app).is_empty());
     }
 
     #[test]

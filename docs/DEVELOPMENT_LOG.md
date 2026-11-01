@@ -125,3 +125,31 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - The folder can only be changed with `coda --setup`.
   - The setup TUI has not been run on Linux.
   - Not run against the real macOS Keychain or a real server by the agents.
+
+## 2026-11-01 — M5 slice 1: Navidrome home, playlists, albums, play next
+- **Delivered:**
+  - Navidrome Home (Playlists / Artists / Albums), with path titles.
+  - Read-only playlists, with truncation shown ("first 10,000 of N").
+  - An album list with six sort orders (`o`). Pages of 500 load near the end, deduplicated by id; random is a single page.
+  - `A` plays next everywhere `a` works: press order is kept, the insertion point lives on the queue, and a job is inserted with one splice.
+  - New API calls: `getAlbumList2`, `getPlaylists`, `getPlaylist` (24 MiB body cap).
+- **Parser rewrite:**
+  - Navidrome JSON is parsed without `serde_json::Value`, through per-endpoint reply types, so other sections are drained.
+  - One object budget per response (100,000), and bounded string and id copies.
+  - A hostile 24 MiB body went from 1.31–1.57 GB peak to about 19 MB extra.
+- **Tests:**
+  - macOS: fmt, clippy (both), and `cargo test --all-targets` (489 lib + integration) pass, as do the 20 ignored mpv tests.
+  - Linux container: clippy and tests pass.
+  - PTY smoke against a fake Subsonic server (1,234 albums, playlists): 36/36.
+- **Review:** three rounds. Fixed:
+  - `Value` buffering per item, then per list
+  - duplicates across pages, and servers that ignore `offset`
+  - silent playlist truncation
+  - the play-next anchor on move, remove and remove-current
+  - the "Added" status when nothing is current
+  - O(n²) insertion
+  - a redraw after paging
+- **Limitations:**
+  - A legitimate response beyond 100,000 objects (e.g. more than about 100k artists) loses the excess silently.
+  - A duplicate key Coda reads fails the response.
+  - Browse position is not persisted; Navidrome opens on Home.

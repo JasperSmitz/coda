@@ -33,6 +33,8 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Enter => Action::Activate,
         KeyCode::Char('h') | KeyCode::Backspace if focus == Focus::Library => Action::Parent,
         KeyCode::Char('a') if focus == Focus::Library => Action::Enqueue,
+        KeyCode::Char('A') if focus == Focus::Library => Action::EnqueueNext,
+        KeyCode::Char('o') if focus == Focus::Library => Action::CycleSort,
         KeyCode::Char('/') if focus == Focus::Library => Action::OpenSearch,
         KeyCode::Esc if focus == Focus::Library => Action::Back,
         KeyCode::Char('r') if focus == Focus::Library => Action::Refresh,
@@ -139,6 +141,12 @@ mod tests {
         assert_eq!(lib(ch('/')), Some(Action::OpenSearch));
         assert_eq!(lib(key(KeyCode::Esc)), Some(Action::Back));
         assert_eq!(lib(ch('r')), Some(Action::Refresh));
+        assert_eq!(lib(ch('A')), Some(Action::EnqueueNext));
+        let shifted_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(lib(shifted_a), Some(Action::EnqueueNext));
+        assert_eq!(lib(ch('o')), Some(Action::CycleSort));
+        assert_eq!(queue(ch('A')), None);
+        assert_eq!(queue(ch('o')), None);
         assert_eq!(queue(ch('h')), None);
         assert_eq!(queue(key(KeyCode::Backspace)), None);
         assert_eq!(queue(ch('a')), None);
@@ -235,6 +243,8 @@ mod tests {
                 ch(' '),
                 ch('n'),
                 ch('a'),
+                ch('A'),
+                ch('o'),
                 ch('d'),
                 ch('h'),
                 ch('1'),
