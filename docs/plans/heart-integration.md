@@ -1,6 +1,6 @@
-# M4 — HEART integration: architecture recommendation
+# HEART integration: architecture recommendation
 
-- **Status:** proposed. Not approved for implementation. Written without inspecting or modifying the HEART repository; HEART's actual needs must be confirmed before a slice is briefed.
+- **Status:** postponed indefinitely (owner, 2026-10-31); kept for reference. Not approved for implementation. Written without inspecting or modifying the HEART repository; HEART's actual needs must be confirmed before a slice is briefed.
 - **Goal (roadmap):** a small command/state API HEART can call while Coda remains independently operable, with no HEART dependency in Coda.
 
 ## 1. What Coda already offers

@@ -5,6 +5,7 @@
 pub mod process;
 pub mod protocol;
 pub mod state;
+pub mod visualizer;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -42,6 +43,12 @@ pub struct MpvOptions {
     /// With `null_audio`, `--ao-null-buffer=<seconds>`: how much audio the
     /// null output takes up front, like a real device's buffer.
     pub null_audio_buffer: Option<u32>,
+    /// The visualizer adds this graph instead of [`visualizer::GRAPH`].
+    /// Tests use a broken one.
+    pub visualizer_graph: Option<String>,
+    /// More mpv arguments, after the others (tests render to a file with
+    /// `--ao=pcm`).
+    pub extra_args: Vec<String>,
 }
 
 impl Default for MpvOptions {
@@ -51,25 +58,37 @@ impl Default for MpvOptions {
             reply_timeout: state::REPLY_TIMEOUT,
             null_audio: false,
             null_audio_buffer: None,
+            visualizer_graph: None,
+            extra_args: Vec::new(),
         }
     }
 }
 
-/// Spawns mpv, connects to it and starts the driver task.
-pub async fn spawn(options: MpvOptions) -> Result<PlaybackHandle, SpawnError> {
-    let mut extra_args = Vec::new();
+/// The mpv arguments `options` add to [`process::mpv_args`].
+fn extra_args(options: &MpvOptions) -> Vec<String> {
+    let mut args = Vec::new();
     if options.null_audio {
-        extra_args.push("--ao=null".to_owned());
+        args.push("--ao=null".to_owned());
         if let Some(seconds) = options.null_audio_buffer {
-            extra_args.push(format!("--ao-null-buffer={seconds}"));
+            args.push(format!("--ao-null-buffer={seconds}"));
         }
     }
+    args.extend(options.extra_args.iter().cloned());
+    args
+}
+
+/// Spawns mpv, connects to it and starts the driver task.
+pub async fn spawn(options: MpvOptions) -> Result<PlaybackHandle, SpawnError> {
+    let extra_args = extra_args(&options);
     let extra_args: Vec<&str> = extra_args.iter().map(String::as_str).collect();
     let (process, stream) = MpvProcess::launch(&options.program, &extra_args).await?;
     let pid = process.id();
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-    let state = MpvState::with_reply_timeout(options.reply_timeout);
+    let mut state = MpvState::with_reply_timeout(options.reply_timeout);
+    if let Some(graph) = options.visualizer_graph {
+        state = state.with_visualizer_graph(graph);
+    }
     let task = tokio::spawn(run(process, stream, state, command_rx, event_tx));
     Ok(PlaybackHandle::new(command_tx, event_rx, task, pid))
 }
@@ -106,11 +125,19 @@ impl Writer {
 
     fn send(&self, requests: &[OutgoingRequest]) {
         for request in requests {
-            tracing::debug!(
-                request_id = request.request_id,
-                command = %request.command.describe(),
-                "mpv <-"
-            );
+            if request.command.is_frequent() {
+                tracing::trace!(
+                    request_id = request.request_id,
+                    command = %request.command.describe(),
+                    "mpv <-"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = request.request_id,
+                    command = %request.command.describe(),
+                    "mpv <-"
+                );
+            }
             let line = request.encode();
             if !request.command.is_sensitive() {
                 tracing::trace!(line = %line.trim_end(), "mpv <- raw");
@@ -161,7 +188,9 @@ async fn write_loop(
 /// The driver loop. Every iteration first checks the reply watchdog; the
 /// tick guarantees an iteration at least every [`POSITION_INTERVAL`] while
 /// the loop waits, which is the cadence the watchdog relies on to tell
-/// listening time from time spent blocked elsewhere.
+/// listening time from time spent blocked elsewhere. While the visualizer
+/// is active, its deadline wakes the loop as well (at most about 30 times
+/// a second); otherwise it costs nothing.
 async fn run(
     mut process: MpvProcess,
     stream: UnixStream,
@@ -187,6 +216,10 @@ async fn run(
         if !deliver(&events, std::mem::take(&mut pending.events)).await {
             break Exit::Graceful;
         }
+        let visualizer = state.visualizer_deadline(Instant::now());
+        // Not polled when `None`; the value is only a placeholder then.
+        let visualizer_due =
+            tokio::time::Instant::from_std(visualizer.unwrap_or_else(Instant::now));
         pending = tokio::select! {
             command = commands.recv() => match command {
                 None | Some(PlaybackCommand::Shutdown) => break Exit::Graceful,
@@ -232,6 +265,9 @@ async fn run(
                 break Exit::BackendGone(reason);
             }
             _ = tick.tick() => state.tick(Instant::now()),
+            _ = tokio::time::sleep_until(visualizer_due), if visualizer.is_some() => {
+                state.visualizer_tick(Instant::now())
+            }
         };
     };
 
@@ -335,6 +371,31 @@ mod tests {
             precheck(&dangling).await,
             Err(state::FILE_NOT_FOUND.to_owned())
         );
+    }
+
+    #[test]
+    fn the_visualizer_graph_is_never_a_spawn_argument() {
+        let options = [
+            MpvOptions::default(),
+            MpvOptions {
+                null_audio: true,
+                null_audio_buffer: Some(3),
+                visualizer_graph: Some("@viz:lavfi=[anull]".into()),
+                ..MpvOptions::default()
+            },
+        ];
+        for options in options {
+            let extra = extra_args(&options);
+            let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+            let args = process::mpv_args(Path::new("/s/mpv.sock"), &extra);
+            let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+            assert!(args.contains(&"--audio-channels=stereo"), "{args:?}");
+            for arg in &args {
+                assert!(!arg.starts_with("--af"), "{arg}");
+                assert!(!arg.contains("lavfi") && !arg.contains("@viz"), "{arg}");
+                assert!(!arg.contains(visualizer::GRAPH), "{arg}");
+            }
+        }
     }
 
     async fn read_all(mut peer: UnixStream) -> String {

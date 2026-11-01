@@ -38,6 +38,31 @@ Brief: `docs/plans/m3-quality.md`. Chosen scope, in slices:
 
 Not chosen: artwork, favourites, gapless lookahead, resume-at-position, playlists, MPRIS.
 
-## M4 — HEART integration (proposed)
-Recommendation (not approved for implementation): `docs/plans/m4-heart-integration.md`.
-Define a small command/state API that HEART can call while Coda remains independently operable. Choose library embedding or a process protocol based on real needs.
+## M4 — Onboarding (completed, reviewed)
+Brief: `docs/plans/m4-onboarding.md`. Decision: `docs/decisions/0004-keychain-password-storage.md`.
+1. First-run setup in the TUI: optional local music folder, optional Navidrome connection (URL → username → password, verified before saving), password stored in the OS keychain. Skipping both exits and asks again next launch. **(completed, reviewed)**
+2. Connect, edit or disconnect Navidrome from within the app, and redo setup (`coda --setup` or from the app). Part A, `coda --setup`: **(completed, reviewed)**. Part B, in-app settings (`,`): **(completed, reviewed)**.
+
+## M5 — Library home and playlists (completed, reviewed)
+Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (read-only), album list with sort and paging, `A` play next. **(completed, reviewed)** 2. Local home with tag-based artists/albums and `.m3u` playlists. **(completed, reviewed)** 3. Navidrome playlist editing: save queue as playlist, add to playlist, remove, reorder, rename, delete. **(completed, reviewed)**
+- A home menu per source: Playlists, Artists, Albums (Songs only if it proves useful; search covers finding songs).
+- Navidrome playlists: read-only in slice 1; creating, editing and saving the queue as a playlist in slice 3.
+- All-albums list (`getAlbumList2`, paged) with useful sort orders.
+- Local `.m3u` playlists may follow the same layout.
+
+## M6 — Audio visualizer (completed, reviewed)
+Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11-01) so the owner can try the current keys first.
+1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation. **(completed)**
+2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder. **(completed, reviewed: 7 bands plus an L/R meter, always-stereo output)**
+
+## M7 — Keybindings and quality of life (proposed)
+The owner is trying the current keys first; their notes set the scope.
+- Play a whole album or playlist directly, instead of only adding it to the queue. Options: Enter plays the whole list while another key opens it, or a modifier plays it (Shift+Enter is reported only by terminals with the kitty keyboard protocol, so it needs a fallback).
+- Settle the provisional keys from M4 and M5: `,` `S` `P` `N` `e` `D` `w`, and `l`, which is not bound yet.
+- Configurable keybindings only once the defaults are settled.
+
+## M8 — Cover art (proposed)
+- Real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), and a block-character fallback elsewhere.
+
+## Postponed indefinitely
+- **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.

@@ -9,7 +9,7 @@ use coda_player::navidrome::browse::{
     Content, FetchRequest, FetchResponse, RequestId, Resource, spawn_fetch,
 };
 use coda_player::navidrome::client::parse_base_url;
-use coda_player::navidrome::{Client, Error, Password};
+use coda_player::navidrome::{AlbumSort, Client, Error, Password};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use wiremock::matchers::{method, path, query_param};
@@ -39,6 +39,7 @@ async fn server() -> (MockServer, Client) {
 async fn run(client: &Client, id: u64, resource: Resource) -> FetchResponse {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let request = FetchRequest {
+        generation: Default::default(),
         id: RequestId(id),
         resource,
     };
@@ -117,6 +118,67 @@ async fn each_resource_maps_to_its_endpoint_and_content() {
 }
 
 #[tokio::test]
+async fn playlists_and_album_pages_map_to_their_endpoints() {
+    let (server, client) = server().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getPlaylists"))
+        .respond_with(ok(json!({ "playlists": { "playlist": [
+            { "id": "p1", "name": "Road Trip", "songCount": 2 }
+        ]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getPlaylist"))
+        .and(query_param("id", "p1"))
+        .respond_with(ok(json!({ "playlist": { "id": "p1", "entry": [
+            { "id": "s1", "title": "One" }, { "id": "s1", "title": "One" }
+        ]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("type", "newest"))
+        .and(query_param("size", "500"))
+        .and(query_param("offset", "500"))
+        .respond_with(ok(json!({ "albumList2": { "album": [
+            { "id": "al1", "name": "Arrival" }
+        ]}})))
+        .mount(&server)
+        .await;
+
+    let response = run(&client, 1, Resource::Playlists).await;
+    let Ok(Content::Playlists(playlists)) = response.result else {
+        panic!("{:?}", response.result);
+    };
+    assert_eq!(playlists[0].song_count, Some(2));
+
+    let response = run(&client, 2, Resource::Playlist("p1".into())).await;
+    let Ok(Content::PlaylistSongs(songs)) = response.result else {
+        panic!("{:?}", response.result);
+    };
+    assert_eq!(songs.tracks.len(), 2, "duplicates are kept");
+
+    let resource = Resource::AlbumPage {
+        sort: AlbumSort::Newest,
+        offset: 500,
+    };
+    let response = run(&client, 3, resource.clone()).await;
+    assert_eq!(response.resource, resource);
+    let Ok(Content::AlbumPage(page)) = response.result else {
+        panic!("{:?}", response.result);
+    };
+    assert_eq!((page.served, page.albums[0].name.as_str()), (1, "Arrival"));
+
+    // Home and whole album lists are never requested; asked anyway, they
+    // fail without contacting the server.
+    let before = server.received_requests().await.unwrap().len();
+    for resource in [Resource::Home, Resource::Albums(AlbumSort::Name)] {
+        assert!(run(&client, 4, resource).await.result.is_err());
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+}
+
+#[tokio::test]
 async fn errors_map_to_short_text_without_urls_or_secrets() {
     let (server, client) = server().await;
     Mock::given(method("GET"))
@@ -192,6 +254,7 @@ async fn fetches_wait_for_a_permit() {
         client,
         limit.clone(),
         FetchRequest {
+            generation: Default::default(),
             id: RequestId(1),
             resource: Resource::Artists,
         },
@@ -219,6 +282,7 @@ async fn a_cancelled_fetch_still_answers_with_an_error() {
             client.clone(),
             limit,
             FetchRequest {
+                generation: Default::default(),
                 id: RequestId(7),
                 resource: Resource::Album("al".into()),
             },

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use crate::queue::{MAX_QUEUE_LEN, Queue, QueueEntryId, Rng};
+use crate::queue::{MAX_QUEUE_LEN, Placement, Queue, QueueEntryId, Rng};
 
 /// `p` restarts the current track instead of going back when the position
 /// is beyond this.
@@ -273,6 +273,26 @@ impl Player {
     /// [`MAX_QUEUE_LEN`] entries.
     pub fn enqueue(&mut self, track: Track) -> Option<QueueEntryId> {
         (!self.is_queue_full()).then(|| self.queue.append(track))
+    }
+
+    /// `A` ("play next"): inserts a track after the current entry, behind
+    /// earlier "play next" tracks (see [`Queue::insert_next`]); appends
+    /// without a current entry. Never starts playback. Returns `None` (and
+    /// adds nothing) when the queue is full.
+    pub fn enqueue_next(&mut self, track: Track) -> Option<QueueEntryId> {
+        (!self.is_queue_full()).then(|| self.queue.insert_next(track))
+    }
+
+    /// Adds `tracks` in order at `placement` (at the end, or as one "play
+    /// next" run), up to [`MAX_QUEUE_LEN`] entries. Never starts playback.
+    /// Returns how many were added.
+    pub fn enqueue_all(&mut self, tracks: Vec<Track>, placement: Placement) -> usize {
+        let room = MAX_QUEUE_LEN.saturating_sub(self.queue.len());
+        let tracks = tracks.into_iter().take(room);
+        match placement {
+            Placement::End => tracks.map(|t| self.queue.append(t)).count(),
+            Placement::Next => self.queue.insert_all_next(tracks).len(),
+        }
     }
 
     pub fn is_queue_full(&self) -> bool {
@@ -617,6 +637,8 @@ impl Player {
                 self.messages.push(message);
                 Vec::new()
             }
+            // Display only; the application keeps the visualizer state.
+            PlaybackEvent::Visualizer { .. } | PlaybackEvent::VisualizerUnavailable => Vec::new(),
             PlaybackEvent::BackendExited(reason) => {
                 tracing::warn!(%reason, "playback backend exited");
                 self.clear_load();
@@ -657,7 +679,8 @@ impl Player {
                     .current_entry()
                     .map(|e| e.track.display_name())
                     .unwrap_or_else(|| "track".into());
-                tracing::info!(%load, track = %name, error = %message, "track failed");
+                // Never the track's name: titles and paths stay out of logs.
+                tracing::info!(%load, error = %message, "track failed");
                 self.messages
                     .push(format!("Could not play {name}: {message}"));
                 if let Some(stop) = self.count_failure() {
@@ -739,11 +762,11 @@ impl Player {
             return Vec::new();
         };
         let source = entry.track.source.clone();
-        let name = entry.track.display_name();
         self.queue.set_current(id);
         self.last_load += 1;
         let load = LoadId(self.last_load);
-        tracing::info!(%load, track = %name, "loading track");
+        let remote = matches!(source, TrackSource::Navidrome { .. });
+        tracing::info!(%load, remote, "loading track");
         self.current_load = Some(load);
         self.started = false;
         self.proven = false;
@@ -1611,6 +1634,81 @@ mod tests {
             p.handle_event(ended(l, EndReason::Error("x".into()))),
             [PlayerCommand::Stop]
         );
+    }
+
+    // ----- play next (`A`) ---------------------------------------------
+
+    #[test]
+    fn play_next_keeps_press_order_and_never_starts_playback() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let load = start(&mut p, ids[0]);
+        p.enqueue_next(t("X"));
+        p.enqueue_next(t("Y"));
+        assert_eq!(titles(&p), ["A*", "X", "Y", "B"]);
+        assert_eq!(p.current_load(), Some(load));
+        // Without a current entry it appends.
+        let (mut p, _) = player_with(&["A"]);
+        p.enqueue_next(t("X"));
+        p.enqueue_next(t("Y"));
+        assert_eq!(titles(&p), ["A", "X", "Y"]);
+    }
+
+    #[test]
+    fn playback_moving_on_starts_a_new_play_next_run() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let load = play_through(&mut p, ids[0]);
+        p.enqueue_next(t("X"));
+        p.enqueue_next(t("Y"));
+        // A ends: X plays; the next `A` goes right after X, before Y.
+        load_of(&p.handle_event(ended(load, EndReason::Eof)));
+        p.enqueue_next(t("Z"));
+        assert_eq!(titles(&p), ["A", "X*", "Z", "Y", "B"]);
+    }
+
+    #[test]
+    fn play_next_with_shuffle_and_repeat() {
+        // Shuffling forgets the run: the next insert is next again.
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        start(&mut p, ids[0]);
+        p.enqueue_next(t("X"));
+        let mut rng = Rng::from_seed(5);
+        p.shuffle_upcoming(&mut rng);
+        p.enqueue_next(t("Y"));
+        assert_eq!(titles(&p)[..2], ["A*", "Y"]);
+        // Repeat one replays the same entry: the run continues.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::One);
+        let load = play_through(&mut p, ids[0]);
+        p.enqueue_next(t("X"));
+        let reload = p.handle_event(ended(load, EndReason::Eof));
+        let mut load = proven(&mut p, &reload);
+        p.enqueue_next(t("Y"));
+        assert_eq!(titles(&p), ["A*", "X", "Y", "B"]);
+        // Repeat all wrapping around to A moves on: a new run.
+        p.set_repeat(RepeatMode::All);
+        for _ in 0..4 {
+            let next = p.handle_event(ended(load, EndReason::Eof));
+            load = proven(&mut p, &next);
+        }
+        assert_eq!(titles(&p), ["A*", "X", "Y", "B"]);
+        p.enqueue_next(t("Z"));
+        assert_eq!(titles(&p), ["A*", "Z", "X", "Y", "B"]);
+    }
+
+    #[test]
+    fn play_next_respects_the_queue_cap() {
+        let mut p = Player::new();
+        for i in 0..MAX_QUEUE_LEN - 2 {
+            p.enqueue(t(&i.to_string()));
+        }
+        let first = p.queue().first().unwrap();
+        start(&mut p, first);
+        let added = p.enqueue_all(vec![t("X"), t("Y"), t("Z")], Placement::Next);
+        assert_eq!(added, 2);
+        assert_eq!(titles(&p)[..3], ["0*", "X", "Y"]);
+        assert_eq!(p.enqueue_next(t("W")), None);
+        assert_eq!(p.enqueue_all(vec![t("W")], Placement::End), 0);
+        assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
     }
 
     // ----- queue controls ------------------------------------------------

@@ -19,6 +19,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
+keyring-core = "1.0.1"
 libc = "0.2.191"
 lofty = "0.25.4"
 md5 = "0.8.1"
@@ -35,6 +36,20 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 unicode-width = "0.2.2"
 url = "2.5.8"
 walkdir = "2.5.0"
+
+# OS credential store backends for `keyring-core` (ADR 0004). Only
+# `src/secret_store.rs` uses them.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+# Pure-Rust D-Bus (zbus) and crypto: no libdbus headers or OpenSSL needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+
+[features]
+# Replaces the OS credential store with an in-memory one, for pty smoke
+# runs that must not touch the real keychain. Never enable in a release.
+mock-secret-store = []
 
 [dev-dependencies]
 wiremock = "0.6.5"

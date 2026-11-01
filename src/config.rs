@@ -7,7 +7,9 @@
 //! - Music directory: CLI argument > `CODA_MUSIC_DIR` > `music_dir`.
 //! - Navidrome: `CODA_NAVIDROME_URL/USER/PASSWORD` override the file's
 //!   `[navidrome]` values. All of url, username and a password source are
-//!   required once any is given.
+//!   required once any is given. The file names at most one password
+//!   source: `password`, `password_command` or `password_keychain` (the OS
+//!   credential store, ADR 0004).
 //! - At least one source (music directory or Navidrome) is required.
 //!
 //! Error messages name files, fields and variables, never their values.
@@ -27,6 +29,7 @@ use url::Url;
 
 use crate::navidrome::Password;
 use crate::navidrome::client::{UrlError, parse_base_url};
+use crate::secret_store::{self, STORE_NAME, SecretError, SecretStore};
 
 pub const MUSIC_DIR_ENV: &str = "CODA_MUSIC_DIR";
 pub const CONFIG_ENV: &str = "CODA_CONFIG";
@@ -41,7 +44,7 @@ pub const PASSWORD_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Command line. `clap` reads `CODA_MUSIC_DIR` when the argument is absent.
 /// The value is an `OsString` because clap's path parser rejects empty
 /// values with a generic error; an empty value counts as unset.
-#[derive(Debug, clap::Parser)]
+#[derive(Debug, Default, clap::Parser)]
 #[command(
     name = "coda",
     version,
@@ -52,6 +55,40 @@ pub struct Cli {
     /// `music_dir` in the config file]
     #[arg(value_name = "MUSIC_DIR", env = MUSIC_DIR_ENV, hide_env = true)]
     pub music_dir: Option<OsString>,
+    /// Run the setup again to change the music folder or Navidrome server
+    #[arg(long)]
+    pub setup: bool,
+}
+
+/// Where a music directory given to the command comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicDirArg {
+    /// The `MUSIC_DIR` argument.
+    Argument,
+    /// `CODA_MUSIC_DIR` (clap reads it into the argument).
+    Env,
+}
+
+impl Cli {
+    /// Parses `args` like [`clap::Parser::try_parse_from`], and also
+    /// reports where a (non-empty) music directory came from, so setup can
+    /// say what overrides the file.
+    pub fn try_parse_with_source<I, T>(args: I) -> Result<(Self, Option<MusicDirArg>), clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        use clap::{CommandFactory, FromArgMatches, parser::ValueSource};
+        let matches = Self::command().try_get_matches_from(args)?;
+        let cli = Self::from_arg_matches(&matches)?;
+        let source = match matches.value_source("music_dir") {
+            _ if cli.music_dir.as_ref().is_none_or(|d| d.is_empty()) => None,
+            Some(ValueSource::CommandLine) => Some(MusicDirArg::Argument),
+            Some(ValueSource::EnvVariable) => Some(MusicDirArg::Env),
+            _ => None,
+        };
+        Ok((cli, source))
+    }
 }
 
 /// Environment inputs, read once so tests never touch the process
@@ -102,11 +139,19 @@ impl fmt::Debug for NavidromeConfig {
     }
 }
 
-/// Where the password comes from. `Debug` hides the password and argv.
+/// Where the password comes from. `Debug` hides the password, argv and
+/// account.
 pub enum PasswordSource {
     Value(Password),
     /// argv, run without a shell by [`PasswordSource::resolve`].
     Command(Vec<String>),
+    /// The OS credential store entry for this account (see
+    /// [`secret_store::account`]). `config_path` names the file that asked
+    /// for it, for error messages.
+    Keychain {
+        account: String,
+        config_path: Option<PathBuf>,
+    },
 }
 
 impl fmt::Debug for PasswordSource {
@@ -114,6 +159,7 @@ impl fmt::Debug for PasswordSource {
         match self {
             Self::Value(_) => f.write_str("Value(<redacted>)"),
             Self::Command(_) => f.write_str("Command(<redacted>)"),
+            Self::Keychain { .. } => f.write_str("Keychain(<redacted>)"),
         }
     }
 }
@@ -174,7 +220,10 @@ pub enum ConfigError {
         field: &'static str,
         env: &'static str,
     },
-    #[error("[navidrome] sets both password and password_command; keep one")]
+    #[error(
+        "[navidrome] sets more than one of password, password_command and \
+         password_keychain; keep one"
+    )]
     ConflictingPassword,
     #[error("[navidrome] password_command must not be empty")]
     EmptyPasswordCommand,
@@ -182,6 +231,29 @@ pub enum ConfigError {
     InvalidUrl(#[from] UrlError),
     #[error("password_command failed: {0}")]
     PasswordCommand(String),
+    #[error("{}", keychain_message(*.error, .config_path.as_deref()))]
+    Keychain {
+        error: SecretError,
+        config_path: Option<PathBuf>,
+    },
+    #[error("no config file location is known; set {CONFIG_ENV}, XDG_CONFIG_HOME or HOME")]
+    NoConfigLocation,
+}
+
+/// The message for a failed `password_keychain` lookup, with a remedy.
+fn keychain_message(error: SecretError, config_path: Option<&Path>) -> String {
+    let path = config_path.map_or_else(|| "the config file".into(), |p| p.display().to_string());
+    match error {
+        SecretError::Missing => format!(
+            "the Navidrome password was not found in the {STORE_NAME}.\n\
+             Run `coda --setup` to enter it again, or set {NAVIDROME_PASSWORD_ENV}."
+        ),
+        error => format!(
+            "could not read the Navidrome password from the {STORE_NAME}: {error}.\n\
+             Run `coda --setup` to set it up again, set {NAVIDROME_PASSWORD_ENV}, \
+             or use password_command in {path} instead."
+        ),
+    }
 }
 
 impl ConfigError {
@@ -198,14 +270,16 @@ impl ConfigError {
             | Self::MissingNavidromeField { .. }
             | Self::ConflictingPassword
             | Self::EmptyPasswordCommand
-            | Self::InvalidUrl(_) => 2,
+            | Self::InvalidUrl(_)
+            | Self::NoConfigLocation => 2,
             Self::NotFound(_)
             | Self::NotADirectory(_)
             | Self::Unreadable { .. }
             | Self::ConfigUnreadable { .. }
             | Self::InsecurePermissions(_)
             | Self::WritableCommandConfig(_)
-            | Self::PasswordCommand(_) => 1,
+            | Self::PasswordCommand(_)
+            | Self::Keychain { .. } => 1,
         }
     }
 }
@@ -225,6 +299,7 @@ struct FileNavidrome {
     username: Option<String>,
     password: Option<FilePassword>,
     password_command: Option<Vec<String>>,
+    password_keychain: Option<bool>,
     scrobble: Option<bool>,
 }
 
@@ -288,13 +363,13 @@ impl Config {
     pub fn load(cli: Cli, env: &Env) -> Result<Self, ConfigError> {
         let location = config_file_path(env);
         let file = match &location {
-            Some((path, explicit)) => read_config_file(path, *explicit)?,
+            Some((path, explicit)) => read_config_file(path, *explicit)?.map(|(file, _)| file),
             None => None,
         };
         let config_path = location.map(|(path, _)| path);
         let file = file.unwrap_or_default();
 
-        let navidrome = merge_navidrome(file.navidrome, env)?;
+        let navidrome = merge_navidrome(file.navidrome, env, config_path.as_deref())?;
 
         let cli_dir = cli.music_dir.filter(|p| !p.is_empty()).map(PathBuf::from);
         let file_dir = match file.music_dir.filter(|s| !s.is_empty()) {
@@ -317,9 +392,152 @@ impl Config {
     }
 }
 
+/// What `coda --setup` starts from: the config file's values as written
+/// (e.g. `~/Music` stays `~/Music`). `Debug` hides every value.
+#[derive(Default)]
+pub struct SetupStart {
+    /// The file setup writes (it may not exist yet).
+    pub config_path: PathBuf,
+    pub music_dir: Option<String>,
+    pub url: Option<String>,
+    pub username: Option<String>,
+    /// `password` or `password_command`, if the file names one: a
+    /// password set outside Coda, which saving replaces.
+    pub hand_written_password: Option<&'static str>,
+    /// The keychain entry Coda wrote for this file: set when the file has
+    /// `password_keychain = true` and a usable url and username.
+    pub keychain_account: Option<String>,
+    /// `true` if `[navidrome]` configures anything besides `scrobble`.
+    pub has_navidrome: bool,
+    /// The file's URL held `user[:password]@`, which `url` leaves out.
+    pub url_had_credentials: bool,
+    /// The file's URL does not parse and contains `@`, so it may hold
+    /// credentials that cannot be separated reliably: `url` is `None`.
+    pub url_withheld: bool,
+    /// Saving backs the file up first: it holds settings and is not
+    /// exactly what Coda wrote (the config writer's rule).
+    pub has_content: bool,
+}
+
+impl fmt::Debug for SetupStart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SetupStart(<redacted>)")
+    }
+}
+
+/// Reads the config file for `coda --setup`. Like [`Config::load`], a file
+/// that cannot be read or parsed, or has unsafe permissions for the secret
+/// it holds, is an error (setup does not repair broken files). Everything
+/// else is taken as it is, to be corrected in setup: a partial
+/// `[navidrome]`, an invalid URL, a folder that no longer exists, or more
+/// than one password key. Nothing is resolved: no keychain read, no
+/// `password_command`.
+pub fn read_for_setup(env: &Env) -> Result<SetupStart, ConfigError> {
+    let (config_path, explicit) = config_file_path(env).ok_or(ConfigError::NoConfigLocation)?;
+    let (file, has_content) = match read_config_file(&config_path, explicit)? {
+        Some((file, text)) => (file, crate::config_writer::needs_backup(&text)),
+        None => (FileConfig::default(), false),
+    };
+    let non_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
+    let navidrome = file.navidrome.unwrap_or_default();
+    let hand_written_password = if navidrome.password.is_some() {
+        Some("password")
+    } else if navidrome.password_command.is_some() {
+        Some("password_command")
+    } else {
+        None
+    };
+    let keychain = navidrome.password_keychain == Some(true);
+    let has_navidrome = navidrome.url.is_some()
+        || navidrome.username.is_some()
+        || hand_written_password.is_some()
+        || keychain;
+    let raw_url = non_empty(navidrome.url);
+    let username = non_empty(navidrome.username);
+    // Never prefill (and so show) credentials embedded in the URL.
+    let prefill = raw_url.as_deref().map(prefill_url);
+    let url_had_credentials = matches!(prefill, Some(UrlPrefill::Stripped(_)));
+    let url_withheld = matches!(prefill, Some(UrlPrefill::Withheld));
+    // From the URL as written, as `Config::load` would.
+    let keychain_account = match (&raw_url, &username) {
+        (Some(url), Some(username)) if keychain => parse_base_url(url)
+            .ok()
+            .map(|url| secret_store::account(&url, username)),
+        _ => None,
+    };
+    let url = match prefill {
+        Some(UrlPrefill::AsWritten) => raw_url,
+        Some(UrlPrefill::Stripped(url)) => Some(url),
+        Some(UrlPrefill::Withheld) | None => None,
+    };
+    Ok(SetupStart {
+        config_path,
+        music_dir: non_empty(file.music_dir),
+        url,
+        username,
+        hand_written_password,
+        keychain_account,
+        has_navidrome,
+        url_had_credentials,
+        url_withheld,
+        has_content,
+    })
+}
+
+/// How a URL from the file may be prefilled.
+#[derive(Debug, PartialEq, Eq)]
+enum UrlPrefill {
+    /// No credentials: shown as written.
+    AsWritten,
+    /// Parsed, with its username and password removed.
+    Stripped(String),
+    /// Does not parse (as a URL with a host) and contains `@`: it may hold
+    /// credentials that text rules would cut wrongly, so it is not shown.
+    Withheld,
+}
+
+/// Coda's own files never hold credentials in the URL (`parse_base_url`
+/// rejects them); a hand-written one might.
+fn prefill_url(raw: &str) -> UrlPrefill {
+    match Url::parse(raw) {
+        Ok(mut url) if url.has_host() => {
+            if url.username().is_empty() && url.password().is_none() {
+                return UrlPrefill::AsWritten;
+            }
+            // Cannot fail for a URL with a host.
+            let cleared = url.set_username("").is_ok() && url.set_password(None).is_ok();
+            if cleared {
+                UrlPrefill::Stripped(url.into())
+            } else {
+                UrlPrefill::Withheld
+            }
+        }
+        _ if raw.contains('@') => UrlPrefill::Withheld,
+        _ => UrlPrefill::AsWritten,
+    }
+}
+
+/// The `CODA_NAVIDROME_*` variables that are set (non-empty) and so
+/// override the file's `[navidrome]` values. Names only.
+pub fn navidrome_env_overrides(env: &Env) -> Vec<&'static str> {
+    let set = |v: &Option<OsString>| v.as_ref().is_some_and(|v| !v.is_empty());
+    [
+        (&env.navidrome_url, NAVIDROME_URL_ENV),
+        (&env.navidrome_user, NAVIDROME_USER_ENV),
+        (&env.navidrome_password, NAVIDROME_PASSWORD_ENV),
+    ]
+    .into_iter()
+    .filter_map(|(value, name)| set(value).then_some(name))
+    .collect()
+}
+
 /// Reads and parses the file. `None` if an implicit (default) path does
 /// not exist. The permission check uses the opened file's metadata.
-fn read_config_file(path: &Path, explicit: bool) -> Result<Option<FileConfig>, ConfigError> {
+/// Also returns the text, for [`read_for_setup`].
+fn read_config_file(
+    path: &Path,
+    explicit: bool,
+) -> Result<Option<(FileConfig, String)>, ConfigError> {
     let unreadable = |source| ConfigError::ConfigUnreadable {
         path: path.to_owned(),
         source,
@@ -354,7 +572,7 @@ fn read_config_file(path: &Path, explicit: bool) -> Result<Option<FileConfig>, C
     if navidrome.is_some_and(|n| n.password_command.is_some()) && mode & 0o022 != 0 {
         return Err(ConfigError::WritableCommandConfig(path.to_owned()));
     }
-    Ok(Some(config))
+    Ok(Some((config, text)))
 }
 
 /// 1-based line and column (in chars) of byte offset `at`.
@@ -395,14 +613,25 @@ fn env_string(value: &Option<OsString>, name: &'static str) -> Result<Option<Str
     }
 }
 
+/// The password source before the URL is known.
+enum PasswordChoice {
+    Ready(PasswordSource),
+    Keychain,
+}
+
 /// Env values (non-empty) override file values. Returns `None` when
 /// nothing Navidrome-related is set anywhere.
 fn merge_navidrome(
     file: Option<FileNavidrome>,
     env: &Env,
+    config_path: Option<&Path>,
 ) -> Result<Option<NavidromeConfig>, ConfigError> {
     let file = file.unwrap_or_default();
-    if file.password.is_some() && file.password_command.is_some() {
+    let keychain = file.password_keychain == Some(true);
+    let sources = usize::from(file.password.is_some())
+        + usize::from(file.password_command.is_some())
+        + usize::from(keychain);
+    if sources > 1 {
         return Err(ConfigError::ConflictingPassword);
     }
     let scrobble = file.scrobble.unwrap_or(true);
@@ -411,15 +640,18 @@ fn merge_navidrome(
     let username =
         env_string(&env.navidrome_user, NAVIDROME_USER_ENV)?.or(non_empty(file.username));
     let password = match env_string(&env.navidrome_password, NAVIDROME_PASSWORD_ENV)? {
-        Some(password) => Some(PasswordSource::Value(Password::new(password))),
+        Some(password) => Some(PasswordChoice::Ready(PasswordSource::Value(Password::new(
+            password,
+        )))),
         None => match (file.password, file.password_command) {
-            (Some(FilePassword(p)), _) if !p.is_empty() => {
-                Some(PasswordSource::Value(Password::new(p)))
-            }
+            (Some(FilePassword(p)), _) if !p.is_empty() => Some(PasswordChoice::Ready(
+                PasswordSource::Value(Password::new(p)),
+            )),
             (_, Some(argv)) if argv.is_empty() || argv[0].is_empty() => {
                 return Err(ConfigError::EmptyPasswordCommand);
             }
-            (_, Some(argv)) => Some(PasswordSource::Command(argv)),
+            (_, Some(argv)) => Some(PasswordChoice::Ready(PasswordSource::Command(argv))),
+            _ if keychain => Some(PasswordChoice::Keychain),
             _ => None,
         },
     };
@@ -432,17 +664,34 @@ fn merge_navidrome(
             } else if username.is_none() {
                 ("username", NAVIDROME_USER_ENV)
             } else {
-                ("password (or password_command)", NAVIDROME_PASSWORD_ENV)
+                (
+                    "password (or password_command or password_keychain)",
+                    NAVIDROME_PASSWORD_ENV,
+                )
             };
             return Err(ConfigError::MissingNavidromeField { field, env });
         }
     };
+    let url = parse_base_url(&url)?;
+    let password = match password {
+        PasswordChoice::Ready(source) => source,
+        PasswordChoice::Keychain => PasswordSource::Keychain {
+            account: secret_store::account(&url, &username),
+            config_path: config_path.map(Path::to_owned),
+        },
+    };
     Ok(Some(NavidromeConfig {
-        url: parse_base_url(&url)?,
+        url,
         username,
         password,
         scrobble,
     }))
+}
+
+/// Expands a typed music directory (`~` or `~/…` with `$HOME`). `None` if
+/// the result is not absolute.
+pub fn expand_music_dir(typed: &str, env: &Env) -> Option<PathBuf> {
+    expand_home(typed, env)
 }
 
 /// Validates the directory: it must exist, be a directory and be
@@ -467,12 +716,38 @@ pub fn validate_music_dir(path: PathBuf) -> Result<PathBuf, ConfigError> {
 }
 
 impl PasswordSource {
-    /// The password, running `password_command` if needed (see
-    /// [`run_password_command`]).
+    /// The password, running `password_command` (see
+    /// [`run_password_command`]) or reading the OS credential store if
+    /// needed.
     pub async fn resolve(self, timeout: Duration) -> Result<Password, ConfigError> {
+        self.resolve_with(timeout, SecretStore::system).await
+    }
+
+    /// [`PasswordSource::resolve`] with the credential store from
+    /// `open_store`. The store is opened and read on a blocking thread;
+    /// the read may wait for an OS prompt, so it has no timeout.
+    pub async fn resolve_with(
+        self,
+        timeout: Duration,
+        open_store: impl FnOnce() -> Result<SecretStore, SecretError> + Send + 'static,
+    ) -> Result<Password, ConfigError> {
         match self {
             Self::Value(password) => Ok(password),
             Self::Command(argv) => run_password_command(&argv, timeout).await,
+            Self::Keychain {
+                account,
+                config_path,
+            } => {
+                let read = tokio::task::spawn_blocking(move || open_store()?.get(&account));
+                let error = match read.await {
+                    Ok(Ok(password)) => return Ok(password),
+                    Ok(Err(error)) => error,
+                    // The read panicked; its message is not shown.
+                    Err(_) => SecretError::Failed,
+                };
+                tracing::warn!(kind = error.kind(), "could not read the keychain");
+                Err(ConfigError::Keychain { error, config_path })
+            }
         }
     }
 }
@@ -586,6 +861,7 @@ mod tests {
     fn cli(dir: Option<&Path>) -> Cli {
         Cli {
             music_dir: dir.map(|d| d.as_os_str().to_owned()),
+            setup: false,
         }
     }
 
@@ -636,7 +912,9 @@ mod tests {
     fn expose(source: &PasswordSource) -> &str {
         match source {
             PasswordSource::Value(p) => p.expose(),
-            PasswordSource::Command(_) => panic!("expected a value"),
+            PasswordSource::Command(_) | PasswordSource::Keychain { .. } => {
+                panic!("expected a value")
+            }
         }
     }
 
@@ -1013,14 +1291,13 @@ mod tests {
     #[tokio::test]
     async fn password_command_timeout_kills_and_reaps_the_child() {
         let started = std::time::Instant::now();
-        let (result, pid) = run_recording_pid(
-            "echo $$ > \"$0\"; exec sleep 30",
-            Duration::from_millis(300),
-        )
-        .await;
+        // Long enough that `sh` has written its pid before the kill, even
+        // on a loaded machine (with 300 ms it sometimes had not).
+        let (result, pid) =
+            run_recording_pid("echo $$ > \"$0\"; exec sleep 30", Duration::from_secs(2)).await;
         let err = result.unwrap_err();
         assert!(err.to_string().contains("did not finish"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(10));
         // Killed and reaped before returning: not even a zombie remains.
         assert!(
             !process_exists(pid),
@@ -1093,6 +1370,372 @@ mod tests {
                 .expose(),
             "q"
         );
+    }
+
+    const KEYCHAIN: &str = "[navidrome]\nurl = \"https://music.example.org:8443/nd\"\n\
+                            username = \"me\"\npassword_keychain = true\n";
+
+    fn keychain_account(source: &PasswordSource) -> &str {
+        match source {
+            PasswordSource::Keychain { account, .. } => account,
+            other => panic!("expected the keychain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn password_keychain_parses_into_an_account() {
+        let f = Fixture::new();
+        // No secret in the file: any mode is fine.
+        f.write(KEYCHAIN, 0o644);
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(keychain_account(&nd.password), "me@music.example.org:8443");
+        assert_eq!(format!("{:?}", nd.password), "Keychain(<redacted>)");
+        // Env values change the account the entry is looked up under.
+        let mut f = f;
+        f.env.navidrome_user = Some("other".into());
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(
+            keychain_account(&nd.password),
+            "other@music.example.org:8443"
+        );
+        // `false` is the same as leaving it out.
+        f.env.navidrome_user = None;
+        f.write(&KEYCHAIN.replace("true", "false"), 0o600);
+        let err = f.load(cli(None)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::MissingNavidromeField { field, .. } if field.contains("password_keychain")),
+            "{err:?}"
+        );
+        // Not a boolean: a parse error.
+        f.write(&KEYCHAIN.replace("true", "\"yes\""), 0o600);
+        let err = f.load(cli(None)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::ConfigParse { line: 4, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn at_most_one_password_source_in_the_file() {
+        let f = Fixture::new();
+        for extra in ["password = \"p\"\n", "password_command = [\"pass\"]\n"] {
+            f.write(&format!("{KEYCHAIN}{extra}"), 0o600);
+            let err = f.load(cli(None)).unwrap_err();
+            assert!(matches!(err, ConfigError::ConflictingPassword), "{err:?}");
+            assert_eq!(err.exit_code(), 2);
+            assert!(err.to_string().contains("password_keychain"), "{err}");
+        }
+        f.write(
+            &format!("{KEYCHAIN}password = \"p\"\npassword_command = [\"x\"]\n"),
+            0o600,
+        );
+        assert!(matches!(
+            f.load(cli(None)).unwrap_err(),
+            ConfigError::ConflictingPassword
+        ));
+        // The env password overrides the keychain, but not a conflict.
+        let mut f = Fixture::new();
+        f.env.navidrome_password = Some("from-env".into());
+        f.write(KEYCHAIN, 0o600);
+        let nd = f.load(cli(None)).unwrap().navidrome.unwrap();
+        assert_eq!(expose(&nd.password), "from-env");
+        f.write(&format!("{KEYCHAIN}password = \"p\"\n"), 0o600);
+        assert!(matches!(
+            f.load(cli(None)).unwrap_err(),
+            ConfigError::ConflictingPassword
+        ));
+    }
+
+    #[tokio::test]
+    async fn keychain_resolution_through_the_mock_store() {
+        let f = Fixture::new();
+        f.write(KEYCHAIN, 0o600);
+        let store = SecretStore::mock();
+        let account = "me@music.example.org:8443";
+        store
+            .set(account, &Password::new("from-keychain".into()))
+            .unwrap();
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let password = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap();
+        assert_eq!(password.expose(), "from-keychain");
+
+        // Missing entry: names the remedy and the file, not the account.
+        store.delete(account).unwrap();
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let err = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Missing,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 1);
+        let text = err.to_string();
+        assert!(text.contains("not found"), "{text}");
+        assert!(text.contains("Run `coda --setup`"), "{text}");
+        assert!(text.contains(NAVIDROME_PASSWORD_ENV), "{text}");
+        assert!(!text.contains("me@"), "{text}");
+        assert!(!text.contains("music.example.org"), "{text}");
+
+        // Unavailable store and denied access.
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let err = source
+            .resolve_with(Duration::from_secs(1), || Err(SecretError::Unavailable))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Unavailable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("could not read"), "{err}");
+        assert!(err.to_string().contains("Run `coda --setup`"), "{err}");
+        assert!(!err.to_string().contains("me@"), "{err}");
+        assert!(!err.to_string().contains("music.example.org"), "{err}");
+        assert_eq!(err.exit_code(), 1);
+
+        store.set(account, &Password::new("x".into())).unwrap();
+        store.fail_next(account, SecretError::Denied);
+        let source = f.load(cli(None)).unwrap().navidrome.unwrap().password;
+        let opened = store.clone();
+        let err = source
+            .resolve_with(Duration::from_secs(1), move || Ok(opened))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::Keychain {
+                    error: SecretError::Denied,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("from-keychain"), "{err}");
+    }
+
+    #[test]
+    fn setup_start_takes_the_file_as_written() {
+        let f = Fixture::new();
+        // No file yet: nothing to prefill, but the path is known.
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.config_path, f.config_path());
+        assert_eq!(start.music_dir, None);
+        assert!(!start.has_navidrome);
+
+        // Coda's own file; the folder need not exist (setup checks it).
+        f.write(
+            &format!("music_dir = \"~/Gone\"\n{KEYCHAIN}scrobble = false\n"),
+            0o600,
+        );
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.music_dir.as_deref(), Some("~/Gone"));
+        assert_eq!(
+            start.url.as_deref(),
+            Some("https://music.example.org:8443/nd")
+        );
+        assert_eq!(start.username.as_deref(), Some("me"));
+        assert_eq!(
+            start.keychain_account.as_deref(),
+            Some("me@music.example.org:8443")
+        );
+        assert_eq!(start.hand_written_password, None);
+        assert!(start.has_navidrome);
+        let text = format!("{start:?}");
+        assert!(
+            !text.contains("music.example") && !text.contains("me@"),
+            "{text}"
+        );
+
+        // Env overrides do not change what the file holds or which entry
+        // Coda wrote for it.
+        let mut f = f;
+        f.env.navidrome_user = Some("other".into());
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.username.as_deref(), Some("me"));
+        assert_eq!(
+            start.keychain_account.as_deref(),
+            Some("me@music.example.org:8443")
+        );
+    }
+
+    #[test]
+    fn setup_start_accepts_partial_and_hand_written_navidrome() {
+        let f = Fixture::new();
+        // Partial: prefilled, no keychain entry to clean up.
+        f.write(
+            "[navidrome]\nurl = \"h.example\"\npassword_keychain = true\n",
+            0o644,
+        );
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.url.as_deref(), Some("h.example"));
+        assert_eq!(start.username, None);
+        assert_eq!(start.keychain_account, None);
+        assert!(start.has_navidrome);
+        // An invalid URL is prefilled as typed, without an account.
+        f.write(
+            "[navidrome]\nurl = \"ftp://h\"\nusername = \"u\"\npassword_keychain = true\n",
+            0o644,
+        );
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.url.as_deref(), Some("ftp://h"));
+        assert_eq!(start.keychain_account, None);
+        // Hand-written passwords are named, never read or run.
+        f.write(NAVIDROME, 0o600);
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.hand_written_password, Some("password"));
+        assert_eq!(start.keychain_account, None);
+        f.write(
+            "[navidrome]\nurl = \"https://h\"\nusername = \"u\"\n\
+             password_command = [\"/nonexistent/should-not-run\"]\n",
+            0o644,
+        );
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.hand_written_password, Some("password_command"));
+        // `scrobble` alone is not a Navidrome setup.
+        f.write("[navidrome]\nscrobble = false\n", 0o644);
+        assert!(!read_for_setup(&f.env).unwrap().has_navidrome);
+    }
+
+    #[test]
+    fn setup_start_still_rejects_broken_files() {
+        let f = Fixture::new();
+        f.write("music_dir = \n", 0o644);
+        let err = read_for_setup(&f.env).unwrap_err();
+        assert!(matches!(err, ConfigError::ConfigParse { .. }), "{err:?}");
+        f.write("[navidrome]\npasword = \"x\"\n", 0o600);
+        assert!(matches!(
+            read_for_setup(&f.env).unwrap_err(),
+            ConfigError::ConfigParse { .. }
+        ));
+        f.write(NAVIDROME, 0o644);
+        let err = read_for_setup(&f.env).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InsecurePermissions(_)),
+            "{err:?}"
+        );
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+        f.write(
+            "[navidrome]\nurl = \"https://h\"\nusername = \"u\"\npassword_command = [\"x\"]\n",
+            0o666,
+        );
+        assert!(matches!(
+            read_for_setup(&f.env).unwrap_err(),
+            ConfigError::WritableCommandConfig(_)
+        ));
+        // An explicit CODA_CONFIG must exist, as for a normal start.
+        let mut f = f;
+        f.env.config_path = Some(f.dir.path().join("missing.toml").into());
+        assert!(matches!(
+            read_for_setup(&f.env).unwrap_err(),
+            ConfigError::ConfigMissing(_)
+        ));
+        let err = read_for_setup(&Env::default()).unwrap_err();
+        assert!(matches!(err, ConfigError::NoConfigLocation), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn credentials_in_a_saved_url_are_never_prefilled() {
+        use UrlPrefill::{AsWritten, Stripped, Withheld};
+        for (raw, expected) in [
+            (
+                "https://u:hunter2@h.example/nd",
+                Stripped("https://h.example/nd".into()),
+            ),
+            (
+                "https://a@b:hunter2@h.example",
+                Stripped("https://h.example/".into()),
+            ),
+            ("http://u@h:4533/", Stripped("http://h:4533/".into())),
+            // A backslash ends the authority, as for startup: host `h`.
+            ("https://h\\x@evil", AsWritten),
+            // The `/` ends the authority, so text rules would show `ss`.
+            ("https://me:pa/ss@h", Withheld),
+            // Without a scheme it does not parse with a host.
+            ("u:hunter2@h.example:4533", Withheld),
+            ("https://h.example/x", AsWritten),
+            ("h.example", AsWritten),
+        ] {
+            assert_eq!(prefill_url(raw), expected, "{raw}");
+        }
+        let url = Url::parse("https://h\\x@evil").unwrap();
+        assert_eq!(url.host_str(), Some("h"));
+        let f = Fixture::new();
+        f.write(
+            "[navidrome]\nurl = \"https://me:hunter2@h.example\"\nusername = \"me\"\n\
+             password_keychain = true\n",
+            0o600,
+        );
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.url.as_deref(), Some("https://h.example/"));
+        assert!(start.url_had_credentials && !start.url_withheld);
+        // `parse_base_url` rejects such a URL, so Coda never wrote an entry.
+        assert_eq!(start.keychain_account, None);
+        f.write("[navidrome]\nurl = \"https://me:pa/ss@h\"\n", 0o600);
+        let start = read_for_setup(&f.env).unwrap();
+        assert_eq!(start.url, None, "withheld");
+        assert!(start.url_withheld && !start.url_had_credentials);
+    }
+
+    #[test]
+    fn setup_start_reports_whether_saving_backs_the_file_up() {
+        let f = Fixture::new();
+        assert!(!read_for_setup(&f.env).unwrap().has_content, "no file");
+        f.write("# only notes\n\n", 0o644);
+        assert!(!read_for_setup(&f.env).unwrap().has_content);
+        f.write("[navidrome]\nscrobble = false\n", 0o644);
+        assert!(read_for_setup(&f.env).unwrap().has_content);
+        // A file exactly as Coda writes it is not backed up.
+        let coda = "# Coda configuration, written by Coda's setup.\n\
+                    # You may edit this file; see the README for all settings.\n\
+                    \n[navidrome]\nscrobble = false\n";
+        f.write(coda, 0o644);
+        assert!(!read_for_setup(&f.env).unwrap().has_content);
+    }
+
+    #[test]
+    fn navidrome_env_overrides_are_named_when_set() {
+        let mut env = Env::default();
+        assert!(navidrome_env_overrides(&env).is_empty());
+        env.navidrome_url = Some("https://secret-host".into());
+        env.navidrome_user = Some("".into());
+        env.navidrome_password = Some("secret".into());
+        assert_eq!(
+            navidrome_env_overrides(&env),
+            [NAVIDROME_URL_ENV, NAVIDROME_PASSWORD_ENV]
+        );
+    }
+
+    #[test]
+    fn setup_flag_and_music_dir_source() {
+        let (cli, source) = Cli::try_parse_with_source(["coda", "--setup", "/m"]).unwrap();
+        assert!(cli.setup);
+        assert_eq!(cli.music_dir, Some(OsString::from("/m")));
+        assert_eq!(source, Some(MusicDirArg::Argument));
+        let (cli, source) = Cli::try_parse_with_source(["coda", ""]).unwrap();
+        assert!(!cli.setup);
+        assert_eq!(source, None, "an empty folder is no override");
+        // The environment fallback (`CODA_MUSIC_DIR`) is not exercised
+        // here: setting it would leak into the other tests in this process.
     }
 
     #[test]

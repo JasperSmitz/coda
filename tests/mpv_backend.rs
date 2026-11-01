@@ -12,7 +12,7 @@ use coda_player::navidrome;
 use coda_player::playback::mpv::{self, MpvOptions};
 use coda_player::playback::{
     EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle, PlaybackTarget,
-    ShutdownOutcome,
+    ShutdownOutcome, VisualizerFrame,
 };
 use coda_player::player::{PlaybackStatus, Player, PlayerCommand};
 use coda_player::resolve;
@@ -954,4 +954,390 @@ async fn draining_the_audio_buffer_at_the_end_does_not_trip_the_watchdog() {
     // The stall really happened (mpv answered only after draining).
     assert!(waited >= Duration::from_millis(1500), "{waited:?}");
     handle.shutdown(STEP).await;
+}
+
+// ----- visualizer -------------------------------------------------------
+
+/// Band index (low to high) with the loudest level; hidden bands count as
+/// silent.
+fn loudest_band(frame: &VisualizerFrame) -> usize {
+    let mut best = 0;
+    for (i, band) in frame.bands.iter().enumerate() {
+        if band.unwrap_or(0.0) > frame.bands[best].unwrap_or(0.0) {
+            best = i;
+        }
+    }
+    best
+}
+
+/// Collects `(seconds since start, frame)` of `load`'s visualizer events
+/// until its track ends; returns them with the end reason.
+async fn visualizer_readings(
+    handle: &mut PlaybackHandle,
+    load: LoadId,
+    start: tokio::time::Instant,
+) -> (Vec<(f64, VisualizerFrame)>, EndReason) {
+    let mut readings = Vec::new();
+    loop {
+        match timeout(Duration::from_secs(15), handle.recv())
+            .await
+            .expect("event within timeout")
+            .expect("backend still running")
+        {
+            PlaybackEvent::Visualizer { load: l, frame } => {
+                assert_eq!(l, load);
+                readings.push((start.elapsed().as_secs_f64(), frame));
+            }
+            PlaybackEvent::TrackEnded { load: l, reason } if l == load => {
+                return (readings, reason);
+            }
+            PlaybackEvent::VisualizerUnavailable => panic!("visualizer unavailable"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn visualizer_tones_peak_in_their_band_when_they_are_heard() {
+    // 63 Hz, 400 Hz, 2.5 kHz and 6.3 kHz for 1.5 s each: bands 0, 2, 4, 5.
+    const SEGMENT: f64 = 1.5;
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("tones.wav");
+    let tones = [(63.0, 1500), (400.0, 1500), (2500.0, 1500), (6300.0, 1500)];
+    common::write_tones(&wav, 44100, 2, &tones, 0.25);
+    let mut handle = timed_backend().await;
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    handle.send(load(1, &wav));
+    let (_, _) = wait_for(&mut handle, |e| {
+        *e == PlaybackEvent::Started { load: LoadId(1) }
+    })
+    .await;
+    let start = tokio::time::Instant::now();
+    let (readings, reason) = visualizer_readings(&mut handle, LoadId(1), start).await;
+    assert_eq!(reason, EndReason::Eof);
+    // About 21 readings a second (2048-sample chunks at 44.1 kHz).
+    let rate = readings.len() as f64 / (SEGMENT * 4.0);
+    assert!((12.0..=31.0).contains(&rate), "{rate}/s");
+
+    // Runs of the loudest band, ignoring flickers at the boundaries.
+    let mut runs: Vec<(usize, usize, f64)> = Vec::new();
+    for (at, frame) in &readings {
+        let band = loudest_band(frame);
+        match runs.last_mut() {
+            Some((b, n, _)) if *b == band => *n += 1,
+            _ => runs.push((band, 1, *at)),
+        }
+        for value in frame
+            .levels
+            .into_iter()
+            .chain(frame.bands.into_iter().flatten())
+        {
+            assert!((0.0..=1.0).contains(&value), "{frame:?}");
+        }
+        assert!(
+            frame.bands.iter().all(Option::is_some),
+            "44.1 kHz: {frame:?}"
+        );
+    }
+    let steady: Vec<(usize, f64)> = runs
+        .iter()
+        .filter(|(_, n, _)| *n >= 5)
+        .map(|&(b, _, at)| (b, at))
+        .collect();
+    let bands: Vec<usize> = steady.iter().map(|&(b, _)| b).collect();
+    assert_eq!(bands, [0, 2, 4, 5], "{runs:?}");
+    // Each tone shows when it is heard, not when mpv analyses it (about
+    // 0.4 s earlier under `--ao=null`). `start` is `file-loaded`, a little
+    // before the audio starts.
+    for (i, &(band, at)) in steady.iter().enumerate().skip(1) {
+        let expected = SEGMENT * i as f64;
+        let early = expected - at;
+        eprintln!("band {band}: shown at {at:.3} s, tone starts at {expected:.1} s");
+        assert!(
+            (-0.35..0.15).contains(&early),
+            "band {band} shown at {at:.3} s, tone at {expected} s: {runs:?}"
+        );
+    }
+    // The level meter follows the signal: about -15 dBFS RMS per channel.
+    let (_, middle) = readings[readings.len() / 2];
+    assert!(
+        middle.levels.iter().all(|l| (0.55..0.95).contains(l)),
+        "{middle:?}"
+    );
+    handle.shutdown(STEP).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn visualizer_graph_leaves_the_audio_bit_identical() {
+    // Rendered to raw PCM with and without the graph (here passed at spawn
+    // so it covers the whole file; Coda adds it while playing, which the
+    // M6 spike showed to be lossless as well).
+    let dir = tempfile::tempdir().unwrap();
+    let tones = [(440.0, 700), (0.0, 100), (5000.0, 700)];
+    let inputs = [
+        ("mono", 1u16, 44100u32),
+        ("stereo", 2, 48000),
+        ("surround", 6, 44100),
+    ];
+    for (name, channels, rate) in inputs {
+        let wav = dir.path().join(format!("{name}.wav"));
+        common::write_tones(&wav, rate, channels, &tones, 0.4);
+        let mut outputs = Vec::new();
+        for with_graph in [false, true] {
+            let out = dir.path().join(format!("{name}-{with_graph}.raw"));
+            let mut extra_args = vec![
+                "--ao=pcm".to_owned(),
+                format!("--ao-pcm-file={}", out.display()),
+                "--ao-pcm-waveheader=no".to_owned(),
+            ];
+            if with_graph {
+                extra_args.push(format!("--af={}", mpv::visualizer::GRAPH));
+            }
+            let mut handle = mpv::spawn(MpvOptions {
+                extra_args,
+                ..MpvOptions::default()
+            })
+            .await
+            .expect("mpv starts");
+            handle.send(load(1, &wav));
+            let (ended, _) = wait_for(&mut handle, |e| {
+                matches!(e, PlaybackEvent::TrackEnded { .. })
+            })
+            .await;
+            assert_eq!(
+                ended,
+                PlaybackEvent::TrackEnded {
+                    load: LoadId(1),
+                    reason: EndReason::Eof
+                },
+                "{name} with graph: {with_graph}"
+            );
+            assert_eq!(handle.shutdown(STEP).await, ShutdownOutcome::Clean);
+            outputs.push(std::fs::read(&out).expect("pcm output"));
+        }
+        // Stereo out, 1.5 s: at least 4 bytes per frame.
+        let frames = u64::from(rate) * 1500 / 1000;
+        assert!(
+            outputs[0].len() as u64 >= frames * 4,
+            "{name}: {}",
+            outputs[0].len()
+        );
+        assert!(outputs[0].iter().any(|&b| b != 0), "{name}: silent");
+        assert_eq!(outputs[0].len(), outputs[1].len(), "{name}");
+        assert!(
+            outputs[0] == outputs[1],
+            "{name}: output differs with the graph"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn a_visualizer_graph_mpv_refuses_is_unavailable_and_playback_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("tone.wav");
+    common::write_tones(&wav, 44100, 2, &[(440.0, 1500)], 0.3);
+    let mut handle = mpv::spawn(MpvOptions {
+        null_audio: true,
+        visualizer_graph: Some(
+            "@vizfmt:format=channels=stereo,@viz:lavfi=[nosuchfilter_coda_test]".into(),
+        ),
+        ..MpvOptions::default()
+    })
+    .await
+    .expect("mpv starts");
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    handle.send(load(1, &wav));
+    let (ended, seen) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    assert_eq!(
+        ended,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(1),
+            reason: EndReason::Eof
+        },
+        "{seen:?}"
+    );
+    let unavailable = seen
+        .iter()
+        .filter(|e| **e == PlaybackEvent::VisualizerUnavailable)
+        .count();
+    assert_eq!(unavailable, 1, "{seen:?}");
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, PlaybackEvent::Position(p) if *p >= Duration::from_millis(750))),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|e| matches!(
+            e,
+            PlaybackEvent::Visualizer { .. } | PlaybackEvent::Error(_)
+        )),
+        "{seen:?}"
+    );
+    // The next track plays too, and nothing is retried or reported again.
+    handle.send(PlaybackCommand::SetVisualizer(false));
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    handle.send(load(2, &wav));
+    let (ended, seen) = wait_for(&mut handle, |e| {
+        matches!(e, PlaybackEvent::TrackEnded { .. })
+    })
+    .await;
+    assert_eq!(
+        ended,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(2),
+            reason: EndReason::Eof
+        },
+        "{seen:?}"
+    );
+    assert!(seen.contains(&PlaybackEvent::Started { load: LoadId(2) }));
+    assert!(
+        !seen.iter().any(|e| matches!(
+            e,
+            PlaybackEvent::VisualizerUnavailable | PlaybackEvent::Visualizer { .. }
+        )),
+        "{seen:?}"
+    );
+    handle.shutdown(STEP).await;
+}
+
+/// Visualizer events among everything received for `period`.
+async fn visualizer_events_during(handle: &mut PlaybackHandle, period: Duration) -> usize {
+    let deadline = tokio::time::Instant::now() + period;
+    let mut count = 0;
+    while let Ok(event) = tokio::time::timeout_at(deadline, handle.recv()).await {
+        let event = event.expect("backend still running");
+        assert!(
+            !matches!(
+                event,
+                PlaybackEvent::TrackEnded { .. } | PlaybackEvent::BackendExited(_)
+            ),
+            "{event:?}"
+        );
+        if matches!(event, PlaybackEvent::Visualizer { .. }) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn no_visualizer_readings_while_hidden_or_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("tone.wav");
+    common::write_tones(&wav, 44100, 2, &[(1000.0, 8000)], 0.3);
+    let mut handle = timed_backend().await;
+    handle.send(load(1, &wav));
+    wait_for(&mut handle, |e| {
+        *e == PlaybackEvent::Started { load: LoadId(1) }
+    })
+    .await;
+    // Off by default.
+    assert_eq!(
+        visualizer_events_during(&mut handle, Duration::from_millis(700)).await,
+        0
+    );
+    // Shown mid-track: added then and there. The first readings are shown
+    // only once the audio they describe is heard (about 0.4 s later here).
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    let shown = visualizer_events_during(&mut handle, Duration::from_millis(1200)).await;
+    assert!(shown >= 5, "{shown}");
+    // Paused: none (after what was already on its way).
+    handle.send(PlaybackCommand::SetPause(true));
+    wait_for(&mut handle, |e| *e == PlaybackEvent::Paused(true)).await;
+    visualizer_events_during(&mut handle, Duration::from_millis(100)).await;
+    assert_eq!(
+        visualizer_events_during(&mut handle, Duration::from_millis(700)).await,
+        0
+    );
+    handle.send(PlaybackCommand::SetPause(false));
+    let resumed = visualizer_events_during(&mut handle, Duration::from_millis(1000)).await;
+    assert!(resumed >= 5, "{resumed}");
+    // Hidden: none, though the graph stays until the track changes.
+    handle.send(PlaybackCommand::SetVisualizer(false));
+    visualizer_events_during(&mut handle, Duration::from_millis(100)).await;
+    assert_eq!(
+        visualizer_events_during(&mut handle, Duration::from_millis(700)).await,
+        0
+    );
+    // Shown again on the same track: at once, without adding it twice.
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    let again = visualizer_events_during(&mut handle, Duration::from_millis(1000)).await;
+    assert!(again >= 5, "{again}");
+    handle.shutdown(STEP).await;
+}
+
+/// Serves `body` as audio/wav to every connection, without Range support
+/// and throttled to `bytes_per_sec`: a stream mpv cannot seek in beyond
+/// what it has received.
+async fn throttled_server(
+    body: Vec<u8>,
+    bytes_per_sec: usize,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = std::sync::Arc::new(body);
+    let task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if socket.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                for chunk in body.chunks(bytes_per_sec / 20) {
+                    if socket.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
+    });
+    (format!("http://{address}/music"), task)
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn a_seek_mpv_cannot_perform_does_not_freeze_the_visualizer() {
+    // mpv answers `success` to a seek past what a non-seekable stream has
+    // delivered, and sends neither `seek` nor `playback-restart`.
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("tone.wav");
+    common::write_tones(&wav, 44100, 2, &[(1000.0, 30_000)], 0.3);
+    // Twice real time: playable, never far ahead.
+    let (base, server) = throttled_server(std::fs::read(&wav).unwrap(), 2 * 44100 * 4).await;
+    let client = navidrome::Client::new(
+        navidrome::client::parse_base_url(&base).unwrap(),
+        "u".into(),
+        navidrome::Password::new("p".into()),
+    )
+    .unwrap();
+    let mut handle = timed_backend().await;
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    handle.send(stream_load(1, &client, "song"));
+    wait_for(&mut handle, |e| {
+        *e == PlaybackEvent::Started { load: LoadId(1) }
+    })
+    .await;
+    let before = visualizer_events_during(&mut handle, Duration::from_millis(1500)).await;
+    assert!(before >= 5, "{before}");
+    handle.send(PlaybackCommand::SeekRelative(20.0));
+    visualizer_events_during(&mut handle, Duration::from_millis(200)).await;
+    let after = visualizer_events_during(&mut handle, Duration::from_millis(1500)).await;
+    assert!(after >= 5, "readings stopped after the seek: {after}");
+    handle.shutdown(STEP).await;
+    server.abort();
 }

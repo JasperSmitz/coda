@@ -156,3 +156,60 @@ fn navidrome_from_env_alone_is_a_valid_source() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stderr(&output).contains("mpv was not found"));
 }
+
+#[test]
+fn without_a_terminal_setup_does_not_run_and_nothing_is_written() {
+    // `Command::output` gives the child no terminal on stdin or stdout.
+    let (output, state) = coda(&[], &[], None);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("no music source configured"), "{err}");
+    assert!(output.stdout.is_empty());
+    assert!(!state.path().join("config").exists());
+}
+
+#[test]
+fn setup_flag_without_a_terminal_is_a_usage_error() {
+    // With a working config, and with a password_command that must never
+    // run: `--setup` stops before reading anything.
+    let state = tempfile::tempdir().unwrap();
+    let marker = state.path().join("ran");
+    let text = format!(
+        "[navidrome]\nurl = \"https://h.example\"\nusername = \"u\"\n\
+         password_command = [\"touch\", {:?}]\n",
+        marker.to_str().unwrap()
+    );
+    write_config(&state, &text, 0o600);
+    let (output, state) = coda_in(state, &["--setup"], &[], None);
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("--setup needs a terminal"), "{err}");
+    assert!(output.stdout.is_empty());
+    assert!(!marker.exists(), "password_command ran");
+    let written = std::fs::read_to_string(state.path().join("config/coda/config.toml")).unwrap();
+    assert_eq!(written, text, "the config is unchanged");
+}
+
+#[test]
+fn setup_flag_is_listed_in_help() {
+    let (output, _state) = coda(&["--help"], &[], None);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--setup"), "{help}");
+}
+
+#[test]
+fn setup_flag_checks_the_given_folder_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope");
+    let missing = missing.to_str().unwrap();
+    for (args, env) in [
+        (vec!["--setup", missing], vec![]),
+        (vec!["--setup"], vec![("CODA_MUSIC_DIR", missing)]),
+    ] {
+        let (output, _state) = coda(&args, &env, None);
+        assert_eq!(output.status.code(), Some(1), "{args:?} {env:?}");
+        let err = stderr(&output);
+        assert!(err.contains("music directory does not exist"), "{err}");
+    }
+}

@@ -45,6 +45,7 @@ Coda (`coda-player`, CLI: `coda`) is a standalone Rust terminal music player for
 Once a Cargo package exists, use the relevant checks:
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo clippy --all-targets -- -D warnings` (without features: `--all-features` swaps in test-only backends, such as the mock secret store)
 - `cargo test --all-targets`
 - `cargo build`
 - Tests that need mpv are `#[ignore]`d; run `cargo test --all-targets -- --ignored` when mpv is installed.

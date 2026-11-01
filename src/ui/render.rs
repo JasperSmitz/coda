@@ -1,5 +1,7 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar, the status line, and the help overlay.
+//! now-playing bar (with the visualizer when shown), the status line, the help overlay, the playlist
+//! picker and name prompt, and the Settings overlay
+//! (`crate::ui::settings`).
 //!
 //! Untrusted names (tags, file names, server responses, the search input)
 //! are sanitised and truncated by display width, so control characters and
@@ -8,25 +10,41 @@
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, LineGauge, List, ListItem, ListState, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, Connection, Focus, LibraryRow, LocalSearch, NO_LOCAL_LIBRARY, ScanState, Source, count,
-    thousands,
+    App, Connection, Focus, LocalSearch, NAVIDROME_NOT_CONFIGURED, NO_LOCAL_LIBRARY,
+    PRESS_ENTER_TO_CONNECT, ScanState, Source, count, thousands,
 };
+use crate::library::browse::{Row as LocalRow, View as LocalView};
+use crate::library::{Library, LocalPlaylist};
 use crate::model::Track;
-use crate::navidrome::browse::{Browser, Load, Resource, Row};
+use crate::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
-use crate::ui::help;
+use crate::ui::{help, settings};
 
 /// Below this width only the focused panel is shown.
 pub const NARROW_WIDTH: u16 = 60;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 const NOW_PLAYING_HEIGHT: u16 = 4;
+/// Rows the visualizer adds to the now-playing bar.
+pub const VISUALIZER_HEIGHT: u16 = 3;
+/// Smaller terminals do not show the visualizer, so the panels keep room.
+pub const VISUALIZER_MIN_SCREEN: (u16, u16) = (20, 16);
+/// Bands at their narrowest: one column each, one apart.
+const NARROW_BANDS_WIDTH: u16 = 13;
+/// The level meter is left out when it would be narrower than this.
+const MIN_METER_WIDTH: u16 = 6;
+const WIDEST_METER: u16 = 24;
+/// Vertical bar cells from 1/8 to 8/8 full.
+const VERTICAL_EIGHTHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Horizontal bar cells from 1/8 to 8/8 full.
+const HORIZONTAL_EIGHTHS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 /// Marks tracks streamed from Navidrome in the queue and now-playing bar.
 /// U+2601 has no emoji presentation by default, so terminals draw it as a
 /// one-column text glyph (and `unicode-width` agrees).
@@ -34,6 +52,10 @@ pub const REMOTE_MARKER: &str = "☁";
 const SEARCH_PROMPT: &str = "Search: ";
 /// Shown right-aligned on the search input line when it fits.
 const SEARCH_HINT: &str = "Enter search · Esc cancel";
+/// Below the playlist name input.
+const PROMPT_HINT: &str = "Enter save · Esc cancel (empty name cancels)";
+/// Widest the picker and prompt boxes get.
+const DIALOG_WIDTH: u16 = 60;
 
 /// Widget state that persists between frames: the first visible row of
 /// each panel, so the view does not jump between frames.
@@ -43,8 +65,19 @@ pub struct ViewState {
     local_search_offset: usize,
     remote_offset: usize,
     queue_offset: usize,
+    /// Navidrome list rows shown in the last frame (0 if none).
+    pub remote_rows: usize,
     /// The largest useful help scroll for the last frame's size.
     pub help_max_scroll: usize,
+    /// Advances the settings spinner, one step per frame.
+    spinner: usize,
+    /// Where the last frame drew the visualizer, if it can be redrawn on
+    /// its own (no overlay or text input on top, so no cursor either).
+    pub visualizer_area: Option<Rect>,
+    /// The last frame had room for the visualizer and no overlay (help,
+    /// settings, the picker or the name prompt) covered it, whether or not
+    /// it is shown. The app polls for readings only while this holds.
+    pub visualizer_drawable: bool,
 }
 
 /// The first visible row for a list of `len` rows in a viewport of
@@ -80,12 +113,26 @@ fn note_row_built() {
 }
 
 pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
+    let screen = frame.area();
+    let room = screen.width >= VISUALIZER_MIN_SCREEN.0 && screen.height >= VISUALIZER_MIN_SCREEN.1;
+    let overlay = app.help_open()
+        || app.settings_open()
+        || app
+            .browser()
+            .is_some_and(|b| b.picker().is_some() || b.prompt().is_some());
+    view.visualizer_drawable = room && !overlay;
+    let visualizer = app.visualizer_shown() && room;
+    let now_playing_height = if visualizer {
+        NOW_PLAYING_HEIGHT + VISUALIZER_HEIGHT
+    } else {
+        NOW_PLAYING_HEIGHT
+    };
     let [panels, now_playing, status] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(NOW_PLAYING_HEIGHT),
+        Constraint::Length(now_playing_height),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(screen);
 
     if panels.width < NARROW_WIDTH {
         match app.focus() {
@@ -99,10 +146,27 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         draw_library(frame, app, view, left, app.focus() == Focus::Library);
         draw_queue(frame, app, view, right, app.focus() == Focus::Queue);
     }
-    draw_now_playing(frame, app, now_playing);
+    let visualizer_area = draw_now_playing(frame, app, now_playing, visualizer);
+    // A text input shows a cursor, which a visualizer-only redraw would
+    // hide; while one is open the visualizer waits for full redraws.
+    view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
     draw_status(frame, app, status, now);
     if app.help_open() {
         view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
+    }
+    if let Some(browser) = app.browser() {
+        if let Some(picker) = browser.picker() {
+            draw_picker(frame, picker, frame.area());
+        }
+        if let Some((title, text)) = browser.prompt() {
+            draw_prompt(frame, title, text, frame.area());
+        }
+    }
+    if app.settings_open() {
+        if app.settings().busy().is_some() {
+            view.spinner = view.spinner.wrapping_add(1);
+        }
+        settings::draw(frame, app.settings(), app.connection(), view.spinner);
     }
 }
 
@@ -141,10 +205,41 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         draw_remote(frame, app, browser, view, area, focused);
         return;
     }
+    if app.navidrome_prompt() {
+        let block = panel_block("Navidrome".to_owned(), focused, area.width);
+        let body = block.inner(area);
+        frame.render_widget(block, area);
+        let width = usize::from(body.width);
+        let mut lines = vec![Line::raw(fit(NAVIDROME_NOT_CONFIGURED, width))];
+        if focused {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                fit(PRESS_ENTER_TO_CONNECT, width),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), body);
+        return;
+    }
+    if app.scan_state() == ScanState::NoLibrary {
+        let block = panel_block("Local".to_owned(), focused, area.width);
+        let body = block.inner(area);
+        frame.render_widget(block, area);
+        let line = fit(NO_LOCAL_LIBRARY, usize::from(body.width));
+        frame.render_widget(Paragraph::new(line), body);
+        return;
+    }
+    let browser = app.local_browser();
+    let library = app.library();
     let title = match app.local_search() {
         Some(search) => local_search_title(search),
-        None if app.library_path().is_empty() => "Local".to_owned(),
-        None => format!("Local: {}", app.library_path().join("/")),
+        None => {
+            let prefix = match app.scan_state() {
+                ScanState::Scanning { .. } => "Local (scanning…)",
+                _ => "Local",
+            };
+            path_title(prefix, &browser.path_titles(library), area.width)
+        }
     };
     let block = panel_block(title, focused, area.width);
     let mut body = block.inner(area);
@@ -160,14 +255,23 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         return;
     }
 
-    if app.tree().is_empty() {
-        let message = match app.scan_state() {
-            ScanState::Scanning { .. } => "Scanning…".to_owned(),
-            ScanState::NoLibrary => NO_LOCAL_LIBRARY.to_owned(),
+    let view_shown = browser.current();
+    if browser.is_empty(library) {
+        let scanning = matches!(app.scan_state(), ScanState::Scanning { .. });
+        let message = match view_shown {
+            _ if scanning => "Scanning…".to_owned(),
+            LocalView::Playlists => "No playlists (.m3u or .m3u8 files)".to_owned(),
+            LocalView::Playlist(id) => match library.playlist(*id).missing {
+                0 => "Empty playlist".to_owned(),
+                n => format!("No tracks found ({} missing)", thousands(n)),
+            },
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
-        let width = usize::from(body.width);
-        frame.render_widget(Paragraph::new(fit(&message, width)), body);
+        let line = Line::styled(
+            fit(&message, usize::from(body.width)),
+            Style::default().fg(Color::DarkGray),
+        );
+        frame.render_widget(Paragraph::new(line), body);
         return;
     }
 
@@ -185,26 +289,76 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         .into_iter()
         .map(|row| {
             note_row_built();
-            match row {
-                LibraryRow::Dir(dir) => ListItem::new(Line::styled(
-                    fit(&format!("{}/", dir.name()), width),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                LibraryRow::Track(track) => {
-                    let left = match track.track_no {
-                        Some(no) => format!("{no:02} {}", track.title),
-                        None => track.title.clone(),
-                    };
-                    ListItem::new(row_line(&left, track.duration.map(format_time), width))
-                }
-            }
+            ListItem::new(local_row(library, view_shown, row, width))
         })
         .collect();
     let mut state =
         ListState::default().with_selected(Some(app.library_selected().saturating_sub(offset)));
     frame.render_stateful_widget(list_widget(items, Block::new(), focused), body, &mut state);
+}
+
+/// One row of a local view.
+fn local_row(
+    library: &Library,
+    view: &LocalView,
+    row: LocalRow<'_>,
+    width: usize,
+) -> Line<'static> {
+    match row {
+        LocalRow::Home(entry) => Line::raw(fit(entry.label(), width)),
+        LocalRow::Dir(dir) => Line::styled(
+            fit(&format!("{}/", dir.name()), width),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        LocalRow::Track(_, track) => {
+            let numbered = |text: String| match track.track_no {
+                Some(no) => format!("{no:02} {text}"),
+                None => text,
+            };
+            let left = match view {
+                LocalView::Playlist(_) => track.display_name(),
+                // A compilation: name the track's own artist.
+                LocalView::Album(id) => {
+                    let album = library.tags().album(*id);
+                    let album_artist = library.tags().artist(album.artist()).name();
+                    match &track.artist {
+                        Some(artist) if artist.to_lowercase() != album_artist.to_lowercase() => {
+                            numbered(track.display_name())
+                        }
+                        _ => numbered(track.title.clone()),
+                    }
+                }
+                _ => numbered(track.title.clone()),
+            };
+            row_line(&left, track.duration.map(format_time), width)
+        }
+        LocalRow::Artist(artist) => row_line(
+            artist.name(),
+            Some(count(artist.albums().len(), "album")),
+            width,
+        ),
+        LocalRow::Album(album, artist) => {
+            let left = match view {
+                LocalView::Albums(_) => format!("{} — {}", album.name(), artist.name()),
+                _ => album.name().to_owned(),
+            };
+            row_line(&left, Some(count(album.tracks().len(), "track")), width)
+        }
+        LocalRow::Playlist(playlist) => {
+            row_line(&playlist.name, Some(playlist_counts(playlist)), width)
+        }
+    }
+}
+
+/// `12 tracks`, or `12 tracks, 3 missing`.
+fn playlist_counts(playlist: &LocalPlaylist) -> String {
+    let tracks = count(playlist.tracks.len(), "track");
+    match playlist.missing {
+        0 => tracks,
+        n => format!("{tracks}, {} missing", thousands(n)),
+    }
 }
 
 /// `Local: 12 results for "blue"`; with more matches than are kept,
@@ -270,19 +424,37 @@ fn draw_local_search(
     frame.render_stateful_widget(list_widget(items, Block::new(), focused), area, &mut state);
 }
 
-/// `Navidrome (<state>): Artists / <artist> / <album>`, fitted to a panel
-/// of `width` columns. When too long, the start of the path is cut so the
+/// Separates the views of the path in a library panel title.
+pub const PATH_SEPARATOR: &str = " › ";
+
+/// `prefix › view › view`, fitted to a panel of `width` columns; just
+/// `prefix` at Home. When too long, the start of the path is cut so the
 /// shown view stays visible.
+fn path_title(prefix: &str, path: &[String], width: u16) -> String {
+    if path.is_empty() {
+        return prefix.to_owned();
+    }
+    let prefix = format!("{prefix}{PATH_SEPARATOR}");
+    let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
+    format!("{prefix}{}", fit_tail(&path.join(PATH_SEPARATOR), room))
+}
+
+/// `Navidrome (<state>) › Albums (newest) › <album>`, fitted to a panel
+/// of `width` columns; Home is the bare `Navidrome (<state>)`. When too
+/// long, the start of the path is cut so the shown view stays visible.
 fn remote_title(connection: &Connection, browser: &Browser, width: u16) -> String {
     let state = match connection {
         Connection::Connecting => "connecting…",
         Connection::Connected => "connected",
         Connection::Failed(_) => "not connected",
     };
-    let prefix = format!("Navidrome ({state}): ");
-    let path: Vec<&str> = browser.stack().iter().map(|v| v.title.as_str()).collect();
-    let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
-    format!("{prefix}{}", fit_tail(&path.join(" / "), room))
+    let path: Vec<String> = browser
+        .stack()
+        .iter()
+        .filter(|v| v.resource != Resource::Home)
+        .map(|v| browser.title(v))
+        .collect();
+    path_title(&format!("Navidrome ({state})"), &path, width)
 }
 
 fn draw_remote(
@@ -307,6 +479,7 @@ fn draw_remote(
         let line = Line::styled(fit(text, usize::from(body.width)), style);
         frame.render_widget(Paragraph::new(line), body);
     };
+    view.remote_rows = 0;
     let Some(current) = browser.current() else {
         return;
     };
@@ -323,17 +496,41 @@ fn draw_remote(
             };
             if content.is_empty() {
                 let text = match current.resource {
+                    Resource::Home => "",
                     Resource::Artists => "No artists",
-                    Resource::Artist(_) => "No albums",
-                    Resource::Album(_) => "No songs",
+                    Resource::Artist(_) | Resource::Albums(_) | Resource::AlbumPage { .. } => {
+                        "No albums"
+                    }
+                    Resource::Album(_) | Resource::Playlist(_) => "No songs",
                     Resource::Search(_) => "No results",
+                    Resource::Playlists => "No playlists",
                 };
                 message(frame, text, Style::default().fg(Color::DarkGray));
                 return;
             }
-            let in_search = matches!(current.resource, Resource::Search(_));
+            let footer = match browser.more(current) {
+                More::Idle => None,
+                More::Loading => Some(Line::styled(
+                    fit("Loading more…", usize::from(body.width)),
+                    Style::default().fg(Color::Yellow),
+                )),
+                More::Failed(_) => Some(Line::styled(
+                    fit("Could not load more — r to retry", usize::from(body.width)),
+                    Style::default().fg(Color::Red),
+                )),
+            };
+            if let Some(footer) = footer
+                && body.height > 1
+            {
+                let [list, footer_area] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+                frame.render_widget(Paragraph::new(footer), footer_area);
+                body = list;
+            }
+            let style = RowStyle::of(&current.resource);
             let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
             let height = usize::from(body.height);
+            view.remote_rows = height;
             let offset = scroll_offset(view.remote_offset, current.selected, content.len(), height);
             view.remote_offset = offset;
             let items: Vec<ListItem> = content
@@ -341,7 +538,7 @@ fn draw_remote(
                 .into_iter()
                 .map(|row| {
                     note_row_built();
-                    ListItem::new(remote_row(row, in_search, width))
+                    ListItem::new(remote_row(row, style, width))
                 })
                 .collect();
             let mut state =
@@ -355,7 +552,29 @@ fn draw_remote(
     }
 }
 
-fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
+/// How rows of a remote view show their item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowStyle {
+    /// Albums with their artist (lists across artists).
+    album_artist: bool,
+    /// Songs as `artist - title` rather than `NN title` (lists that are
+    /// not one album).
+    song_artist: bool,
+}
+
+impl RowStyle {
+    fn of(resource: &Resource) -> Self {
+        Self {
+            album_artist: matches!(
+                resource,
+                Resource::Search(_) | Resource::Albums(_) | Resource::AlbumPage { .. }
+            ),
+            song_artist: matches!(resource, Resource::Search(_) | Resource::Playlist(_)),
+        }
+    }
+}
+
+fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
     match row {
         Row::Header(section) => Line::styled(
             fit(section.label(), width),
@@ -363,20 +582,29 @@ fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
+        Row::Home(entry) => Line::raw(fit(entry.label(), width)),
+        Row::Playlist(playlist) => {
+            let songs = playlist.song_count.map(|n| count(n as usize, "song"));
+            let right = match (songs, playlist.duration.map(format_time)) {
+                (Some(songs), Some(time)) => Some(format!("{songs} · {time}")),
+                (songs, time) => songs.or(time),
+            };
+            row_line(&playlist.name, right, width)
+        }
         Row::Artist(artist) => row_line(
             &artist.name,
             artist.album_count.map(|n| count(n as usize, "album")),
             width,
         ),
         Row::Album(album) => {
-            let left = match (&album.artist, in_search) {
+            let left = match (&album.artist, style.album_artist) {
                 (Some(artist), true) => format!("{} — {artist}", album.name),
                 _ => album.name.clone(),
             };
             row_line(&left, album.year.map(|y| y.to_string()), width)
         }
         Row::Song(track) => {
-            let left = if in_search {
+            let left = if style.song_artist {
                 track.display_name()
             } else {
                 match track.track_no {
@@ -386,6 +614,105 @@ fn remote_row(row: Row<'_>, in_search: bool, width: usize) -> Line<'static> {
             };
             row_line(&left, track.duration.map(format_time), width)
         }
+    }
+}
+
+/// A box of at most `width` × `height`, centred in `area`.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// The "Add to playlist" picker: "New playlist…", then the user's own
+/// playlists A–Z, with a note while the list loads or when it failed.
+/// Builds only the visible rows.
+fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
+    let note = match picker.load() {
+        Load::Loading(_) => Some(("Loading your playlists…".to_owned(), Color::Yellow)),
+        Load::Failed(error) => Some((format!("Could not load playlists: {error}"), Color::Red)),
+        Load::Ready if picker.choices().is_empty() => {
+            Some(("No playlists of your own yet".to_owned(), Color::DarkGray))
+        }
+        Load::Ready => None,
+    };
+    let rows = picker.len().saturating_add(usize::from(note.is_some()));
+    let height = u16::try_from(rows.saturating_add(2)).unwrap_or(u16::MAX);
+    let popup = centered(area, DIALOG_WIDTH, height);
+    frame.render_widget(Clear, popup);
+    let title = format!("Add {} to", picker.label());
+    let block = panel_block(title, true, popup.width);
+    let mut body = block.inner(popup);
+    frame.render_widget(block, popup);
+    if let Some((text, color)) = note
+        && body.height > 1
+    {
+        let [list, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+        let line = Line::styled(
+            fit(&text, usize::from(footer.width)),
+            Style::default().fg(color),
+        );
+        frame.render_widget(Paragraph::new(line), footer);
+        body = list;
+    }
+    let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+    let height = usize::from(body.height);
+    let offset = scroll_offset(0, picker.selected(), picker.len(), height);
+    let items: Vec<ListItem> = (offset..picker.len().min(offset.saturating_add(height)))
+        .map(|i| {
+            note_row_built();
+            match i.checked_sub(1).and_then(|j| picker.choices().get(j)) {
+                Some(playlist) => ListItem::new(row_line(
+                    &playlist.name,
+                    playlist.song_count.map(|n| count(n as usize, "song")),
+                    width,
+                )),
+                None => ListItem::new(Line::styled(
+                    fit(NEW_PLAYLIST_ROW, width),
+                    Style::default().add_modifier(Modifier::ITALIC),
+                )),
+            }
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(picker.selected() - offset));
+    frame.render_stateful_widget(list_widget(items, Block::new(), true), body, &mut state);
+}
+
+/// The playlist name prompt: a box with the input (the end of the text,
+/// with the cursor after it) and a hint.
+fn draw_prompt(frame: &mut Frame, title: &str, text: &str, area: Rect) {
+    let popup = centered(area, DIALOG_WIDTH, 4);
+    frame.render_widget(Clear, popup);
+    let block = panel_block(title.to_owned(), true, popup.width);
+    let body = block.inner(popup);
+    frame.render_widget(block, popup);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let shown = fit_tail(text, usize::from(body.width).saturating_sub(1));
+    let cursor_x = shown.width();
+    frame.render_widget(Paragraph::new(Line::raw(shown)), Rect { height: 1, ..body });
+    let x = body.x + (cursor_x as u16).min(body.width - 1);
+    frame.set_cursor_position((x, body.y));
+    if body.height > 1 {
+        let hint = Line::styled(
+            fit(PROMPT_HINT, usize::from(body.width)),
+            Style::default().fg(Color::DarkGray),
+        );
+        frame.render_widget(
+            Paragraph::new(hint),
+            Rect {
+                y: body.y + 1,
+                height: 1,
+                ..body
+            },
+        );
     }
 }
 
@@ -419,7 +746,7 @@ fn draw_search_input(frame: &mut Frame, query: &str, area: Rect) {
 /// shortened. Bounded the same way: only the last [`MAX_FIT_CHARS`] chars
 /// are considered and the cut is found by binary search over measured
 /// suffixes.
-fn fit_tail(text: &str, width: usize) -> String {
+pub fn fit_tail(text: &str, width: usize) -> String {
     let skip = text.chars().count().saturating_sub(MAX_FIT_CHARS);
     let clean: String = text
         .chars()
@@ -525,15 +852,21 @@ fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
     }
 }
 
-fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
+/// Draws the now-playing bar; with `visualizer`, the visualizer below the
+/// progress line. Returns the visualizer's area.
+fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) -> Option<Rect> {
     let player = app.player();
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Now Playing ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [info, progress] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+    let [info, progress, visualizer_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(if visualizer { VISUALIZER_HEIGHT } else { 0 }),
+    ])
+    .areas(inner);
 
     let (label, color) = status_label(player.status());
     let label = format!("[{label}] ");
@@ -602,6 +935,108 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect) {
         gauge_area,
     );
     frame.render_widget(Paragraph::new(volume), volume_area);
+    let visualizer_area = visualizer_area.inner(ratatui::layout::Margin::new(1, 0));
+    (visualizer && !visualizer_area.is_empty()).then(|| {
+        draw_visualizer(frame.buffer_mut(), app, visualizer_area);
+        visualizer_area
+    })
+}
+
+/// Draws the visualizer into `area` of `buffer`, replacing what was there.
+/// Shape carries all the meaning (block characters), so it reads the same
+/// without colour (`NO_COLOR`) and with 16 colours. Silent unless the
+/// current track is playing. Too narrow for even one-column bands, it
+/// draws nothing.
+pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
+    Clear.render(area, buffer);
+    if area.width < NARROW_BANDS_WIDTH || area.height == 0 {
+        return;
+    }
+    let player = app.player();
+    let meter = app.meter();
+    let live = player.status() == PlaybackStatus::Playing
+        && meter.load().is_some()
+        && meter.load() == player.current_load();
+    let (levels, bands) = if live {
+        (meter.levels(), meter.bands())
+    } else {
+        ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
+    };
+
+    // Bands: three columns each when there is room for them and a meter.
+    let (band_width, gap) = if area.width >= 42 { (3, 1) } else { (1, 1) };
+    let count = bands.len() as u16;
+    let bands_width = count * (band_width + gap) - gap;
+    let band_style = Style::default().fg(Color::Cyan);
+    for (i, band) in bands.iter().enumerate() {
+        let x = area.x + i as u16 * (band_width + gap);
+        // A band the track cannot contain stays empty.
+        let Some(value) = band else { continue };
+        let eighths = eighths(*value, area.height);
+        for row in 0..area.height {
+            let filled = eighths.saturating_sub(row * 8).min(8);
+            if filled == 0 {
+                break;
+            }
+            let symbol = VERTICAL_EIGHTHS[usize::from(filled - 1)];
+            let y = area.y + area.height - 1 - row;
+            for dx in 0..band_width {
+                buffer[(x + dx, y)].set_char(symbol).set_style(band_style);
+            }
+        }
+    }
+
+    // Left/right meter on the bottom two rows, to the right of the bands.
+    let room = area.width.saturating_sub(bands_width + 2);
+    if room < MIN_METER_WIDTH || area.height < 2 {
+        return;
+    }
+    let width = room.min(WIDEST_METER);
+    let x = area.x + area.width - width;
+    let label_style = Style::default().fg(Color::DarkGray);
+    let bar_style = Style::default().fg(Color::Green);
+    for (row, (label, value)) in ["L", "R"].iter().zip(levels).enumerate() {
+        let y = area.y + area.height - 2 + row as u16;
+        buffer.set_string(x, y, label, label_style);
+        let bar = width - 2;
+        let eighths = eighths(value, bar);
+        for cell in 0..bar {
+            let filled = eighths.saturating_sub(cell * 8).min(8);
+            if filled == 0 {
+                break;
+            }
+            buffer[(x + 2 + cell, y)]
+                .set_char(HORIZONTAL_EIGHTHS[usize::from(filled - 1)])
+                .set_style(bar_style);
+        }
+    }
+}
+
+/// Redraws only the visualizer: draws it into `last_frame` (a copy of the
+/// last full frame, which `area` belongs to) and sends the terminal the
+/// difference, which is just the visualizer's cells. Only valid while
+/// nothing covers `area` and no cursor is shown (see
+/// [`ViewState::visualizer_area`]).
+pub fn redraw_visualizer<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    last_frame: &mut Buffer,
+    app: &App,
+    area: Rect,
+) -> Result<(), B::Error> {
+    draw_visualizer(last_frame, app, area);
+    terminal.current_buffer_mut().clone_from(last_frame);
+    terminal.apply_buffer()?;
+    Ok(())
+}
+
+/// `value` (`0.0..=1.0`) in eighths of `cells` cells.
+fn eighths(value: f32, cells: u16) -> u16 {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (value * f32::from(cells) * 8.0).round() as u16
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
@@ -761,6 +1196,17 @@ mod tests {
         out
     }
 
+    /// From the local Home (as a new app starts), opens Folders.
+    fn open_folders(app: &mut App, now: Instant) {
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
+        assert_eq!(app.library_path(), [] as [String; 0]);
+        assert!(matches!(
+            app.local_browser().current(),
+            crate::library::browse::View::Folder(_)
+        ));
+    }
+
     fn tagged(rel: &str, title: &str, artist: &str, secs: u64) -> Track {
         Track::local(
             format!("/music/{rel}").into(),
@@ -784,10 +1230,7 @@ mod tests {
         .unwrap();
         let mut app = App::with_sources(None, Some(client));
         let screen = render(&app, 100, 20, now);
-        assert!(
-            screen.contains("Navidrome (connecting…): Artists"),
-            "{screen}"
-        );
+        assert!(screen.contains("Navidrome (connecting…) "), "{screen}");
         assert!(!screen.contains("Scanning"), "{screen}");
         assert!(screen.contains("? help"), "{screen}");
         app.handle_action(Action::SelectLocal, now);
@@ -808,6 +1251,30 @@ mod tests {
     }
 
     #[test]
+    fn navidrome_prompt_and_settings_overlay() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_action(Action::SelectNavidrome, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Navidrome is not configured"), "{screen}");
+        assert!(screen.contains("Press Enter to connect"), "{screen}");
+        // The prompt is only offered while the panel is focused.
+        app.handle_action(Action::SwitchFocus, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("Navidrome is not configured"), "{screen}");
+        assert!(!screen.contains("Press Enter"), "{screen}");
+        app.handle_action(Action::OpenSettings, now);
+        let screen = render(&app, 100, 24, now);
+        assert!(screen.contains(" Settings "), "{screen}");
+        assert!(screen.contains("Music folder  /music"), "{screen}");
+        // Help lists the key.
+        let mut app = App::new("/music".into());
+        app.handle_action(Action::ToggleHelp, now);
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Settings (Navidrome)"), "{screen}");
+    }
+
+    #[test]
     fn empty_library_after_scan() {
         let now = Instant::now();
         let mut app = App::new("/music".into());
@@ -819,6 +1286,9 @@ mod tests {
             },
             now,
         );
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("│> Playlists"), "Home first: {screen}");
+        open_folders(&mut app, now);
         let screen = render(&app, 100, 20, now);
         assert!(screen.contains("No music found in /music"), "{screen}");
         assert!(screen.contains("Queue is empty"), "{screen}");
@@ -832,7 +1302,10 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new("/music".into());
         let screen = render(&app, 100, 20, now);
-        assert!(screen.contains("Scanning…"), "{screen}");
+        assert!(screen.contains("┌ Local (scanning…) "), "{screen}");
+        open_folders(&mut app, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("│Scanning…"), "{screen}");
         let tracks: Vec<Track> = (0..1234)
             .map(|i| tagged(&format!("a/{i:04}.flac"), &format!("t{i}"), "x", 1))
             .collect();
@@ -855,6 +1328,7 @@ mod tests {
             )]),
             now,
         );
+        open_folders(&mut app, now);
         let commands = app.handle_action(Action::Activate, now);
         let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
             panic!("{commands:?}");
@@ -876,6 +1350,268 @@ mod tests {
         assert!(render(&app, 100, 20, now).contains("[Paused]"));
     }
 
+    /// An app playing one track with the visualizer shown and fed
+    /// `frame` twice (so the smoothed bars are near it).
+    fn visualizer_app(frame: crate::playback::VisualizerFrame, now: Instant) -> App {
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("song.flac", "Song", "Artist", 100)]),
+            now,
+        );
+        open_folders(&mut app, now);
+        let commands = app.handle_action(Action::Activate, now);
+        let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
+            panic!("{commands:?}");
+        };
+        let load = *load;
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        app.handle_action(Action::ToggleVisualizer, now);
+        assert!(app.handle_visualizer(load, &frame, now));
+        assert!(app.handle_visualizer(load, &frame, now));
+        app
+    }
+
+    fn loud() -> crate::playback::VisualizerFrame {
+        crate::playback::VisualizerFrame {
+            levels: [1.0, 0.5],
+            bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+        }
+    }
+
+    fn drawn(
+        app: &App,
+        width: u16,
+        height: u16,
+        now: Instant,
+    ) -> (Terminal<TestBackend>, ViewState) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut view = ViewState::default();
+        terminal
+            .draw(|frame| draw(frame, app, &mut view, now))
+            .unwrap();
+        (terminal, view)
+    }
+
+    /// The text of `area` in the backend's buffer, row by row.
+    fn area_text(terminal: &Terminal<TestBackend>, area: Rect) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_visualizer_is_off_by_default_and_takes_three_rows_when_shown() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.expect("shown");
+        assert_eq!(area.height, VISUALIZER_HEIGHT);
+        // Below the progress line, inside the now-playing box.
+        let screen = buffer_text(&terminal);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[usize::from(area.y) - 1].contains("Vol"), "{screen}");
+        assert!(
+            rows[usize::from(area.bottom())].starts_with('└'),
+            "{screen}"
+        );
+        assert!(rows[23].contains("Playing"), "{screen}");
+        // Hidden: back to the plain bar, with no visualizer rows.
+        app.handle_action(Action::ToggleVisualizer, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        let hidden = buffer_text(&terminal);
+        assert!(!hidden.contains('█') && !hidden.contains('▏'), "{hidden}");
+        assert_eq!(
+            hidden.lines().position(|l| l.contains("Now Playing")),
+            Some(24 - 1 - 4)
+        );
+    }
+
+    #[test]
+    fn the_visualizer_draws_bands_and_meter_at_several_sizes() {
+        let now = Instant::now();
+        let app = visualizer_app(loud(), now);
+        for (width, height) in [(80, 24), (120, 40), (60, 20), (40, 18), (20, 16)] {
+            let (terminal, view) = drawn(&app, width, height, now);
+            let area = view
+                .visualizer_area
+                .unwrap_or_else(|| panic!("{width}x{height}"));
+            let rows = area_text(&terminal, area);
+            let text = rows.join("\n");
+            // Loud bands (smoothed to 0.91 of full) fill the lower rows and
+            // most of the top one.
+            assert!(
+                rows[1..].iter().all(|r| r.contains('█')),
+                "{width}x{height}:\n{text}"
+            );
+            assert!(rows[0].contains('▆'), "{width}x{height}:\n{text}");
+            let meter = area.width >= 13 + 2 + MIN_METER_WIDTH;
+            assert_eq!(rows[1].contains('L'), meter, "{width}x{height}:\n{text}");
+            assert_eq!(rows[2].contains('R'), meter, "{width}x{height}:\n{text}");
+            // Nothing escapes the area: the panels and status are intact.
+            let screen = buffer_text(&terminal);
+            assert!(screen.contains("Now Playing"), "{screen}");
+            for line in screen.lines() {
+                assert_eq!(line.width(), usize::from(width), "{screen}");
+            }
+        }
+    }
+
+    #[test]
+    fn small_terminals_leave_the_visualizer_out() {
+        let now = Instant::now();
+        let app = visualizer_app(loud(), now);
+        for (width, height) in [(80, 15), (19, 30), (10, 5), (1, 1)] {
+            let (terminal, view) = drawn(&app, width, height, now);
+            assert_eq!(view.visualizer_area, None, "{width}x{height}");
+            let screen = buffer_text(&terminal);
+            assert!(!screen.contains('█'), "{width}x{height}: {screen}");
+        }
+        // At the smallest size that shows it, the panels keep their rows.
+        let (terminal, _) = drawn(&app, 20, 16, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.lines().next().unwrap().starts_with('┌'), "{screen}");
+    }
+
+    #[test]
+    fn the_visualizer_is_silent_unless_playing() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        app.handle_playback_event(PlaybackEvent::Paused(true), now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let rows = area_text(&terminal, view.visualizer_area.unwrap());
+        assert!(
+            rows.iter().all(|r| !r.contains(['█', '▏', '▁'])),
+            "{rows:?}"
+        );
+        // The meter labels stay, so the layout does not jump.
+        assert!(rows[1].contains('L') && rows[2].contains('R'), "{rows:?}");
+    }
+
+    #[test]
+    fn unreachable_bands_stay_empty_and_quiet_bands_are_low() {
+        let now = Instant::now();
+        let mut frame = loud();
+        frame.bands[5] = None;
+        frame.bands[6] = None;
+        frame.bands[0] = Some(0.1);
+        let app = visualizer_app(frame, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let rows = area_text(&terminal, area);
+        let column = |band: usize| -> String {
+            let x = band * 4;
+            rows.iter().map(|r| r.chars().nth(x).unwrap()).collect()
+        };
+        // Band 0 at 0.091 of 24 eighths: two eighths, bottom row only.
+        assert_eq!(column(0), "  ▂", "{rows:?}");
+        assert_eq!(column(3), "▆██", "{rows:?}");
+        assert_eq!(column(5), "   ", "{rows:?}");
+        assert_eq!(column(6), "   ", "{rows:?}");
+    }
+
+    #[test]
+    fn the_visualizer_reads_without_colour() {
+        // With NO_COLOR, crossterm drops every colour; the bars must still
+        // read. Every cell the visualizer sets is a block character or a
+        // label, in one of the 16 basic colours, and bar heights differ by
+        // shape alone.
+        let now = Instant::now();
+        let mut frame = loud();
+        frame.bands[2] = Some(0.5);
+        let app = visualizer_app(frame, now);
+        let (terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let cell = &buffer[(x, y)];
+                assert!(
+                    matches!(
+                        cell.fg,
+                        Color::Reset | Color::Cyan | Color::Green | Color::DarkGray
+                    ),
+                    "{:?}",
+                    cell.fg
+                );
+                assert_eq!(cell.bg, Color::Reset);
+                let c = cell.symbol().chars().next().unwrap();
+                assert!(
+                    c == ' '
+                        || c == 'L'
+                        || c == 'R'
+                        || VERTICAL_EIGHTHS.contains(&c)
+                        || HORIZONTAL_EIGHTHS.contains(&c),
+                    "{c:?}"
+                );
+            }
+        }
+        let rows = area_text(&terminal, area);
+        let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
+        let half: String = rows.iter().map(|r| r.chars().nth(8).unwrap()).collect();
+        assert_ne!(full, half, "{rows:?}");
+    }
+
+    #[test]
+    fn a_visualizer_only_redraw_matches_a_full_redraw() {
+        let now = Instant::now();
+        let later = now + Duration::from_millis(40);
+        let mut app = visualizer_app(loud(), now);
+        let (mut terminal, view) = drawn(&app, 80, 24, now);
+        let area = view.visualizer_area.unwrap();
+        let mut last = terminal.backend().buffer().clone();
+        let mut quiet = loud();
+        quiet.levels = [0.0, 0.0];
+        quiet.bands = [Some(0.0); crate::playback::VISUALIZER_BANDS];
+        let load = app.player().current_load().unwrap();
+        assert!(app.handle_visualizer(load, &quiet, later));
+        redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
+        let partial = terminal.backend().buffer().clone();
+        let (full, _) = drawn(&app, 80, 24, now);
+        assert_eq!(&partial, full.backend().buffer());
+        assert_eq!(&last, full.backend().buffer());
+        // A full draw after a partial one still works (buffers swapped).
+        terminal
+            .draw(|frame| draw(frame, &app, &mut ViewState::default(), now))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), full.backend().buffer());
+    }
+
+    #[test]
+    fn overlays_and_inputs_turn_off_visualizer_only_redraws() {
+        let now = Instant::now();
+        let mut app = visualizer_app(loud(), now);
+        assert!(drawn(&app, 80, 24, now).1.visualizer_drawable);
+        app.handle_action(Action::ToggleHelp, now);
+        let (_, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        assert!(!view.visualizer_drawable, "help covers it: no polling");
+        app.handle_action(Action::CloseHelp, now);
+        app.handle_action(Action::OpenSettings, now);
+        assert!(!drawn(&app, 80, 24, now).1.visualizer_drawable);
+        app.handle_settings_input(crate::onboarding::Input::Esc, now);
+        assert!(!app.settings_open());
+        app.handle_action(Action::OpenSearch, now);
+        assert!(app.input_open());
+        let (_, view) = drawn(&app, 80, 24, now);
+        assert_eq!(view.visualizer_area, None);
+        assert!(
+            view.visualizer_drawable,
+            "still shown, updated by full redraws"
+        );
+        // Too small: not drawable, whatever the setting.
+        app.handle_action(Action::InputCancel, now);
+        assert!(!drawn(&app, 80, 15, now).1.visualizer_drawable);
+        app.handle_action(Action::ToggleVisualizer, now);
+        assert!(drawn(&app, 80, 24, now).1.visualizer_drawable);
+        assert!(!drawn(&app, 19, 24, now).1.visualizer_drawable);
+    }
+
     #[test]
     fn help_overlay_lists_keys() {
         let now = Instant::now();
@@ -886,11 +1622,14 @@ mod tests {
         assert!(screen.contains("Switch panel"), "{screen}");
         assert!(screen.contains("Ctrl-C"), "{screen}");
         for text in [
-            "Move entry down / up",
-            "Select current entry",
-            "Shuffle upcoming",
-            "Clear queue",
-            "Repeat: off / all / one",
+            "Queue: remove / move down / up",
+            "Queue: select current / shuffle",
+            "Queue: clear / save as playlist",
+            "Add to a Navidrome playlist",
+            "Playlists: new / rename / delete",
+            "Playlist: remove / move song",
+            "Playlist: save / discard order",
+            "Repeat (off/all/one) / visualizer",
             "Streamed from Navidrome",
         ] {
             assert!(screen.contains(text), "{text}: {screen}");
@@ -1109,6 +1848,7 @@ mod tests {
             })
             .collect();
         app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        open_folders(&mut app, now);
         app.handle_action(Action::Activate, now);
         app.handle_action(Action::Enqueue, now);
         let commands = app.handle_action(Action::Activate, now);
@@ -1181,6 +1921,7 @@ mod tests {
             })
             .collect();
         app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        open_folders(&mut app, now);
         app.handle_action(Action::Enqueue, now); // the folder, recursively
         app.handle_action(Action::SwitchFocus, now);
         app.handle_action(Action::Activate, now);
@@ -1335,6 +2076,7 @@ mod tests {
         );
         // Open the emoji folder, enqueue both and play the first (fills
         // the library, queue and now-playing bar).
+        open_folders(&mut app, now);
         app.handle_action(Action::Activate, now);
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::Down, now);
@@ -1415,6 +2157,7 @@ mod tests {
             ]),
             now,
         );
+        open_folders(&mut app, now);
         // The input line sits at the top of the Local panel, with its hint.
         app.handle_action(Action::OpenSearch, now);
         for c in "blue".chars() {
@@ -1462,7 +2205,7 @@ mod tests {
         // Back to the tree.
         app.handle_action(Action::Back, now);
         let screen = render(&app, 100, 14, now);
-        assert!(screen.contains("┌ Local ─"), "{screen}");
+        assert!(screen.contains("┌ Local › Folders ─"), "{screen}");
         assert!(screen.contains("> a/"), "{screen}");
     }
 
@@ -1508,9 +2251,13 @@ mod tests {
         .unwrap()
     }
 
-    /// Navidrome only; the startup Artists request is returned unanswered.
+    /// Navidrome only, with Artists opened from Home; its request is
+    /// returned unanswered.
     fn nav_app() -> (App, FetchRequest) {
         let mut app = App::with_sources(None, Some(nav_client()));
+        let now = Instant::now();
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
         let request = app.take_fetch_requests().remove(0);
         (app, request)
     }
@@ -1522,6 +2269,7 @@ mod tests {
     ) {
         app.handle_fetch_response(
             FetchResponse {
+                generation: Default::default(),
                 id: request.id,
                 resource: request.resource.clone(),
                 result,
@@ -1573,7 +2321,7 @@ mod tests {
         );
         let screen = render(&app, 100, 14, now);
         assert!(
-            screen.contains("Navidrome (connected): Artists"),
+            screen.contains("Navidrome (connected) › Artists"),
             "{screen}"
         );
         assert!(screen.contains("> Miles Davis"), "{screen}");
@@ -1588,7 +2336,7 @@ mod tests {
         app.handle_action(Action::Activate, now);
         let screen = render(&app, 100, 14, now);
         assert!(
-            screen.contains("Navidrome (connected): Artists / Miles Davis"),
+            screen.contains("Navidrome (connected) › Artists › Miles Davis"),
             "{screen}"
         );
         assert!(screen.contains("Loading…"), "{screen}");
@@ -1687,13 +2435,13 @@ mod tests {
         let screen = render(&app, 140, 14, now);
         assert!(!screen.contains("Search: "), "{screen}");
         assert!(
-            screen.contains("Navidrome (connected): Artists / Search \"blue x\""),
+            screen.contains("Navidrome (connected) › Artists › Search \"blue x\""),
             "{screen}"
         );
         // A narrow panel cuts the start of the path, not the shown view.
         let screen = render(&app, 40, 14, now);
         assert!(
-            screen.contains("(connected): …") && screen.contains("\"blue x\" ┐"),
+            screen.contains("(connected) › …") && screen.contains("\"blue x\" ┐"),
             "{screen}"
         );
         answer(
@@ -1738,8 +2486,11 @@ mod tests {
             ScanEvent::Batch(vec![tagged("l.flac", "Local Song", "Band", 61)]),
             now,
         );
+        open_folders(&mut app, now);
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::SelectNavidrome, now);
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
         let request = app.take_fetch_requests().remove(0);
         answer(
             &mut app,
@@ -1811,5 +2562,632 @@ mod tests {
                 assert_full_width(&screen, width);
             }
         }
+    }
+
+    // ----- local Home, tag lists and playlists ---------------------------
+
+    fn album_track(rel: &str, title: &str, artist: &str, album_artist: &str, album: &str) -> Track {
+        let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        Track::local(
+            format!("/music/{rel}").into(),
+            TrackMetadata {
+                title: Some(title.into()),
+                artist: some(artist),
+                album_artist: some(album_artist),
+                album: some(album),
+                track_no: rel
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.get(..2)?.parse().ok()),
+                duration: Some(Duration::from_secs(90)),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    fn local_press(app: &mut App, actions: &[Action], now: Instant) {
+        for action in actions {
+            app.handle_action(*action, now);
+        }
+    }
+
+    #[test]
+    fn local_home_lists_and_playlists_render() {
+        use crate::library::m3u::PlaylistFile;
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                album_track("k/01.flac", "So What", "Miles Davis", "", "Kind of Blue"),
+                album_track("k/02.flac", "Freddie", "Miles Davis", "", "Kind of Blue"),
+                album_track("h/01.flac", "Hit", "Guest", "Various Artists", "Hits"),
+                album_track(
+                    "h/02.flac",
+                    "Other",
+                    "Miles Davis",
+                    "Various Artists",
+                    "Hits",
+                ),
+                album_track("loose.flac", "Loose", "", "", ""),
+            ]),
+            now,
+        );
+        // Home, with the scanning note in the title.
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local (scanning…) ─"), "{screen}");
+        for (i, entry) in ["Playlists", "Folders", "Artists", "Albums"]
+            .iter()
+            .enumerate()
+        {
+            let mark = if i == 0 { "> " } else { "  " };
+            assert!(screen.contains(&format!("│{mark}{entry} ")), "{screen}");
+        }
+        // Artists, with album counts.
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local (scanning…) › Artists ─"),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis"), "{screen}");
+        assert!(screen.contains("Various Artists"), "{screen}");
+        assert!(screen.contains("Unknown artist"), "{screen}");
+        assert!(screen.contains("1 album"), "{screen}");
+        // A compilation names each track's artist.
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Activate, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("Local (scanning…) › Artists › Various Artists › Hits"),
+            "{screen}"
+        );
+        assert!(screen.contains("> 01 Guest - Hit"), "{screen}");
+        assert!(screen.contains("02 Miles Davis - Other"), "{screen}");
+        // The note goes once the scan finishes; playlists come before.
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/Road.m3u".into(),
+                name: "Road Trip".into(),
+                entries: vec!["/music/k/02.flac".into(), "/music/gone.flac".into()],
+                unresolved: 2,
+                cut: false,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/All.m3u".into(),
+                name: "All good".into(),
+                entries: vec!["/music/k/01.flac".into()],
+                unresolved: 0,
+                cut: true,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 5,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local › Artists › Various Artists › Hits ─"),
+            "{screen}"
+        );
+        // Albums A–Z and by artist, each row with its artist.
+        for _ in 0..4 {
+            app.handle_action(Action::Parent, now);
+        }
+        local_press(&mut app, &[Action::Down, Action::Activate], now);
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local › Albums (A–Z) ─"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(at("Hits — Various Artists") < at("Kind of Blue — Miles Davis"));
+        assert!(at("Kind of Blue — Miles Davis") < at("Unknown album — Unknown artist"));
+        assert!(lines[at("Kind of Blue")].contains("2 tracks"), "{screen}");
+        app.handle_action(Action::CycleSort, now);
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local › Albums (by artist) ─"),
+            "{screen}"
+        );
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(at("Kind of Blue — Miles Davis") < at("Hits — Various Artists"));
+        // Playlists with their counts, A–Z.
+        app.handle_action(Action::Parent, now);
+        local_press(
+            &mut app,
+            &[Action::Up, Action::Up, Action::Up, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local › Playlists ─"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let all = lines.iter().position(|l| l.contains("All good")).unwrap();
+        let road = lines.iter().position(|l| l.contains("Road Trip")).unwrap();
+        assert!(all < road, "{screen}");
+        assert!(lines[all].contains("1 track│"), "{screen}");
+        assert!(lines[road].contains("1 track, 3 missing"), "{screen}");
+        // A playlist cut at the cap says so; its tracks show the artist.
+        app.handle_action(Action::Activate, now);
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("Local › Playlists › All good (cut: file too long)"),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis - So What"), "{screen}");
+        for width in [20, 59, 100] {
+            assert_full_width(&render(&app, width, 16, now), width);
+        }
+    }
+
+    #[test]
+    fn empty_local_lists_explain_themselves() {
+        use crate::library::m3u::PlaylistFile;
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("│Scanning…"), "{screen}");
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/x.m3u".into(),
+                name: "Gone".into(),
+                entries: Vec::new(),
+                unresolved: 4,
+                cut: false,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 0,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        app.handle_action(Action::Activate, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No tracks found (4 missing)"), "{screen}");
+        app.handle_action(Action::Parent, now);
+        app.handle_action(Action::Parent, now);
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No music found in /music"), "{screen}");
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 0,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("No playlists (.m3u or .m3u8 files)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_large_local_album_list_renders_only_visible_rows() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        let tracks: Vec<Track> = (0..20_000)
+            .map(|i| {
+                album_track(
+                    &format!("d/{i:05}.flac"),
+                    "t",
+                    &format!("Artist {}", i % 997),
+                    "",
+                    &format!("Album {i}"),
+                )
+            })
+            .collect();
+        app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(app.library_row_count(), 20_000);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut view = ViewState::default();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        assert!(built <= 19, "built {built} rows");
+    }
+
+    // ----- Navidrome Home, playlists and album lists ---------------------
+
+    use crate::navidrome::browse::Resource as Res;
+    use crate::navidrome::{AlbumPage, AlbumSort, Playlist};
+
+    /// Navidrome only, connected, on Home.
+    fn nav_home() -> App {
+        let mut app = App::with_sources(None, Some(nav_client()));
+        app.handle_navidrome_ping(Ok(()), Instant::now());
+        app
+    }
+
+    fn press(app: &mut App, actions: &[Action]) {
+        for action in actions {
+            app.handle_action(*action, Instant::now());
+        }
+    }
+
+    fn nav_album(id: &str, name: &str, artist: &str) -> Album {
+        Album {
+            id: id.into(),
+            name: name.into(),
+            artist: Some(artist.into()),
+            year: Some(1959),
+            song_count: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn home_and_playlists_render() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        let screen = render(&app, 100, 14, now);
+        for expected in [
+            "┌ Navidrome (connected) ─",
+            "> Playlists",
+            "Artists",
+            "Albums",
+        ] {
+            assert!(screen.contains(expected), "{expected}:\n{screen}");
+        }
+        assert!(!screen.contains("›"), "Home has no path: {screen}");
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        assert_eq!(request.resource, Res::Playlists);
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![
+                Playlist {
+                    id: "p1".into(),
+                    name: "Road Trip".into(),
+                    song_count: Some(12),
+                    duration: Some(Duration::from_secs(2712)),
+                    access: Default::default(),
+                },
+                Playlist {
+                    id: "p2".into(),
+                    name: "\u{202E}Huge\u{1b}[2J".into(),
+                    song_count: Some(u32::MAX),
+                    duration: Some(Duration::MAX),
+                    access: Default::default(),
+                },
+                Playlist {
+                    id: "p3".into(),
+                    name: "Bare".into(),
+                    song_count: None,
+                    duration: None,
+                    access: Default::default(),
+                },
+            ])),
+        );
+        let screen = render(&app, 100, 14, now);
+        for expected in [
+            "Navidrome (connected) › Playlists",
+            "> Road Trip",
+            "12 songs · 45:12",
+            "4,294,967,295 songs",
+            "Bare",
+        ] {
+            assert!(screen.contains(expected), "{expected}:\n{screen}");
+        }
+        assert!(!screen.contains('\u{1b}') && !screen.contains('\u{202E}'));
+        assert_full_width(&screen, 100);
+        assert_full_width(&render(&app, 30, 14, now), 30);
+        // A playlist's songs show their artist.
+        press(&mut app, &[Action::Activate]);
+        let songs = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &songs,
+            Ok(Content::Songs(vec![
+                nav_track("s1", "So What", "Miles Davis", 562),
+                nav_track("s1", "So What", "Miles Davis", 562),
+            ])),
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Playlists › Road Trip"),
+            "{screen}"
+        );
+        assert_eq!(
+            screen.matches("Miles Davis - So What").count(),
+            2,
+            "{screen}"
+        );
+        assert!(screen.contains("9:22"), "{screen}");
+    }
+
+    #[test]
+    fn album_lists_show_the_sort_and_a_paging_footer() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        press(&mut app, &[Action::Down, Action::Down, Action::Activate]);
+        let first = app.take_fetch_requests().remove(0);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Albums (A–Z)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Loading…"), "{screen}");
+        let albums: Vec<Album> = (0..500)
+            .map(|i| nav_album(&format!("al{i}"), &format!("Record {i:03}"), "Band"))
+            .collect();
+        answer(
+            &mut app,
+            &first,
+            Ok(Content::AlbumPage(AlbumPage {
+                albums,
+                served: 500,
+            })),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let mut view = ViewState::default();
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> Record 000 — Band"), "{screen}");
+        assert!(screen.contains("1959"), "{screen}");
+        assert!(!screen.contains("Loading more"), "{screen}");
+        // 14 rows - 5 (now playing, status) - 2 borders.
+        assert_eq!(view.remote_rows, 7);
+        app.set_remote_rows(view.remote_rows);
+        for _ in 0..493 {
+            press(&mut app, &[Action::Down]);
+        }
+        let more = app.take_fetch_requests().remove(0);
+        assert_eq!(
+            more.resource,
+            Res::AlbumPage {
+                sort: AlbumSort::Name,
+                offset: 500
+            }
+        );
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> Record 493 — Band"), "{screen}");
+        assert!(screen.contains("Loading more…"), "{screen}");
+        assert_eq!(view.remote_rows, 6, "the footer takes a row");
+        answer(&mut app, &more, Err(crate::navidrome::Error::Http(500)));
+        draw_to(&mut terminal, &app, &mut view, now);
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("Could not load more — r to retry"),
+            "{screen}"
+        );
+        assert!(!screen.contains("secret-host"), "{screen}");
+        // The sort shows in the title.
+        press(&mut app, &[Action::CycleSort, Action::CycleSort]);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Albums (newest)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_huge_playlist_renders_only_visible_rows() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        press(&mut app, &[Action::Activate]);
+        let lists = app.take_fetch_requests().remove(0);
+        answer(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![Playlist {
+                id: "big".into(),
+                name: "Big".into(),
+                song_count: Some(10_000),
+                duration: None,
+                access: Default::default(),
+            }])),
+        );
+        press(&mut app, &[Action::Activate]);
+        let songs = app.take_fetch_requests().remove(0);
+        let tracks: Vec<Track> = (0..10_000)
+            .map(|i| nav_track(&format!("s{i}"), &format!("Song {i:05}"), "x", 60))
+            .collect();
+        answer(&mut app, &songs, Ok(Content::Songs(tracks)));
+        for _ in 0..9_990 {
+            press(&mut app, &[Action::Down]);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut view = ViewState::default();
+        let started = Instant::now();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(1), "render took {elapsed:?}");
+        assert!(built <= 2 * 19, "built {built} rows");
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> x - Song 09990"), "{screen}");
+    }
+
+    #[test]
+    fn help_lists_play_next_and_sort() {
+        let keys: Vec<&str> = help::BINDINGS.iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"a / A"), "{keys:?}");
+        assert!(keys.contains(&"r / o"), "{keys:?}");
+    }
+
+    fn nav_playlist(id: &str, name: &str, owner: &str, songs: u32) -> crate::navidrome::Playlist {
+        crate::navidrome::Playlist {
+            id: id.into(),
+            name: name.into(),
+            song_count: Some(songs),
+            duration: None,
+            access: crate::navidrome::Access {
+                owner: Some(owner.into()),
+                readonly: false,
+            },
+        }
+    }
+
+    /// Navidrome only, in the Playlists list holding `lists`.
+    fn nav_playlists(lists: Vec<crate::navidrome::Playlist>) -> App {
+        let mut app = nav_home();
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        answer(&mut app, &request, Ok(Content::Playlists(lists)));
+        app
+    }
+
+    #[test]
+    fn the_playlist_picker_renders_new_playlist_first_then_own_playlists() {
+        let mut app = nav_playlists(vec![
+            nav_playlist("p1", "Zebra", "u", 3),
+            nav_playlist("p2", "Theirs", "someone", 9),
+            nav_playlist("p3", "apple", "u", 1),
+        ]);
+        press(&mut app, &[Action::AddToPlaylist, Action::Down]);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Add Zebra to"), "{screen}");
+        let new = screen.find(NEW_PLAYLIST_ROW).expect(&screen);
+        let apple = screen.find("> apple").expect(&screen);
+        let zebra = screen.rfind("Zebra").unwrap();
+        assert!(new < apple && apple < zebra, "{screen}");
+        assert!(
+            screen.contains("1 song") && screen.contains("3 songs"),
+            "{screen}"
+        );
+        // The other user's playlist appears in the list behind, not in the
+        // picker: it shows once.
+        assert_eq!(screen.matches("Theirs").count(), 1, "{screen}");
+        assert_full_width(&screen, 80);
+        render(&app, 20, 6, now);
+        render(&app, 1, 1, now);
+    }
+
+    #[test]
+    fn the_picker_says_when_the_playlists_are_loading_or_failed() {
+        let (mut app, request) = nav_app();
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![nav_artist("a1", "Miles")])),
+        );
+        press(&mut app, &[Action::AddToPlaylist]);
+        let lists = app.take_fetch_requests().remove(0);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Add Miles to"), "{screen}");
+        assert!(screen.contains(NEW_PLAYLIST_ROW), "{screen}");
+        assert!(screen.contains("Loading your playlists…"), "{screen}");
+        answer(&mut app, &lists, Err(crate::navidrome::Error::Http(503)));
+        let screen = render(&app, 80, 24, now);
+        assert!(
+            screen.contains("Could not load playlists: server returned HTTP 503"),
+            "{screen}"
+        );
+        assert!(!screen.contains("secret-host"), "{screen}");
+    }
+
+    #[test]
+    fn a_large_picker_builds_only_visible_rows() {
+        let lists = (0..10_000)
+            .map(|i| nav_playlist(&format!("p{i}"), &format!("List {i:05}"), "u", 1))
+            .collect();
+        let mut app = nav_playlists(lists);
+        press(&mut app, &[Action::AddToPlaylist]);
+        for _ in 0..5_000 {
+            app.handle_action(Action::Down, Instant::now());
+        }
+        let now = Instant::now();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut view = ViewState::default();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        assert!(built < 60, "{built}");
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> List 04999"), "{screen}");
+    }
+
+    #[test]
+    fn the_name_prompt_shows_its_title_text_and_hint() {
+        let mut app = nav_playlists(vec![nav_playlist("p1", "Road Trip", "u", 3)]);
+        press(&mut app, &[Action::RenamePlaylist]);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Rename playlist"), "{screen}");
+        assert!(screen.contains("Road Trip"), "{screen}");
+        assert!(screen.contains("Enter save · Esc cancel"), "{screen}");
+        // Hostile pasted text stays on its line.
+        app.handle_paste(&format!("\u{202E}{}", "雨".repeat(300)));
+        let screen = render(&app, 80, 24, now);
+        assert_full_width(&screen, 80);
+        assert!(screen.contains("…雨"), "the end is shown: {screen}");
+        render(&app, 10, 3, now);
+        render(&app, 1, 1, now);
+    }
+
+    #[test]
+    fn a_reordered_playlist_says_modified_and_read_only_edits_say_why() {
+        let mut app = nav_playlists(vec![
+            nav_playlist("p1", "Mine", "u", 2),
+            nav_playlist("p2", "Theirs", "someone", 2),
+        ]);
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        let songs = |owner: &str| {
+            Content::PlaylistSongs(crate::navidrome::PlaylistSongs {
+                tracks: vec![
+                    nav_track("s1", "One", "Band", 60),
+                    nav_track("s2", "Two", "Band", 60),
+                ],
+                served: 2,
+                access: crate::navidrome::Access {
+                    owner: Some(owner.into()),
+                    readonly: false,
+                },
+                song_count: None,
+            })
+        };
+        answer(&mut app, &request, Ok(songs("u")));
+        press(&mut app, &[Action::MoveEntryDown]);
+        let now = Instant::now();
+        let screen = render(&app, 100, 24, now);
+        assert!(screen.contains("› Mine (modified) ┐"), "{screen}");
+        let two = screen.find("Band - Two").unwrap();
+        let one = screen.find("> Band - One").unwrap();
+        assert!(two < one, "{screen}");
+        press(
+            &mut app,
+            &[Action::Back, Action::Parent, Action::Down, Action::Activate],
+        );
+        let request = app.take_fetch_requests().remove(0);
+        answer(&mut app, &request, Ok(songs("someone")));
+        press(&mut app, &[Action::RemoveFromPlaylist]);
+        let screen = render(&app, 100, 24, now);
+        assert!(
+            screen.contains(crate::navidrome::browse::READ_ONLY_OTHER),
+            "{screen}"
+        );
+        assert!(!screen.contains("(modified)"), "{screen}");
     }
 }

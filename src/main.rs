@@ -1,22 +1,26 @@
-//! `coda` binary. Startup order: parse and validate the config, init
-//! logging, obtain the Navidrome password (possibly running
-//! `password_command`, which may prompt) and build the client, load the
+//! `coda` binary. Startup order: parse and validate the config (when no
+//! source is configured and stdin/stdout are terminals, or with `--setup`,
+//! run the setup and load the config it wrote), init logging, obtain the Navidrome
+//! password (possibly running `password_command`, which may prompt, or
+//! reading the OS keychain) and build the client, load the
 //! saved session, spawn mpv and connect, then hand over to [`app::run`],
 //! which restores the session, enters the TUI, starts the scan and pings
 //! the server. Errors before the TUI are printed
 //! to stderr; the TUI never writes to stdout/stderr.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::Parser;
 use coda_player::app;
-use coda_player::config::{self, Cli, Config, Env, PASSWORD_COMMAND_TIMEOUT};
+use coda_player::config::{self, Cli, Config, ConfigError, Env, PASSWORD_COMMAND_TIMEOUT};
 use coda_player::navidrome;
+use coda_player::onboarding::Outcome;
 use coda_player::playback;
 use coda_player::session;
+use coda_player::settings;
+use coda_player::setup;
 use tracing::{Level, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
@@ -53,25 +57,100 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> ExitCode {
-    let cli = Cli::parse();
-    let config = match Config::load(cli, &Env::from_process()) {
-        Ok(config) => config,
-        Err(error) => {
+    let (cli, music_arg) = match Cli::try_parse_with_source(std::env::args_os()) {
+        Ok(parsed) => parsed,
+        Err(error) => error.exit(),
+    };
+    let env = Env::from_process();
+    let mut logging = false;
+    // Kept for loading the config again after setup.
+    let music_dir_arg = cli.music_dir.clone();
+    let config = if cli.setup {
+        // `coda --setup`: run the setup whatever is configured. A folder
+        // given to this run is checked first, as on a normal start.
+        if let Some(dir) = music_dir_arg.as_ref().filter(|d| !d.is_empty())
+            && let Err(error) = config::validate_music_dir(dir.into())
+        {
             eprintln!("coda: {error}");
             return ExitCode::from(error.exit_code());
         }
+        if !is_interactive() {
+            eprintln!("coda: --setup needs a terminal on stdin and stdout");
+            return ExitCode::from(2);
+        }
+        let start = match config::read_for_setup(&env) {
+            Ok(start) => start,
+            Err(error) => {
+                eprintln!("coda: {error}");
+                return ExitCode::from(error.exit_code());
+            }
+        };
+        init_logging();
+        logging = true;
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
+        let redo = setup::RedoContext::from_start(&start, music_arg, &env);
+        let context = setup::Context::redo(start.config_path, env.clone(), redo);
+        match run_setup(context, music_dir_arg, &env).await {
+            Ok(config) => config,
+            Err(code) => return code,
+        }
+    } else {
+        match Config::load(cli, &env) {
+            Ok(config) => config,
+            // Setup only fills in a missing source, and only interactively;
+            // scripts and pipes keep the usage error.
+            Err(ConfigError::NoSource {
+                config_path: Some(path),
+            }) if is_interactive() => {
+                init_logging();
+                logging = true;
+                tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting setup");
+                match run_setup(setup::Context::new(path, env.clone()), None, &env).await {
+                    Ok(config) => config,
+                    Err(code) => return code,
+                }
+            }
+            Err(error) => {
+                eprintln!("coda: {error}");
+                return ExitCode::from(error.exit_code());
+            }
+        }
     };
-    init_logging();
+    if !logging {
+        init_logging();
+    }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda starting");
 
     let scrobble = config.navidrome.as_ref().is_some_and(|n| n.scrobble);
+    // What the in-app settings show and may change: names and ownership
+    // only, never a password.
+    let music_origin = music_arg.filter(|_| config.music_dir.is_some());
+    // A folder from the argument or `CODA_MUSIC_DIR` hides whether the
+    // file has its own; read it (it just loaded, values only, nothing is
+    // resolved). On any doubt, assume it has none: that only refuses
+    // Disconnect.
+    let file_has_music_dir = match music_origin {
+        None => config.music_dir.is_some(),
+        Some(_) => config::read_for_setup(&env).is_ok_and(|start| start.music_dir.is_some()),
+    };
+    let settings = settings::Context {
+        config_path: config::config_file_path(&env).map(|(path, _)| path),
+        music_dir: config.music_dir.clone(),
+        music_origin,
+        file_has_music_dir,
+        navidrome: settings::Navidrome::from_config(
+            config.navidrome.as_ref(),
+            &config::navidrome_env_overrides(&env),
+        ),
+        env_overrides: config::navidrome_env_overrides(&env),
+    };
     let navidrome = match config.navidrome {
         Some(settings) => {
             let password = match settings.password.resolve(PASSWORD_COMMAND_TIMEOUT).await {
                 Ok(password) => password,
                 Err(error) => {
                     tracing::error!(%error, "could not obtain the Navidrome password");
-                    eprintln!("coda: {error}");
+                    let _ = writeln!(std::io::stderr(), "coda: {error}");
                     return ExitCode::from(error.exit_code());
                 }
             };
@@ -107,7 +186,16 @@ async fn run() -> ExitCode {
         }
     };
 
-    match app::run(handle, config.music_dir, navidrome, scrobble, restored).await {
+    match app::run(
+        handle,
+        config.music_dir,
+        navidrome,
+        scrobble,
+        restored,
+        settings,
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!("coda exiting");
             ExitCode::SUCCESS
@@ -121,9 +209,52 @@ async fn run() -> ExitCode {
     }
 }
 
+/// Runs setup, then loads the config it wrote (with the same music
+/// directory argument as this run). `Err` carries the exit status: success
+/// when the user left setup without saving.
+async fn run_setup(
+    context: setup::Context,
+    music_dir: Option<std::ffi::OsString>,
+    env: &Env,
+) -> Result<Config, ExitCode> {
+    match setup::run(context).await {
+        Ok(Outcome::Saved) => {}
+        Ok(Outcome::Exit) => return Err(ExitCode::SUCCESS),
+        Err(error) => {
+            // The terminal may be gone (hangup); never panic here.
+            let _ = writeln!(std::io::stderr(), "coda: setup failed: {error}");
+            return Err(ExitCode::FAILURE);
+        }
+    }
+    // Known gap: setup registered Tokio handlers for SIGTERM, SIGHUP and
+    // SIGINT, which stay installed for the process. A signal arriving from
+    // here until `app::run` listens again (keychain read, mpv start;
+    // normally well under a second) is swallowed rather than ending the
+    // process.
+    let cli = Cli {
+        music_dir,
+        setup: false,
+    };
+    Config::load(cli, env).map_err(|error| {
+        tracing::error!("the config written by setup did not load");
+        let _ = writeln!(std::io::stderr(), "coda: {error}");
+        ExitCode::from(error.exit_code())
+    })
+}
+
+/// Setup needs a terminal to talk to: both stdin and stdout.
+fn is_interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
 /// Logs to a file only, truncated at each launch. Level from `CODA_LOG`
 /// (EnvFilter syntax), default `info`. If the file cannot be opened,
 /// continue without logging rather than writing to the terminal.
+///
+/// Never add a `log` → `tracing` bridge (`tracing-log`) without clamping
+/// the keyring crates first: `keyring-core` and its stores log the
+/// keychain account (username and host) at debug through `log`, which
+/// today goes nowhere.
 fn init_logging() {
     let Some(path) =
         config::log_file_path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
@@ -144,9 +275,10 @@ fn init_logging() {
 }
 
 /// HTTP/TLS crates that log server hostnames and addresses below `warn`
-/// (e.g. hyper-util's `connecting to <addr>`). ADR 0003: the log never
-/// records them, whatever `CODA_LOG` says.
-const CLAMPED_TARGETS: [&str; 5] = ["hyper_util", "hyper", "h2", "reqwest", "rustls"];
+/// (e.g. hyper-util's `connecting to <addr>`), and zbus, whose D-Bus
+/// messages to the Secret Service carry the keychain account (username and
+/// host). ADR 0003: the log never records them, whatever `CODA_LOG` says.
+const CLAMPED_TARGETS: [&str; 6] = ["hyper_util", "hyper", "h2", "reqwest", "rustls", "zbus"];
 
 fn is_clamped(target: &str) -> bool {
     CLAMPED_TARGETS.iter().any(|crate_name| {
@@ -252,6 +384,7 @@ mod tests {
         assert!(is_clamped("hyper::proto"));
         assert!(is_clamped("hyper_util::client"));
         assert!(is_clamped("h2"));
+        assert!(is_clamped("zbus::connection"));
         assert!(!is_clamped("hyperion"));
         assert!(!is_clamped("h2o::x"));
         assert!(!is_clamped("coda_player"));

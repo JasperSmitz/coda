@@ -7,16 +7,18 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use coda_player::library::m3u::PlaylistFile;
 use coda_player::library::scan::{self, ScanEvent};
 use coda_player::library::tree::LibraryTree;
 use coda_player::model::{MAX_METADATA_CHARS, Track};
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor, TagExt};
-use lofty::tag::{Tag, TagType};
+use lofty::tag::{ItemKey, Tag, TagType};
 use tokio::sync::mpsc;
 
 struct Outcome {
     batches: Vec<Vec<Track>>,
+    playlists: Vec<PlaylistFile>,
     finished: Option<(usize, usize, usize)>,
 }
 
@@ -46,13 +48,19 @@ fn run_scan_with(root: &Path, batch_size: usize, interval: Duration) -> Outcome 
     drop(tx);
     let mut outcome = Outcome {
         batches: Vec::new(),
+        playlists: Vec::new(),
         finished: None,
     };
     while let Some(event) = rx.blocking_recv() {
         match event {
             ScanEvent::Batch(batch) => {
                 assert!(outcome.finished.is_none(), "batch after Finished");
+                assert!(outcome.playlists.is_empty(), "batch after a playlist");
                 outcome.batches.push(batch);
+            }
+            ScanEvent::Playlist(file) => {
+                assert!(outcome.finished.is_none(), "playlist after Finished");
+                outcome.playlists.push(file);
             }
             ScanEvent::Finished {
                 tracks,
@@ -149,6 +157,7 @@ fn tags_written_with_lofty_are_read_back() {
     tag.set_title("The Title".into());
     tag.set_artist("The Artist".into());
     tag.set_album("The Album".into());
+    tag.insert_text(ItemKey::AlbumArtist, "The Album Artist".into());
     tag.set_track(7);
     tag.set_disk(2);
     tag.save_to_path(&path, WriteOptions::default()).unwrap();
@@ -160,6 +169,7 @@ fn tags_written_with_lofty_are_read_back() {
     assert_eq!(t.title, "The Title");
     assert_eq!(t.artist.as_deref(), Some("The Artist"));
     assert_eq!(t.album.as_deref(), Some("The Album"));
+    assert_eq!(t.album_artist.as_deref(), Some("The Album Artist"));
     assert_eq!(t.track_no, Some(7));
     assert_eq!(t.disc_no, Some(2));
     assert_eq!(t.display_name(), "The Artist - The Title");
@@ -308,6 +318,7 @@ async fn spawn_scan_streams_to_finished() {
     loop {
         match rx.recv().await.expect("scan ends with Finished") {
             ScanEvent::Batch(batch) => tracks += batch.len(),
+            ScanEvent::Playlist(_) => {}
             ScanEvent::Finished { tracks: total, .. } => {
                 assert_eq!(total, tracks);
                 break;
@@ -315,4 +326,87 @@ async fn spawn_scan_streams_to_finished() {
         }
     }
     assert_eq!(tracks, 2);
+}
+
+#[test]
+fn playlists_follow_the_audio_rules_and_come_after_every_track() {
+    let (_guard, root) = root();
+    let (_outside_guard, outside) = self::root();
+    touch(&root.join("Artist/Album/01.mp3"));
+    touch(&root.join("Artist/Album/02.mp3"));
+    std::fs::create_dir_all(root.join("lists")).unwrap();
+    std::fs::write(
+        root.join("lists/Road Trip.m3u8"),
+        "#EXTM3U\n#EXTINF:1,x\n../Artist/Album/02.mp3\n../Artist/Album/01.mp3\nhttp://x/y\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("top.M3U"), "Artist/Album/01.mp3\r\n").unwrap();
+    std::fs::write(root.join(".hidden.m3u"), "x.mp3\n").unwrap();
+    std::fs::write(outside.join("linked.m3u"), "x.mp3\n").unwrap();
+    std::fs::create_dir_all(outside.join("dir")).unwrap();
+    std::fs::write(outside.join("dir/in-linked-dir.m3u"), "x.mp3\n").unwrap();
+    // A file symlink to a playlist is read; a symlinked folder is not walked.
+    symlink(outside.join("linked.m3u"), root.join("lists/via-link.m3u")).unwrap();
+    symlink(outside.join("dir"), root.join("linked-dir")).unwrap();
+    symlink(outside.join("missing.m3u"), root.join("dangling.m3u")).unwrap();
+
+    let outcome = run_scan(&root);
+    assert_eq!(
+        outcome.finished,
+        Some((2, 0, 0)),
+        "playlists are not counted"
+    );
+    let mut names: Vec<&str> = outcome.playlists.iter().map(|p| p.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["Road Trip", "top", "via-link"]);
+    let road = outcome
+        .playlists
+        .iter()
+        .find(|p| p.name == "Road Trip")
+        .unwrap();
+    assert_eq!(
+        road.entries,
+        [
+            root.join("Artist/Album/02.mp3"),
+            root.join("Artist/Album/01.mp3")
+        ]
+    );
+    assert_eq!(road.unresolved, 1);
+    // Entries of the linked playlist resolve against the link's folder.
+    let linked = outcome
+        .playlists
+        .iter()
+        .find(|p| p.name == "via-link")
+        .unwrap();
+    assert_eq!(linked.entries, [root.join("lists/x.mp3")]);
+}
+
+#[test]
+fn a_playlist_entry_through_a_symlinked_folder_is_missing() {
+    use coda_player::library::Library;
+    let (_guard, root) = root();
+    let (_outside_guard, outside) = self::root();
+    touch(&root.join("real/x.mp3"));
+    touch(&outside.join("x.mp3"));
+    symlink(outside.clone(), root.join("linked-dir")).unwrap();
+    // The folder is there on disk, and so is the file through it.
+    assert!(root.join("linked-dir/x.mp3").is_file());
+    std::fs::write(
+        root.join("list.m3u"),
+        "linked-dir/x.mp3\nlinked-dir/../real/x.mp3\nreal/x.mp3\n",
+    )
+    .unwrap();
+    let outcome = run_scan(&root);
+    let mut library = Library::new(root.clone());
+    library.extend(outcome.tracks().into_iter().cloned());
+    let file = outcome.playlists.into_iter().next().unwrap();
+    let id = library.add_playlist(file).unwrap();
+    let playlist = library.playlist(id);
+    let paths: Vec<_> = playlist
+        .tracks
+        .iter()
+        .map(|t| library.track(*t).local_path().unwrap().to_owned())
+        .collect();
+    assert_eq!(paths, [root.join("real/x.mp3")]);
+    assert_eq!(playlist.missing, 2);
 }

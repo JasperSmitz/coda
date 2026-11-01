@@ -9,6 +9,11 @@
 //!   fallback; mpv decides playability.
 //! - Unreadable directories are counted as errors and the scan continues.
 //! - Non-UTF-8 paths are skipped and counted (mpv IPC is JSON/UTF-8).
+//! - `.m3u`/`.m3u8` playlists follow the same rules (not counted as
+//!   skipped). After the walk, each is read (bounded, see [`m3u`]) and
+//!   sent as [`ScanEvent::Playlist`], after every track and before
+//!   [`ScanEvent::Finished`], so it can be matched with the whole library.
+//!   At most [`MAX_PLAYLISTS`] are read.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -17,9 +22,12 @@ use std::time::{Duration, Instant};
 use lofty::config::ParseOptions;
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
+use lofty::tag::ItemKey;
 use tokio::sync::mpsc;
 use walkdir::{DirEntry, WalkDir};
 
+use super::MAX_PLAYLISTS;
+use super::m3u::{self, PlaylistFile};
 use crate::model::{Track, TrackMetadata};
 
 pub const AUDIO_EXTENSIONS: [&str; 13] = [
@@ -32,6 +40,8 @@ const CHANNEL_CAPACITY: usize = 16;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanEvent {
     Batch(Vec<Track>),
+    /// A playlist file, read and resolved; sent after every batch.
+    Playlist(PlaylistFile),
     Finished {
         /// Tracks delivered in batches.
         tracks: usize,
@@ -88,6 +98,8 @@ fn scan_inner(
     let mut batch = Vec::new();
     let mut last_flush = clock();
     let (mut tracks, mut skipped, mut errors) = (0usize, 0usize, 0usize);
+    let mut playlists = Vec::new();
+    let mut playlists_over_cap = 0usize;
 
     let walker = WalkDir::new(root)
         .follow_links(false)
@@ -113,10 +125,16 @@ fn scan_inner(
                     batch.push(Track::local(path, metadata));
                     tracks += 1;
                 }
+                Candidate::Playlist if playlists.len() < MAX_PLAYLISTS => {
+                    playlists.push(entry.into_path());
+                }
+                Candidate::Playlist => playlists_over_cap += 1,
             },
             Err(error) => {
                 errors += 1;
-                tracing::warn!(%error, "scan error");
+                // walkdir's message names the path; log only the kind.
+                let kind = error.io_error().map(std::io::Error::kind);
+                tracing::warn!(?kind, depth = error.depth(), "scan error");
             }
         }
         // Checked for every walked entry, so a slow stretch of non-audio
@@ -139,7 +157,35 @@ fn scan_inner(
     if !batch.is_empty() && tx.blocking_send(ScanEvent::Batch(batch)).is_err() {
         return;
     }
-    tracing::info!(tracks, skipped, errors, elapsed = ?started.elapsed(), "scan finished");
+    if playlists_over_cap > 0 {
+        tracing::warn!(
+            ignored = playlists_over_cap,
+            max = MAX_PLAYLISTS,
+            "too many playlists; the rest are ignored"
+        );
+    }
+    let found = playlists.len();
+    for path in playlists {
+        if tx.is_closed() {
+            return;
+        }
+        // Never log the path or its entries: only kinds and counts.
+        match m3u::read_playlist(root, path) {
+            Ok(file) => {
+                if file.cut {
+                    tracing::info!(
+                        kept = file.entries.len() + file.unresolved,
+                        "playlist cut at the size or entry cap"
+                    );
+                }
+                if tx.blocking_send(ScanEvent::Playlist(file)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => tracing::warn!(error = %error.kind(), "could not read a playlist"),
+        }
+    }
+    tracing::info!(tracks, skipped, errors, playlists = found, elapsed = ?started.elapsed(), "scan finished");
     let _ = tx.blocking_send(ScanEvent::Finished {
         tracks,
         skipped,
@@ -149,28 +195,48 @@ fn scan_inner(
 
 enum Candidate {
     Track,
+    Playlist,
     Ignore,
     Skip(&'static str),
 }
 
 fn classify(entry: &DirEntry) -> Candidate {
     let file_type = entry.file_type();
-    if file_type.is_dir() || !is_audio_file(entry.path()) {
+    if file_type.is_dir() {
         return Candidate::Ignore;
     }
+    let found = if is_audio_file(entry.path()) {
+        Candidate::Track
+    } else if m3u::is_playlist_file(entry.path()) {
+        Candidate::Playlist
+    } else {
+        return Candidate::Ignore;
+    };
     if file_type.is_symlink() {
         // Follow file symlinks only; directory symlinks are never walked.
         match std::fs::metadata(entry.path()) {
             Ok(target) if target.is_file() => {}
-            _ => return Candidate::Skip("symlink does not point at a regular file"),
+            _ => return skip(found, "symlink does not point at a regular file"),
         }
     } else if !file_type.is_file() {
         return Candidate::Ignore;
     }
     if entry.path().to_str().is_none() {
-        return Candidate::Skip("path is not valid UTF-8");
+        return skip(found, "path is not valid UTF-8");
     }
-    Candidate::Track
+    found
+}
+
+/// Audio files that cannot be listed are counted as skipped; playlists
+/// are only noted in the debug log.
+fn skip(found: Candidate, why: &'static str) -> Candidate {
+    match found {
+        Candidate::Playlist => {
+            tracing::debug!(why, "skipping playlist");
+            Candidate::Ignore
+        }
+        _ => Candidate::Skip(why),
+    }
 }
 
 fn is_hidden(name: &OsStr) -> bool {
@@ -221,6 +287,7 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
         title: tag.title().map(|s| s.into_owned()),
         artist: tag.artist().map(|s| s.into_owned()),
         album: tag.album().map(|s| s.into_owned()),
+        album_artist: tag.get_string(ItemKey::AlbumArtist).map(str::to_owned),
         track_no: tag.track(),
         disc_no: tag.disk(),
         duration,
@@ -238,6 +305,7 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             match event {
                 ScanEvent::Batch(b) => batches.push(b.into_iter().map(|t| t.title).collect()),
+                ScanEvent::Playlist(_) => {}
                 ScanEvent::Finished { tracks, .. } => finished = Some(tracks),
             }
         }

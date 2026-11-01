@@ -7,12 +7,28 @@
 //!
 //! Every change to the entries or to `current` bumps [`Queue::revision`],
 //! so callers can tell cheaply whether the queue needs saving.
+//!
+//! "Play next" ([`Queue::insert_next`]) remembers its insertion point, so
+//! consecutive inserts form a run after the current entry in the order
+//! they were made. A change of the current entry, a shuffle or a clear
+//! forgets it (see [`Queue::next_anchor`]).
 
 use crate::model::Track;
 
 /// Upper bound on queue length, enforced where tracks are added (the
 /// player) and on restore.
 pub const MAX_QUEUE_LEN: usize = 10_000;
+
+/// Where added tracks go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    /// `a`: at the end of the queue.
+    #[default]
+    End,
+    /// `A`: after the current entry, behind earlier "play next" tracks
+    /// ([`Queue::insert_next`]).
+    Next,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueueEntryId(u64);
@@ -33,6 +49,9 @@ pub struct QueueEntry {
 pub struct Queue {
     entries: Vec<QueueEntry>,
     current: Option<QueueEntryId>,
+    /// The last entry added by [`Queue::insert_next`] since `current`
+    /// last changed; the next one goes after it. Not saved.
+    next_anchor: Option<QueueEntryId>,
     next_id: u64,
     revision: u64,
 }
@@ -66,6 +85,18 @@ impl Queue {
 
     fn changed(&mut self) {
         self.revision += 1;
+    }
+
+    /// Where the next [`Queue::insert_next`] goes after: the last entry it
+    /// added. It is forgotten when `current` changes (playback moved on,
+    /// or another entry was played), on play now
+    /// ([`Queue::insert_after_current`]), when the current entry is
+    /// removed, and on shuffle and clear. Appending, moving and removing
+    /// other entries keep it: if the anchor entry is gone
+    /// or now comes before the current one, inserts go right after the
+    /// current entry again.
+    pub fn next_anchor(&self) -> Option<QueueEntryId> {
+        self.next_anchor
     }
 
     pub fn current_entry(&self) -> Option<&QueueEntry> {
@@ -108,6 +139,7 @@ impl Queue {
     /// Inserts a new entry directly after the current one, or appends it
     /// when there is no current entry. Does not change `current`.
     pub fn insert_after_current(&mut self, track: Track) -> QueueEntryId {
+        self.next_anchor = None;
         let Some(pos) = self.current.and_then(|id| self.position(id)) else {
             return self.append(track);
         };
@@ -118,12 +150,51 @@ impl Queue {
         id
     }
 
+    /// "Play next": inserts a new entry after the current one, behind any
+    /// entries inserted this way since the current entry last changed (see
+    /// [`Queue::next_anchor`]), so consecutive inserts keep their order.
+    /// Without a current entry it appends. Does not change `current`.
+    pub fn insert_next(&mut self, track: Track) -> QueueEntryId {
+        self.insert_all_next([track])
+            .pop()
+            .expect("one track inserts one entry")
+    }
+
+    /// [`Queue::insert_next`] for several tracks, in order, as one splice.
+    /// Returns their ids.
+    pub fn insert_all_next(
+        &mut self,
+        tracks: impl IntoIterator<Item = Track>,
+    ) -> Vec<QueueEntryId> {
+        let entries: Vec<QueueEntry> = tracks.into_iter().map(|t| self.new_entry(t)).collect();
+        let ids: Vec<QueueEntryId> = entries.iter().map(|e| e.id).collect();
+        if entries.is_empty() {
+            return ids;
+        }
+        match self.current.and_then(|id| self.position(id)) {
+            Some(current) => {
+                let at = self
+                    .next_anchor
+                    .and_then(|id| self.position(id))
+                    .filter(|&anchor| anchor > current)
+                    .unwrap_or(current)
+                    + 1;
+                self.entries.splice(at..at, entries);
+                self.next_anchor = ids.last().copied();
+            }
+            None => self.entries.extend(entries),
+        }
+        self.changed();
+        ids
+    }
+
     /// Makes `id` current. Returns `false` (and changes nothing) if `id` is
     /// not in the queue.
     pub fn set_current(&mut self, id: QueueEntryId) -> bool {
         if self.position(id).is_some() {
             if self.current != Some(id) {
                 self.current = Some(id);
+                self.next_anchor = None;
                 self.changed();
             }
             true
@@ -138,6 +209,7 @@ impl Queue {
     pub fn move_to_next(&mut self) -> Option<QueueEntryId> {
         let next = self.id_after(self.current?)?;
         self.current = Some(next);
+        self.next_anchor = None;
         self.changed();
         Some(next)
     }
@@ -148,6 +220,7 @@ impl Queue {
     pub fn move_to_previous(&mut self) -> Option<QueueEntryId> {
         let prev = self.id_before(self.current?)?;
         self.current = Some(prev);
+        self.next_anchor = None;
         self.changed();
         Some(prev)
     }
@@ -161,6 +234,8 @@ impl Queue {
         let entry = self.entries.remove(pos);
         self.changed();
         if self.current == Some(id) {
+            // A new current entry: the "play next" run belonged to the old.
+            self.next_anchor = None;
             self.current = self
                 .entries
                 .get(pos)
@@ -201,6 +276,7 @@ impl Queue {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.current = None;
+        self.next_anchor = None;
         self.changed();
     }
 
@@ -210,6 +286,7 @@ impl Queue {
     /// modulo `n`. The current entry and everything before it stay in
     /// place. Returns the number of entries shuffled.
     pub fn shuffle_after_current(&mut self, mut random_below: impl FnMut(usize) -> usize) -> usize {
+        self.next_anchor = None;
         let start = match self.current.and_then(|id| self.position(id)) {
             Some(pos) => pos + 1,
             None => 0,
@@ -495,6 +572,169 @@ mod tests {
         assert_ne!(after, before, "50 entries stay in order only by chance");
         after.sort();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn consecutive_play_next_inserts_keep_their_order() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.append(t("B"));
+        q.set_current(a);
+        q.insert_next(t("X"));
+        q.insert_next(t("Y"));
+        q.insert_next(t("Z"));
+        assert_eq!(titles(&q), ["A*", "X", "Y", "Z", "B"]);
+        // Appending does not break the run.
+        q.append(t("E"));
+        q.insert_next(t("W"));
+        assert_eq!(titles(&q), ["A*", "X", "Y", "Z", "W", "B", "E"]);
+    }
+
+    #[test]
+    fn play_next_without_current_appends_and_remembers_nothing() {
+        let mut q = Queue::new();
+        q.insert_next(t("X"));
+        q.append(t("A"));
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["X", "A", "Y"]);
+        assert_eq!(q.next_anchor(), None);
+    }
+
+    #[test]
+    fn the_play_next_point_resets_when_current_moves_or_the_order_changes() {
+        // Each case starts as A* X(anchor) B and then disturbs the run;
+        // the next insert goes right after the current entry again.
+        type Disturb = fn(&mut Queue, [QueueEntryId; 3]);
+        let cases: [(&str, Disturb, &[&str]); 4] = [
+            (
+                "next",
+                |q, _| {
+                    q.move_to_next();
+                },
+                &["A", "X*", "Y", "B"],
+            ),
+            (
+                "set current",
+                |q, [_, _, b]| {
+                    q.set_current(b);
+                },
+                &["A", "X", "B*", "Y"],
+            ),
+            (
+                "play now",
+                |q, _| {
+                    q.insert_after_current(t("N"));
+                },
+                &["A*", "Y", "N", "X", "B"],
+            ),
+            (
+                "shuffle",
+                |q, _| {
+                    q.shuffle_after_current(|n| n - 1);
+                },
+                &["A*", "Y", "X", "B"],
+            ),
+        ];
+        for (name, disturb, expected) in cases {
+            let mut q = Queue::new();
+            let a = q.append(t("A"));
+            let b = q.append(t("B"));
+            q.set_current(a);
+            let x = q.insert_next(t("X"));
+            assert_eq!(q.next_anchor(), Some(x), "{name}");
+            disturb(&mut q, [a, x, b]);
+            assert_eq!(q.next_anchor(), None, "{name}");
+            q.insert_next(t("Y"));
+            assert_eq!(titles(&q), expected, "{name}");
+        }
+        // Going back: A B* X(anchor), then `p`.
+        let mut q = Queue::new();
+        q.append(t("A"));
+        let b = q.append(t("B"));
+        q.set_current(b);
+        q.insert_next(t("X"));
+        q.move_to_previous();
+        assert_eq!(q.next_anchor(), None);
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["A*", "Y", "B", "X"]);
+        q.clear();
+        assert_eq!(q.next_anchor(), None);
+    }
+
+    #[test]
+    fn moving_and_removing_keep_the_play_next_point_where_it_is_still_valid() {
+        // A* X(anchor) B: removing B keeps the run.
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        let b = q.append(t("B"));
+        q.set_current(a);
+        let x = q.insert_next(t("X"));
+        q.remove(b);
+        assert_eq!(q.next_anchor(), Some(x));
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["A*", "X", "Y"]);
+        // Moving the anchor further down: inserts follow it.
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.append(t("B"));
+        q.set_current(a);
+        let x = q.insert_next(t("X"));
+        q.move_down(x);
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["A*", "B", "X", "Y"]);
+        // Moved above the current entry, or removed: right after current.
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.set_current(a);
+        let x = q.insert_next(t("X"));
+        q.move_up(x);
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["X", "A*", "Y"]);
+        let y = q.next_anchor().unwrap();
+        q.remove(y);
+        q.insert_next(t("Z"));
+        assert_eq!(titles(&q), ["X", "A*", "Z"]);
+    }
+
+    #[test]
+    fn removing_the_current_entry_forgets_the_play_next_point() {
+        // A* X(anchor) B: removing A makes X current; Y goes right after.
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.append(t("B"));
+        q.set_current(a);
+        q.insert_next(t("X"));
+        q.remove(a);
+        assert_eq!(q.next_anchor(), None);
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["X*", "Y", "B"]);
+    }
+
+    #[test]
+    fn several_tracks_go_next_as_one_run() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.append(t("B"));
+        q.set_current(a);
+        let ids = q.insert_all_next([t("X"), t("Y")]);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(q.next_anchor(), Some(ids[1]));
+        q.insert_all_next([t("Z")]);
+        assert!(q.insert_all_next([]).is_empty());
+        assert_eq!(titles(&q), ["A*", "X", "Y", "Z", "B"]);
+    }
+
+    #[test]
+    fn replaying_the_current_entry_keeps_the_play_next_point() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        q.set_current(a);
+        let x = q.insert_next(t("X"));
+        // Repeat-one reloads make the same entry current again.
+        assert!(q.set_current(a));
+        assert_eq!(q.next_anchor(), Some(x));
+        q.insert_next(t("Y"));
+        assert_eq!(titles(&q), ["A*", "X", "Y"]);
     }
 
     #[test]

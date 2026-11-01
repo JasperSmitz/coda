@@ -45,4 +45,196 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
 - **Tests:** fmt, clippy, build, `cargo test --all-targets` (319 lib + integration) pass; **all 20 ignored real-mpv tests pass** on this machine, including the watchdog SIGSTOP test and an end-of-track drain test.
 - **Review:** one round; fixed unbounded reap, wrong "replies are immediate" premise (+ drain test), restored volume overwritten by rejection, a tight timing bound in a default-suite test.
 - **Limitations:** an idle hung mpv is detected only at the next command; no mpv auto-restart (owner decision from M1); the bounded-reap timeout path has no automated test (needs an unkillable child).
-- **Next:** M4 needs owner input — see `docs/plans/m4-heart-integration.md` open questions. Candidate follow-ups: gapless lookahead (ADR 0002), a real-server smoke test by the owner, a Linux TUI run.
+- **Next:** M4 needs owner input — see `docs/plans/heart-integration.md` (since postponed indefinitely) open questions. Candidate follow-ups: gapless lookahead (ADR 0002), a real-server smoke test by the owner, a Linux TUI run.
+
+## 2026-10-31 — M4 slice 1: first-run setup
+- **Owner input:** HEART postponed indefinitely. New roadmap: M4 onboarding, M5 library home and playlists, M6 keybindings, M7 visual extras. The owner's first real-server run (macOS, `password_command` with the Keychain) worked.
+- **Delivered:**
+  - First-run setup in the TUI when no source is configured and Coda runs in a terminal: an optional music folder, then optional Navidrome (URL → username → masked password, checked with `ping`, a Ready confirmation), then the password goes into the OS keychain and the config file is written. Skipping both exits 0 without writing anything.
+  - Modules: `onboarding` (pure), `setup` (driver), `config_writer`, `secret_store`, `ui::onboarding`.
+  - `password_keychain = true` in the config (ADR 0004).
+- **Crates:** `keyring-core` with `apple-native-keyring-store` and `zbus-secret-service-keyring-store`. The Linux backend is pure Rust, with no libdbus or OpenSSL.
+- **Tests:**
+  - On macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (370 lib + integration) pass, as do all 20 ignored mpv tests.
+  - In a Linux container (`rust:1-bookworm`): clippy (both) and `cargo test --all-targets` pass.
+  - PTY smoke runs with the mock store and a fake Subsonic server cover skip, folder, Navidrome with a wrong then right password, Ctrl-C while saving, signals and hangup.
+- **Review:** one round, no blocking defects. Fixed:
+  - quit or a signal during a save abandoning it
+  - the mock-store feature being indistinguishable from the real store
+  - an orphaned keychain entry after a failed config write
+  - a relative `CODA_CONFIG`
+  - plus polish: back navigation, hints, the non-UTF-8 backup name, URL truncation, the `zbus` log clamp
+- **Limitations:**
+  - A signal between setup and the player loop is lost.
+  - No timeout on keychain reads.
+  - A cancelled macOS prompt shows a generic error.
+  - A missing keychain entry means editing the config by hand (slice 2 replaces this).
+  - A symlinked `config.toml` is replaced by a regular file (documented).
+  - Not yet run against the real macOS Keychain, or as a TUI on Linux.
+
+## 2026-10-31 — M4 slice 2 Part A: `coda --setup`
+- **Delivered:**
+  - `coda --setup` reruns setup, prefilled from the file. It never reads the keychain or runs `password_command`.
+  - Skipping a source removes it, and skipping both is refused on a redo.
+  - A Coda-owned keychain entry is deleted only after a successful write that changes or removes the account.
+  - Settings set outside Coda are named on the screens they affect.
+  - With `CODA_NAVIDROME_URL`/`_USER` set and no password variable, the server form is blocked: `k` keeps `[navidrome]` verbatim, `n` removes it.
+  - The keychain error remedy now points to `coda --setup`.
+- **Tests:**
+  - macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (404 lib tests plus the integration suites) pass, as do the 20 ignored mpv tests.
+  - Linux container: three runs of clippy and the full tests passed, with output kept.
+  - PTY smokes: account change, removing Navidrome, skip-both refused, no TTY, and the env-override keep and remove cases.
+- **Review:** two rounds plus a follow-up. Fixed:
+  - the env-override setup loop
+  - a userinfo password shown in a prefilled URL
+  - prefill truncation
+  - plaintext-backup notes
+  - the backup note rule
+  - early validation of the folder argument
+  - authority parsing via `Url`
+  - the blocked-state refusal text
+  - Keep failing loudly when the file changed
+  - two timing-fragile tests (`password_command` timeout, scrobbler queue)
+- **Earlier Linux exit 101:** most likely the container's OOM killer stopping the linker, which was observed once. Not confirmed, since the original output was not kept.
+- **Limitations:** every redo save leaves a `.bak.<secs>` behind, so backups accumulate. With `CODA_NAVIDROME_PASSWORD` set, the form pings the typed values, not the env ones (noted on screen).
+
+## 2026-10-31 — M4 slice 2 Part B: settings inside the app (M4 complete)
+- **Delivered:**
+  - A `,` Settings overlay. It shows the folder and the Navidrome status. Connect, Edit and Disconnect (`d d`) are available for Coda-owned settings; anything set outside Coda is read-only and named.
+  - `2` without Navidrome offers "Press Enter to connect".
+  - A hot client swap that leaves mpv alone: client generations on fetches and pings, old fetches aborted, the browser reset, the scrobbler replaced, and the load in flight at the swap never scrobbled.
+  - Disconnect is refused unless the config file keeps a music folder.
+  - A second Ctrl-C quits during a save.
+  - No backup for files that are exactly what Coda writes.
+- **Tests:**
+  - macOS: fmt, clippy with and without `--all-features`, and `cargo test --all-targets` (448 lib tests plus integration) pass, as do the 20 ignored mpv tests.
+  - Linux container (`-j 2`, output kept): clippy and the tests pass.
+  - PTY smokes: connect while a local track plays (same mpv process, playback continues), edit to another account, disconnect, the `2` prompt, a server set outside Coda, and disconnect refused with a folder given only on the command line.
+- **Review:** two rounds. Fixed:
+  - disconnect leaving no source in the file
+  - a load in flight scrobbled to the new server
+  - old fetches holding permits after the swap
+  - an old ping racing the swap
+  - j/k under the prompt
+  - backups accumulating
+  - a hung keychain blocking quit
+  - the help text
+- **Limitations:**
+  - An old ping is not aborted at the swap; it sends one request and its answer is ignored.
+  - Quitting mid-save can leave an unused keychain entry.
+  - The folder can only be changed with `coda --setup`.
+  - The setup TUI has not been run on Linux.
+  - Not run against the real macOS Keychain or a real server by the agents.
+
+## 2026-11-01 — M5 slice 1: Navidrome home, playlists, albums, play next
+- **Delivered:**
+  - Navidrome Home (Playlists / Artists / Albums), with path titles.
+  - Read-only playlists, with truncation shown ("first 10,000 of N").
+  - An album list with six sort orders (`o`). Pages of 500 load near the end, deduplicated by id; random is a single page.
+  - `A` plays next everywhere `a` works: press order is kept, the insertion point lives on the queue, and a job is inserted with one splice.
+  - New API calls: `getAlbumList2`, `getPlaylists`, `getPlaylist` (24 MiB body cap).
+- **Parser rewrite:**
+  - Navidrome JSON is parsed without `serde_json::Value`, through per-endpoint reply types, so other sections are drained.
+  - One object budget per response (100,000), and bounded string and id copies.
+  - A hostile 24 MiB body went from 1.31–1.57 GB peak to about 19 MB extra.
+- **Tests:**
+  - macOS: fmt, clippy (both), and `cargo test --all-targets` (489 lib + integration) pass, as do the 20 ignored mpv tests.
+  - Linux container: clippy and tests pass.
+  - PTY smoke against a fake Subsonic server (1,234 albums, playlists): 36/36.
+- **Review:** three rounds. Fixed:
+  - `Value` buffering per item, then per list
+  - duplicates across pages, and servers that ignore `offset`
+  - silent playlist truncation
+  - the play-next anchor on move, remove and remove-current
+  - the "Added" status when nothing is current
+  - O(n²) insertion
+  - a redraw after paging
+- **Limitations:**
+  - A legitimate response beyond 100,000 objects (e.g. more than about 100k artists) loses the excess silently.
+  - A duplicate key Coda reads fails the response.
+  - Browse position is not persisted; Navidrome opens on Home.
+
+## 2026-11-01 — M5 slice 2: local home, tag-based artists and albums, `.m3u` playlists
+- **Delivered:**
+  - A local Home (Playlists / Folders / Artists / Albums) with path titles and a "scanning…" note.
+  - Artists and albums grouped from tags: album artist, else artist; case- and whitespace-insensitive keys; unknowns last. `o` sorts albums A–Z or by artist.
+  - `.m3u`/`.m3u8` playlists collected by the scan and resolved without touching the file system, inside the canonical root only. Windows `\` separators are supported, and the rows show missing counts.
+  - Each track is stored once in `LibraryTree` (`TrackId`).
+  - `album_artist` is optional in `state.json`, which stays version 1.
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (523 lib + integration) pass. On the pre-polish tree the developer ran the 20 ignored mpv tests and the Debian container (clippy and tests), all passing.
+  - PTY smoke against generated tagged FLACs and hostile playlists: 36/36.
+  - 50k tracks: worst batch about 2.8 ms on the input loop.
+- **Review:** one round, nothing blocking; 400k-entry randomised resolve check against a real tree with symlinks found no escape. Polish fixed:
+  - a too-broad URL detection
+  - Windows separators
+  - `O_NOCTTY`
+  - a symlinked-folder integration test
+- **Limitations:**
+  - Playlist matching has no Unicode normalisation and is case-sensitive.
+  - Absolute entries must use the canonical root.
+  - Folders holding only playlists don't appear under Folders.
+  - `l` is unbound (M6).
+
+## 2026-11-01 — M5 slice 3: Navidrome playlist editing (M5 complete)
+- **Delivered** (provisional keys until M6):
+  - Save the queue as a playlist (`S`).
+  - Add to a playlist through a picker (`P`).
+  - New playlist (`N`), rename (`e`), delete (`D D`).
+  - Remove a song (`d d`).
+  - Reorder (`J`/`K`, then `w` to save or `Esc` to discard).
+- **How edits work:**
+  - Edits run as sequential jobs in a loop-level runner, each answering exactly once, with generation drops.
+  - Removal and reorder are checked replaces: a refetch compares ids in order and the hidden-entry count.
+  - Partial batches are reported honestly.
+  - Writes go as POST form when `formPost` is advertised, otherwise as GET under 8 KiB.
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (563 lib, 20 edit tests, plus the rest) pass; the 20 ignored mpv tests pass.
+  - Linux container: fmt, clippy and three test runs pass.
+  - PTY smoke against a recording fake Subsonic server: 59/59 in both the GET and the POST mode.
+- **Review:** three rounds. Fixed:
+  - Esc racing a save
+  - the picker selecting by index
+  - quitting mid-edit
+  - edits overlapping across account swaps
+  - unsafe index removal (Navidrome's hidden entries)
+  - silent loss of hidden entries (now a warning with confirmation and a recheck)
+  - detection caching
+  - a long-flaky settings test that matched "pw" in a temp path
+- **Limitations:**
+  - A few-millisecond window between the stale check and the write remains, since Subsonic has no conditional write.
+  - Queued edits that never started are dropped at quit, counted in the log.
+  - On servers without `formPost`, playlists over about 250 songs can't be reordered or have songs removed.
+  - Not yet run against the owner's real server.
+
+## 2026-11-01 — M6: audio visualizer (complete)
+- **Slice 1, spike:**
+  - Levels and frequency bands are available from mpv over IPC (lavfi `astats` on a split, band-passed copy). The played audio stays bit-identical when the output is forced to stereo.
+  - Analysis runs about 0.25 s ahead of the speaker; a time-code channel measures the lead exactly.
+  - A bad graph passed at spawn or while idle breaks every file, so the filter is attached lazily.
+  - Findings are in `docs/plans/m6-visualizer.md`.
+- **Owner decisions:** the full visualizer with always-stereo output (`--audio-channels=stereo`), and the graph stays attached while hidden until the next track.
+- **Slice 2:**
+  - `v` toggles 7 bands plus an L/R meter in the now-playing box. It is off by default and persisted.
+  - The filter is attached lazily with `af add`, polled at up to 30 Hz with one request in flight, and aligned by time code.
+  - Smoothing is fast attack, slow decay, and the bars fade after 300 ms without readings.
+  - A visualizer-only redraw is used.
+  - No polling while hidden, paused, stopped or covered.
+  - An unavailable filter is reported once, and playback continues.
+- **Privacy:** logs no longer contain track titles, artists, albums or file paths (`loadfile` is marked sensitive, and scan errors log only the kind).
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (613 lib plus integration) pass, and the ignored mpv tests pass 25/25. The real-mpv tests cover tones peaking in the right band, bit-identity, an unavailable graph, and a seek mpv cannot perform.
+  - Linux container (mpv 0.35.1): the same, 25/25.
+  - PTY smoke: 46/46.
+- **Review:** one round plus follow-ups. Fixed:
+  - a freeze after a seek mpv acknowledges but does not perform
+  - stale readings after rapid seeks
+  - superseded-load attach races
+  - over-eager "unavailable"
+  - polling while not drawn
+  - a lenient session field
+- **Limitations:**
+  - Surround output is gone (always stereo).
+  - Bands show about 50–130 ms after the sound.
+  - The Linux PulseAudio/PipeWire lead has not been measured acoustically.
+  - The graph stays attached while hidden until the next track (about 3.5–6 % of a core).

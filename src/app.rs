@@ -11,12 +11,27 @@
 //! that cannot be resolved is fed back to the player as a failed track, so
 //! the queue advances exactly as for a missing file.
 //!
-//! The Library panel has two sources: the local tree and, when configured,
-//! Navidrome ([`navidrome::browse::Browser`]). Remote lists are fetched in
+//! The Library panel has two sources: the local library ([`Library`],
+//! browsed from its Home with [`LocalBrowser`]: playlists, folders,
+//! artists, albums) and, when configured, Navidrome
+//! ([`navidrome::browse::Browser`]). Remote lists are fetched in
 //! the background: [`App`] queues fetch requests as data
 //! ([`App::take_fetch_requests`]) and the loop spawns them, at most
 //! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
 //! [`App::handle_fetch_response`].
+//!
+//! Navidrome playlist edits work the same way: the browser queues
+//! [`EditRequest`]s ([`App::take_edit_requests`]), the loop runs each as
+//! a sequential job ([`navidrome::edit::spawn_edit`]), one at a time, and
+//! the result comes back through [`App::handle_edit_response`].
+//!
+//! Settings (`,`) are a [`Settings`] overlay: like the browser, it emits
+//! requests (ping, save, disconnect) that the loop performs on tasks and
+//! blocking threads. A saved or removed Navidrome account is swapped in
+//! without touching playback: a new client generation (responses from
+//! the old client are ignored), a fresh browser, a new ping and a new
+//! scrobbler ([`App::take_client_change`]). Queued remote tracks resolve
+//! against whatever client is current at their next load.
 //!
 //! The session (queue, current entry, volume, repeat mode) is restored at
 //! startup ([`App::restore_session`]) and saved by the loop: [`App`] only
@@ -41,28 +56,38 @@ use crossterm::event::{
 };
 use futures_util::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
+use ratatui::buffer::Buffer;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use crate::library::browse::{self as local, LocalBrowser, Row as LocalRow};
 use crate::library::scan::{self, ScanEvent};
 use crate::library::search::{self, SearchResults};
-use crate::library::tree::{DirNode, LibraryTree};
+use crate::library::{Library, MAX_PLAYLISTS};
 use crate::line_input::LineInput;
 use crate::model::Track;
 use crate::model::TrackSource;
 use crate::navidrome;
+use crate::navidrome::Hidden;
 use crate::navidrome::browse::{
-    self, Activated, Browser, FetchRequest, FetchResponse, JobOutcome, MAX_CONCURRENT_FETCHES,
+    self, Activated, Browser, FetchRequest, FetchResponse, Generation, JobOutcome,
+    MAX_CONCURRENT_FETCHES, Removal, SaveOrder, UNSAVED_ORDER,
 };
+use crate::navidrome::edit::{EditId, EditRequest, EditResponse};
 use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
-use crate::queue::{QueueEntryId, Rng};
+use crate::queue::{Placement, QueueEntryId, Rng};
 use crate::resolve;
+use crate::secret_store::{SecretError, SecretStore};
 use crate::session::{self, Session};
+use crate::settings::{self, Change, Settings};
+use crate::setup::{self, Reply, SaveNavidrome};
 use crate::ui::{help, keymap, render};
+use crate::visualizer::Meter;
 
 /// Redraw interval when nothing else changes (progress, status expiry).
 pub const TICK: Duration = Duration::from_millis(250);
@@ -76,10 +101,16 @@ pub const SEEK_STEP: f64 = 5.0;
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Upper bound on waiting for the session save at quit.
 pub const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Upper bound on waiting at exit for a settings save that is running.
+pub const SETTINGS_SAVE_WAIT: Duration = Duration::from_secs(5);
 /// A second `C` within this time clears the queue.
 pub const CLEAR_CONFIRM: Duration = Duration::from_secs(3);
 /// Status after the first `C`.
 pub const CLEAR_PROMPT: &str = "Press C again to clear the queue";
+/// Status for "Add to playlist" (`P`) on local tracks.
+pub const LOCAL_TO_PLAYLIST: &str = "Only Navidrome songs can be added to a Navidrome playlist";
+/// Status for `S` without Navidrome songs in the queue.
+pub const NO_REMOTE_IN_QUEUE: &str = "No Navidrome songs in the queue to save";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -104,11 +135,21 @@ pub enum Connection {
     Failed(String),
 }
 
-/// Status when `2` is pressed without a Navidrome configuration.
+/// Shown for the Navidrome source without a Navidrome configuration.
 pub const NAVIDROME_NOT_CONFIGURED: &str = "Navidrome is not configured";
+/// Below [`NAVIDROME_NOT_CONFIGURED`]: Enter opens the Connect form.
+pub const PRESS_ENTER_TO_CONNECT: &str = "Press Enter to connect";
+/// Status when quitting is refused while a playlist change is pending.
+pub const SAVING_PLAYLIST: &str = "A playlist change is being saved; press again to quit";
+/// Upper bound on waiting at exit for the playlist change that is running.
+pub const EDIT_SAVE_WAIT: Duration = Duration::from_secs(5);
+/// Status when quitting is refused while settings are being saved.
+pub const SAVING_SETTINGS: &str = "Saving settings… press Ctrl-C again to quit";
 /// Status when `/` is pressed on the local source without a music
 /// directory.
 pub const NO_LOCAL_LIBRARY: &str = "No local music directory configured";
+/// Status when the visualizer cannot work (shown once, and on `v`).
+pub const VISUALIZER_UNAVAILABLE: &str = "Visualizer unavailable";
 
 /// A user intent, already resolved from a key by [`keymap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,9 +161,15 @@ pub enum Action {
     Activate,
     /// Library: go to the parent directory or previous view.
     Parent,
-    /// Library: enqueue the track, all tracks below the directory, or a
-    /// remote album or artist.
+    /// Library: enqueue the track, all tracks below the directory, or an
+    /// album, playlist or artist (local or remote).
     Enqueue,
+    /// Library (`A`): like [`Action::Enqueue`], but "play next": after the
+    /// current entry, behind earlier "play next" tracks.
+    EnqueueNext,
+    /// Library (`o`): show an album list (local or Navidrome) in the next
+    /// sort order.
+    CycleSort,
     /// `1`: show the local library (focuses the Library panel).
     SelectLocal,
     /// `2`: show Navidrome (focuses the Library panel).
@@ -164,7 +211,78 @@ pub enum Action {
     SwitchFocus,
     ToggleHelp,
     CloseHelp,
+    /// `,`: open the Settings overlay.
+    OpenSettings,
+    /// Queue (`S`): save the queue's Navidrome songs as a new playlist.
+    SaveQueueAsPlaylist,
+    /// Library (`P`): add the selection to a Navidrome playlist (picker).
+    AddToPlaylist,
+    /// Playlists list (`N`): create an empty playlist.
+    NewPlaylist,
+    /// Playlists list (`e`): rename the selected playlist.
+    RenamePlaylist,
+    /// Playlists list (`D`, twice): delete the selected playlist.
+    DeletePlaylist,
+    /// Playlist view (`d`, twice): remove the selected song.
+    RemoveFromPlaylist,
+    /// Playlist view (`w`): save the changed order.
+    SaveOrder,
+    /// `v`: show or hide the visualizer.
+    ToggleVisualizer,
     Quit,
+}
+
+impl Action {
+    /// Library-panel actions that have nothing to act on while the
+    /// Navidrome source only offers to connect.
+    fn is_library_only(self) -> bool {
+        matches!(
+            self,
+            Self::Up
+                | Self::Down
+                | Self::Parent
+                | Self::Back
+                | Self::Enqueue
+                | Self::EnqueueNext
+                | Self::CycleSort
+                | Self::OpenSearch
+                | Self::Refresh
+                | Self::AddToPlaylist
+                | Self::NewPlaylist
+                | Self::RenamePlaylist
+                | Self::DeletePlaylist
+                | Self::RemoveFromPlaylist
+                | Self::SaveOrder
+                | Self::MoveEntryUp
+                | Self::MoveEntryDown
+        )
+    }
+}
+
+/// A playlist edit armed by its first key press; the second press within
+/// [`CLEAR_CONFIRM`], on the same item and with nothing in between,
+/// confirms it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditArm {
+    Delete(String),
+    /// Saving an order that drops hidden entries.
+    SaveOrder(String),
+    Remove {
+        playlist_id: String,
+        index: usize,
+        song_id: String,
+    },
+}
+
+/// A new Navidrome client (or none) for the loop to start a ping and a
+/// scrobbler for; see [`App::take_client_change`].
+#[derive(Debug)]
+pub struct ClientChange {
+    /// The new client's generation, for its ping.
+    pub generation: Generation,
+    pub client: Option<navidrome::Client>,
+    /// Start a scrobbler for it.
+    pub scrobble: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,13 +301,6 @@ pub enum ScanState {
     },
     /// No local music directory is configured; nothing is scanned.
     NoLibrary,
-}
-
-/// One row of the library panel: sub-directories first, then tracks.
-#[derive(Debug, Clone, Copy)]
-pub enum LibraryRow<'a> {
-    Dir(&'a DirNode),
-    Track(&'a Track),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,22 +322,14 @@ pub struct LocalSearch {
     pub selected: usize,
 }
 
-/// Identity of a library row, used to keep the selection on the same item
-/// while scan batches insert rows around it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RowKey {
-    Dir(String),
-    Track(PathBuf),
-}
-
 #[derive(Debug)]
 pub struct App {
     player: Player,
-    tree: LibraryTree,
-    /// Directory names from the library root to the open directory. The
-    /// tree only grows, so this path stays valid.
-    library_path: Vec<String>,
-    library_selected: usize,
+    /// What the scan has found so far.
+    library: Library,
+    /// Local browse navigation (Home, folders, artists, albums,
+    /// playlists).
+    local: LocalBrowser,
     queue_selected: usize,
     focus: Focus,
     help_open: bool,
@@ -235,6 +338,9 @@ pub struct App {
     help_scroll: usize,
     /// Until when a second `C` clears the queue.
     clear_armed_until: Option<Instant>,
+    /// A playlist delete or removal awaiting its second press, and until
+    /// when.
+    edit_armed: Option<(EditArm, Instant)>,
     /// The local search input while it is open.
     local_input: Option<LineInput>,
     /// Local search results, while shown.
@@ -266,6 +372,43 @@ pub struct App {
     scrobbles: Vec<ScrobbleRequest>,
     /// A scrobble failure has been shown; later ones are only logged.
     scrobble_failure_shown: bool,
+    /// The Settings overlay.
+    settings: Settings,
+    /// The current client's generation; fetch responses from another are
+    /// ignored.
+    generation: Generation,
+    /// A client swap the loop has not picked up yet.
+    client_change: Option<ClientChange>,
+    /// The load current at the last client swap: resolved for the old
+    /// server, so it is never reported as a listen to the new one (it may
+    /// still be loading when the swap lands).
+    unscrobbled_load: Option<LoadId>,
+    /// A first quit was refused while settings were being saved; the next
+    /// one quits (the exit still waits, bounded, for the save).
+    quit_armed: bool,
+    /// A first quit was refused while a playlist change was pending; the
+    /// next one quits.
+    edit_quit_armed: bool,
+    /// The loop is running an edit (maintained by its runner). Unlike the
+    /// browser's pending edits, it survives an account swap, so an edit
+    /// still running for the old account warns at quit too.
+    edit_in_flight: bool,
+    /// The visualizer is shown (`v`; saved with the session).
+    visualizer: bool,
+    /// The backend cannot run the visualizer this session.
+    visualizer_unavailable: bool,
+    /// The last frame had room for the visualizer, uncovered by an
+    /// overlay (assumed until a frame says otherwise).
+    visualizer_drawable: bool,
+    /// What the backend was last told (`SetVisualizer`): on only while
+    /// shown and drawable, so nothing is polled for a visualizer nobody
+    /// sees.
+    visualizer_sent: bool,
+    /// The visualizer's bars.
+    meter: Meter,
+    /// Bumped when an application setting worth saving changes (the
+    /// visualizer); added to the player's revision.
+    settings_revision: u64,
 }
 
 impl App {
@@ -284,7 +427,13 @@ impl App {
             None => ScanState::NoLibrary,
         };
         let navidrome_configured = navidrome.is_some();
-        let mut browser = navidrome.as_ref().map(|_| Browser::new());
+        let settings = Settings::new(settings::Context::unsaved(
+            music_dir.clone(),
+            navidrome.as_ref(),
+        ));
+        let mut browser = navidrome
+            .as_ref()
+            .map(|client| Browser::for_user(Generation::default(), client.username()));
         let source = match (&music_dir, &mut browser) {
             (None, Some(browser)) => {
                 browser.ensure_started();
@@ -294,14 +443,14 @@ impl App {
         };
         Self {
             player: Player::new(),
-            tree: LibraryTree::new(music_dir.unwrap_or_default()),
-            library_path: Vec::new(),
-            library_selected: 0,
+            library: Library::new(music_dir.unwrap_or_default()),
+            local: LocalBrowser::new(),
             queue_selected: 0,
             focus: Focus::Library,
             help_open: false,
             help_scroll: 0,
             clear_armed_until: None,
+            edit_armed: None,
             local_input: None,
             local_search: None,
             scan,
@@ -319,7 +468,26 @@ impl App {
             listen: None,
             scrobbles: Vec::new(),
             scrobble_failure_shown: false,
+            settings,
+            generation: Generation::default(),
+            client_change: None,
+            unscrobbled_load: None,
+            quit_armed: false,
+            edit_quit_armed: false,
+            edit_in_flight: false,
+            visualizer: false,
+            visualizer_unavailable: false,
+            visualizer_drawable: true,
+            visualizer_sent: false,
+            meter: Meter::default(),
+            settings_revision: 0,
         }
+    }
+
+    /// Sets what the Settings overlay shows and may change (see
+    /// [`settings::Context`]).
+    pub fn set_settings_context(&mut self, context: settings::Context) {
+        self.settings = Settings::new(context);
     }
 
     /// Turns scrobbling of Navidrome plays on or off (on by default when
@@ -332,10 +500,10 @@ impl App {
     }
 
     /// Restores a saved session: the queue, its current entry (selected in
-    /// the Queue panel) and the repeat mode, without playing anything.
-    /// Returns the command that applies the saved volume, if it differs
-    /// from the backend's startup volume. The restored state counts as
-    /// saved.
+    /// the Queue panel), the repeat mode and the visualizer, without
+    /// playing anything. Returns the commands that apply the saved volume
+    /// (if it differs from the backend's startup volume) and turn the
+    /// visualizer on (if it was). The restored state counts as saved.
     pub fn restore_session(&mut self, session: Session, now: Instant) -> Vec<PlaybackCommand> {
         let restored = session.tracks.len();
         let commands = self.player.restore(
@@ -344,7 +512,9 @@ impl App {
             session.repeat,
             session.volume,
         );
-        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        let mut commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        self.visualizer = session.visualizer;
+        commands.extend(self.sync_visualizer());
         let queue = self.player.queue();
         self.queue_selected = queue
             .current()
@@ -353,17 +523,22 @@ impl App {
         if restored > 0 {
             self.set_status(format!("Restored queue: {}", count(restored, "track")), now);
         }
-        self.seen_revision = self.player.revision();
+        self.seen_revision = self.revision();
         self.saved_revision = Some(self.seen_revision);
         self.save_due = None;
         commands
+    }
+
+    /// Increases whenever something worth saving changes.
+    fn revision(&self) -> u64 {
+        self.player.revision() + self.settings_revision
     }
 
     // ----- session saving ----------------------------------------------
 
     /// Starts (or restarts) the save debounce if the saved state changed.
     fn note_changes(&mut self, now: Instant) {
-        let revision = self.player.revision();
+        let revision = self.revision();
         if revision != self.seen_revision {
             self.seen_revision = revision;
             self.save_due = Some(now + SAVE_DEBOUNCE);
@@ -384,7 +559,7 @@ impl App {
     /// (or the last save failed). Cancels a pending debounce.
     pub fn take_final_save(&mut self) -> Option<Session> {
         self.save_due = None;
-        (self.saved_revision != Some(self.player.revision())).then(|| self.save_snapshot())
+        (self.saved_revision != Some(self.revision())).then(|| self.save_snapshot())
     }
 
     /// The last snapshot could not be written; the exit save retries.
@@ -393,8 +568,11 @@ impl App {
     }
 
     fn save_snapshot(&mut self) -> Session {
-        self.saved_revision = Some(self.player.revision());
-        Session::from_player(&self.player)
+        self.saved_revision = Some(self.revision());
+        Session {
+            visualizer: self.visualizer,
+            ..Session::from_player(&self.player)
+        }
     }
 
     // ----- read access for rendering -----------------------------------
@@ -403,16 +581,33 @@ impl App {
         &self.player
     }
 
-    pub fn tree(&self) -> &LibraryTree {
-        &self.tree
+    /// The visualizer is to be drawn (shown, and the backend supports it).
+    pub fn visualizer_shown(&self) -> bool {
+        self.visualizer && !self.visualizer_unavailable
+    }
+
+    /// The visualizer's bars; silent unless a track is playing.
+    pub fn meter(&self) -> &Meter {
+        &self.meter
+    }
+
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Local browse navigation.
+    pub fn local_browser(&self) -> &LocalBrowser {
+        &self.local
     }
 
     pub fn music_dir(&self) -> &Path {
-        self.tree.root_path()
+        self.library.root_path()
     }
 
+    /// The open folder's path from the music root while a folder is shown;
+    /// empty otherwise.
     pub fn library_path(&self) -> &[String] {
-        &self.library_path
+        self.local.folder_path()
     }
 
     pub fn focus(&self) -> Focus {
@@ -431,6 +626,16 @@ impl App {
     /// scrolling back up responds at once.
     pub fn clamp_help_scroll(&mut self, max: usize) {
         self.help_scroll = self.help_scroll.min(max);
+    }
+
+    /// The number of Navidrome list rows the last frame showed, so paged
+    /// lists load ahead by a screen. Ignored while nothing was shown.
+    pub fn set_remote_rows(&mut self, rows: usize) {
+        if rows > 0
+            && let Some(browser) = self.browser.as_mut()
+        {
+            browser.set_viewport_rows(rows);
+        }
     }
 
     pub fn scan_state(&self) -> ScanState {
@@ -454,9 +659,34 @@ impl App {
         &self.connection
     }
 
-    /// `true` while a search input (local or Navidrome) takes all keys.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// `true` while the Settings overlay takes all keys.
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_open()
+    }
+
+    /// The Navidrome source is shown without Navidrome: the panel offers
+    /// to connect.
+    pub fn navidrome_prompt(&self) -> bool {
+        self.source == Source::Navidrome && self.browser.is_none()
+    }
+
+    /// The current Navidrome client, if any.
+    pub fn navidrome_client(&self) -> Option<&navidrome::Client> {
+        self.navidrome.as_ref()
+    }
+
+    /// `true` while a text input (local or Navidrome search, or a
+    /// playlist name) takes all keys.
     pub fn input_open(&self) -> bool {
-        self.local_input.is_some() || self.browser.as_ref().is_some_and(|b| b.input().is_some())
+        self.local_input.is_some()
+            || self
+                .browser
+                .as_ref()
+                .is_some_and(|b| b.input().is_some() || b.prompt().is_some())
     }
 
     /// The local search input while it is open.
@@ -474,6 +704,14 @@ impl App {
         std::mem::take(&mut self.scrobbles)
     }
 
+    /// The next playlist edit to run (at most one at a time).
+    pub fn take_edit_requests(&mut self) -> Vec<EditRequest> {
+        self.browser
+            .as_mut()
+            .map(Browser::take_edit_requests)
+            .unwrap_or_default()
+    }
+
     /// Fetches to spawn, in order.
     pub fn take_fetch_requests(&mut self) -> Vec<FetchRequest> {
         self.browser
@@ -484,6 +722,11 @@ impl App {
 
     fn remote_active(&self) -> bool {
         self.focus == Focus::Library && self.source == Source::Navidrome && self.browser.is_some()
+    }
+
+    /// Library keys act on the "Press Enter to connect" prompt.
+    fn prompt_active(&self) -> bool {
+        self.focus == Focus::Library && self.navidrome_prompt()
     }
 
     /// Library keys act on local search results.
@@ -499,48 +742,23 @@ impl App {
             .map(|s| s.text.as_str())
     }
 
-    /// The open library directory.
-    pub fn library_dir(&self) -> &DirNode {
-        let path: Vec<&str> = self.library_path.iter().map(String::as_str).collect();
-        // The tree never shrinks, so the path always resolves; fall back to
-        // the root defensively.
-        self.tree.dir(&path).unwrap_or_else(|| self.tree.root())
+    pub fn library_rows(&self) -> Vec<LocalRow<'_>> {
+        self.local.rows(&self.library, 0, usize::MAX)
     }
 
-    pub fn library_rows(&self) -> Vec<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        dir.dirs()
-            .iter()
-            .map(LibraryRow::Dir)
-            .chain(dir.tracks().iter().map(LibraryRow::Track))
-            .collect()
-    }
-
-    /// Number of rows in the open directory.
+    /// Number of rows in the shown local view.
     pub fn library_row_count(&self) -> usize {
-        self.library_len()
+        self.local.len(&self.library)
     }
 
     /// At most `len` rows starting at row `start`, without building the rest.
-    pub fn library_rows_window(&self, start: usize, len: usize) -> Vec<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        dir.dirs()
-            .iter()
-            .map(LibraryRow::Dir)
-            .chain(dir.tracks().iter().map(LibraryRow::Track))
-            .skip(start)
-            .take(len)
-            .collect()
-    }
-
-    fn library_len(&self) -> usize {
-        let dir = self.library_dir();
-        dir.dirs().len() + dir.tracks().len()
+    pub fn library_rows_window(&self, start: usize, len: usize) -> Vec<LocalRow<'_>> {
+        self.local.rows(&self.library, start, len)
     }
 
     /// Selected library row index; always in range when there are rows.
     pub fn library_selected(&self) -> usize {
-        self.library_selected
+        self.local.selected()
     }
 
     /// Selected queue row index; always in range when there are entries.
@@ -548,48 +766,33 @@ impl App {
         self.queue_selected
     }
 
-    fn selected_row(&self) -> Option<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        let i = self.library_selected;
-        match dir.dirs().get(i) {
-            Some(d) => Some(LibraryRow::Dir(d)),
-            None => dir
-                .tracks()
-                .get(i - dir.dirs().len())
-                .map(LibraryRow::Track),
-        }
-    }
-
-    fn selected_key(&self) -> Option<RowKey> {
-        self.selected_row().map(|row| match row {
-            LibraryRow::Dir(d) => RowKey::Dir(d.name().to_owned()),
-            LibraryRow::Track(t) => RowKey::Track(t.local_path().unwrap_or(Path::new("")).into()),
-        })
-    }
-
-    fn row_index(&self, key: &RowKey) -> Option<usize> {
-        let dir = self.library_dir();
-        match key {
-            RowKey::Dir(name) => dir.dirs().iter().position(|d| d.name() == name),
-            RowKey::Track(path) => dir
-                .tracks()
-                .iter()
-                .position(|t| t.local_path() == Some(path.as_path()))
-                .map(|i| i + dir.dirs().len()),
-        }
+    /// Library keys act on the local browser (not search results, and
+    /// not while there is no local library to show).
+    fn local_browse_active(&self) -> bool {
+        self.focus == Focus::Library
+            && self.source == Source::Local
+            && self.local_search.is_none()
+            && self.scan != ScanState::NoLibrary
     }
 
     // ----- inputs ------------------------------------------------------
 
     /// Applies a user action and returns the commands to send.
     pub fn handle_action(&mut self, action: Action, now: Instant) -> Vec<PlaybackCommand> {
+        if self.settings.is_open() {
+            // The loop sends settings keys to `handle_settings_input`.
+            if action == Action::Quit {
+                self.request_quit(now);
+            }
+            return Vec::new();
+        }
         if let Some(input) = self.local_input.as_mut() {
             match action {
                 Action::InputChar(c) => input.push_char(c),
                 Action::InputBackspace => input.backspace(),
                 Action::InputSubmit => self.submit_local_search(),
                 Action::InputCancel => self.local_input = None,
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
@@ -600,7 +803,35 @@ impl App {
                 Action::InputBackspace => browser.input_backspace(),
                 Action::InputSubmit => browser.submit_search(),
                 Action::InputCancel => browser.cancel_search(),
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if let Some(browser) = self.browser.as_mut().filter(|b| b.prompt().is_some()) {
+            match action {
+                Action::InputChar(c) => browser.prompt_char(c),
+                Action::InputBackspace => browser.prompt_backspace(),
+                Action::InputSubmit => {
+                    let outcomes = browser.submit_prompt();
+                    self.apply_job_outcomes(outcomes, now);
+                }
+                Action::InputCancel => browser.cancel_prompt(),
+                Action::Quit => self.request_quit(now),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if let Some(browser) = self.browser.as_mut().filter(|b| b.picker().is_some()) {
+            match action {
+                Action::Up => browser.picker_move(-1),
+                Action::Down => browser.picker_move(1),
+                Action::Activate => {
+                    let outcomes = browser.picker_choose();
+                    self.apply_job_outcomes(outcomes, now);
+                }
+                Action::Back | Action::Parent => browser.close_picker(),
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
@@ -613,14 +844,22 @@ impl App {
                     self.help_scroll =
                         (self.help_scroll + 1).min(help::BINDINGS.len().saturating_sub(1));
                 }
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
         }
-        // Any other action cancels a pending `C`.
+        // Any other action cancels a pending `C`, `D` or `d`.
         let clear_armed = self.clear_armed_until.take();
+        let edit_armed = self.edit_armed.take();
+        let mut backend = Vec::new();
         let commands = match action {
+            Action::Activate if self.prompt_active() => {
+                self.settings.open_connect();
+                Vec::new()
+            }
+            // Before Up/Down: the hidden local selection must not move.
+            _ if self.prompt_active() && action.is_library_only() => Vec::new(),
             Action::Up => {
                 self.move_selection(-1);
                 Vec::new()
@@ -635,19 +874,32 @@ impl App {
                 Focus::Library => self.activate_library(now),
                 Focus::Queue => self.activate_queue(),
             },
+            Action::Parent | Action::Refresh
+                if self.remote_active() && self.browser_mut().has_unsaved_order() =>
+            {
+                self.set_status(UNSAVED_ORDER, now);
+                Vec::new()
+            }
             Action::Parent => {
                 if self.remote_active() {
                     self.browser_mut().go_up();
                 } else if self.local_results_active() {
                     self.local_search = None;
-                } else if self.focus == Focus::Library {
-                    self.go_to_parent();
+                } else if self.local_browse_active() {
+                    self.local.go_up(&self.library);
                 }
                 Vec::new()
             }
             Action::Back => {
+                let discarded = if self.remote_active() && !self.local_results_active() {
+                    self.browser_mut().discard_order()
+                } else {
+                    None
+                };
                 if self.local_results_active() {
                     self.local_search = None;
+                } else if let Some(message) = discarded {
+                    self.set_status(message, now);
                 } else if self.remote_active()
                     && self
                         .browser_mut()
@@ -658,14 +910,27 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::Enqueue => {
+            Action::Enqueue | Action::EnqueueNext => {
+                let placement = if action == Action::EnqueueNext {
+                    Placement::Next
+                } else {
+                    Placement::End
+                };
                 if self.remote_active() {
-                    let outcomes = self.browser_mut().enqueue_selected();
+                    let outcomes = self.browser_mut().enqueue_selected(placement);
                     self.apply_job_outcomes(outcomes, now);
                 } else if self.local_results_active() {
-                    self.enqueue_search_result(now);
-                } else if self.focus == Focus::Library {
-                    self.enqueue_selected(now);
+                    self.enqueue_search_result(placement, now);
+                } else if self.local_browse_active() {
+                    self.enqueue_selected(placement, now);
+                }
+                Vec::new()
+            }
+            Action::CycleSort => {
+                if self.remote_active() {
+                    self.browser_mut().cycle_album_sort();
+                } else if self.local_browse_active() {
+                    self.local.cycle_album_order(&self.library);
                 }
                 Vec::new()
             }
@@ -675,18 +940,18 @@ impl App {
                 Vec::new()
             }
             Action::SelectNavidrome => {
-                match self.browser.as_mut() {
-                    Some(browser) => {
-                        browser.ensure_started();
-                        self.source = Source::Navidrome;
-                        self.focus = Focus::Library;
-                    }
-                    None => self.set_status(NAVIDROME_NOT_CONFIGURED, now),
+                if let Some(browser) = self.browser.as_mut() {
+                    browser.ensure_started();
                 }
+                // Without Navidrome the panel offers to connect.
+                self.source = Source::Navidrome;
+                self.focus = Focus::Library;
                 Vec::new()
             }
             Action::OpenSearch => {
-                if self.remote_active() {
+                if self.remote_active() && self.browser_mut().has_unsaved_order() {
+                    self.set_status(UNSAVED_ORDER, now);
+                } else if self.remote_active() {
                     self.browser_mut().open_search();
                 } else if self.focus == Focus::Library {
                     if self.scan == ScanState::NoLibrary {
@@ -712,8 +977,66 @@ impl App {
                 Focus::Library => Vec::new(),
             },
             Action::MoveEntryUp | Action::MoveEntryDown => {
+                let up = action == Action::MoveEntryUp;
                 if self.focus == Focus::Queue {
-                    self.move_selected_entry(action == Action::MoveEntryUp);
+                    self.move_selected_entry(up);
+                } else if self.remote_active()
+                    && let Err(reason) = self.browser_mut().move_entry(if up { -1 } else { 1 })
+                    && !reason.is_empty()
+                {
+                    self.set_status(reason, now);
+                }
+                Vec::new()
+            }
+            Action::SaveQueueAsPlaylist => {
+                if self.focus == Focus::Queue {
+                    self.save_queue_as_playlist(now);
+                }
+                Vec::new()
+            }
+            Action::AddToPlaylist => {
+                if self.remote_active() {
+                    self.browser_mut().open_picker();
+                } else if self.local_results_active() || self.local_browse_active() {
+                    self.set_status(LOCAL_TO_PLAYLIST, now);
+                }
+                Vec::new()
+            }
+            Action::NewPlaylist => {
+                if self.remote_active()
+                    && self
+                        .browser_mut()
+                        .current()
+                        .is_some_and(|v| v.resource == browse::Resource::Playlists)
+                {
+                    self.browser_mut().open_new_playlist();
+                }
+                Vec::new()
+            }
+            Action::RenamePlaylist => {
+                if self.remote_active()
+                    && let Err(reason) = self.browser_mut().open_rename()
+                    && !reason.is_empty()
+                {
+                    self.set_status(reason, now);
+                }
+                Vec::new()
+            }
+            Action::DeletePlaylist => {
+                if self.remote_active() {
+                    self.delete_playlist(edit_armed, now);
+                }
+                Vec::new()
+            }
+            Action::RemoveFromPlaylist => {
+                if self.remote_active() {
+                    self.remove_from_playlist(edit_armed, now);
+                }
+                Vec::new()
+            }
+            Action::SaveOrder => {
+                if self.remote_active() {
+                    self.save_order(edit_armed, now);
                 }
                 Vec::new()
             }
@@ -757,14 +1080,73 @@ impl App {
                 Vec::new()
             }
             Action::CloseHelp => Vec::new(),
+            Action::OpenSettings => {
+                self.settings.open();
+                Vec::new()
+            }
+            Action::ToggleVisualizer => {
+                backend.extend(self.toggle_visualizer(now));
+                Vec::new()
+            }
             Action::Quit => {
-                self.quit = true;
+                self.request_quit(now);
                 Vec::new()
             }
         };
-        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        let mut commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
+        commands.extend(backend);
         self.after_player_call(now);
         commands
+    }
+
+    /// `v`: flips (and saves) the setting. Hidden, the bars drop at once.
+    fn toggle_visualizer(&mut self, now: Instant) -> Option<PlaybackCommand> {
+        self.visualizer = !self.visualizer;
+        self.settings_revision += 1;
+        self.meter.reset();
+        if self.visualizer && self.visualizer_unavailable {
+            self.set_status(VISUALIZER_UNAVAILABLE, now);
+        }
+        self.sync_visualizer()
+    }
+
+    /// Whether the last frame could show the visualizer (enough room, no
+    /// overlay on top), whatever the setting. Returns the command that
+    /// starts or stops the backend's readings if that changes what it
+    /// should do.
+    pub fn set_visualizer_drawable(&mut self, drawable: bool) -> Option<PlaybackCommand> {
+        self.visualizer_drawable = drawable;
+        if !drawable {
+            self.meter.reset();
+        }
+        self.sync_visualizer()
+    }
+
+    /// `SetVisualizer` if the backend's state differs from what is wanted.
+    fn sync_visualizer(&mut self) -> Option<PlaybackCommand> {
+        let wanted = self.visualizer && self.visualizer_drawable;
+        (wanted != self.visualizer_sent).then(|| {
+            self.visualizer_sent = wanted;
+            PlaybackCommand::SetVisualizer(wanted)
+        })
+    }
+
+    /// A visualizer reading. Returns `true` if the bars changed and the
+    /// visualizer should be redrawn; readings are dropped while it is
+    /// hidden or the track is not playing (or is not the current one).
+    pub fn handle_visualizer(
+        &mut self,
+        load: LoadId,
+        frame: &crate::playback::VisualizerFrame,
+        now: Instant,
+    ) -> bool {
+        let current = self.player.current_load() == Some(load)
+            && self.player.status() == PlaybackStatus::Playing;
+        if !self.visualizer_shown() || !self.visualizer_drawable || !current {
+            return false;
+        }
+        self.meter.update(load, frame, now);
+        true
     }
 
     pub fn handle_playback_event(
@@ -772,6 +1154,21 @@ impl App {
         event: PlaybackEvent,
         now: Instant,
     ) -> Vec<PlaybackCommand> {
+        match &event {
+            PlaybackEvent::Visualizer { load, frame } => {
+                self.handle_visualizer(*load, frame, now);
+                return Vec::new();
+            }
+            PlaybackEvent::VisualizerUnavailable => {
+                if !self.visualizer_unavailable {
+                    self.visualizer_unavailable = true;
+                    self.meter.reset();
+                    self.set_status(VISUALIZER_UNAVAILABLE, now);
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
         let started = match event {
             PlaybackEvent::Started { load } => Some(load),
             _ => None,
@@ -784,6 +1181,7 @@ impl App {
         if let Some(load) = started {
             self.listen_started(load);
         }
+
         if let Some(position) = position {
             self.listen_progressed(position);
         }
@@ -806,6 +1204,7 @@ impl App {
     fn listen_started(&mut self, load: LoadId) {
         if !self.scrobbling
             || self.player.current_load() != Some(load)
+            || self.unscrobbled_load == Some(load)
             || self.listen.as_ref().is_some_and(|l| l.load() == load)
         {
             return;
@@ -853,7 +1252,22 @@ impl App {
         }
     }
 
-    /// Shows the result of the startup Navidrome ping.
+    /// A ping's result for the client of `generation`; ignored if that
+    /// client has since been replaced.
+    pub fn handle_ping(
+        &mut self,
+        generation: Generation,
+        result: Result<(), navidrome::Error>,
+        now: Instant,
+    ) {
+        if generation == self.generation {
+            self.handle_navidrome_ping(result, now);
+        } else {
+            tracing::debug!("ping result for an old client ignored");
+        }
+    }
+
+    /// Shows the result of the current client's Navidrome ping.
     pub fn handle_navidrome_ping(&mut self, result: Result<(), navidrome::Error>, now: Instant) {
         match result {
             Ok(()) => {
@@ -871,14 +1285,149 @@ impl App {
         }
     }
 
-    /// Bracketed paste: into the open search input, local or Navidrome
-    /// (through the typed-character filter, so newlines never submit),
-    /// ignored otherwise.
+    // ----- settings ------------------------------------------------------
+
+    /// A key while the Settings overlay is open. Ctrl-C, and `q` outside
+    /// the form, quit, except while a save is running.
+    pub fn handle_settings_input(&mut self, input: Input, now: Instant) {
+        let quit =
+            input == Input::Quit || (input == Input::Char('q') && self.settings.form().is_none());
+        if quit {
+            self.request_quit(now);
+        } else {
+            self.settings.handle_input(input, now);
+        }
+    }
+
+    /// Quits. While settings are being saved, the first request only
+    /// warns and the second quits; the exit then still waits (up to
+    /// [`SETTINGS_SAVE_WAIT`]) for the save, so the process does not stop
+    /// between the keychain write and the config write. Likewise while a
+    /// playlist change is queued or running (the exit waits up to
+    /// [`EDIT_SAVE_WAIT`] for the running one; queued ones are dropped).
+    fn request_quit(&mut self, now: Instant) {
+        let saving = matches!(
+            self.settings.busy(),
+            Some(settings::Busy::Saving | settings::Busy::Disconnecting)
+        );
+        let editing =
+            self.edit_in_flight || self.browser.as_ref().is_some_and(|b| b.pending_edits() > 0);
+        if saving && !self.quit_armed {
+            self.quit_armed = true;
+            self.set_status(SAVING_SETTINGS, now);
+        } else if editing && !saving && !self.edit_quit_armed {
+            self.edit_quit_armed = true;
+            self.set_status(SAVING_PLAYLIST, now);
+        } else {
+            self.quit = true;
+        }
+    }
+
+    /// Settings requests to perform, in order.
+    pub fn take_settings_requests(&mut self) -> Vec<settings::Request> {
+        self.settings.take_requests()
+    }
+
+    /// Applies a finished settings request; a saved or removed account is
+    /// swapped in at once (see [`App::take_client_change`]).
+    pub fn handle_settings_response(&mut self, response: settings::Response, now: Instant) {
+        let change = self.settings.handle_response(response);
+        if self.settings.busy().is_none() {
+            self.quit_armed = false;
+        }
+        match change {
+            Some(Change::Connected(saved)) => {
+                // On screen only: the user typed it.
+                let label =
+                    settings::account_label(saved.client.base_url(), saved.client.username());
+                self.swap_client(Some(saved.client), saved.scrobble);
+                self.set_status(format!("Navidrome saved; connecting as {label}"), now);
+            }
+            Some(Change::Disconnected) => {
+                self.swap_client(None, false);
+                self.set_status("Disconnected from Navidrome", now);
+            }
+            None => {}
+        }
+    }
+
+    /// A client swap for the loop: ping the new client and replace the
+    /// scrobbler (stopping the old one). `None` until the next swap.
+    pub fn take_client_change(&mut self) -> Option<ClientChange> {
+        self.client_change.take()
+    }
+
+    /// Replaces the Navidrome client without touching playback: the track
+    /// playing keeps its stream, and queued remote tracks resolve with the
+    /// new client (or fail without one) at their next load. Browsing
+    /// starts over under a new generation, so responses still in flight
+    /// from the old client are ignored, and a listen in progress belongs
+    /// to the old server and is dropped.
+    fn swap_client(&mut self, client: Option<navidrome::Client>, scrobble: bool) {
+        self.generation = Generation(self.generation.0 + 1);
+        self.browser = client
+            .as_ref()
+            .map(|client| Browser::for_user(self.generation, client.username()));
+        match self.browser.as_mut() {
+            Some(browser) if self.source == Source::Navidrome => browser.ensure_started(),
+            None if self.source == Source::Navidrome && self.scan != ScanState::NoLibrary => {
+                self.source = Source::Local;
+            }
+            _ => {}
+        }
+        self.navidrome = client;
+        self.connection = Connection::Connecting;
+        self.listen = None;
+        self.unscrobbled_load = self.player.current_load();
+        self.scrobbles.clear();
+        self.scrobble_failure_shown = false;
+        self.scrobbling = scrobble && self.navidrome.is_some();
+        self.client_change = Some(ClientChange {
+            generation: self.generation,
+            client: self.navidrome.clone(),
+            scrobble: self.scrobbling,
+        });
+        tracing::info!(
+            generation = self.generation.0,
+            navidrome = self.navidrome.is_some(),
+            scrobble = self.scrobbling,
+            "navidrome client replaced"
+        );
+    }
+
+    /// Bracketed paste: into the open search input, local or Navidrome,
+    /// or the playlist name prompt (through the typed-character filter, so
+    /// newlines never submit), ignored otherwise.
     pub fn handle_paste(&mut self, text: &str) {
-        if let Some(input) = self.local_input.as_mut() {
+        if self.settings.is_open() {
+            self.settings.handle_paste(text);
+        } else if let Some(input) = self.local_input.as_mut() {
             input.push_str(text);
         } else if let Some(browser) = self.browser.as_mut() {
-            browser.input_str(text);
+            if browser.prompt().is_some() {
+                browser.prompt_str(text);
+            } else {
+                browser.input_str(text);
+            }
+        }
+    }
+
+    /// Applies a finished playlist edit: shows what it did and reloads the
+    /// lists it changed. A result for a replaced client is ignored.
+    pub fn handle_edit_response(&mut self, response: EditResponse, now: Instant) {
+        if response.generation != self.generation {
+            tracing::debug!(id = response.id.0, "edit result for an old client ignored");
+            return;
+        }
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        let message = browser.handle_edit_response(response);
+        if browser.pending_edits() == 0 && !self.edit_in_flight {
+            self.edit_quit_armed = false;
+        }
+        if let Some(message) = message {
+            self.set_status(message, now);
         }
     }
 
@@ -889,6 +1438,14 @@ impl App {
         let Some(browser) = self.browser.as_mut() else {
             return;
         };
+        if response.generation != self.generation {
+            // From a client that has since been replaced or removed.
+            tracing::debug!(
+                id = response.id.0,
+                "fetch response for an old client ignored"
+            );
+            return;
+        }
         if response.result.is_ok() {
             self.connection = Connection::Connected;
         }
@@ -900,13 +1457,20 @@ impl App {
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
         match event {
             ScanEvent::Batch(tracks) => {
-                let key = self.selected_key();
-                self.tree.extend(tracks);
+                let key = self.local.selected_key(&self.library);
+                self.library.extend(tracks);
                 if let ScanState::Scanning { tracks } = &mut self.scan {
-                    *tracks = self.tree.len();
+                    *tracks = self.library.len();
                 }
-                self.library_selected = key.and_then(|k| self.row_index(&k)).unwrap_or(0);
+                self.local.reselect(&self.library, key);
                 self.clamp_selections();
+            }
+            ScanEvent::Playlist(file) => {
+                let key = self.local.selected_key(&self.library);
+                if self.library.add_playlist(file).is_none() {
+                    tracing::debug!(max = MAX_PLAYLISTS, "playlist over the cap ignored");
+                }
+                self.local.reselect(&self.library, key);
             }
             ScanEvent::Finished {
                 tracks,
@@ -920,6 +1484,10 @@ impl App {
                     errors,
                 };
                 let mut text = format!("Library scan complete: {}", count(tracks, "track"));
+                let playlists = self.library.playlists().len();
+                if playlists > 0 {
+                    text.push_str(&format!(", {}", count(playlists, "playlist")));
+                }
                 if skipped > 0 {
                     text.push_str(&format!(", {skipped} skipped"));
                 }
@@ -949,12 +1517,15 @@ impl App {
 
     /// Drops the status message once it has expired. Returns `true` if
     /// anything visible changed.
+    /// Also lets the visualizer's bars fall when readings stopped coming
+    /// while playing (a stall: buffering, or a seek mpv did not perform).
     pub fn tick(&mut self, now: Instant) -> bool {
+        let faded = self.meter.fade(now);
         if self.status.as_ref().is_some_and(|s| now >= s.expires_at) {
             self.status = None;
             return true;
         }
-        false
+        faded
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, now: Instant) {
@@ -966,7 +1537,15 @@ impl App {
 
     // ----- helpers -----------------------------------------------------
 
+    fn meter_load_is_stale(&self) -> bool {
+        !self.meter.is_empty() && self.meter.load() != self.player.current_load()
+    }
+
     fn after_player_call(&mut self, now: Instant) {
+        // Paused, stopped or another track: the bars drop to silence.
+        if self.player.status() != PlaybackStatus::Playing || self.meter_load_is_stale() {
+            self.meter.reset();
+        }
         // A new load, a stop or a backend exit ends the current listen.
         if self
             .listen
@@ -983,9 +1562,7 @@ impl App {
     }
 
     fn clamp_selections(&mut self) {
-        self.library_selected = self
-            .library_selected
-            .min(self.library_len().saturating_sub(1));
+        self.local.clamp(&self.library);
         self.queue_selected = self
             .queue_selected
             .min(self.player.queue().len().saturating_sub(1));
@@ -1005,33 +1582,31 @@ impl App {
                 .min(search.results.tracks.len().saturating_sub(1));
             return;
         }
-        let len = match self.focus {
-            Focus::Library => self.library_len(),
-            Focus::Queue => self.player.queue().len(),
-        };
-        let selected = match self.focus {
-            Focus::Library => &mut self.library_selected,
-            Focus::Queue => &mut self.queue_selected,
-        };
-        *selected = selected
-            .saturating_add_signed(delta)
-            .min(len.saturating_sub(1));
+        match self.focus {
+            Focus::Library if self.local_browse_active() => {
+                self.local.move_selection(&self.library, delta);
+            }
+            Focus::Library => {}
+            Focus::Queue => {
+                self.queue_selected = self
+                    .queue_selected
+                    .saturating_add_signed(delta)
+                    .min(self.player.queue().len().saturating_sub(1));
+            }
+        }
     }
 
     fn activate_library(&mut self, now: Instant) -> Vec<PlayerCommand> {
-        match self.selected_row() {
-            Some(LibraryRow::Dir(dir)) => {
-                let name = dir.name().to_owned();
-                self.library_path.push(name);
-                self.library_selected = 0;
-                Vec::new()
-            }
-            Some(LibraryRow::Track(track)) => {
-                let track = track.clone();
+        if !self.local_browse_active() {
+            return Vec::new();
+        }
+        match self.local.activate(&self.library) {
+            local::Activated::Play(id) => {
+                let track = self.library.track(id).clone();
                 self.set_status(format!("Playing {}", track.display_name()), now);
                 self.player.play_track_now(track)
             }
-            None => Vec::new(),
+            local::Activated::Opened | local::Activated::Nothing => Vec::new(),
         }
     }
 
@@ -1042,7 +1617,7 @@ impl App {
         let Some(input) = self.local_input.take() else {
             return;
         };
-        let Some(results) = search::search(&self.tree, input.as_str()) else {
+        let Some(results) = search::search(self.library.tree(), input.as_str()) else {
             return;
         };
         // A failed scan also left only part of the library.
@@ -1073,9 +1648,9 @@ impl App {
         }
     }
 
-    fn enqueue_search_result(&mut self, now: Instant) {
+    fn enqueue_search_result(&mut self, placement: Placement, now: Instant) {
         if let Some(track) = self.selected_search_result() {
-            self.enqueue_with_status(vec![track], now);
+            self.enqueue_with_status(vec![track], placement, now);
         }
     }
 
@@ -1105,13 +1680,18 @@ impl App {
         let mut last = None;
         for outcome in outcomes {
             match outcome {
-                JobOutcome::Added { label, tracks } => {
+                JobOutcome::Added {
+                    label,
+                    tracks,
+                    placement,
+                } => {
+                    let verb = self.added_verb(placement);
                     last = Some(match tracks.as_slice() {
                         [] => format!("Nothing to add from {label}"),
-                        [one] => format!("Added {}", one.display_name()),
-                        many => format!("Added {} from {label}", count(many.len(), "track")),
+                        [one] => format!("{verb} {}", one.display_name()),
+                        many => format!("{verb} {} from {label}", count(many.len(), "track")),
                     });
-                    let (n, dropped) = self.enqueue_tracks(tracks);
+                    let (n, dropped) = self.enqueue_tracks(tracks, placement);
                     added += n;
                     not_added += dropped;
                 }
@@ -1122,6 +1702,7 @@ impl App {
                 JobOutcome::Failed { label, error } => {
                     failures.push(format!("Could not add {label}: {error}"));
                 }
+                JobOutcome::Editing { message } => last = Some(message),
             }
         }
         let text = match failures.as_slice() {
@@ -1148,15 +1729,21 @@ impl App {
         self.clamp_selections();
     }
 
-    /// Appends `tracks` up to the queue's cap. Returns how many were added
-    /// and how many were dropped.
-    fn enqueue_tracks(&mut self, tracks: Vec<Track>) -> (usize, usize) {
+    /// Adds `tracks` in order at `placement`, up to the queue's cap.
+    /// Returns how many were added and how many were dropped.
+    fn enqueue_tracks(&mut self, tracks: Vec<Track>, placement: Placement) -> (usize, usize) {
         let total = tracks.len();
-        let added = tracks
-            .into_iter()
-            .map_while(|track| self.player.enqueue(track))
-            .count();
+        let added = self.player.enqueue_all(tracks, placement);
         (added, total - added)
+    }
+
+    /// How the status line reports tracks added at `placement`: "play
+    /// next" without a current entry just appends, so it says so.
+    fn added_verb(&self, placement: Placement) -> &'static str {
+        match placement {
+            Placement::Next if self.player.queue().current().is_some() => "Playing next:",
+            _ => "Added",
+        }
     }
 
     fn activate_queue(&mut self) -> Vec<PlayerCommand> {
@@ -1169,37 +1756,36 @@ impl App {
         }
     }
 
-    fn go_to_parent(&mut self) {
-        let Some(left) = self.library_path.pop() else {
+    /// `a`/`A` in the local browser: the selected track, or every track
+    /// of the selected folder, artist, album or playlist, in order.
+    fn enqueue_selected(&mut self, placement: Placement, now: Instant) {
+        let Some(ids) = self.local.selected_tracks(&self.library) else {
             return;
         };
-        self.library_selected = self.row_index(&RowKey::Dir(left)).unwrap_or(0);
+        if ids.is_empty() {
+            self.set_status("Nothing to add", now);
+            return;
+        }
+        let tracks = ids
+            .into_iter()
+            .map(|id| self.library.track(id).clone())
+            .collect();
+        self.enqueue_with_status(tracks, placement, now);
     }
 
-    fn enqueue_selected(&mut self, now: Instant) {
-        let tracks: Vec<Track> = match self.selected_row() {
-            Some(LibraryRow::Track(track)) => vec![track.clone()],
-            Some(LibraryRow::Dir(dir)) => {
-                let mut tracks = Vec::new();
-                collect_tracks(dir, &mut tracks);
-                tracks
-            }
-            None => return,
-        };
-        self.enqueue_with_status(tracks, now);
-    }
-
-    /// Appends `tracks` and reports what was added in the status line.
-    fn enqueue_with_status(&mut self, tracks: Vec<Track>, now: Instant) {
+    /// Adds `tracks` at `placement` and reports what was added in the
+    /// status line.
+    fn enqueue_with_status(&mut self, tracks: Vec<Track>, placement: Placement, now: Instant) {
+        let verb = self.added_verb(placement);
         let text = match tracks.as_slice() {
-            [one] => format!("Added {}", one.display_name()),
-            many => format!("Added {}", count(many.len(), "track")),
+            [one] => format!("{verb} {}", one.display_name()),
+            many => format!("{verb} {}", count(many.len(), "track")),
         };
-        let text = match self.enqueue_tracks(tracks) {
+        let text = match self.enqueue_tracks(tracks, placement) {
             (_, 0) => text,
             (0, _) => QUEUE_FULL.to_owned(),
             (added, dropped) => format!(
-                "Added {}; queue full, {} not added",
+                "{verb} {}; queue full, {} not added",
                 count(added, "track"),
                 thousands(dropped)
             ),
@@ -1265,6 +1851,99 @@ impl App {
         self.set_status(text, now);
     }
 
+    /// `S`: asks for a name and saves the queue's Navidrome songs, in
+    /// queue order, as a new playlist. Local tracks are left out.
+    fn save_queue_as_playlist(&mut self, now: Instant) {
+        let Some(browser) = self.browser.as_mut() else {
+            self.set_status(NAVIDROME_NOT_CONFIGURED, now);
+            return;
+        };
+        let entries = self.player.queue().entries();
+        let songs: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.track.navidrome_id().map(str::to_owned))
+            .collect();
+        let local = entries.len() - songs.len();
+        if songs.is_empty() {
+            self.set_status(NO_REMOTE_IN_QUEUE, now);
+            return;
+        }
+        browser.open_save_queue(songs, local, &queue_playlist_name(SystemTime::now()));
+    }
+
+    /// `D`: the first press asks for confirmation; a second one within
+    /// [`CLEAR_CONFIRM`] on the same playlist deletes it.
+    fn delete_playlist(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let (id, name) = match self.browser_mut().deletion() {
+            Ok(target) => target,
+            Err("") => return,
+            Err(reason) => return self.set_status(reason, now),
+        };
+        let arm = EditArm::Delete(id.clone());
+        if confirms(armed, &arm, now) {
+            let text = format!("Deleting {name}…");
+            if self.browser_mut().delete_playlist(id, name) {
+                self.set_status(text, now);
+            }
+        } else {
+            self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+            self.set_status(format!("Press D again to delete {name}"), now);
+        }
+    }
+
+    /// `d` in a playlist: the first press asks for confirmation; a second
+    /// one within [`CLEAR_CONFIRM`] on the same entry removes it.
+    fn remove_from_playlist(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let removal: Removal = match self.browser_mut().removal() {
+            Ok(removal) => removal,
+            Err("") => return,
+            Err(reason) => return self.set_status(reason, now),
+        };
+        let arm = EditArm::Remove {
+            playlist_id: removal.playlist_id.clone(),
+            index: removal.index,
+            song_id: removal.song_id.clone(),
+        };
+        if confirms(armed, &arm, now) {
+            let text = format!("Removing {}…", removal.song);
+            if self.browser_mut().remove_entry(removal) {
+                self.set_status(text, now);
+            }
+        } else {
+            self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+            let again = format!("d again to remove {}", removal.song);
+            let text = match removal.hidden {
+                Hidden::None => format!("Press {again}"),
+                hidden => browse::hidden_warning(hidden, &again),
+            };
+            self.set_status(text, now);
+        }
+    }
+
+    /// `w`: saves the shown unsaved order. If the playlist has entries the
+    /// server hides, which the save would drop, the first press warns and
+    /// a second one within [`CLEAR_CONFIRM`] (with nothing in between)
+    /// saves.
+    fn save_order(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let Some(playlist_id) = self
+            .browser_mut()
+            .unsaved_order_playlist()
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let arm = EditArm::SaveOrder(playlist_id);
+        let confirmed = confirms(armed, &arm, now);
+        match self.browser_mut().save_order(confirmed) {
+            Some(SaveOrder::Message(message)) => self.set_status(message, now),
+            Some(SaveOrder::Confirm(hidden)) => {
+                self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+                self.set_status(browse::hidden_warning(hidden, "w again to save"), now);
+            }
+            None => {}
+        }
+    }
+
     fn remove_selected(&mut self) -> Vec<PlayerCommand> {
         match self.player.queue().entries().get(self.queue_selected) {
             Some(entry) => {
@@ -1276,13 +1955,62 @@ impl App {
     }
 }
 
-/// All tracks below `dir` in browse order: sub-directories first (each
-/// recursively), then the directory's own tracks.
-fn collect_tracks(dir: &DirNode, out: &mut Vec<Track>) {
-    for sub in dir.dirs() {
-        collect_tracks(sub, out);
-    }
-    out.extend(dir.tracks().iter().cloned());
+/// `true` if `armed` is `arm`, pressed before its deadline.
+fn confirms(armed: Option<(EditArm, Instant)>, arm: &EditArm, now: Instant) -> bool {
+    armed.is_some_and(|(armed, until)| armed == *arm && now < until)
+}
+
+/// The suggested name of a saved queue: `Queue 2026-11-01`, the local
+/// date (the UTC date if the local one cannot be determined).
+pub fn queue_playlist_name(now: SystemTime) -> String {
+    let secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month, day) = local_date(secs).unwrap_or_else(|| {
+        let (y, m, d) = civil_from_days(secs / 86_400);
+        (i64::try_from(y).unwrap_or(i64::MAX), m, d)
+    });
+    format!("Queue {year:04}-{month:02}-{day:02}")
+}
+
+/// The local calendar date of `secs` after the Unix epoch, by the
+/// process's time zone (`TZ`, else the system's), via `localtime_r`.
+fn local_date(secs: u64) -> Option<(i64, u64, u64)> {
+    let time = libc::time_t::try_from(secs).ok()?;
+    // SAFETY: `tm` is plain data, fully written by `localtime_r` on
+    // success; both pointers are valid for the call, and `localtime_r`
+    // (unlike `localtime`) uses no shared static buffer. It may read the
+    // `TZ` environment variable (to load the time zone); that is sound
+    // because Coda never modifies its environment at runtime (no
+    // `set_var`/`remove_var`), so no other thread writes it meanwhile.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut tm).is_null() {
+            return None;
+        }
+        tm
+    };
+    Some((
+        i64::from(tm.tm_year) + 1900,
+        u64::try_from(tm.tm_mon).ok()? + 1,
+        u64::try_from(tm.tm_mday).ok()?,
+    ))
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (Howard
+/// Hinnant's `civil_from_days`, for non-negative days).
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// `1 track`, `1,234 tracks`.
@@ -1291,18 +2019,7 @@ pub fn count(n: usize, noun: &str) -> String {
     format!("{} {noun}{plural}", thousands(n))
 }
 
-/// Formats with `,` thousands separators.
-pub fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use crate::model::thousands;
 
 // ----- terminal lifecycle and event loop -------------------------------
 
@@ -1322,12 +2039,16 @@ pub fn thousands(n: usize) -> String {
 ///
 /// With `scrobble` (and a client), plays of Navidrome tracks are reported
 /// to the server by a background [`Scrobbler`].
+///
+/// `settings` is what the Settings overlay shows and may change; a save
+/// still running at exit is awaited for up to [`SETTINGS_SAVE_WAIT`].
 pub async fn run(
     mut playback: PlaybackHandle,
     music_dir: Option<PathBuf>,
     navidrome: Option<navidrome::Client>,
     scrobble: bool,
     restored: session::Restored,
+    settings: settings::Context,
 ) -> io::Result<()> {
     let signals = match Signals::new() {
         Ok(signals) => signals,
@@ -1363,9 +2084,16 @@ pub async fn run(
     let mut terminal = ManuallyDrop::new(terminal);
 
     let scan = music_dir.clone().map(scan::spawn_scan);
-    let ping = navidrome.clone().map(spawn_ping);
+    let ping = navidrome
+        .clone()
+        .map(|client| spawn_ping(client, Generation::default()));
     let scrobbler = navidrome.clone().filter(|_| scrobble).map(Scrobbler::spawn);
-    let mut app = App::with_sources(music_dir, navidrome.clone());
+    let mut app = App::with_sources(music_dir, navidrome);
+    let mut writers = Writers {
+        settings: SettingsIo::new(settings.config_path.clone(), SecretStore::system),
+        edits: EditRunner::default(),
+    };
+    app.set_settings_context(settings);
     app.set_scrobbling(scrobbler.is_some());
     let now = Instant::now();
     playback.send_all(app.restore_session(restored.session, now));
@@ -1377,7 +2105,6 @@ pub async fn run(
     let sources = Sources {
         scan,
         ping,
-        navidrome,
         scrobbler,
         scrobble_failure,
     };
@@ -1388,12 +2115,22 @@ pub async fn run(
         sources,
         signals,
         &mut saver,
+        &mut writers,
     )
     .await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
-    tokio::join!(saver.finish(&mut app), shutdown_backend(playback));
+    let queued = app.browser().map_or(0, Browser::queued_edits);
+    if queued > 0 {
+        tracing::info!(queued, "queued playlist changes dropped at exit");
+    }
+    tokio::join!(
+        saver.finish(&mut app),
+        shutdown_backend(playback),
+        writers.settings.finish(SETTINGS_SAVE_WAIT),
+        writers.edits.finish(EDIT_SAVE_WAIT)
+    );
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
     result
@@ -1500,7 +2237,7 @@ async fn shutdown_backend(playback: PlaybackHandle) {
 /// retries a failed show-cursor with `eprintln!`, which panics when the
 /// terminal has hung up; in that case the terminal is leaked instead (the
 /// process is exiting).
-fn release_terminal(mut terminal: DefaultTerminal) {
+pub(crate) fn release_terminal(mut terminal: DefaultTerminal) {
     if let Err(error) = terminal.show_cursor() {
         tracing::warn!(%error, "could not show the cursor");
         std::mem::forget(terminal);
@@ -1509,7 +2246,7 @@ fn release_terminal(mut terminal: DefaultTerminal) {
 
 /// Restores the terminal without ever writing to stderr: after a hangup
 /// the terminal is gone and a failed write must not panic.
-fn restore_terminal() {
+pub(crate) fn restore_terminal() {
     if let Err(error) = crossterm::execute!(io::stdout(), DisableBracketedPaste) {
         tracing::warn!(%error, "could not disable bracketed paste");
     }
@@ -1588,36 +2325,292 @@ type PingResult = Result<(), navidrome::Error>;
 /// Background work whose results arrive in the loop.
 struct Sources {
     scan: Option<mpsc::Receiver<ScanEvent>>,
-    ping: Option<oneshot::Receiver<PingResult>>,
-    /// Runs the app's fetch requests.
-    navidrome: Option<navidrome::Client>,
+    ping: Option<oneshot::Receiver<(Generation, PingResult)>>,
     /// Sends the app's scrobbles.
     scrobbler: Option<Scrobbler>,
     /// The first scrobble failure, if any.
     scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
 }
 
-/// Spawns the fetch tasks for `requests`; their responses arrive on
-/// `responses`. Concurrency is bounded by `limit`.
-fn spawn_fetches(
-    requests: Vec<FetchRequest>,
-    client: Option<&navidrome::Client>,
-    limit: &Arc<Semaphore>,
-    responses: &mpsc::UnboundedSender<FetchResponse>,
-) {
-    let Some(client) = client else {
-        return;
-    };
-    for request in requests {
-        browse::spawn_fetch(client.clone(), limit.clone(), request, responses.clone());
+/// Runs the browser's fetches for the current client, at most
+/// [`MAX_CONCURRENT_FETCHES`] at a time.
+struct Fetches {
+    limit: Arc<Semaphore>,
+    /// Fetch tasks that may still be running.
+    running: Vec<JoinHandle<()>>,
+}
+
+impl Fetches {
+    fn new() -> Self {
+        Self {
+            limit: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
+            running: Vec::new(),
+        }
+    }
+
+    /// Spawns the fetch tasks for `requests`; their responses arrive on
+    /// `responses`.
+    fn spawn(
+        &mut self,
+        requests: Vec<FetchRequest>,
+        client: Option<&navidrome::Client>,
+        responses: &mpsc::UnboundedSender<FetchResponse>,
+    ) {
+        let Some(client) = client else {
+            return;
+        };
+        if requests.is_empty() {
+            return;
+        }
+        self.running.retain(|task| !task.is_finished());
+        for request in requests {
+            self.running.push(browse::spawn_fetch(
+                client.clone(),
+                self.limit.clone(),
+                request,
+                responses.clone(),
+            ));
+        }
+    }
+
+    /// The client changed: aborts the old client's fetches (each still
+    /// answers, with `Aborted`, which the generation check drops) and gives
+    /// the new client its own permits, so nothing queued for the old server
+    /// runs or holds up the new one.
+    fn restart(&mut self) {
+        for task in self.running.drain(..) {
+            task.abort();
+        }
+        self.limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
     }
 }
 
-/// Pings the server on a Tokio task; the result arrives over a oneshot.
-fn spawn_ping(client: navidrome::Client) -> oneshot::Receiver<PingResult> {
+/// Work that changes something outside Coda (the config file and
+/// keychain, the user's playlists); each is waited for, bounded, at exit.
+struct Writers {
+    settings: SettingsIo,
+    edits: EditRunner,
+}
+
+/// Runs playlist edits one at a time, across client changes too: the next
+/// edit (of any generation) starts only once the running one has
+/// answered. Edits are not aborted when the client changes (the old
+/// server's change completes; its result is dropped by the generation
+/// check).
+#[derive(Default)]
+struct EditRunner {
+    /// The edit running: its generation, id and task.
+    running: Option<(Generation, EditId, JoinHandle<()>)>,
+}
+
+impl EditRunner {
+    /// Starts the app's next edit with its current client, unless one is
+    /// running.
+    fn pump(&mut self, app: &mut App, responses: &mpsc::UnboundedSender<EditResponse>) {
+        if self.running.is_some() {
+            return;
+        }
+        // A browser, and so an edit, exists only with a client.
+        let Some(client) = app.navidrome_client().cloned() else {
+            return;
+        };
+        for request in app.take_edit_requests() {
+            let key = (request.generation, request.id);
+            let task = navidrome::edit::spawn_edit(client.clone(), request, responses.clone());
+            self.running = Some((key.0, key.1, task));
+            app.edit_in_flight = true;
+        }
+    }
+
+    /// An edit answered; if it is the running one, the next may start.
+    fn answered(&mut self, app: &mut App, response: &EditResponse) {
+        if self.running.as_ref().is_some_and(|(generation, id, _)| {
+            (*generation, *id) == (response.generation, response.id)
+        }) {
+            self.running = None;
+            app.edit_in_flight = false;
+            if app.browser.as_ref().is_none_or(|b| b.pending_edits() == 0) {
+                app.edit_quit_armed = false;
+            }
+        }
+    }
+
+    /// Waits up to `wait` for the running edit at exit.
+    async fn finish(self, wait: Duration) {
+        let Some((_, _, task)) = self.running else {
+            return;
+        };
+        if task.is_finished() {
+            return;
+        }
+        tracing::info!("waiting for a playlist change before exit");
+        if tokio::time::timeout(wait, task).await.is_err() {
+            tracing::warn!("a playlist change did not finish before exit");
+        }
+    }
+}
+
+/// Performs the Settings overlay's requests: the ping on a Tokio task, the
+/// keychain and config writes on blocking threads. Each request answers
+/// exactly once, through a drop guard. Logs only kinds and outcomes.
+struct SettingsIo {
+    config_path: Option<PathBuf>,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    /// Saves and disconnects that may still be running.
+    writes: Vec<JoinHandle<()>>,
+}
+
+impl SettingsIo {
+    fn new(
+        config_path: Option<PathBuf>,
+        open_store: fn() -> Result<SecretStore, SecretError>,
+    ) -> Self {
+        Self {
+            config_path,
+            open_store,
+            writes: Vec::new(),
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        request: settings::Request,
+        tx: &mpsc::UnboundedSender<settings::Response>,
+    ) {
+        use settings::{NO_CONFIG_LOCATION, Request, Response};
+        self.writes.retain(|write| !write.is_finished());
+        fn interrupted<T>() -> Result<T, String> {
+            Err(setup::INTERRUPTED.to_owned())
+        }
+        let open_store = self.open_store;
+        match request {
+            Request::Ping { id, server } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Pinged {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                tokio::spawn(async move {
+                    let result = setup::ping(server).await;
+                    reply.send(Response::Pinged { id, result });
+                });
+            }
+            Request::Save {
+                id,
+                server,
+                previous_account,
+            } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Saved {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                let Some(path) = self.config_path.clone() else {
+                    reply.send(Response::Saved {
+                        id,
+                        result: Err(NO_CONFIG_LOCATION.into()),
+                    });
+                    return;
+                };
+                self.writes.push(tokio::task::spawn_blocking(move || {
+                    let result =
+                        save_server(&path, server, open_store, previous_account.as_deref());
+                    reply.send(Response::Saved { id, result });
+                }));
+            }
+            Request::Disconnect {
+                id,
+                previous_account,
+            } => {
+                let reply = Reply::new(
+                    tx,
+                    Response::Disconnected {
+                        id,
+                        result: interrupted(),
+                    },
+                );
+                let Some(path) = self.config_path.clone() else {
+                    reply.send(Response::Disconnected {
+                        id,
+                        result: Err(NO_CONFIG_LOCATION.into()),
+                    });
+                    return;
+                };
+                self.writes.push(tokio::task::spawn_blocking(move || {
+                    let result = setup::save_navidrome(
+                        &path,
+                        SaveNavidrome::Remove,
+                        open_store,
+                        previous_account.as_deref(),
+                    )
+                    .map(drop)
+                    .map_err(save_message);
+                    reply.send(Response::Disconnected { id, result });
+                }));
+            }
+        }
+    }
+
+    /// Waits up to `wait` for running saves, so the process does not exit
+    /// between the keychain write and the config write.
+    async fn finish(self, wait: Duration) {
+        if self.writes.iter().all(JoinHandle::is_finished) {
+            return;
+        }
+        let all = futures_util::future::join_all(self.writes);
+        if tokio::time::timeout(wait, all).await.is_err() {
+            tracing::warn!("a settings save did not finish before exit");
+        }
+    }
+}
+
+/// Builds the client for `server`, then stores the password and writes
+/// `[navidrome]` (keeping the folder and `scrobble`). Blocking.
+fn save_server(
+    path: &Path,
+    server: crate::onboarding::Server,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+    previous_account: Option<&str>,
+) -> Result<settings::Saved, String> {
+    let client = navidrome::Client::new(
+        server.url.clone(),
+        server.username.clone(),
+        server.password.clone(),
+    )
+    .map_err(|error| {
+        tracing::warn!(detail = %error.detail(), "settings: could not set up the client");
+        "Could not set up the Navidrome client".to_owned()
+    })?;
+    let scrobble = setup::save_navidrome(
+        path,
+        SaveNavidrome::Server(server),
+        open_store,
+        previous_account,
+    )
+    .map_err(save_message)?;
+    Ok(settings::Saved { client, scrobble })
+}
+
+fn save_message(error: crate::onboarding::SaveError) -> String {
+    match error {
+        crate::onboarding::SaveError::Keychain(message)
+        | crate::onboarding::SaveError::Config(message) => message,
+    }
+}
+
+/// Pings the server on a Tokio task; the result arrives over a oneshot,
+/// tagged with the client's generation.
+fn spawn_ping(
+    client: navidrome::Client,
+    generation: Generation,
+) -> oneshot::Receiver<(Generation, PingResult)> {
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
-        let _ = tx.send(client.ping().await);
+        let _ = tx.send((generation, client.ping().await));
     });
     rx
 }
@@ -1647,6 +2640,7 @@ async fn event_loop(
     sources: Sources,
     mut signals: Signals,
     saver: &mut Saver,
+    writers: &mut Writers,
 ) -> io::Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -1655,34 +2649,79 @@ async fn event_loop(
     let Sources {
         mut scan,
         mut ping,
-        navidrome,
-        scrobbler,
+        mut scrobbler,
         mut scrobble_failure,
     } = sources;
-    let fetch_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+    let mut fetches = Fetches::new();
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
+    let (settings_tx, mut settings_rx) = mpsc::unbounded_channel();
+    let (edit_tx, mut edit_rx) = mpsc::unbounded_channel();
     let mut playback_open = true;
     let mut dirty = true;
+    // Only the visualizer changed: redraw just its area over a copy of the
+    // last full frame (`last_frame`, kept only while it is shown).
+    let mut visualizer_dirty = false;
+    let mut last_frame: Option<Buffer> = None;
 
     loop {
-        spawn_fetches(
-            app.take_fetch_requests(),
-            navidrome.as_ref(),
-            &fetch_limit,
-            &fetch_tx,
-        );
+        for request in app.take_settings_requests() {
+            writers.settings.spawn(request, &settings_tx);
+        }
+        if let Some(change) = app.take_client_change() {
+            fetches.restart();
+            // Replacing the receivers drops the old ping's answer and the
+            // old scrobbler, whose worker ends once its queue is sent.
+            ping = change
+                .client
+                .clone()
+                .map(|client| spawn_ping(client, change.generation));
+            (scrobbler, scrobble_failure) = change
+                .client
+                .filter(|_| change.scrobble)
+                .map(Scrobbler::spawn)
+                .unzip();
+        }
+        fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
+        writers.edits.pump(app, &edit_tx);
         for request in app.take_scrobble_requests() {
             if let Some(scrobbler) = &scrobbler {
                 scrobbler.send(request);
             }
         }
         if dirty {
-            terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            let completed =
+                terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            last_frame = view.visualizer_area.map(|_| completed.buffer.clone());
+            visualizer_dirty = false;
+            if let Some(command) = app.set_visualizer_drawable(view.visualizer_drawable) {
+                playback.send(command);
+            }
             app.clamp_help_scroll(view.help_max_scroll);
-            dirty = false;
+            app.set_remote_rows(view.remote_rows);
+            // A larger screen may want the next page of a list at once;
+            // draw again right away so "Loading more…" shows.
+            let requests = app.take_fetch_requests();
+            dirty = !requests.is_empty();
+            fetches.spawn(requests, app.navidrome_client(), &fetch_tx);
+            if dirty {
+                continue;
+            }
+        } else if visualizer_dirty {
+            visualizer_dirty = false;
+            if let (Some(area), Some(frame)) = (view.visualizer_area, last_frame.as_mut()) {
+                render::redraw_visualizer(terminal, frame, app, area)?;
+            }
         }
         tokio::select! {
             input_event = input.next() => match input_event {
+                Some(Ok(Event::Key(key))) if app.settings_open() => {
+                    if key.kind != KeyEventKind::Release
+                        && let Some(input) = crate::ui::onboarding::map_key(key)
+                    {
+                        app.handle_settings_input(input, Instant::now());
+                        dirty = true;
+                    }
+                }
                 Some(Ok(Event::Key(key))) => {
                     let action = if app.input_open() {
                         keymap::map_input_key(key)
@@ -1698,7 +2737,7 @@ async fn event_loop(
                     }
                 }
                 Some(Ok(Event::Paste(text))) => {
-                    if app.input_open() {
+                    if app.input_open() || app.settings_open() {
                         app.handle_paste(&text);
                         dirty = true;
                     }
@@ -1714,6 +2753,11 @@ async fn event_loop(
                 }
             },
             event = playback.recv(), if playback_open => match event {
+                Some(PlaybackEvent::Visualizer { load, frame }) => {
+                    if app.handle_visualizer(load, &frame, Instant::now()) {
+                        visualizer_dirty = true;
+                    }
+                }
                 Some(event) => {
                     let commands = app.handle_playback_event(event, Instant::now());
                     playback.send_all(commands);
@@ -1737,6 +2781,17 @@ async fn event_loop(
                 app.handle_fetch_response(response, Instant::now());
                 dirty = true;
             },
+            // Likewise.
+            Some(response) = edit_rx.recv() => {
+                writers.edits.answered(app, &response);
+                app.handle_edit_response(response, Instant::now());
+                dirty = true;
+            },
+            // Likewise.
+            Some(response) = settings_rx.recv() => {
+                app.handle_settings_response(response, Instant::now());
+                dirty = true;
+            },
             failure = next_once(&mut scrobble_failure) => {
                 scrobble_failure = None;
                 // `None`: the worker ended without a failure (at exit).
@@ -1748,8 +2803,8 @@ async fn event_loop(
             result = next_once(&mut ping) => {
                 ping = None;
                 // A dropped sender means the task panicked; it is logged.
-                if let Some(result) = result {
-                    app.handle_navidrome_ping(result, Instant::now());
+                if let Some((generation, result)) = result {
+                    app.handle_ping(generation, result, Instant::now());
                     dirty = true;
                 }
             },
@@ -1917,6 +2972,7 @@ mod tests {
         );
     }
 
+    /// An app with `rels` scanned, showing Folders.
     fn app_with(rels: &[&str]) -> (App, Instant) {
         let now = Instant::now();
         let mut app = App::new(ROOT.into());
@@ -1924,15 +2980,34 @@ mod tests {
             ScanEvent::Batch(rels.iter().map(|r| track(r)).collect()),
             now,
         );
+        open_local(&mut app, local::HomeEntry::Folders, now);
         (app, now)
+    }
+
+    /// Goes back to the local Home and opens `entry`.
+    fn open_local(app: &mut App, entry: local::HomeEntry, now: Instant) {
+        while *app.local_browser().current() != local::View::Home {
+            app.handle_action(Action::Parent, now);
+        }
+        let at = local::HOME_ENTRIES
+            .iter()
+            .position(|e| *e == entry)
+            .unwrap();
+        press(app, &[Action::Up; 4], now);
+        press(app, &vec![Action::Down; at], now);
+        press(app, &[Action::Activate], now);
     }
 
     fn row_names(app: &App) -> Vec<String> {
         app.library_rows()
             .iter()
             .map(|row| match row {
-                LibraryRow::Dir(d) => format!("{}/", d.name()),
-                LibraryRow::Track(t) => t.title.clone(),
+                LocalRow::Home(e) => e.label().to_owned(),
+                LocalRow::Dir(d) => format!("{}/", d.name()),
+                LocalRow::Track(_, t) => t.title.clone(),
+                LocalRow::Artist(a) => a.name().to_owned(),
+                LocalRow::Album(album, artist) => format!("{} — {}", album.name(), artist.name()),
+                LocalRow::Playlist(p) => p.name.clone(),
             })
             .collect()
     }
@@ -1991,13 +3066,17 @@ mod tests {
         press(&mut app, &[Action::Parent], now);
         assert!(app.library_path().is_empty());
         assert_eq!(selected_name(&app), "b/");
-        // Parent at the root is a no-op.
+        // Parent at the folder root goes to Home, on Folders.
         press(&mut app, &[Action::Parent], now);
-        assert_eq!(selected_name(&app), "b/");
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        assert_eq!(selected_name(&app), "Folders");
+        // Parent at Home is a no-op.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Folders");
         // Nested.
         press(
             &mut app,
-            &[Action::Up, Action::Activate, Action::Activate],
+            &[Action::Activate, Action::Activate, Action::Activate],
             now,
         );
         assert_eq!(app.library_path(), ["a", "x"]);
@@ -2047,21 +3126,33 @@ mod tests {
 
     #[test]
     fn selection_is_valid_on_an_empty_library() {
-        let mut app = App::new(ROOT.into());
         let now = Instant::now();
-        assert!(app.library_rows().is_empty());
-        let commands = press(
-            &mut app,
-            &[
-                Action::Down,
-                Action::Activate,
-                Action::Enqueue,
-                Action::Parent,
-            ],
-            now,
-        );
-        assert!(commands.is_empty());
-        assert_eq!(app.library_selected(), 0);
+        for entry in local::HOME_ENTRIES {
+            let mut app = App::new(ROOT.into());
+            // Home is there before anything is scanned.
+            assert_eq!(
+                row_names(&app),
+                ["Playlists", "Folders", "Artists", "Albums"]
+            );
+            open_local(&mut app, entry, now);
+            assert!(app.library_rows().is_empty(), "{entry:?}");
+            let commands = press(
+                &mut app,
+                &[
+                    Action::Down,
+                    Action::Activate,
+                    Action::Enqueue,
+                    Action::EnqueueNext,
+                    Action::CycleSort,
+                ],
+                now,
+            );
+            assert!(commands.is_empty());
+            assert_eq!(app.library_selected(), 0);
+            assert!(app.player().queue().is_empty());
+        }
+        let mut app = App::new(ROOT.into());
+        open_local(&mut app, local::HomeEntry::Folders, now);
         app.handle_scan_event(ScanEvent::Batch(vec![track("a.flac")]), now);
         assert_eq!(selected_name(&app), "a");
     }
@@ -2122,6 +3213,10 @@ mod tests {
             ]),
             now,
         );
+        // Home entries add nothing.
+        press(&mut app, &[Action::Enqueue, Action::EnqueueNext], now);
+        assert!(app.player().queue().is_empty());
+        open_local(&mut app, local::HomeEntry::Folders, now);
         let commands = press(&mut app, &[Action::Enqueue], now);
         assert!(commands.is_empty(), "enqueue does not start playback");
         assert_eq!(queue_titles(&app), ["w", "y", "x", "a-side", "b-side"]);
@@ -2360,9 +3455,16 @@ mod tests {
         Content::Songs(ids.iter().map(|id| remote(id)).collect())
     }
 
-    /// Navidrome only: the Navidrome source is active and the artists are
-    /// requested at once.
+    /// Navidrome only: the Navidrome source is active on Home; Artists is
+    /// opened from it, so the artists are requested.
     fn nav_app() -> (App, Instant) {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        (app, now)
+    }
+
+    /// Navidrome only, on Home.
+    fn nav_home() -> (App, Instant) {
         (App::with_sources(None, Some(client())), Instant::now())
     }
 
@@ -2379,6 +3481,7 @@ mod tests {
     fn respond(app: &mut App, request: &FetchRequest, result: Result<Content, navidrome::Error>) {
         app.handle_fetch_response(
             FetchResponse {
+                generation: request.generation,
                 id: request.id,
                 resource: request.resource.clone(),
                 result,
@@ -2404,12 +3507,11 @@ mod tests {
         app.browser().unwrap()
     }
 
+    /// The titles of the views below Home (which is always the root).
     fn view_titles(app: &App) -> Vec<String> {
-        browser(app)
-            .stack()
-            .iter()
-            .map(|v| v.title.clone())
-            .collect()
+        let stack = browser(app).stack();
+        assert_eq!(stack[0].resource, Resource::Home);
+        stack[1..].iter().map(|v| v.title.clone()).collect()
     }
 
     fn current_load(app: &App) -> Load {
@@ -2421,10 +3523,23 @@ mod tests {
     }
 
     #[test]
-    fn navidrome_only_starts_on_the_navidrome_source_and_fetches_artists() {
-        let (mut app, _) = nav_app();
+    fn navidrome_only_starts_on_home_and_fetches_nothing_until_opened() {
+        let (mut app, now) = nav_home();
         assert_eq!(app.source(), Source::Navidrome);
         assert_eq!(app.connection(), &Connection::Connecting);
+        assert_eq!(current_load(&app), Load::Ready);
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty(), "Home is static");
+        // `h` and `a` on Home do nothing; `r` fetches nothing.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Enqueue, Action::Refresh],
+            now,
+        );
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty());
+        assert!(app.player().queue().is_empty());
+        press(&mut app, &[Action::Down, Action::Activate], now);
         assert!(matches!(current_load(&app), Load::Loading(_)));
         assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(one_request(&mut app).resource, Resource::Artists);
@@ -2473,15 +3588,19 @@ mod tests {
         assert_eq!(queue_titles(&app), ["Remote s1", "Remote s2*", "Remote s3"]);
         assert_eq!(app.status(now), Some("Playing Remote s2"));
 
-        // Up the stack: each view keeps its selection; the root stays.
+        // Up the stack: each view keeps its selection; Home stays.
         press(&mut app, &[Action::Parent], now);
         assert_eq!(view_titles(&app), ["Artists", "Artist a2"]);
         assert_eq!(current_selected(&app), 1);
-        press(&mut app, &[Action::Parent, Action::Parent], now);
+        press(&mut app, &[Action::Parent], now);
         assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(current_selected(&app), 1);
+        press(&mut app, &[Action::Parent, Action::Parent], now);
+        assert!(view_titles(&app).is_empty());
+        assert_eq!(current_selected(&app), 1, "Home keeps its selection");
         // Re-opening a cached list needs no request.
         press(&mut app, &[Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists"]);
         assert_eq!(current_load(&app), Load::Ready);
         assert!(requests(&mut app).is_empty());
     }
@@ -2666,6 +3785,475 @@ mod tests {
         assert_eq!(one_request(&mut app).resource, Resource::Album("x".into()));
     }
 
+    // ----- play next (`A`) ------------------------------------------------
+
+    #[test]
+    fn local_play_next_on_a_folder_and_tracks_keeps_press_order() {
+        let (mut app, now) = app_with(&["a.flac", "b.flac", "d/1.flac", "d/2.flac"]);
+        assert_eq!(row_names(&app), ["d/", "a", "b"]);
+        // Play a, append b.
+        press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Down,
+                Action::Enqueue,
+            ],
+            now,
+        );
+        assert_eq!(queue_titles(&app), ["a*", "b"]);
+        // `A` on the folder, then on b: both right after a, in that order.
+        let commands = press(
+            &mut app,
+            &[Action::Up, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        assert!(commands.is_empty(), "play next never starts playback");
+        assert_eq!(app.status(now), Some("Playing next: 2 tracks"));
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::EnqueueNext],
+            now,
+        );
+        assert_eq!(app.status(now), Some("Playing next: b"));
+        assert_eq!(queue_titles(&app), ["a*", "1", "2", "b", "b"]);
+        // Playing another track starts a new run.
+        press(&mut app, &[Action::Up, Action::Activate], now);
+        press(&mut app, &[Action::Down, Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["a", "a*", "b", "1", "2", "b", "b"]);
+    }
+
+    // ----- local Home, tag lists and playlists ---------------------------
+
+    /// A local track with tags: `artist` and `album_artist` may be empty
+    /// (absent).
+    fn tagged(rel: &str, title: &str, artist: &str, album_artist: &str, album: &str) -> Track {
+        let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        Track::local(
+            format!("{ROOT}/{rel}").into(),
+            TrackMetadata {
+                title: some(title),
+                artist: some(artist),
+                album_artist: some(album_artist),
+                album: some(album),
+                track_no: rel
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.get(..2))
+                    .and_then(|n| n.parse().ok()),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    /// Two artists, a compilation and an untagged file.
+    fn tag_library() -> Vec<Track> {
+        vec![
+            tagged("m/x/02.flac", "M Two", "Miles", "", "Kind"),
+            tagged("m/x/01.flac", "M One", "miles", "", "kind"),
+            tagged("m/y/01.flac", "Y One", "Miles", "", "Blue"),
+            tagged("c/01.flac", "C One", "Guest", "Various", "Hits"),
+            tagged("c/02.flac", "C Two", "Miles", "Various", "Hits"),
+            tagged("loose.flac", "", "", "", ""),
+        ]
+    }
+
+    fn tag_app() -> (App, Instant) {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        app.handle_scan_event(ScanEvent::Batch(tag_library()), now);
+        (app, now)
+    }
+
+    fn path_titles(app: &App) -> Vec<String> {
+        app.local_browser().path_titles(app.library())
+    }
+
+    fn local_playlist(name: &str, rels: &[&str], unresolved: usize) -> ScanEvent {
+        ScanEvent::Playlist(crate::library::m3u::PlaylistFile {
+            path: format!("{ROOT}/{name}.m3u").into(),
+            name: name.into(),
+            entries: rels.iter().map(|r| format!("{ROOT}/{r}").into()).collect(),
+            unresolved,
+            cut: false,
+        })
+    }
+
+    #[test]
+    fn local_home_opens_each_list_and_h_goes_back_up_to_home() {
+        let (mut app, now) = tag_app();
+        assert_eq!(
+            row_names(&app),
+            ["Playlists", "Folders", "Artists", "Albums"]
+        );
+        assert!(path_titles(&app).is_empty());
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        // "Miles" is the more common spelling.
+        assert_eq!(row_names(&app), ["Miles", "Various", "Unknown artist"]);
+        assert_eq!(path_titles(&app), ["Artists"]);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(row_names(&app), ["Blue — Miles", "Kind — Miles"]);
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        assert_eq!(row_names(&app), ["M One", "M Two"]);
+        assert_eq!(path_titles(&app), ["Artists", "Miles", "Kind"]);
+        // `h` back up: each level re-selects what it opened, ending at Home.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Kind — Miles");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Miles");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Artists");
+        press(&mut app, &[Action::Parent, Action::Parent], now);
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        // Albums: every album with its artist, A–Z by name.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+        assert_eq!(
+            row_names(&app),
+            [
+                "Blue — Miles",
+                "Hits — Various",
+                "Kind — Miles",
+                "Unknown album — Unknown artist"
+            ]
+        );
+        // Search from a list returns to it.
+        local_search_for(&mut app, "one", now);
+        assert_eq!(local_titles(&app), ["C One", "M One", "Y One"]);
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+        // Folders is the tree, unchanged.
+        open_local(&mut app, local::HomeEntry::Folders, now);
+        assert_eq!(row_names(&app), ["c/", "m/", "loose"]);
+        assert_eq!(path_titles(&app), ["Folders"]);
+        press(
+            &mut app,
+            &[Action::Down, Action::Activate, Action::Activate],
+            now,
+        );
+        assert_eq!(path_titles(&app), ["Folders", "m", "x"]);
+    }
+
+    #[test]
+    fn o_cycles_the_local_album_order_and_keeps_the_selected_album() {
+        let (mut app, now) = tag_app();
+        // Outside the Albums list, `o` does nothing.
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Down], now);
+        assert_eq!(selected_name(&app), "Hits — Various");
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(path_titles(&app), ["Albums (by artist)"]);
+        assert_eq!(
+            row_names(&app),
+            [
+                "Blue — Miles",
+                "Kind — Miles",
+                "Hits — Various",
+                "Unknown album — Unknown artist"
+            ]
+        );
+        assert_eq!(selected_name(&app), "Hits — Various");
+        // Home → Albums reopens the order last chosen.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        assert_eq!(path_titles(&app), ["Albums (by artist)"]);
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+    }
+
+    #[test]
+    fn local_lists_fill_in_during_a_scan_and_keep_the_selection() {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        assert!(app.library_rows().is_empty());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("1.flac", "a", "Moby", "", "Play")]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["Moby"]);
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                tagged("2.flac", "b", "ABBA", "", "Gold"),
+                tagged("3.flac", "c", "Zappa", "", "Apostrophe"),
+            ]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["ABBA", "Moby", "Zappa"]);
+        assert_eq!(selected_name(&app), "Moby");
+        // Inside an album, a track arriving before the selection.
+        press(&mut app, &[Action::Activate, Action::Activate], now);
+        assert_eq!(row_names(&app), ["a"]);
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("0.flac", "0", "Moby", "", "Play")]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["0", "a"]);
+        assert_eq!(selected_name(&app), "a");
+        // Playlists arrive after the tracks.
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        assert!(app.library_rows().is_empty());
+        app.handle_scan_event(local_playlist("Road", &["1.flac"], 0), now);
+        app.handle_scan_event(local_playlist("Alpha", &[], 0), now);
+        assert_eq!(row_names(&app), ["Alpha", "Road"]);
+        assert_eq!(selected_name(&app), "Road");
+        app.handle_scan_event(local_playlist("Morning", &[], 0), now);
+        assert_eq!(row_names(&app), ["Alpha", "Morning", "Road"]);
+        assert_eq!(selected_name(&app), "Road");
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 4,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        assert_eq!(
+            app.status(now),
+            Some("Library scan complete: 4 tracks, 3 playlists")
+        );
+    }
+
+    #[test]
+    fn local_artist_album_and_playlist_enqueue_in_order() {
+        let (mut app, now) = tag_app();
+        app.handle_scan_event(
+            local_playlist(
+                "Mix",
+                &["c/02.flac", "m/x/01.flac", "gone.flac", "c/02.flac"],
+                2,
+            ),
+            now,
+        );
+        // `a` on an artist: albums A–Z, each in track order.
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(queue_titles(&app), ["Y One", "M One", "M Two"]);
+        assert_eq!(app.status(now), Some("Added 3 tracks"));
+        // Play the first, then `A` an album and a playlist: both next, in
+        // press order, the playlist with its duplicate.
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::Activate, Action::SwitchFocus],
+            now,
+        );
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Down, Action::EnqueueNext], now);
+        assert_eq!(app.status(now), Some("Playing next: 2 tracks"));
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        assert_eq!(row_names(&app), ["Mix"]);
+        press(&mut app, &[Action::EnqueueNext], now);
+        assert_eq!(
+            queue_titles(&app),
+            [
+                "Y One*", "C One", "C Two", "C Two", "M One", "C Two", "M One", "M Two"
+            ]
+        );
+        // Inside the playlist: matched tracks in file order, duplicates
+        // kept; Enter plays one.
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(path_titles(&app), ["Playlists", "Mix"]);
+        assert_eq!(row_names(&app), ["C Two", "M One", "C Two"]);
+        let commands = press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(load_path(&commands), PathBuf::from("/music/c/02.flac"));
+        // The selection stays on the second "C Two" as batches arrive.
+        app.handle_scan_event(ScanEvent::Batch(vec![track("z.flac")]), now);
+        assert_eq!(app.library_selected(), 2);
+        // `a` on an album row and on a track in an album.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Up; 4], now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(app.status(now), Some("Added Miles - Y One"));
+        press(&mut app, &[Action::Activate, Action::Enqueue], now);
+        assert_eq!(app.status(now), Some("Added Miles - Y One"));
+    }
+
+    #[test]
+    fn an_empty_playlist_adds_nothing() {
+        let (mut app, now) = tag_app();
+        app.handle_scan_event(local_playlist("Gone", &["nope.flac"], 1), now);
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert!(app.player().queue().is_empty());
+        assert_eq!(app.status(now), Some("Nothing to add"));
+        press(&mut app, &[Action::Activate], now);
+        assert!(app.library_rows().is_empty());
+        assert!(press(&mut app, &[Action::Activate, Action::Enqueue], now).is_empty());
+    }
+
+    #[test]
+    fn without_a_local_library_local_keys_do_nothing() {
+        let now = Instant::now();
+        let mut app = App::with_sources(None, Some(client()));
+        press(&mut app, &[Action::SelectLocal], now);
+        let commands = press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Activate,
+                Action::Enqueue,
+                Action::CycleSort,
+            ],
+            now,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        assert_eq!(app.library_selected(), 0);
+    }
+
+    #[test]
+    fn play_next_with_nothing_current_appends() {
+        let (mut app, now) = app_with(&["a.flac", "b.flac"]);
+        press(
+            &mut app,
+            &[Action::EnqueueNext, Action::Down, Action::EnqueueNext],
+            now,
+        );
+        assert_eq!(queue_titles(&app), ["a", "b"]);
+        // Local search results too.
+        local_search_for(&mut app, "a", now);
+        press(&mut app, &[Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["a", "b", "a"]);
+        assert_eq!(app.status(now), Some("Added a"), "nothing plays next");
+    }
+
+    #[test]
+    fn remote_play_next_jobs_keep_their_turn() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        let albums = one_request(&mut app);
+        respond(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let y = one_request(&mut app);
+        respond(&mut app, &y, Ok(songs(&["y1", "y2"])));
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(queue_titles(&app), ["Remote y1*"]);
+        // `A` on album x (not fetched yet), then on song y2 (ready).
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        let x = one_request(&mut app);
+        assert_eq!(app.status(now), Some("Fetching Album x…"));
+        press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Down,
+                Action::EnqueueNext,
+            ],
+            now,
+        );
+        assert_eq!(app.status(now), Some("Queued Remote y2 after Album x…"));
+        assert_eq!(queue_titles(&app), ["Remote y1*"]);
+        respond(&mut app, &x, Ok(songs(&["x1", "x2"])));
+        assert_eq!(
+            queue_titles(&app),
+            ["Remote y1*", "Remote x1", "Remote x2", "Remote y2"]
+        );
+        assert_eq!(app.status(now), Some("Playing next: Remote y2"));
+    }
+
+    #[test]
+    fn a_pending_play_next_job_keeps_press_order_after_an_unrelated_remove() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::Activate], now);
+        let albums = one_request(&mut app);
+        respond(
+            &mut app,
+            &albums,
+            Ok(Content::Albums(vec![album("x"), album("y")])),
+        );
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let y = one_request(&mut app);
+        respond(&mut app, &y, Ok(songs(&["y1", "y2", "y3"])));
+        // Play y1, append y3, `A` y2: y1* y2 y3.
+        press(&mut app, &[Action::Activate], now);
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Enqueue],
+            now,
+        );
+        press(&mut app, &[Action::Up, Action::EnqueueNext], now);
+        assert_eq!(queue_titles(&app), ["Remote y1*", "Remote y2", "Remote y3"]);
+        // `A` on album x (still to fetch), then remove y3 meanwhile.
+        press(
+            &mut app,
+            &[Action::Parent, Action::Up, Action::EnqueueNext],
+            now,
+        );
+        let x = one_request(&mut app);
+        app.focus = Focus::Queue;
+        press(&mut app, &[Action::Down, Action::Down, Action::Remove], now);
+        app.focus = Focus::Library;
+        respond(&mut app, &x, Ok(songs(&["x1", "x2"])));
+        assert_eq!(
+            queue_titles(&app),
+            ["Remote y1*", "Remote y2", "Remote x1", "Remote x2"]
+        );
+    }
+
+    #[test]
+    fn o_cycles_the_album_sort_only_in_an_album_list() {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::CycleSort], now);
+        assert!(requests(&mut app).is_empty(), "nothing on Home");
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(view_titles(&app), ["Albums (A–Z)"]);
+        let first = one_request(&mut app);
+        assert_eq!(
+            first.resource,
+            Resource::AlbumPage {
+                sort: navidrome::AlbumSort::Name,
+                offset: 0
+            }
+        );
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(view_titles(&app), ["Albums (by artist)"]);
+        let next = one_request(&mut app);
+        assert_eq!(
+            next.resource,
+            Resource::AlbumPage {
+                sort: navidrome::AlbumSort::Artist,
+                offset: 0
+            }
+        );
+        // The first order still lands in its cache.
+        respond(
+            &mut app,
+            &first,
+            Ok(Content::AlbumPage(navidrome::AlbumPage {
+                albums: vec![album("a")],
+                served: 1,
+            })),
+        );
+        assert!(
+            browser(&app)
+                .cached(&Resource::Albums(navidrome::AlbumSort::Name))
+                .is_some()
+        );
+        // `o` in the local source does nothing.
+        press(&mut app, &[Action::SelectLocal, Action::CycleSort], now);
+        assert!(requests(&mut app).is_empty());
+    }
+
     #[test]
     fn failed_job_reports_its_error() {
         let (mut app, now) = nav_app_with_artists(&["a1"]);
@@ -2790,6 +4378,7 @@ mod tests {
             ScanEvent::Batch(vec![track("d/1.flac"), track("d/2.flac")]),
             now,
         );
+        open_local(&mut app, local::HomeEntry::Folders, now);
         press(&mut app, &[Action::Activate, Action::Down], now);
         assert_eq!(app.library_path(), ["d"]);
         assert_eq!(selected_name(&app), "2");
@@ -2801,6 +4390,8 @@ mod tests {
         );
         assert_eq!(app.focus(), Focus::Library);
         assert_eq!(app.source(), Source::Navidrome);
+        assert!(requests(&mut app).is_empty(), "Home fetches nothing");
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let request = one_request(&mut app);
         respond(
             &mut app,
@@ -2831,31 +4422,66 @@ mod tests {
     }
 
     #[test]
-    fn navidrome_keys_without_navidrome_show_a_message() {
-        let (mut app, now) = app_with(&["1.flac"]);
+    fn navidrome_without_navidrome_offers_to_connect() {
+        let (mut app, now) = app_with(&["1.flac", "2.flac"]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
         press(
             &mut app,
             &[Action::SwitchFocus, Action::SelectNavidrome],
             now,
         );
-        assert_eq!(app.source(), Source::Local);
-        assert_eq!(app.focus(), Focus::Queue);
-        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
-        assert!(app.browser().is_none());
-        assert!(requests(&mut app).is_empty());
-        press(&mut app, &[Action::SelectLocal, Action::Refresh], now);
+        assert_eq!(app.source(), Source::Navidrome);
         assert_eq!(app.focus(), Focus::Library);
+        assert!(app.navidrome_prompt());
+        assert_eq!(app.status(now), None);
+        assert!(app.browser().is_none());
+        // Library keys have nothing to act on; no local search opens.
+        press(
+            &mut app,
+            &[
+                Action::Refresh,
+                Action::OpenSearch,
+                Action::Enqueue,
+                Action::Down,
+                Action::Parent,
+            ],
+            now,
+        );
         assert!(!app.input_open());
-        assert_eq!(app.status(now), Some(NAVIDROME_NOT_CONFIGURED));
+        assert!(app.player().queue().is_empty());
+        assert!(requests(&mut app).is_empty());
+        // The hidden local selection did not move.
+        assert_eq!(selected_name(&app), "1");
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Up, Action::Down],
+            now,
+        );
+        assert_eq!(app.library_selected(), 0);
         // A response without a browser is ignored.
         app.handle_fetch_response(
             FetchResponse {
+                generation: Generation::default(),
                 id: browse::RequestId(1),
                 resource: Resource::Artists,
                 result: Ok(Content::Artists(Vec::new())),
             },
             now,
         );
+        // Enter opens the Connect form.
+        press(&mut app, &[Action::Activate], now);
+        assert!(app.settings_open());
+        let (kind, _) = app.settings().form().unwrap();
+        assert_eq!(kind, settings::FormKind::Connect);
+        // `1` still shows the local library.
+        app.handle_settings_input(Input::Esc, now);
+        app.handle_settings_input(Input::Esc, now);
+        assert!(!app.settings_open());
+        press(&mut app, &[Action::SelectLocal], now);
+        assert!(!app.navidrome_prompt());
         assert_eq!(selected_name(&app), "1");
     }
 
@@ -3333,6 +4959,155 @@ mod tests {
         *load
     }
 
+    fn reading(value: f32) -> crate::playback::VisualizerFrame {
+        crate::playback::VisualizerFrame {
+            levels: [value; 2],
+            bands: [Some(value); crate::playback::VISUALIZER_BANDS],
+        }
+    }
+
+    #[test]
+    fn v_toggles_the_visualizer_and_the_setting_is_saved_and_restored() {
+        let (mut app, now) = queued_app(&["A"]);
+        assert!(!app.visualizer_shown(), "off by default");
+        let commands = press(&mut app, &[Action::ToggleVisualizer], now);
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(true)]);
+        assert!(app.visualizer_shown());
+        let saved = app.take_due_save(now + SAVE_DEBOUNCE).expect("saved");
+        assert!(saved.visualizer);
+        let commands = press(&mut app, &[Action::ToggleVisualizer], now);
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(false)]);
+        assert!(!app.take_final_save().expect("changed again").visualizer);
+
+        // Restored on: the backend is told at startup.
+        let (mut app, now) = app_with(&[]);
+        let commands = app.restore_session(
+            Session {
+                visualizer: true,
+                ..Session::default()
+            },
+            now,
+        );
+        assert_eq!(commands, [PlaybackCommand::SetVisualizer(true)]);
+        assert!(app.visualizer_shown());
+        assert_eq!(app.take_final_save(), None, "restored counts as saved");
+        // Restored off: nothing to tell.
+        let (mut app, now) = app_with(&[]);
+        assert!(app.restore_session(Session::default(), now).is_empty());
+        // The key does nothing while help is open.
+        press(&mut app, &[Action::ToggleHelp], now);
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert!(!app.visualizer_shown());
+    }
+
+    #[test]
+    fn readings_redraw_only_while_shown_and_playing_the_current_track() {
+        let (mut app, now) = queued_app(&["A", "B"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        // Hidden: dropped, nothing to redraw.
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        assert!(app.meter().is_empty());
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        assert!(app.meter().levels()[0] > 0.0);
+        // Another load's reading is stale.
+        assert!(!app.handle_visualizer(LoadId(load.0 + 100), &reading(1.0), now));
+        // Paused: the bars drop and readings are dropped.
+        app.handle_playback_event(PlaybackEvent::Paused(true), now);
+        assert!(app.meter().is_empty());
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        app.handle_playback_event(PlaybackEvent::Paused(false), now);
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        // Hidden again: the bars drop at once.
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        assert!(app.meter().is_empty());
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        // Next track: loading, so the old load's readings are dropped.
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        press(&mut app, &[Action::Next], now);
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        // Through the event path as well.
+        app.handle_playback_event(
+            PlaybackEvent::Visualizer {
+                load,
+                frame: reading(1.0),
+            },
+            now,
+        );
+        assert!(app.meter().is_empty());
+        // Stopped.
+        press(&mut app, &[Action::ClearQueue, Action::ClearQueue], now);
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+    }
+
+    #[test]
+    fn readings_are_requested_only_while_the_visualizer_can_be_seen() {
+        let (mut app, now) = queued_app(&["A"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        // Not shown: drawability alone asks for nothing.
+        assert_eq!(app.set_visualizer_drawable(false), None);
+        assert_eq!(app.set_visualizer_drawable(true), None);
+        assert_eq!(
+            press(&mut app, &[Action::ToggleVisualizer], now),
+            [PlaybackCommand::SetVisualizer(true)]
+        );
+        assert!(app.handle_visualizer(load, &reading(1.0), now));
+        // Covered or too small: readings stop and the bars drop.
+        assert_eq!(
+            app.set_visualizer_drawable(false),
+            Some(PlaybackCommand::SetVisualizer(false))
+        );
+        assert!(app.meter().is_empty());
+        assert!(!app.handle_visualizer(load, &reading(1.0), now));
+        assert_eq!(app.set_visualizer_drawable(false), None, "no repeats");
+        // `v` while covered changes the setting only.
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert!(press(&mut app, &[Action::ToggleVisualizer], now).is_empty());
+        assert_eq!(
+            app.set_visualizer_drawable(true),
+            Some(PlaybackCommand::SetVisualizer(true))
+        );
+        assert!(app.take_due_save(now + SAVE_DEBOUNCE).unwrap().visualizer);
+    }
+
+    #[test]
+    fn the_bars_fall_on_the_tick_when_readings_stop() {
+        let (mut app, now) = queued_app(&["A"]);
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        app.handle_visualizer(load, &reading(1.0), now);
+        let level = app.meter().levels()[0];
+        assert!(!app.tick(now + Duration::from_millis(100)));
+        assert!(app.tick(now + Duration::from_millis(400)));
+        assert!(app.meter().levels()[0] < level);
+        for i in 0..10 {
+            app.tick(now + Duration::from_millis(650 + 250 * i));
+        }
+        assert_eq!(app.meter().levels(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn an_unavailable_visualizer_is_reported_once_and_on_v() {
+        let (mut app, now) = queued_app(&["A"]);
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        app.handle_playback_event(PlaybackEvent::VisualizerUnavailable, now);
+        assert_eq!(app.status(now), Some(VISUALIZER_UNAVAILABLE));
+        assert!(!app.visualizer_shown());
+        let later = now + STATUS_TTL * 2;
+        app.tick(later);
+        app.handle_playback_event(PlaybackEvent::VisualizerUnavailable, later);
+        assert_eq!(app.status(later), None, "only once");
+        // Turning it off and on again says why nothing shows.
+        press(&mut app, &[Action::ToggleVisualizer], later);
+        assert_eq!(app.status(later), None);
+        press(&mut app, &[Action::ToggleVisualizer], later);
+        assert_eq!(app.status(later), Some(VISUALIZER_UNAVAILABLE));
+        assert!(!app.visualizer_shown());
+    }
+
     #[test]
     fn move_keys_reorder_and_the_selection_follows() {
         let (mut app, now) = queued_app(&["A", "B", "C"]);
@@ -3511,6 +5286,7 @@ mod tests {
             repeat: crate::player::RepeatMode::All,
             current: Some(2),
             tracks: vec![track("a.flac"), remote("r1"), track("c.flac")],
+            visualizer: false,
         };
         let commands = app.restore_session(session, now);
         assert_eq!(commands, [PlaybackCommand::SetVolume(60)]);
@@ -3754,5 +5530,2056 @@ mod tests {
         saver.finish(&mut app).await;
         let (session, _) = session::load(&path);
         assert_eq!(session.tracks.len(), 2);
+    }
+
+    // ----- settings and hot swap ----------------------------------------------
+
+    fn settings_context(music: Option<&str>, navidrome: settings::Navidrome) -> settings::Context {
+        settings::Context {
+            config_path: Some("/cfg/config.toml".into()),
+            music_dir: music.map(PathBuf::from),
+            music_origin: None,
+            file_has_music_dir: music.is_some(),
+            navidrome,
+            env_overrides: Vec::new(),
+        }
+    }
+
+    /// The account of [`client`], as Coda wrote it.
+    fn coda_owned() -> settings::Navidrome {
+        settings::Navidrome::Coda {
+            url: navidrome::client::parse_base_url("https://h.example/nd").unwrap(),
+            username: "u".into(),
+            account: "u@h.example".into(),
+        }
+    }
+
+    fn other_client() -> navidrome::Client {
+        navidrome::Client::new(
+            navidrome::client::parse_base_url("https://other.example/nd").unwrap(),
+            "v".into(),
+            navidrome::Password::new("q".into()),
+        )
+        .unwrap()
+    }
+
+    fn settings_type(app: &mut App, text: &str, now: Instant) {
+        for c in text.chars() {
+            app.handle_settings_input(Input::Char(c), now);
+        }
+        app.handle_settings_input(Input::Enter, now);
+    }
+
+    /// Connects (or, for a Coda-owned server, edits) through the overlay
+    /// up to the save; the loop's answers are faked. Returns the save's id.
+    fn settings_up_to_save(app: &mut App, now: Instant) -> settings::RequestId {
+        app.handle_action(Action::OpenSettings, now);
+        assert!(app.settings_open());
+        if matches!(app.settings().navidrome(), settings::Navidrome::Coda { .. }) {
+            app.handle_settings_input(Input::Char('e'), now);
+        } else {
+            app.handle_settings_input(Input::Char('c'), now);
+            settings_type(app, "other.example/nd", now);
+            settings_type(app, "v", now);
+        }
+        settings_type(app, "q", now);
+        let requests = app.take_settings_requests();
+        let [settings::Request::Ping { id, .. }] = requests.as_slice() else {
+            panic!("expected a ping, got {requests:?}");
+        };
+        app.handle_settings_response(
+            settings::Response::Pinged {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        let requests = app.take_settings_requests();
+        let [settings::Request::Save { id, .. }] = requests.as_slice() else {
+            panic!("expected a save, got {requests:?}");
+        };
+        *id
+    }
+
+    /// Connects or edits through the overlay, ending with `client`.
+    fn connect_in_app(app: &mut App, client: navidrome::Client, scrobble: bool, now: Instant) {
+        let id = settings_up_to_save(app, now);
+        app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Ok(settings::Saved { client, scrobble }),
+            },
+            now,
+        );
+    }
+
+    fn stream_host(commands: &[PlaybackCommand]) -> String {
+        match commands {
+            [
+                PlaybackCommand::Load {
+                    target: PlaybackTarget::Stream(url),
+                    ..
+                },
+            ] => url::Url::parse(url.expose())
+                .unwrap()
+                .host_str()
+                .unwrap()
+                .to_owned(),
+            other => panic!("expected a single stream Load, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connecting_in_the_app_keeps_playback_and_browses_the_new_server() {
+        let (mut app, now) = app_with(&["a.flac"]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
+        let commands = press(&mut app, &[Action::Activate], now);
+        let load = started(&mut app, &commands, now);
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        connect_in_app(&mut app, other_client(), true, now);
+        let change = app.take_client_change().expect("a client change");
+        assert!(change.client.is_some());
+        assert!(change.scrobble);
+        assert!(app.take_client_change().is_none(), "taken once");
+        // Playback is untouched.
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+        assert_eq!(app.player().current_load(), Some(load));
+        assert_eq!(app.connection(), &Connection::Connecting);
+        assert!(matches!(
+            app.settings().navidrome(),
+            settings::Navidrome::Coda { .. }
+        ));
+        assert!(app.settings().form().is_none());
+        assert_eq!(
+            app.status(now),
+            Some("Navidrome saved; connecting as v @ other.example")
+        );
+
+        app.handle_settings_input(Input::Esc, now);
+        assert!(!app.settings_open());
+        press(&mut app, &[Action::SelectNavidrome], now);
+        assert!(requests(&mut app).is_empty(), "Home fetches nothing");
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.generation, Generation(1));
+        assert_eq!(request.resource, Resource::Artists);
+        respond(&mut app, &request, Ok(Content::Artists(vec![artist("b1")])));
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(app.connection(), &Connection::Connected);
+    }
+
+    #[test]
+    fn a_stale_response_from_the_old_client_is_ignored_after_the_swap() {
+        let (mut app, now) = nav_app();
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let old = one_request(&mut app);
+        assert_eq!(old.generation, Generation(0));
+        // Browse a little first: the new browser starts over, on Home.
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty());
+        app.handle_settings_input(Input::Esc, now);
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        let new = one_request(&mut app);
+        assert_eq!(new.generation, Generation(1));
+        assert_eq!(
+            new.id, old.id,
+            "ids restart, so only the generation tells them apart"
+        );
+        assert_eq!(view_titles(&app), ["Artists"]);
+
+        respond(&mut app, &old, Ok(Content::Artists(vec![artist("old")])));
+        assert_eq!(current_load(&app), Load::Loading(new.id));
+        assert!(browser(&app).cached(&Resource::Artists).is_none());
+        assert_eq!(app.connection(), &Connection::Connecting);
+        // An old failure does not fail the new view either.
+        respond(&mut app, &old, Err(navidrome::Error::Auth));
+        assert_eq!(current_load(&app), Load::Loading(new.id));
+
+        respond(&mut app, &new, Ok(Content::Artists(vec![artist("new")])));
+        assert_eq!(current_load(&app), Load::Ready);
+        let Some(Content::Artists(artists)) = browser(&app).cached(&Resource::Artists) else {
+            panic!()
+        };
+        assert_eq!(artists[0].id, "new");
+    }
+
+    #[test]
+    fn the_swap_resets_the_browser() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(view_titles(&app), ["Artists", "Artist a1"]);
+        requests(&mut app);
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(view_titles(&app).is_empty(), "back on Home");
+        assert!(browser(&app).cached(&Resource::Artists).is_none());
+        assert_eq!(browser(&app).generation(), Generation(1));
+        assert!(requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn the_swap_drops_a_listen_in_progress_and_replaces_the_scrobbler() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180)]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = press(&mut app, &[Action::Activate], now);
+        started(&mut app, &commands, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing s1"]);
+        progress(&mut app, 0.0, 30.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(app.take_client_change().unwrap().scrobble);
+        // The listen belonged to the old server: its submission never
+        // goes to the new one.
+        progress(&mut app, 30.0, 170.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        // A file with `scrobble = false` turns scrobbling off.
+        connect_in_app(&mut app, client(), false, now);
+        let change = app.take_client_change().unwrap();
+        assert!(change.client.is_some());
+        assert!(!change.scrobble);
+        assert!(!app.scrobbling);
+    }
+
+    #[test]
+    fn a_queued_remote_track_resolves_with_the_new_client() {
+        let (mut app, now) = scrobble_app(vec![remote("r1"), remote("r2")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_host(&commands), "h.example");
+        let load = started(&mut app, &commands, now);
+
+        connect_in_app(&mut app, other_client(), true, now);
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        assert_eq!(stream_id(&commands), "r2");
+    }
+
+    #[test]
+    fn after_disconnect_remote_tracks_fail_and_the_queue_advances() {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        app.set_settings_context(settings_context(Some(ROOT), coda_owned()));
+        app.player.enqueue(remote("r1"));
+        app.player.enqueue(remote("r2"));
+        app.player.enqueue(track("b.flac"));
+        app.focus = Focus::Queue;
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_id(&commands), "r1");
+        let load = started(&mut app, &commands, now);
+        press(&mut app, &[Action::SelectNavidrome], now);
+        requests(&mut app);
+
+        app.handle_action(Action::OpenSettings, now);
+        app.handle_settings_input(Input::Char('d'), now);
+        app.handle_settings_input(Input::Char('d'), now);
+        let requests = app.take_settings_requests();
+        let [
+            settings::Request::Disconnect {
+                id,
+                previous_account,
+            },
+        ] = requests.as_slice()
+        else {
+            panic!("expected a disconnect, got {requests:?}");
+        };
+        assert_eq!(previous_account.as_deref(), Some("u@h.example"));
+        app.handle_settings_response(
+            settings::Response::Disconnected {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        let change = app.take_client_change().unwrap();
+        assert!(change.client.is_none());
+        assert!(!change.scrobble);
+        assert!(app.browser().is_none());
+        assert_eq!(app.source(), Source::Local);
+        // The current stream plays on.
+        assert_eq!(app.player().status(), PlaybackStatus::Playing);
+
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(load_path(&commands), PathBuf::from("/music/b.flac"));
+        assert_eq!(
+            app.status(now),
+            Some("Could not play Remote r2: Navidrome is not configured")
+        );
+    }
+
+    #[test]
+    fn a_second_quit_while_saving_quits() {
+        let (mut app, now) = app_with(&[]);
+        app.set_settings_context(settings_context(
+            Some(ROOT),
+            settings::Navidrome::NotConfigured,
+        ));
+        let id = settings_up_to_save(&mut app, now);
+        app.handle_settings_input(Input::Quit, now);
+        assert!(!app.should_quit());
+        assert_eq!(app.status(now), Some(SAVING_SETTINGS));
+        // The save ends (failing): the warning is reset, so quitting
+        // during the next save warns again.
+        app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Err("Could not write /cfg/config.toml: denied".into()),
+            },
+            now,
+        );
+        // The form stays open with the error; `q` is text there.
+        app.handle_settings_input(Input::Char('q'), now);
+        assert!(!app.should_quit());
+        app.handle_settings_input(Input::Enter, now);
+        let requests = app.take_settings_requests();
+        let [settings::Request::Ping { id, .. }] = requests.as_slice() else {
+            panic!("{requests:?}");
+        };
+        app.handle_settings_response(
+            settings::Response::Pinged {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        assert_eq!(app.settings().busy(), Some(settings::Busy::Saving));
+        app.handle_settings_input(Input::Quit, now);
+        assert!(!app.should_quit(), "warned again");
+        app.handle_settings_input(Input::Quit, now);
+        assert!(app.should_quit(), "the second Ctrl-C quits");
+    }
+
+    #[test]
+    fn a_load_still_loading_at_the_swap_is_not_scrobbled_to_the_new_server() {
+        let (mut app, now) = scrobble_app(vec![timed_remote("s1", 180), timed_remote("s2", 180)]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        // Resolved (and sent to mpv) with the old client...
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(stream_host(&commands), "h.example");
+        // ...then the swap lands before it starts.
+        connect_in_app(&mut app, other_client(), true, now);
+        assert!(app.take_client_change().unwrap().scrobble);
+        let load = started(&mut app, &commands, now);
+        progress(&mut app, 0.0, 170.0, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        // The next load is the new server's and is reported.
+        let commands = app.handle_playback_event(
+            PlaybackEvent::TrackEnded {
+                load,
+                reason: EndReason::Eof,
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        started(&mut app, &commands, now);
+        assert_eq!(summary(&app.take_scrobble_requests()), ["playing s2"]);
+    }
+
+    #[test]
+    fn the_old_ping_racing_the_swap_is_ignored() {
+        let (mut app, now) = nav_app();
+        app.set_settings_context(settings_context(None, coda_owned()));
+        requests(&mut app);
+        connect_in_app(&mut app, other_client(), true, now);
+        let change = app.take_client_change().unwrap();
+        assert_eq!(change.generation, Generation(1));
+        // The startup ping of the old client answers late.
+        app.handle_ping(Generation(0), Err(navidrome::Error::Auth), now);
+        assert_eq!(app.connection(), &Connection::Connecting);
+        app.handle_ping(Generation(0), Ok(()), now);
+        assert_eq!(app.connection(), &Connection::Connecting);
+        app.handle_ping(Generation(1), Err(navidrome::Error::Auth), now);
+        assert_eq!(
+            app.connection(),
+            &Connection::Failed("authentication failed".into())
+        );
+    }
+
+    #[test]
+    fn q_quits_from_the_settings_overview_and_actions_are_swallowed() {
+        let (mut app, now) = app_with(&["a.flac"]);
+        app.handle_action(Action::OpenSettings, now);
+        assert!(app.settings_open());
+        assert!(press(&mut app, &[Action::Activate, Action::Next], now).is_empty());
+        app.handle_settings_input(Input::Char('q'), now);
+        assert!(app.should_quit());
+    }
+
+    // ----- settings I/O (mock store, temporary files, fake server) -------------
+
+    fn store_settings() -> Result<SecretStore, SecretError> {
+        static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+        Ok(STORE.get_or_init(SecretStore::mock).clone())
+    }
+
+    fn server(url: &str, username: &str, password: &str) -> crate::onboarding::Server {
+        crate::onboarding::Server {
+            url: navidrome::client::parse_base_url(url).unwrap(),
+            username: username.into(),
+            password: navidrome::Password::new(password.into()),
+        }
+    }
+
+    async fn perform(io: &mut SettingsIo, request: settings::Request) -> settings::Response {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        io.spawn(request, &tx);
+        rx.recv().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_saves_keep_other_settings_and_replace_the_account() {
+        use crate::config::{Cli, Config, Env, PasswordSource};
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let path = dir.path().join("coda").join("config.toml");
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let old = format!(
+            "music_dir = \"{}\"\n\n[navidrome]\nurl = \"https://old.example\"\nusername = \"me\"\npassword_keychain = true\nscrobble = false\n",
+            music.display()
+        );
+        std::fs::write(&path, &old).unwrap();
+        let store = store_settings().unwrap();
+        store
+            .set("me@old.example", &navidrome::Password::new("old-pw".into()))
+            .unwrap();
+        let env = Env {
+            config_path: Some(path.clone().into()),
+            ..Env::default()
+        };
+        let mut io = SettingsIo::new(Some(path.clone()), store_settings);
+
+        // Edit to another account.
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 1,
+                server: server("https://new.example:8443", "you", "new-pw"),
+                previous_account: Some("me@old.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 1,
+            result: Ok(saved),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(!saved.scrobble, "the file's scrobble = false is kept");
+        assert_eq!(
+            saved.client.base_url().as_str(),
+            "https://new.example:8443/"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("new-pw"), "{text}");
+        assert!(text.contains("scrobble = false"), "{text}");
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert_eq!(config.music_dir.unwrap(), music.canonicalize().unwrap());
+        let nd = config.navidrome.unwrap();
+        assert_eq!(nd.url.as_str(), "https://new.example:8443/");
+        assert!(!nd.scrobble);
+        let PasswordSource::Keychain { account, .. } = &nd.password else {
+            panic!()
+        };
+        assert_eq!(account, "you@new.example:8443");
+        assert_eq!(store.get(account).unwrap().expose(), "new-pw");
+        assert_eq!(store.get("me@old.example"), Err(SecretError::Missing));
+        // The previous file was backed up.
+        let backups = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".bak.")
+            })
+            .count();
+        assert!(backups >= 1);
+
+        // Disconnect: `[navidrome]` and the entry go, the folder stays.
+        let response = perform(
+            &mut io,
+            settings::Request::Disconnect {
+                id: 2,
+                previous_account: Some("you@new.example:8443".into()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                settings::Response::Disconnected {
+                    id: 2,
+                    result: Ok(())
+                }
+            ),
+            "{response:?}"
+        );
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert!(config.navidrome.is_none());
+        assert!(config.music_dir.is_some());
+        assert_eq!(store.get("you@new.example:8443"), Err(SecretError::Missing));
+        io.finish(SETTINGS_SAVE_WAIT).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_write_keeps_the_old_file_and_entry() {
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // The config's directory is a file: the write fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("config.toml");
+        let mut io = SettingsIo::new(Some(path), store);
+        store()
+            .unwrap()
+            .set("me@old.example", &navidrome::Password::new("old".into()))
+            .unwrap();
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 7,
+                server: server("https://new.example", "you", "pw"),
+                previous_account: Some("me@old.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 7,
+            result: Err(message),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(message.starts_with("Could not write"), "{message}");
+        // The message names the (random) temporary path, which may itself
+        // contain "pw"; only the rest must be free of secrets.
+        let message = message.replace(&dir.path().display().to_string(), "<dir>");
+        for secret in ["pw", "you@", "new.example", "old.example"] {
+            assert!(!message.contains(secret), "{secret}: {message}");
+        }
+        // The new entry was removed again; the old one is still used.
+        assert_eq!(
+            store().unwrap().get("you@new.example"),
+            Err(SecretError::Missing)
+        );
+        assert_eq!(
+            store().unwrap().get("me@old.example").unwrap().expose(),
+            "old"
+        );
+        // Without a config location nothing is attempted.
+        let mut nowhere = SettingsIo::new(None, store);
+        let response = perform(
+            &mut nowhere,
+            settings::Request::Disconnect {
+                id: 8,
+                previous_account: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            response,
+            settings::Response::Disconnected {
+                id: 8,
+                result: Err(_)
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn settings_pings_against_a_fake_server() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let ok = json!({ "subsonic-response": { "status": "ok", "version": "1.16.1" } });
+        let auth = json!({ "subsonic-response": {
+            "status": "failed", "version": "1.16.1",
+            "error": { "code": 40, "message": "Wrong username or password" }
+        } });
+        for (body, expected) in [
+            (ok, Ok(())),
+            (auth, Err("Authentication failed".to_owned())),
+        ] {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/rest/ping"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&mock)
+                .await;
+            let mut io = SettingsIo::new(None, store_settings);
+            let response = perform(
+                &mut io,
+                settings::Request::Ping {
+                    id: 3,
+                    server: server(&mock.uri(), "me", "pass-word"),
+                },
+            )
+            .await;
+            let settings::Response::Pinged { id: 3, result } = response else {
+                panic!("{response:?}");
+            };
+            assert_eq!(result, expected);
+            for request in mock.received_requests().await.unwrap() {
+                assert!(!request.url.as_str().contains("pass-word"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_old_clients_fetches_are_aborted_and_never_block_the_new_one() {
+        use serde_json::json;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let artists = json!({ "subsonic-response": {
+            "status": "ok", "version": "1.16.1", "artists": { "index": [] }
+        } });
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(artists.clone())
+                    .set_delay(Duration::from_secs(20)),
+            )
+            .mount(&slow)
+            .await;
+        let fast = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(artists))
+            .mount(&fast)
+            .await;
+        let client_for = |server: &MockServer| {
+            navidrome::Client::new(
+                navidrome::client::parse_base_url(&server.uri()).unwrap(),
+                "u".into(),
+                navidrome::Password::new("p".into()),
+            )
+            .unwrap()
+        };
+        let request = |generation, id| FetchRequest {
+            generation: Generation(generation),
+            id: browse::RequestId(id),
+            resource: Resource::Search(format!("q{id}")),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut fetches = Fetches::new();
+        // More than the permits: some run (and hang), the rest queue.
+        let old: Vec<_> = (1..=MAX_CONCURRENT_FETCHES as u64 + 2)
+            .map(|id| request(0, id))
+            .collect();
+        fetches.spawn(old, Some(&client_for(&slow)), &tx);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        fetches.restart();
+        fetches.spawn(vec![request(1, 1)], Some(&client_for(&fast)), &tx);
+        let mut aborted = 0;
+        let new = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let response = rx.recv().await.unwrap();
+                if response.generation == Generation(1) {
+                    return response;
+                }
+                assert!(matches!(response.result, Err(navidrome::Error::Aborted)));
+                aborted += 1;
+            }
+        })
+        .await
+        .expect("the new client's fetch was not held up");
+        assert!(new.result.is_ok(), "{:?}", new.result);
+        // Every old fetch answers (aborted), and none ran after the swap.
+        while aborted < MAX_CONCURRENT_FETCHES + 2 {
+            let response = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.generation, Generation(0));
+            assert!(matches!(response.result, Err(navidrome::Error::Aborted)));
+            aborted += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let reached = slow.received_requests().await.unwrap().len();
+        assert!(reached <= MAX_CONCURRENT_FETCHES, "{reached}");
+    }
+
+    #[tokio::test]
+    async fn connect_from_not_configured_writes_navidrome_next_to_the_folder() {
+        use crate::config::{Cli, Config, Env, PasswordSource};
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let path = dir.path().join("config.toml");
+        let old = format!("music_dir = \"{}\"\n", music.display());
+        std::fs::write(&path, &old).unwrap();
+        let mut io = SettingsIo::new(Some(path.clone()), store);
+        let response = perform(
+            &mut io,
+            settings::Request::Save {
+                id: 1,
+                server: server("http://127.0.0.1:4533", "me", "pw"),
+                previous_account: None,
+            },
+        )
+        .await;
+        let settings::Response::Saved {
+            id: 1,
+            result: Ok(saved),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(saved.scrobble, "the default");
+        let env = Env {
+            config_path: Some(path.clone().into()),
+            ..Env::default()
+        };
+        let config = Config::load(Cli::default(), &env).unwrap();
+        assert_eq!(config.music_dir.unwrap(), music.canonicalize().unwrap());
+        let nd = config.navidrome.unwrap();
+        assert!(nd.scrobble);
+        let PasswordSource::Keychain { account, .. } = &nd.password else {
+            panic!()
+        };
+        assert_eq!(account, "me@127.0.0.1:4533");
+        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw");
+        // The hand-written file was backed up; Coda's own is not, so a
+        // second save adds no backup.
+        let backups = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".bak.")
+                })
+                .count()
+        };
+        assert_eq!(backups(), 1);
+        perform(
+            &mut io,
+            settings::Request::Save {
+                id: 2,
+                server: server("http://127.0.0.1:4533", "me", "pw2"),
+                previous_account: Some("me@127.0.0.1:4533".into()),
+            },
+        )
+        .await;
+        assert_eq!(backups(), 1);
+        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw2");
+    }
+
+    #[tokio::test]
+    async fn disconnect_keeps_the_entry_when_the_file_has_no_folder() {
+        fn store() -> Result<SecretStore, SecretError> {
+            static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
+            Ok(STORE.get_or_init(SecretStore::mock).clone())
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[navidrome]\nurl = \"https://h.example\"\nusername = \"me\"\npassword_keychain = true\n";
+        std::fs::write(&path, text).unwrap();
+        store()
+            .unwrap()
+            .set("me@h.example", &navidrome::Password::new("pw".into()))
+            .unwrap();
+        let mut io = SettingsIo::new(Some(path.clone()), store);
+        let response = perform(
+            &mut io,
+            settings::Request::Disconnect {
+                id: 1,
+                previous_account: Some("me@h.example".into()),
+            },
+        )
+        .await;
+        let settings::Response::Disconnected {
+            id: 1,
+            result: Err(message),
+        } = response
+        else {
+            panic!("{response:?}");
+        };
+        assert!(
+            message.contains(crate::config_writer::NO_SOURCE_LEFT),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(store().unwrap().get("me@h.example").unwrap().expose(), "pw");
+    }
+
+    // ----- Navidrome playlist editing ------------------------------------
+
+    use crate::navidrome::browse::{
+        INCOMPLETE_PLAYLIST, MODIFIED, READ_ONLY_FLAGGED, READ_ONLY_OTHER, READ_ONLY_UNKNOWN,
+        STALE_PLAYLIST,
+    };
+    use crate::navidrome::edit::{EditOp, EditResult};
+    use crate::navidrome::{Access, Playlist, PlaylistSongs};
+
+    fn owned_by(owner: Option<&str>, readonly: bool) -> Access {
+        Access {
+            owner: owner.map(str::to_owned),
+            readonly,
+        }
+    }
+
+    /// A playlist of the test client's user (`u`; the server may spell it
+    /// in another case).
+    fn own(id: &str, name: &str) -> Playlist {
+        Playlist {
+            id: id.into(),
+            name: name.into(),
+            song_count: None,
+            duration: None,
+            access: owned_by(Some("U"), false),
+        }
+    }
+
+    /// Another user's playlist, flagged read-only as Navidrome does.
+    fn others(id: &str, name: &str) -> Playlist {
+        Playlist {
+            access: owned_by(Some("someone"), true),
+            ..own(id, name)
+        }
+    }
+
+    fn playlist_songs(ids: &[&str], access: Access) -> Content {
+        Content::PlaylistSongs(PlaylistSongs {
+            tracks: ids.iter().map(|id| remote(id)).collect(),
+            served: ids.len(),
+            access,
+            song_count: None,
+        })
+    }
+
+    fn own_songs(ids: &[&str]) -> Content {
+        playlist_songs(ids, owned_by(Some("u"), false))
+    }
+
+    /// Navidrome only, in the Playlists list holding `lists`.
+    fn playlists_app(lists: Vec<Playlist>) -> (App, Instant) {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Playlists);
+        respond(&mut app, &request, Ok(Content::Playlists(lists)));
+        (app, now)
+    }
+
+    /// Opens the selected playlist and answers it with `songs`.
+    fn open_playlist(app: &mut App, songs: Content, now: Instant) {
+        press(app, &[Action::Activate], now);
+        let request = one_request(app);
+        assert!(matches!(request.resource, Resource::Playlist(_)));
+        respond(app, &request, Ok(songs));
+    }
+
+    fn one_edit(app: &mut App) -> EditRequest {
+        let mut edits = app.take_edit_requests();
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        edits.remove(0)
+    }
+
+    fn answer_edit(app: &mut App, request: &EditRequest, result: EditResult) {
+        app.handle_edit_response(
+            EditResponse {
+                generation: request.generation,
+                id: request.id,
+                result,
+            },
+            Instant::now(),
+        );
+    }
+
+    fn status_text(app: &App, now: Instant) -> String {
+        app.status(now).unwrap_or_default().to_owned()
+    }
+
+    fn shown_title(app: &App) -> String {
+        let browser = browser(app);
+        browser.title(browser.current().unwrap())
+    }
+
+    fn song_titles(app: &App) -> Vec<String> {
+        browser(app)
+            .current_content()
+            .unwrap()
+            .rows(0, usize::MAX)
+            .into_iter()
+            .map(|row| match row {
+                browse::Row::Song(t) => t.title.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn server_error(message: &str) -> navidrome::Error {
+        navidrome::Error::Server {
+            code: 0,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn playlists_of_other_users_are_read_only_with_a_short_message() {
+        let (mut app, now) = playlists_app(vec![
+            others("p1", "Theirs"),
+            own("p2", "Flagged"),
+            own("p3", "Unknown"),
+        ]);
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert!(browser(&app).prompt().is_none());
+        assert_eq!(status_text(&app, now), READ_ONLY_OTHER);
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), READ_ONLY_OTHER);
+        // `N` and `P` still work from someone else's playlist.
+        press(&mut app, &[Action::NewPlaylist], now);
+        assert_eq!(browser(&app).prompt(), Some(("New playlist", "")));
+        press(&mut app, &[Action::InputCancel], now);
+        // Inside it, nothing can change either.
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(Some("someone"), true)),
+            now,
+        );
+        for action in [
+            Action::RemoveFromPlaylist,
+            Action::MoveEntryDown,
+            Action::MoveEntryUp,
+        ] {
+            app.set_status("", now);
+            press(&mut app, &[action, action], now);
+            assert_eq!(status_text(&app, now), READ_ONLY_OTHER, "{action:?}");
+        }
+        assert!(!shown_title(&app).contains(MODIFIED));
+        // The server's own read-only flag, and an unknown owner.
+        press(&mut app, &[Action::Parent, Action::Down], now);
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(Some("u"), true)),
+            now,
+        );
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(status_text(&app, now), READ_ONLY_FLAGGED);
+        press(&mut app, &[Action::Parent, Action::Down], now);
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(None, false)),
+            now,
+        );
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), READ_ONLY_UNKNOWN);
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn new_and_rename_prompts_emit_edits_and_an_empty_name_cancels() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Road Trip")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        assert!(app.input_open());
+        // Prompt keys are text, not commands.
+        type_text(&mut app, "  Night ", now);
+        app.handle_paste("Drive\n\u{1b}");
+        assert_eq!(
+            browser(&app).prompt(),
+            Some(("New playlist", "  Night Drive "))
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(!app.input_open());
+        assert_eq!(status_text(&app, now), "Creating Night Drive…");
+        let create = one_edit(&mut app);
+        assert_eq!(
+            create.op,
+            EditOp::Create {
+                name: "Night Drive".into(),
+                songs: Vec::new()
+            }
+        );
+        // An empty name cancels.
+        press(&mut app, &[Action::NewPlaylist, Action::InputSubmit], now);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "   ", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        // Rename: prefilled; unchanged does nothing.
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert_eq!(
+            browser(&app).prompt(),
+            Some(("Rename playlist", "Road Trip"))
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Name unchanged");
+        press(&mut app, &[Action::RenamePlaylist], now);
+        type_text(&mut app, "s", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("new".into()),
+            },
+        );
+        assert_eq!(status_text(&app, now), "Created Night Drive");
+        let rename = one_edit(&mut app);
+        assert_eq!(
+            rename.op,
+            EditOp::Rename {
+                playlist_id: "p1".into(),
+                name: "Road Trips".into()
+            }
+        );
+        assert!(app.take_edit_requests().is_empty(), "nothing else queued");
+        // The Playlists list was reloaded after the create.
+        let reload = one_request(&mut app);
+        assert_eq!(reload.resource, Resource::Playlists);
+        assert_eq!(current_load(&app), Load::Loading(reload.id));
+        answer_edit(&mut app, &rename, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Renamed Road Trip to Road Trips");
+    }
+
+    #[test]
+    fn delete_needs_a_second_press_on_the_same_playlist_soon() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        press(&mut app, &[Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete One");
+        assert!(app.take_edit_requests().is_empty());
+        // Anything in between disarms it, and so does moving to another.
+        press(&mut app, &[Action::Down, Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete Two");
+        press(&mut app, &[Action::Up, Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete One");
+        // Too late.
+        let later = now + CLEAR_CONFIRM + Duration::from_millis(1);
+        app.handle_action(Action::DeletePlaylist, later);
+        assert!(app.take_edit_requests().is_empty());
+        assert_eq!(status_text(&app, later), "Press D again to delete One");
+        app.handle_action(Action::DeletePlaylist, later);
+        let delete = one_edit(&mut app);
+        assert_eq!(
+            delete.op,
+            EditOp::Delete {
+                playlist_id: "p1".into()
+            }
+        );
+        assert_eq!(status_text(&app, later), "Deleting One…");
+        answer_edit(&mut app, &delete, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, later), "Deleted One");
+        assert_eq!(one_request(&mut app).resource, Resource::Playlists);
+    }
+
+    #[test]
+    fn remove_needs_a_second_press_and_a_stale_playlist_is_reloaded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s1"]), now);
+        press(&mut app, &[Action::Down, Action::Down], now);
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), "Press d again to remove Remote s1");
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        let remove = one_edit(&mut app);
+        assert_eq!(
+            remove.op,
+            EditOp::Remove {
+                playlist_id: "p1".into(),
+                index: 2,
+                expected: vec!["s1".into(), "s2".into(), "s1".into()],
+                hidden: 0,
+            }
+        );
+        // The queue is not touched.
+        assert!(app.player().queue().is_empty());
+        answer_edit(&mut app, &remove, EditResult::Stale);
+        assert_eq!(status_text(&app, now), STALE_PLAYLIST);
+        // The shown playlist is fetched again, and so is the Playlists list
+        // below it (counts may have changed).
+        let reloads = requests(&mut app);
+        let resources: Vec<&Resource> = reloads.iter().map(|r| &r.resource).collect();
+        assert_eq!(
+            resources,
+            [&Resource::Playlist("p1".into()), &Resource::Playlists]
+        );
+        let reload = reloads[0].clone();
+        respond(&mut app, &reload, Ok(own_songs(&["s1", "s3", "s2", "s1"])));
+        assert_eq!(
+            song_titles(&app),
+            ["Remote s1", "Remote s3", "Remote s2", "Remote s1"]
+        );
+        // A successful removal reloads it too.
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        let remove = one_edit(&mut app);
+        answer_edit(&mut app, &remove, EditResult::Done { created: None });
+        // The selection kept its row across the reload.
+        assert_eq!(status_text(&app, now), "Removed Remote s2 from Mix");
+        assert_eq!(
+            requests(&mut app)[0].resource,
+            Resource::Playlist("p1".into())
+        );
+    }
+
+    #[test]
+    fn index_edits_are_refused_on_a_playlist_with_unreadable_entries() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        let Content::PlaylistSongs(mut songs) = own_songs(&["s1", "s2"]) else {
+            unreachable!()
+        };
+        songs.served = 3;
+        open_playlist(&mut app, Content::PlaylistSongs(songs), now);
+        for action in [Action::RemoveFromPlaylist, Action::MoveEntryDown] {
+            press(&mut app, &[action], now);
+            assert_eq!(status_text(&app, now), INCOMPLETE_PLAYLIST);
+        }
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn reordering_is_a_draft_until_saved_or_discarded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert!(
+            !shown_title(&app).contains(MODIFIED),
+            "nothing above the first"
+        );
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s1", "Remote s3"]);
+        assert_eq!(current_selected(&app), 1, "the selection follows");
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        // Leaving or reloading is refused while it is unsaved.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+        press(&mut app, &[Action::Refresh], now);
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(view_titles(&app), ["Playlists", "Mix"]);
+        // Removing is refused too.
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+        // Esc discards.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), "New order discarded");
+        assert_eq!(song_titles(&app), ["Remote s1", "Remote s2", "Remote s3"]);
+        assert_eq!(shown_title(&app), "Mix");
+        // Moving back to the start is no change.
+        press(&mut app, &[Action::MoveEntryDown, Action::MoveEntryUp], now);
+        assert_eq!(shown_title(&app), "Mix");
+        press(&mut app, &[Action::SaveOrder], now);
+        assert!(app.take_edit_requests().is_empty(), "nothing to save");
+        // Move s1 to the end and save.
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 0);
+        press(
+            &mut app,
+            &[
+                Action::MoveEntryDown,
+                Action::MoveEntryDown,
+                Action::SaveOrder,
+            ],
+            now,
+        );
+        assert_eq!(status_text(&app, now), "Saving the new order of Mix…");
+        let replace = one_edit(&mut app);
+        assert_eq!(
+            replace.op,
+            EditOp::Replace {
+                playlist_id: "p1".into(),
+                expected: vec!["s1".into(), "s2".into(), "s3".into()],
+                songs: vec!["s2".into(), "s3".into(), "s1".into()],
+                hidden: 0,
+            }
+        );
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert_eq!(status_text(&app, now), "Saving the new order…");
+        // A failure keeps the draft on screen, unreloaded, so `w` retries.
+        answer_edit(&mut app, &replace, EditResult::Failed(server_error("busy")));
+        assert_eq!(
+            status_text(&app, now),
+            "Could not save the order of Mix: server error 0: busy; w retries, Esc discards"
+        );
+        assert!(
+            requests(&mut app).is_empty(),
+            "nothing changed, nothing reloaded"
+        );
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s3", "Remote s1"]);
+        // Too long for one request on this server: no retry offered.
+        press(&mut app, &[Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &replace,
+            EditResult::Failed(navidrome::Error::RequestTooLarge),
+        );
+        assert_eq!(
+            status_text(&app, now),
+            "Could not save the order of Mix: too many songs to reorder on this server; Esc discards"
+        );
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        press(&mut app, &[Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(&mut app, &replace, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Saved the new order of Mix");
+        let reload = requests(&mut app).remove(0);
+        assert_eq!(reload.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &reload, Ok(own_songs(&["s2", "s3", "s1"])));
+        assert_eq!(shown_title(&app), "Mix");
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s3", "Remote s1"]);
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Playlists"]);
+    }
+
+    #[test]
+    fn a_stale_reorder_is_dropped_and_the_playlist_reloaded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(&mut app, &replace, EditResult::Stale);
+        assert_eq!(status_text(&app, now), STALE_PLAYLIST);
+        let reload = requests(&mut app).remove(0);
+        assert_eq!(reload.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &reload, Ok(own_songs(&["s9", "s1", "s2"])));
+        assert_eq!(shown_title(&app), "Mix");
+        assert_eq!(song_titles(&app), ["Remote s9", "Remote s1", "Remote s2"]);
+    }
+
+    #[test]
+    fn the_picker_lists_new_playlist_then_own_playlists_a_to_z() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        // The Playlists list is fetched for it.
+        let lists = one_request(&mut app);
+        assert_eq!(lists.resource, Resource::Playlists);
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.label(), "Artist a1");
+        assert_eq!(picker.load(), &Load::Loading(lists.id));
+        respond(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![
+                own("p1", "beta"),
+                others("p2", "Alpha (theirs)"),
+                own("p3", "Alpha"),
+                Playlist {
+                    access: owned_by(Some("u"), true),
+                    ..own("p4", "Smart")
+                },
+            ])),
+        );
+        let picker = browser(&app).picker().unwrap();
+        let names: Vec<&str> = picker.choices().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta"]);
+        assert_eq!(picker.selected(), 0);
+        // Keys move in the picker; the view behind does not.
+        press(&mut app, &[Action::Down, Action::Down, Action::Down], now);
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2);
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 0);
+        // Esc closes; `P` again uses the cached list.
+        press(&mut app, &[Action::Back], now);
+        assert!(browser(&app).picker().is_none());
+        assert_eq!(view_titles(&app), ["Artists"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(browser(&app).picker().unwrap().load(), &Load::Ready);
+        // "New playlist…": a name, then the artist's songs are fetched.
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(browser(&app).prompt(), Some(("New playlist", "")));
+        type_text(&mut app, "Fresh", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Fetching Artist a1…");
+        let artist = one_request(&mut app);
+        respond(&mut app, &artist, Ok(Content::Albums(vec![album("x")])));
+        let songs_request = one_request(&mut app);
+        respond(&mut app, &songs_request, Ok(songs(&["s1", "s2"])));
+        assert_eq!(
+            status_text(&app, now),
+            "Creating Fresh with 2 songs from Artist a1…"
+        );
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Create {
+                name: "Fresh".into(),
+                songs: vec!["s1".into(), "s2".into()]
+            }
+        );
+        // Nothing reached the queue.
+        assert!(app.player().queue().is_empty());
+    }
+
+    #[test]
+    fn adding_a_playlist_to_another_reports_a_partial_failure() {
+        let (mut app, now) = playlists_app(vec![own("p1", "b list"), own("p2", "A list")]);
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Activate],
+            now,
+        );
+        assert!(browser(&app).picker().is_none());
+        let source = one_request(&mut app);
+        assert_eq!(source.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &source, Ok(own_songs(&["s1", "s2", "s1"])));
+        assert_eq!(
+            status_text(&app, now),
+            "Adding 3 songs from b list to A list…"
+        );
+        let add = one_edit(&mut app);
+        assert_eq!(
+            add.op,
+            EditOp::Add {
+                playlist_id: "p2".into(),
+                songs: vec!["s1".into(), "s2".into(), "s1".into()]
+            }
+        );
+        answer_edit(
+            &mut app,
+            &add,
+            EditResult::Partial {
+                created: None,
+                added: 1,
+                error: server_error("disk full"),
+            },
+        );
+        assert_eq!(
+            status_text(&app, now),
+            "Added 1 of 3 songs to A list; could not add the rest: server error 0: disk full"
+        );
+        // The shown Playlists list is reloaded.
+        assert_eq!(one_request(&mut app).resource, Resource::Playlists);
+    }
+
+    #[test]
+    fn local_tracks_cannot_go_to_a_navidrome_playlist() {
+        let (mut app, now) = app_with(&["a/one.flac"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        assert_eq!(status_text(&app, now), LOCAL_TO_PLAYLIST);
+    }
+
+    #[test]
+    fn the_queue_is_saved_as_a_playlist_of_its_navidrome_songs() {
+        let (mut app, now) = nav_home();
+        app.player.enqueue(remote("s1"));
+        app.player.enqueue(track("local.flac"));
+        app.player.enqueue(remote("s2"));
+        app.player.enqueue(remote("s1"));
+        // Only in the queue panel.
+        press(&mut app, &[Action::SaveQueueAsPlaylist], now);
+        assert!(browser(&app).prompt().is_none());
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        let (title, text) = browser(&app).prompt().unwrap();
+        assert_eq!(title, "Save queue as playlist");
+        assert!(
+            text.starts_with("Queue 20") && text.len() == "Queue 2026-11-01".len(),
+            "{text}"
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(
+            status_text(&app, now).starts_with("Saving 3 songs as Queue 20"),
+            "{}",
+            status_text(&app, now)
+        );
+        assert!(status_text(&app, now).ends_with("(1 local track left out)…"));
+        let EditOp::Create { songs, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(songs, ["s1", "s2", "s1"]);
+        assert_eq!(app.player().queue().len(), 4, "the queue is unchanged");
+        // Without Navidrome songs, or without Navidrome.
+        let (mut app, now) = queued_app(&["a", "b"]);
+        press(&mut app, &[Action::SaveQueueAsPlaylist], now);
+        assert_eq!(status_text(&app, now), NAVIDROME_NOT_CONFIGURED);
+        let (mut app, now) = nav_home();
+        app.player.enqueue(track("local.flac"));
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), NO_REMOTE_IN_QUEUE);
+    }
+
+    #[test]
+    fn the_default_queue_name_is_the_local_date() {
+        // The UTC fallback.
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(951_782_400 / 86_400), (2000, 2, 29));
+        assert_eq!(civil_from_days(1_793_491_199 / 86_400), (2026, 10, 31));
+        assert_eq!(civil_from_days(1_793_491_200 / 86_400), (2026, 11, 1));
+        // The local date is within a day of the UTC date (time zones span
+        // UTC-12 to UTC+14) and is what the name uses.
+        for secs in [0u64, 951_782_400, 1_793_491_200, 1_793_534_400] {
+            let (y, m, d) = local_date(secs).expect("localtime_r");
+            let local = format!("Queue {y:04}-{m:02}-{d:02}");
+            let at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            assert_eq!(queue_playlist_name(at), local);
+            let near: Vec<String> = [secs.saturating_sub(86_400), secs, secs + 86_400]
+                .iter()
+                .map(|s| {
+                    let (y, m, d) = civil_from_days(s / 86_400);
+                    format!("Queue {y:04}-{m:02}-{d:02}")
+                })
+                .collect();
+            assert!(near.contains(&local), "{local} vs {near:?}");
+        }
+    }
+
+    #[test]
+    fn edits_run_one_at_a_time_and_one_in_flight_at_a_swap_is_dropped() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        for name in ["A", "B"] {
+            press(&mut app, &[Action::NewPlaylist], now);
+            type_text(&mut app, name, now);
+            press(&mut app, &[Action::InputSubmit], now);
+        }
+        let first = one_edit(&mut app);
+        assert_eq!(first.generation, Generation(0));
+        assert!(app.take_edit_requests().is_empty(), "B waits for A");
+        assert_eq!(browser(&app).pending_edits(), 2);
+        connect_in_app(&mut app, other_client(), true, now);
+        let swapped = status_text(&app, now);
+        answer_edit(&mut app, &first, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), swapped, "the old result is dropped");
+        assert!(
+            app.take_edit_requests().is_empty(),
+            "B went with the old browser"
+        );
+        assert_eq!(browser(&app).pending_edits(), 0);
+        assert!(requests(&mut app).is_empty(), "nothing reloaded");
+    }
+
+    #[test]
+    fn a_reload_after_an_edit_supersedes_an_older_fetch() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::Refresh], now);
+        let older = one_request(&mut app);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Two", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p2".into()),
+            },
+        );
+        let newer = one_request(&mut app);
+        assert_eq!(newer.resource, Resource::Playlists);
+        assert_ne!(newer.id, older.id);
+        // The older answer may predate the change: neither cached nor shown.
+        respond(
+            &mut app,
+            &older,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert_eq!(current_load(&app), Load::Loading(newer.id));
+        assert!(browser(&app).cached(&Resource::Playlists).is_none());
+        respond(
+            &mut app,
+            &newer,
+            Ok(Content::Playlists(vec![own("p1", "One"), own("p2", "Two")])),
+        );
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(browser(&app).current_content().unwrap().len(), 2);
+    }
+
+    // ----- review follow-up: drafts, picker, quitting, serialisation -----
+
+    use crate::navidrome::browse::{LAST_SONG, ORDER_DISCARDED, SAVING_ORDER, WAITING_FOR_EDIT};
+
+    #[test]
+    fn esc_during_a_save_is_refused_and_only_that_save_ends_the_draft() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let save = one_edit(&mut app);
+        // Esc while it runs: refused, the draft stays.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        // `J` after the refused Esc is refused too; no new draft.
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s1", "Remote s3"]);
+        answer_edit(&mut app, &save, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Saved the new order of Mix");
+        assert_eq!(shown_title(&app), "Mix");
+        // After the save, a new draft works and Esc discards it.
+        let reload = requests(&mut app).remove(0);
+        respond(&mut app, &reload, Ok(own_songs(&["s2", "s1", "s3"])));
+        press(&mut app, &[Action::MoveEntryDown, Action::Back], now);
+        assert_eq!(status_text(&app, now), ORDER_DISCARDED);
+        assert_eq!(shown_title(&app), "Mix");
+    }
+
+    #[test]
+    fn a_stale_answer_for_another_save_does_not_end_a_new_draft() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let save = one_edit(&mut app);
+        // An answer with another id (a forged or old one) leaves it alone.
+        answer_edit(
+            &mut app,
+            &EditRequest {
+                id: crate::navidrome::edit::EditId(save.id.0 + 7),
+                ..save.clone()
+            },
+            EditResult::Done { created: None },
+        );
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+    }
+
+    #[test]
+    fn the_picker_keeps_its_choices_and_selection_across_a_reload() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        // An edit is running when the picker opens.
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Down],
+            now,
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2, "Two");
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p3".into()),
+            },
+        );
+        let reload = one_request(&mut app);
+        assert_eq!(reload.resource, Resource::Playlists);
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.load(), &Load::Loading(reload.id));
+        let names: Vec<&str> = picker.choices().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["One", "Two"], "old choices stay while loading");
+        // The new list puts another playlist first; the selection follows Two.
+        respond(
+            &mut app,
+            &reload,
+            Ok(Content::Playlists(vec![
+                own("p1", "One"),
+                own("p2", "Two"),
+                own("p3", "Ab"),
+            ])),
+        );
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.selected(), 3);
+        assert_eq!(picker.choices()[2].name, "Two");
+        press(&mut app, &[Action::Back], now);
+    }
+
+    #[test]
+    fn enter_in_a_reloading_picker_adds_to_the_playlist_shown() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        press(&mut app, &[Action::AddToPlaylist, Action::Down], now);
+        answer_edit(&mut app, &create, EditResult::Done { created: None });
+        let reload = one_request(&mut app);
+        // Still loading: Enter acts on the row shown ("One").
+        press(&mut app, &[Action::Activate], now);
+        assert!(browser(&app).picker().is_none());
+        let songs = one_request(&mut app);
+        assert_eq!(songs.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &songs, Ok(own_songs(&["s1"])));
+        let add = one_edit(&mut app);
+        assert_eq!(
+            add.op,
+            EditOp::Add {
+                playlist_id: "p1".into(),
+                songs: vec!["s1".into()]
+            }
+        );
+        // A selected playlist that is gone after a reload falls back to
+        // "New playlist…".
+        respond(
+            &mut app,
+            &reload,
+            Ok(Content::Playlists(vec![own("p1", "One"), own("p2", "Two")])),
+        );
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Down],
+            now,
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2);
+        answer_edit(&mut app, &add, EditResult::Done { created: None });
+        let lists = requests(&mut app)
+            .into_iter()
+            .find(|r| r.resource == Resource::Playlists)
+            .unwrap();
+        respond(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 0);
+    }
+
+    #[test]
+    fn quitting_with_a_pending_change_warns_first() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        press(&mut app, &[Action::Quit], now);
+        assert!(!app.should_quit());
+        assert_eq!(status_text(&app, now), SAVING_PLAYLIST);
+        press(&mut app, &[Action::Quit], now);
+        assert!(app.should_quit());
+        // Once the change answered, quitting is immediate again.
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit, Action::Quit], now);
+        let create = one_edit(&mut app);
+        answer_edit(&mut app, &create, EditResult::Done { created: None });
+        press(&mut app, &[Action::Quit], now);
+        assert!(app.should_quit());
+        // From the help overlay too.
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(
+            &mut app,
+            &[Action::InputSubmit, Action::ToggleHelp, Action::Quit],
+            now,
+        );
+        assert!(!app.should_quit());
+        assert_eq!(app.browser().unwrap().queued_edits(), 1);
+    }
+
+    #[test]
+    fn index_edits_wait_for_a_pending_change_of_the_same_playlist() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert_eq!(app.browser().unwrap().pending_edits(), 1);
+        for action in [Action::RemoveFromPlaylist, Action::MoveEntryDown] {
+            press(&mut app, &[action], now);
+            assert_eq!(status_text(&app, now), WAITING_FOR_EDIT, "{action:?}");
+        }
+        assert!(!shown_title(&app).contains(MODIFIED));
+        assert_eq!(app.take_edit_requests().len(), 1, "only the first");
+    }
+
+    #[test]
+    fn the_last_song_cannot_be_removed() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Solo")]);
+        open_playlist(&mut app, own_songs(&["s1"]), now);
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), LAST_SONG);
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn search_cannot_open_over_an_unsaved_order() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::OpenSearch], now);
+        assert!(!app.input_open());
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+    }
+
+    #[test]
+    fn an_untouched_rename_sends_nothing_even_for_a_cut_name() {
+        let long = "n".repeat(300);
+        let (mut app, now) = playlists_app(vec![own("p1", &long)]);
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert_eq!(
+            browser(&app).prompt().unwrap().1.chars().count(),
+            MAX_QUERY_CHARS
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Name unchanged");
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn an_edit_supersedes_a_fetch_in_flight_for_a_list_no_view_shows() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::Refresh], now);
+        let older = one_request(&mut app);
+        press(&mut app, &[Action::Parent], now);
+        assert!(view_titles(&app).is_empty(), "on Home");
+        app.player.enqueue(remote("s1"));
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p2".into()),
+            },
+        );
+        let newer = one_request(&mut app);
+        assert_eq!(newer.resource, Resource::Playlists);
+        respond(
+            &mut app,
+            &older,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert!(
+            browser(&app).cached(&Resource::Playlists).is_none(),
+            "predates the edit"
+        );
+        respond(
+            &mut app,
+            &newer,
+            Ok(Content::Playlists(vec![
+                own("p1", "One"),
+                own("p2", "Queue"),
+            ])),
+        );
+        let Some(Content::Playlists(lists)) = browser(&app).cached(&Resource::Playlists) else {
+            panic!()
+        };
+        assert_eq!(lists.len(), 2);
+    }
+
+    // ----- the loop's edit runner ----------------------------------------
+
+    use wiremock::matchers::path as at_path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn subsonic_ok(body: serde_json::Value) -> ResponseTemplate {
+        let mut response = serde_json::json!({ "status": "ok", "version": "1.16.1" });
+        if let (Some(target), serde_json::Value::Object(extra)) = (response.as_object_mut(), body) {
+            target.extend(extra);
+        }
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "subsonic-response": response }))
+    }
+
+    async fn edit_server(delete_delay: Duration) -> MockServer {
+        let server = MockServer::start().await;
+        let mount = |endpoint: &str, response: ResponseTemplate| {
+            Mock::given(at_path(format!("/nd/rest/{endpoint}"))).respond_with(response)
+        };
+        mount(
+            "getOpenSubsonicExtensions",
+            subsonic_ok(serde_json::json!({ "openSubsonicExtensions": [{ "name": "formPost" }] })),
+        )
+        .mount(&server)
+        .await;
+        mount(
+            "deletePlaylist",
+            subsonic_ok(serde_json::json!({})).set_delay(delete_delay),
+        )
+        .mount(&server)
+        .await;
+        mount(
+            "createPlaylist",
+            subsonic_ok(serde_json::json!({ "playlist": { "id": "p9" } })),
+        )
+        .mount(&server)
+        .await;
+        server
+    }
+
+    fn client_for(server: &MockServer) -> navidrome::Client {
+        navidrome::Client::new(
+            navidrome::client::parse_base_url(&format!("{}/nd", server.uri())).unwrap(),
+            "u".into(),
+            navidrome::Password::new("p".into()),
+        )
+        .unwrap()
+    }
+
+    /// Navidrome only, against `client`, in the Playlists list (answered
+    /// by hand).
+    fn runner_app(client: navidrome::Client) -> (App, Instant) {
+        let mut app = App::with_sources(None, Some(client));
+        let now = Instant::now();
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        (app, now)
+    }
+
+    fn endpoints(requests: &[wiremock::Request]) -> Vec<String> {
+        requests
+            .iter()
+            .map(|r| r.url.path().rsplit('/').next().unwrap().to_owned())
+            .filter(|e| e != "getOpenSubsonicExtensions")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_edit_running_across_a_same_account_swap_finishes_before_the_next_starts() {
+        let server = edit_server(Duration::from_millis(400)).await;
+        let client = client_for(&server);
+        let (mut app, now) = runner_app(client.clone());
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        assert!(runner.running.is_some());
+        // The same account is saved again: a new generation and browser.
+        connect_in_app(&mut app, client, true, now);
+        app.handle_settings_input(Input::Esc, now);
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.generation, Generation(1));
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "New", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        // The old edit still runs: the new one waits, queued.
+        runner.pump(&mut app, &tx);
+        assert_eq!(app.browser().unwrap().queued_edits(), 1);
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.generation, Generation(0));
+        assert_eq!(
+            endpoints(&server.received_requests().await.unwrap()),
+            ["deletePlaylist"]
+        );
+        runner.answered(&mut app, &first);
+        app.handle_edit_response(first, Instant::now());
+        runner.pump(&mut app, &tx);
+        assert_eq!(app.browser().unwrap().queued_edits(), 0);
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.generation, Generation(1));
+        runner.answered(&mut app, &second);
+        app.handle_edit_response(second, Instant::now());
+        assert_eq!(status_text(&app, Instant::now()), "Created New");
+        assert_eq!(
+            endpoints(&server.received_requests().await.unwrap()),
+            ["deletePlaylist", "createPlaylist"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exit_waits_for_the_running_edit_but_only_so_long() {
+        // A quick edit is waited for.
+        let server = edit_server(Duration::from_millis(200)).await;
+        let (mut app, now) = runner_app(client_for(&server));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        let started = Instant::now();
+        runner.finish(Duration::from_secs(5)).await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(matches!(
+            rx.try_recv().unwrap().result,
+            crate::navidrome::edit::EditResult::Done { .. }
+        ));
+        // A hung one is not.
+        let server = edit_server(Duration::from_secs(10)).await;
+        let (mut app, now) = runner_app(client_for(&server));
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        let started = Instant::now();
+        runner.finish(Duration::from_millis(100)).await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Nothing running: returns at once.
+        EditRunner::default().finish(Duration::from_secs(5)).await;
+    }
+
+    // ----- hidden entries and the old account's edit at quit -------------
+
+    /// Own songs whose stored count is `count` (hidden entries beyond).
+    fn counted_songs(ids: &[&str], count: Option<u32>) -> Content {
+        let Content::PlaylistSongs(mut songs) = own_songs(ids) else {
+            unreachable!()
+        };
+        songs.song_count = count;
+        Content::PlaylistSongs(songs)
+    }
+
+    #[test]
+    fn removing_from_a_playlist_with_hidden_entries_warns_first() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Gaps")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(5)), now);
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(
+            status_text(&app, now),
+            "Press d again to remove Remote s1: this also removes 3 entries Navidrome hides \
+             (missing files or other libraries)"
+        );
+        assert!(app.take_edit_requests().is_empty());
+        // Any other key cancels.
+        press(
+            &mut app,
+            &[Action::CycleRepeat, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Remove {
+                playlist_id: "p1".into(),
+                index: 0,
+                expected: vec!["s1".into(), "s2".into()],
+                hidden: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn saving_an_order_over_hidden_entries_needs_a_second_w() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Gaps")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(3)), now);
+        // Reordering itself is allowed; the warning comes at save.
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert_eq!(
+            status_text(&app, now),
+            "Press w again to save: this also removes 1 entry Navidrome hides (missing files or \
+             other libraries)"
+        );
+        assert!(app.take_edit_requests().is_empty());
+        // Another key cancels: the next `w` warns again.
+        press(&mut app, &[Action::CycleRepeat, Action::SaveOrder], now);
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::SaveOrder], now);
+        assert_eq!(status_text(&app, now), "Saving the new order of Gaps…");
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Replace {
+                playlist_id: "p1".into(),
+                expected: vec!["s1".into(), "s2".into()],
+                songs: vec!["s2".into(), "s1".into()],
+                hidden: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_suspect_count_warns_and_no_count_saves_at_once() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Odd"), own("p2", "Plain")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(1)), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert!(
+            status_text(&app, now)
+                .starts_with("Press w again to save: this may also remove entries Navidrome hides"),
+            "{}",
+            status_text(&app, now)
+        );
+        press(&mut app, &[Action::SaveOrder], now);
+        let EditOp::Replace { hidden, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(hidden, usize::MAX);
+        // A server that sends no songCount: no warning, as before.
+        let (mut app, now) = playlists_app(vec![own("p1", "Plain")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], None), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert_eq!(status_text(&app, now), "Saving the new order of Plain…");
+        let EditOp::Replace { hidden, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(hidden, 0);
+    }
+
+    #[tokio::test]
+    async fn quit_warns_while_an_edit_for_the_old_account_still_runs() {
+        let server = edit_server(Duration::from_millis(300)).await;
+        let client = client_for(&server);
+        let (mut app, now) = runner_app(client.clone());
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        connect_in_app(&mut app, client, true, now);
+        app.handle_settings_input(Input::Esc, now);
+        assert_eq!(app.browser().unwrap().pending_edits(), 0, "a fresh browser");
+        press(&mut app, &[Action::Quit], now);
+        assert!(!app.should_quit());
+        assert_eq!(status_text(&app, now), SAVING_PLAYLIST);
+        let response = rx.recv().await.unwrap();
+        runner.answered(&mut app, &response);
+        app.handle_edit_response(response, Instant::now());
+        // Done: the warning is disarmed and quitting is immediate.
+        let (mut fresh, now) = (app, Instant::now());
+        fresh.handle_action(Action::Quit, now);
+        assert!(fresh.should_quit());
     }
 }

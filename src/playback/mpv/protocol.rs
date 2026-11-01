@@ -45,6 +45,15 @@ pub enum MpvCommand {
         seconds: f64,
         mode: SeekMode,
     },
+    /// `["af", "add", graph]`: appends audio filters.
+    AfAdd {
+        graph: String,
+    },
+    /// `["af", "remove", labels]`: removes the filters with these labels
+    /// (`@a,@b`); removing absent labels succeeds.
+    AfRemove {
+        labels: &'static str,
+    },
     Stop,
     Quit,
 }
@@ -72,15 +81,24 @@ impl MpvCommand {
                 };
                 vec!["seek".into(), (*seconds).into(), mode.into()]
             }
+            Self::AfAdd { graph } => vec!["af".into(), "add".into(), graph.as_str().into()],
+            Self::AfRemove { labels } => vec!["af".into(), "remove".into(), (*labels).into()],
             Self::Stop => vec!["stop".into()],
             Self::Quit => vec!["quit".into()],
         }
     }
 
-    /// `true` if the encoded request carries a secret (a signed URL), so
-    /// the raw line must not be logged even at `trace`.
+    /// `true` if the encoded request carries a secret (a signed URL) or
+    /// private data (a local path), so the raw line must not be logged
+    /// even at `trace`.
     pub fn is_sensitive(&self) -> bool {
-        matches!(self, Self::LoadStream { .. })
+        matches!(self, Self::LoadFile { .. } | Self::LoadStream { .. })
+    }
+
+    /// `true` for requests sent many times a second (visualizer polls),
+    /// which are logged only at `trace`.
+    pub fn is_frequent(&self) -> bool {
+        matches!(self, Self::GetProperty { name } if *name == super::visualizer::METADATA_PROPERTY)
     }
 
     /// Short description for logs. Never includes the load target.
@@ -91,6 +109,8 @@ impl MpvCommand {
             Self::GetProperty { name } => format!("get_property {name}"),
             Self::ObserveProperty { name, .. } => format!("observe_property {name}"),
             Self::Seek { .. } => "seek".to_owned(),
+            Self::AfAdd { .. } => "af add".to_owned(),
+            Self::AfRemove { labels } => format!("af remove {labels}"),
             Self::Stop => "stop".to_owned(),
             Self::Quit => "quit".to_owned(),
         }
@@ -138,6 +158,13 @@ pub enum MpvEvent {
         reason: EndFileReason,
         file_error: Option<String>,
     },
+    /// mpv is performing a seek. mpv answers a `seek` command with
+    /// `success` even when it does not seek (a non-seekable stream), and
+    /// then sends neither this nor `playback-restart`.
+    Seek,
+    /// Playback (re)started after a load or a seek: audio from the new
+    /// position is on its way.
+    PlaybackRestart,
     /// `data` is `None` when the property is unavailable (mpv sends no
     /// `data` field, e.g. `time-pos` while idle).
     PropertyChange {
@@ -190,6 +217,8 @@ pub fn parse_line(line: &str) -> Result<MpvMessage, ProtocolError> {
                 entry_id: raw.playlist_entry_id,
             },
             "file-loaded" => MpvEvent::FileLoaded,
+            "seek" => MpvEvent::Seek,
+            "playback-restart" => MpvEvent::PlaybackRestart,
             "end-file" => MpvEvent::EndFile {
                 entry_id: raw.playlist_entry_id,
                 reason: match raw.reason.as_deref() {
@@ -303,6 +332,16 @@ mod tests {
                 },
                 r#"{"command":["seek",0.0,"absolute"],"request_id":3}"#,
             ),
+            (
+                MpvCommand::AfAdd {
+                    graph: "@x:lavfi=[anull]".into(),
+                },
+                r#"{"command":["af","add","@x:lavfi=[anull]"],"request_id":3}"#,
+            ),
+            (
+                MpvCommand::AfRemove { labels: "@a,@b" },
+                r#"{"command":["af","remove","@a,@b"],"request_id":3}"#,
+            ),
             (MpvCommand::Stop, r#"{"command":["stop"],"request_id":3}"#),
             (MpvCommand::Quit, r#"{"command":["quit"],"request_id":3}"#),
         ];
@@ -317,7 +356,17 @@ mod tests {
             path: "/secret/path.flac".into(),
         };
         assert!(!cmd.describe().contains("secret"));
-        assert!(!cmd.is_sensitive());
+        assert!(cmd.is_sensitive(), "local paths are never logged");
+        assert!(!cmd.is_frequent());
+        let poll = MpvCommand::GetProperty {
+            name: super::super::visualizer::METADATA_PROPERTY,
+        };
+        assert!(poll.is_frequent());
+        let graph = MpvCommand::AfAdd {
+            graph: super::super::visualizer::GRAPH.into(),
+        };
+        assert_eq!(graph.describe(), "af add");
+        assert!(!graph.is_frequent() && !graph.is_sensitive());
     }
 
     #[test]
@@ -384,6 +433,14 @@ mod tests {
         assert_eq!(
             parse_line(r#"{"event": "file-loaded"}"#).unwrap(),
             MpvMessage::Event(MpvEvent::FileLoaded)
+        );
+        assert_eq!(
+            parse_line(r#"{"event": "playback-restart"}"#).unwrap(),
+            MpvMessage::Event(MpvEvent::PlaybackRestart)
+        );
+        assert_eq!(
+            parse_line(r#"{"event": "seek"}"#).unwrap(),
+            MpvMessage::Event(MpvEvent::Seek)
         );
         assert_eq!(
             parse_line(r#"{"event": "end-file", "reason": "eof", "playlist_entry_id": 2}"#)
