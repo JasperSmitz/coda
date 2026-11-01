@@ -20,6 +20,9 @@ pub struct TrackMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    /// The album artist (lofty's `AlbumArtist` item; Navidrome's
+    /// `displayAlbumArtist`). Groups compilations under one artist.
+    pub album_artist: Option<String>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
     pub duration: Option<Duration>,
@@ -32,6 +35,7 @@ pub struct Track {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub album_artist: Option<String>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
     pub duration: Option<Duration>,
@@ -48,6 +52,7 @@ impl Track {
             title,
             artist: clean_text(metadata.artist),
             album: clean_text(metadata.album),
+            album_artist: clean_text(metadata.album_artist),
             track_no: metadata.track_no,
             disc_no: metadata.disc_no,
             duration: metadata.duration,
@@ -62,6 +67,7 @@ impl Track {
             title: clean_text(metadata.title).unwrap_or_else(|| UNKNOWN_TITLE.to_owned()),
             artist: clean_text(metadata.artist),
             album: clean_text(metadata.album),
+            album_artist: clean_text(metadata.album_artist),
             track_no: metadata.track_no,
             disc_no: metadata.disc_no,
             duration: metadata.duration,

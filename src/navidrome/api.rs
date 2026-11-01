@@ -242,6 +242,9 @@ pub struct RawSong {
     pub artist: Option<String>,
     #[serde(deserialize_with = "text")]
     pub album: Option<String>,
+    /// OpenSubsonic; absent from plain Subsonic servers.
+    #[serde(deserialize_with = "text")]
+    pub display_album_artist: Option<String>,
     #[serde(deserialize_with = "uint")]
     pub track: Option<u32>,
     #[serde(deserialize_with = "uint")]
@@ -361,6 +364,7 @@ impl RawSong {
                 title: self.title,
                 artist: self.artist,
                 album: self.album,
+                album_artist: self.display_album_artist,
                 track_no: self.track,
                 disc_no: self.disc_number,
                 duration: self.duration,
@@ -753,6 +757,35 @@ mod tests {
     fn response(body: Value) -> Response {
         let body = serde_json::to_vec(&json!({ "subsonic-response": body })).unwrap();
         parse::<Response>(&body).unwrap()
+    }
+
+    #[test]
+    fn display_album_artist_fills_the_album_artist() {
+        let r = response(json!({
+            "status": "ok",
+            "album": { "id": "al", "song": [
+                { "id": "1", "artist": "Guest", "displayAlbumArtist": " Various Artists " },
+                { "id": "2", "artist": "Plain" },
+                { "id": "3", "displayAlbumArtist": ["not", "text"] },
+                { "id": "4", "displayAlbumArtist": "z".repeat(10_000) },
+            ]}
+        }));
+        let tracks: Vec<Track> = r
+            .album
+            .unwrap()
+            .song
+            .into_iter()
+            .filter_map(RawSong::into_track)
+            .collect();
+        assert_eq!(tracks.len(), 4);
+        assert_eq!(tracks[0].album_artist.as_deref(), Some("Various Artists"));
+        assert_eq!(tracks[0].artist.as_deref(), Some("Guest"));
+        assert_eq!(tracks[1].album_artist, None);
+        assert_eq!(tracks[2].album_artist, None);
+        assert_eq!(
+            tracks[3].album_artist.as_ref().unwrap().chars().count(),
+            MAX_METADATA_CHARS
+        );
     }
 
     #[test]

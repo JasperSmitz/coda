@@ -148,6 +148,11 @@
   - help still fits 80x24
 - **PTY smoke:** a temporary music folder with tagged files, including compilations and a missing album tag, plus playlists (relative, absolute inside and outside, missing, URL).
 
+### Decisions made during slices 1–2
+- `l` was not bound in either source, contrary to "Enter/`l`" above. This is deferred to M6 together with the owner's keybinding notes.
+- "Missing" in a playlist row covers unmatched files, entries outside the music folder, refused `..` paths and URLs.
+- Unknown artist and Unknown album sort last.
+
 ## Slice 3 — Navidrome playlist editing (approved by owner 2026-11-01; briefed in detail after slice 2)
 - **Save the queue as a new playlist** (`createPlaylist`, name typed in a single-line input).
 - **Add to playlist:** add the selected song, album or playlist to a playlist picked from a short list, with "New playlist…" at the top. Uses `updatePlaylist` `songIdToAdd`, in order.

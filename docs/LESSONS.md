@@ -110,3 +110,9 @@ Each entry should state:
 - **Root cause:** the swap cleared the listen that existed at swap time, but mpv's `Started` for that load arrived afterwards and created a new one.
 - **Rule:** when swapping the identity behind async work, also invalidate events that arrive after the swap for work issued before it. Do this by recording the last pre-swap id, or by tagging work with a generation (as fetches and pings now are).
 - **Where verified:** M4 slice 2 Part B review; `a_load_still_loading_at_the_swap_is_not_scrobbled_to_the_new_server`, `the_old_ping_racing_the_swap_is_ignored`.
+
+### Resolve untrusted paths as lookup keys, not as files
+- **Context / symptom:** `.m3u` entries are untrusted text naming files relative to the playlist. Lexical normalisation of `link/../x` disagrees with the file system when `link` is a symlinked folder, and resolving with the file system (`canonicalize`) would follow symlinks out of the music folder and break file symlinks the scanner accepts.
+- **Root cause:** `..` is only exact lexically while every folder before it is a real folder; the entry's own names may be symlinks, the walked folder and the canonical root are not.
+- **Rule:** resolve without touching the file system. Allow `..` only before the first name of a relative entry, relative to a folder known to contain no symlinks (one the scanner walked below a canonical root); refuse `..` after a name and in absolute entries; map foreign separators (`\`) before applying these rules. Use the result only as a key into the set of paths the scan actually found, never as something to open, so the worst an entry can do is select a scanned track.
+- **Where verified:** M5 slice 2 review, including a randomised check of 400k entries; `entries_cannot_climb_out_of_the_root`, `windows_separators_and_drive_letters` in `src/library/m3u.rs`, `a_playlist_entry_through_a_symlinked_folder_is_missing` in `tests/library_scan.rs`.

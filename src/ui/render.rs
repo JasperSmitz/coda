@@ -16,9 +16,11 @@ use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, Connection, Focus, LibraryRow, LocalSearch, NAVIDROME_NOT_CONFIGURED, NO_LOCAL_LIBRARY,
+    App, Connection, Focus, LocalSearch, NAVIDROME_NOT_CONFIGURED, NO_LOCAL_LIBRARY,
     PRESS_ENTER_TO_CONNECT, ScanState, Source, count, thousands,
 };
+use crate::library::browse::{Row as LocalRow, View as LocalView};
+use crate::library::{Library, LocalPlaylist};
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, More, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
@@ -168,10 +170,25 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         frame.render_widget(Paragraph::new(lines), body);
         return;
     }
+    if app.scan_state() == ScanState::NoLibrary {
+        let block = panel_block("Local".to_owned(), focused, area.width);
+        let body = block.inner(area);
+        frame.render_widget(block, area);
+        let line = fit(NO_LOCAL_LIBRARY, usize::from(body.width));
+        frame.render_widget(Paragraph::new(line), body);
+        return;
+    }
+    let browser = app.local_browser();
+    let library = app.library();
     let title = match app.local_search() {
         Some(search) => local_search_title(search),
-        None if app.library_path().is_empty() => "Local".to_owned(),
-        None => format!("Local: {}", app.library_path().join("/")),
+        None => {
+            let prefix = match app.scan_state() {
+                ScanState::Scanning { .. } => "Local (scanning…)",
+                _ => "Local",
+            };
+            path_title(prefix, &browser.path_titles(library), area.width)
+        }
     };
     let block = panel_block(title, focused, area.width);
     let mut body = block.inner(area);
@@ -187,14 +204,23 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         return;
     }
 
-    if app.tree().is_empty() {
-        let message = match app.scan_state() {
-            ScanState::Scanning { .. } => "Scanning…".to_owned(),
-            ScanState::NoLibrary => NO_LOCAL_LIBRARY.to_owned(),
+    let view_shown = browser.current();
+    if browser.is_empty(library) {
+        let scanning = matches!(app.scan_state(), ScanState::Scanning { .. });
+        let message = match view_shown {
+            _ if scanning => "Scanning…".to_owned(),
+            LocalView::Playlists => "No playlists (.m3u or .m3u8 files)".to_owned(),
+            LocalView::Playlist(id) => match library.playlist(*id).missing {
+                0 => "Empty playlist".to_owned(),
+                n => format!("No tracks found ({} missing)", thousands(n)),
+            },
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
-        let width = usize::from(body.width);
-        frame.render_widget(Paragraph::new(fit(&message, width)), body);
+        let line = Line::styled(
+            fit(&message, usize::from(body.width)),
+            Style::default().fg(Color::DarkGray),
+        );
+        frame.render_widget(Paragraph::new(line), body);
         return;
     }
 
@@ -212,26 +238,76 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         .into_iter()
         .map(|row| {
             note_row_built();
-            match row {
-                LibraryRow::Dir(dir) => ListItem::new(Line::styled(
-                    fit(&format!("{}/", dir.name()), width),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                LibraryRow::Track(track) => {
-                    let left = match track.track_no {
-                        Some(no) => format!("{no:02} {}", track.title),
-                        None => track.title.clone(),
-                    };
-                    ListItem::new(row_line(&left, track.duration.map(format_time), width))
-                }
-            }
+            ListItem::new(local_row(library, view_shown, row, width))
         })
         .collect();
     let mut state =
         ListState::default().with_selected(Some(app.library_selected().saturating_sub(offset)));
     frame.render_stateful_widget(list_widget(items, Block::new(), focused), body, &mut state);
+}
+
+/// One row of a local view.
+fn local_row(
+    library: &Library,
+    view: &LocalView,
+    row: LocalRow<'_>,
+    width: usize,
+) -> Line<'static> {
+    match row {
+        LocalRow::Home(entry) => Line::raw(fit(entry.label(), width)),
+        LocalRow::Dir(dir) => Line::styled(
+            fit(&format!("{}/", dir.name()), width),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        LocalRow::Track(_, track) => {
+            let numbered = |text: String| match track.track_no {
+                Some(no) => format!("{no:02} {text}"),
+                None => text,
+            };
+            let left = match view {
+                LocalView::Playlist(_) => track.display_name(),
+                // A compilation: name the track's own artist.
+                LocalView::Album(id) => {
+                    let album = library.tags().album(*id);
+                    let album_artist = library.tags().artist(album.artist()).name();
+                    match &track.artist {
+                        Some(artist) if artist.to_lowercase() != album_artist.to_lowercase() => {
+                            numbered(track.display_name())
+                        }
+                        _ => numbered(track.title.clone()),
+                    }
+                }
+                _ => numbered(track.title.clone()),
+            };
+            row_line(&left, track.duration.map(format_time), width)
+        }
+        LocalRow::Artist(artist) => row_line(
+            artist.name(),
+            Some(count(artist.albums().len(), "album")),
+            width,
+        ),
+        LocalRow::Album(album, artist) => {
+            let left = match view {
+                LocalView::Albums(_) => format!("{} — {}", album.name(), artist.name()),
+                _ => album.name().to_owned(),
+            };
+            row_line(&left, Some(count(album.tracks().len(), "track")), width)
+        }
+        LocalRow::Playlist(playlist) => {
+            row_line(&playlist.name, Some(playlist_counts(playlist)), width)
+        }
+    }
+}
+
+/// `12 tracks`, or `12 tracks, 3 missing`.
+fn playlist_counts(playlist: &LocalPlaylist) -> String {
+    let tracks = count(playlist.tracks.len(), "track");
+    match playlist.missing {
+        0 => tracks,
+        n => format!("{tracks}, {} missing", thousands(n)),
+    }
 }
 
 /// `Local: 12 results for "blue"`; with more matches than are kept,
@@ -297,8 +373,20 @@ fn draw_local_search(
     frame.render_stateful_widget(list_widget(items, Block::new(), focused), area, &mut state);
 }
 
-/// Separates the views of the path in the Navidrome panel title.
+/// Separates the views of the path in a library panel title.
 pub const PATH_SEPARATOR: &str = " › ";
+
+/// `prefix › view › view`, fitted to a panel of `width` columns; just
+/// `prefix` at Home. When too long, the start of the path is cut so the
+/// shown view stays visible.
+fn path_title(prefix: &str, path: &[String], width: u16) -> String {
+    if path.is_empty() {
+        return prefix.to_owned();
+    }
+    let prefix = format!("{prefix}{PATH_SEPARATOR}");
+    let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
+    format!("{prefix}{}", fit_tail(&path.join(PATH_SEPARATOR), room))
+}
 
 /// `Navidrome (<state>) › Albums (newest) › <album>`, fitted to a panel
 /// of `width` columns; Home is the bare `Navidrome (<state>)`. When too
@@ -309,19 +397,13 @@ fn remote_title(connection: &Connection, browser: &Browser, width: u16) -> Strin
         Connection::Connected => "connected",
         Connection::Failed(_) => "not connected",
     };
-    let prefix = format!("Navidrome ({state})");
     let path: Vec<String> = browser
         .stack()
         .iter()
         .filter(|v| v.resource != Resource::Home)
         .map(|v| browser.title(v))
         .collect();
-    if path.is_empty() {
-        return prefix;
-    }
-    let prefix = format!("{prefix}{PATH_SEPARATOR}");
-    let room = usize::from(width.saturating_sub(4)).saturating_sub(prefix.width());
-    format!("{prefix}{}", fit_tail(&path.join(PATH_SEPARATOR), room))
+    path_title(&format!("Navidrome ({state})"), &path, width)
 }
 
 fn draw_remote(
@@ -856,6 +938,17 @@ mod tests {
         out
     }
 
+    /// From the local Home (as a new app starts), opens Folders.
+    fn open_folders(app: &mut App, now: Instant) {
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Activate, now);
+        assert_eq!(app.library_path(), [] as [String; 0]);
+        assert!(matches!(
+            app.local_browser().current(),
+            crate::library::browse::View::Folder(_)
+        ));
+    }
+
     fn tagged(rel: &str, title: &str, artist: &str, secs: u64) -> Track {
         Track::local(
             format!("/music/{rel}").into(),
@@ -936,6 +1029,9 @@ mod tests {
             now,
         );
         let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("│> Playlists"), "Home first: {screen}");
+        open_folders(&mut app, now);
+        let screen = render(&app, 100, 20, now);
         assert!(screen.contains("No music found in /music"), "{screen}");
         assert!(screen.contains("Queue is empty"), "{screen}");
         assert!(screen.contains("[Stopped]"), "{screen}");
@@ -948,7 +1044,10 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new("/music".into());
         let screen = render(&app, 100, 20, now);
-        assert!(screen.contains("Scanning…"), "{screen}");
+        assert!(screen.contains("┌ Local (scanning…) "), "{screen}");
+        open_folders(&mut app, now);
+        let screen = render(&app, 100, 20, now);
+        assert!(screen.contains("│Scanning…"), "{screen}");
         let tracks: Vec<Track> = (0..1234)
             .map(|i| tagged(&format!("a/{i:04}.flac"), &format!("t{i}"), "x", 1))
             .collect();
@@ -971,6 +1070,7 @@ mod tests {
             )]),
             now,
         );
+        open_folders(&mut app, now);
         let commands = app.handle_action(Action::Activate, now);
         let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
             panic!("{commands:?}");
@@ -1225,6 +1325,7 @@ mod tests {
             })
             .collect();
         app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        open_folders(&mut app, now);
         app.handle_action(Action::Activate, now);
         app.handle_action(Action::Enqueue, now);
         let commands = app.handle_action(Action::Activate, now);
@@ -1297,6 +1398,7 @@ mod tests {
             })
             .collect();
         app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        open_folders(&mut app, now);
         app.handle_action(Action::Enqueue, now); // the folder, recursively
         app.handle_action(Action::SwitchFocus, now);
         app.handle_action(Action::Activate, now);
@@ -1451,6 +1553,7 @@ mod tests {
         );
         // Open the emoji folder, enqueue both and play the first (fills
         // the library, queue and now-playing bar).
+        open_folders(&mut app, now);
         app.handle_action(Action::Activate, now);
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::Down, now);
@@ -1531,6 +1634,7 @@ mod tests {
             ]),
             now,
         );
+        open_folders(&mut app, now);
         // The input line sits at the top of the Local panel, with its hint.
         app.handle_action(Action::OpenSearch, now);
         for c in "blue".chars() {
@@ -1578,7 +1682,7 @@ mod tests {
         // Back to the tree.
         app.handle_action(Action::Back, now);
         let screen = render(&app, 100, 14, now);
-        assert!(screen.contains("┌ Local ─"), "{screen}");
+        assert!(screen.contains("┌ Local › Folders ─"), "{screen}");
         assert!(screen.contains("> a/"), "{screen}");
     }
 
@@ -1859,6 +1963,7 @@ mod tests {
             ScanEvent::Batch(vec![tagged("l.flac", "Local Song", "Band", 61)]),
             now,
         );
+        open_folders(&mut app, now);
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::SelectNavidrome, now);
         app.handle_action(Action::Down, now);
@@ -1934,6 +2039,258 @@ mod tests {
                 assert_full_width(&screen, width);
             }
         }
+    }
+
+    // ----- local Home, tag lists and playlists ---------------------------
+
+    fn album_track(rel: &str, title: &str, artist: &str, album_artist: &str, album: &str) -> Track {
+        let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        Track::local(
+            format!("/music/{rel}").into(),
+            TrackMetadata {
+                title: Some(title.into()),
+                artist: some(artist),
+                album_artist: some(album_artist),
+                album: some(album),
+                track_no: rel
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.get(..2)?.parse().ok()),
+                duration: Some(Duration::from_secs(90)),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    fn local_press(app: &mut App, actions: &[Action], now: Instant) {
+        for action in actions {
+            app.handle_action(*action, now);
+        }
+    }
+
+    #[test]
+    fn local_home_lists_and_playlists_render() {
+        use crate::library::m3u::PlaylistFile;
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                album_track("k/01.flac", "So What", "Miles Davis", "", "Kind of Blue"),
+                album_track("k/02.flac", "Freddie", "Miles Davis", "", "Kind of Blue"),
+                album_track("h/01.flac", "Hit", "Guest", "Various Artists", "Hits"),
+                album_track(
+                    "h/02.flac",
+                    "Other",
+                    "Miles Davis",
+                    "Various Artists",
+                    "Hits",
+                ),
+                album_track("loose.flac", "Loose", "", "", ""),
+            ]),
+            now,
+        );
+        // Home, with the scanning note in the title.
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local (scanning…) ─"), "{screen}");
+        for (i, entry) in ["Playlists", "Folders", "Artists", "Albums"]
+            .iter()
+            .enumerate()
+        {
+            let mark = if i == 0 { "> " } else { "  " };
+            assert!(screen.contains(&format!("│{mark}{entry} ")), "{screen}");
+        }
+        // Artists, with album counts.
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local (scanning…) › Artists ─"),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis"), "{screen}");
+        assert!(screen.contains("Various Artists"), "{screen}");
+        assert!(screen.contains("Unknown artist"), "{screen}");
+        assert!(screen.contains("1 album"), "{screen}");
+        // A compilation names each track's artist.
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Activate, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("Local (scanning…) › Artists › Various Artists › Hits"),
+            "{screen}"
+        );
+        assert!(screen.contains("> 01 Guest - Hit"), "{screen}");
+        assert!(screen.contains("02 Miles Davis - Other"), "{screen}");
+        // The note goes once the scan finishes; playlists come before.
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/Road.m3u".into(),
+                name: "Road Trip".into(),
+                entries: vec!["/music/k/02.flac".into(), "/music/gone.flac".into()],
+                unresolved: 2,
+                cut: false,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/All.m3u".into(),
+                name: "All good".into(),
+                entries: vec!["/music/k/01.flac".into()],
+                unresolved: 0,
+                cut: true,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 5,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local › Artists › Various Artists › Hits ─"),
+            "{screen}"
+        );
+        // Albums A–Z and by artist, each row with its artist.
+        for _ in 0..4 {
+            app.handle_action(Action::Parent, now);
+        }
+        local_press(&mut app, &[Action::Down, Action::Activate], now);
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local › Albums (A–Z) ─"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(at("Hits — Various Artists") < at("Kind of Blue — Miles Davis"));
+        assert!(at("Kind of Blue — Miles Davis") < at("Unknown album — Unknown artist"));
+        assert!(lines[at("Kind of Blue")].contains("2 tracks"), "{screen}");
+        app.handle_action(Action::CycleSort, now);
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("┌ Local › Albums (by artist) ─"),
+            "{screen}"
+        );
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(at("Kind of Blue — Miles Davis") < at("Hits — Various Artists"));
+        // Playlists with their counts, A–Z.
+        app.handle_action(Action::Parent, now);
+        local_press(
+            &mut app,
+            &[Action::Up, Action::Up, Action::Up, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 140, 16, now);
+        assert!(screen.contains("┌ Local › Playlists ─"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let all = lines.iter().position(|l| l.contains("All good")).unwrap();
+        let road = lines.iter().position(|l| l.contains("Road Trip")).unwrap();
+        assert!(all < road, "{screen}");
+        assert!(lines[all].contains("1 track│"), "{screen}");
+        assert!(lines[road].contains("1 track, 3 missing"), "{screen}");
+        // A playlist cut at the cap says so; its tracks show the artist.
+        app.handle_action(Action::Activate, now);
+        let screen = render(&app, 140, 16, now);
+        assert!(
+            screen.contains("Local › Playlists › All good (cut: file too long)"),
+            "{screen}"
+        );
+        assert!(screen.contains("> Miles Davis - So What"), "{screen}");
+        for width in [20, 59, 100] {
+            assert_full_width(&render(&app, width, 16, now), width);
+        }
+    }
+
+    #[test]
+    fn empty_local_lists_explain_themselves() {
+        use crate::library::m3u::PlaylistFile;
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("│Scanning…"), "{screen}");
+        app.handle_scan_event(
+            ScanEvent::Playlist(PlaylistFile {
+                path: "/music/x.m3u".into(),
+                name: "Gone".into(),
+                entries: Vec::new(),
+                unresolved: 4,
+                cut: false,
+            }),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 0,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        app.handle_action(Action::Activate, now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No tracks found (4 missing)"), "{screen}");
+        app.handle_action(Action::Parent, now);
+        app.handle_action(Action::Parent, now);
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No music found in /music"), "{screen}");
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 0,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("No playlists (.m3u or .m3u8 files)"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_large_local_album_list_renders_only_visible_rows() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        let tracks: Vec<Track> = (0..20_000)
+            .map(|i| {
+                album_track(
+                    &format!("d/{i:05}.flac"),
+                    "t",
+                    &format!("Artist {}", i % 997),
+                    "",
+                    &format!("Album {i}"),
+                )
+            })
+            .collect();
+        app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        local_press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(app.library_row_count(), 20_000);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut view = ViewState::default();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        assert!(built <= 19, "built {built} rows");
     }
 
     // ----- Navidrome Home, playlists and album lists ---------------------

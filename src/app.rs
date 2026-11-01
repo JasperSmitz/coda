@@ -11,8 +11,10 @@
 //! that cannot be resolved is fed back to the player as a failed track, so
 //! the queue advances exactly as for a missing file.
 //!
-//! The Library panel has two sources: the local tree and, when configured,
-//! Navidrome ([`navidrome::browse::Browser`]). Remote lists are fetched in
+//! The Library panel has two sources: the local library ([`Library`],
+//! browsed from its Home with [`LocalBrowser`]: playlists, folders,
+//! artists, albums) and, when configured, Navidrome
+//! ([`navidrome::browse::Browser`]). Remote lists are fetched in
 //! the background: [`App`] queues fetch requests as data
 //! ([`App::take_fetch_requests`]) and the loop spawns them, at most
 //! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
@@ -54,9 +56,10 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use crate::library::browse::{self as local, LocalBrowser, Row as LocalRow};
 use crate::library::scan::{self, ScanEvent};
 use crate::library::search::{self, SearchResults};
-use crate::library::tree::{DirNode, LibraryTree};
+use crate::library::{Library, MAX_PLAYLISTS};
 use crate::line_input::LineInput;
 use crate::model::Track;
 use crate::model::TrackSource;
@@ -139,13 +142,14 @@ pub enum Action {
     Activate,
     /// Library: go to the parent directory or previous view.
     Parent,
-    /// Library: enqueue the track, all tracks below the directory, or a
-    /// remote album, playlist or artist.
+    /// Library: enqueue the track, all tracks below the directory, or an
+    /// album, playlist or artist (local or remote).
     Enqueue,
     /// Library (`A`): like [`Action::Enqueue`], but "play next": after the
     /// current entry, behind earlier "play next" tracks.
     EnqueueNext,
-    /// Library (`o`): show a Navidrome album list in the next sort order.
+    /// Library (`o`): show an album list (local or Navidrome) in the next
+    /// sort order.
     CycleSort,
     /// `1`: show the local library (focuses the Library panel).
     SelectLocal,
@@ -241,13 +245,6 @@ pub enum ScanState {
     NoLibrary,
 }
 
-/// One row of the library panel: sub-directories first, then tracks.
-#[derive(Debug, Clone, Copy)]
-pub enum LibraryRow<'a> {
-    Dir(&'a DirNode),
-    Track(&'a Track),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusMessage {
     pub text: String,
@@ -267,22 +264,14 @@ pub struct LocalSearch {
     pub selected: usize,
 }
 
-/// Identity of a library row, used to keep the selection on the same item
-/// while scan batches insert rows around it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RowKey {
-    Dir(String),
-    Track(PathBuf),
-}
-
 #[derive(Debug)]
 pub struct App {
     player: Player,
-    tree: LibraryTree,
-    /// Directory names from the library root to the open directory. The
-    /// tree only grows, so this path stays valid.
-    library_path: Vec<String>,
-    library_selected: usize,
+    /// What the scan has found so far.
+    library: Library,
+    /// Local browse navigation (Home, folders, artists, albums,
+    /// playlists).
+    local: LocalBrowser,
     queue_selected: usize,
     focus: Focus,
     help_open: bool,
@@ -368,9 +357,8 @@ impl App {
         };
         Self {
             player: Player::new(),
-            tree: LibraryTree::new(music_dir.unwrap_or_default()),
-            library_path: Vec::new(),
-            library_selected: 0,
+            library: Library::new(music_dir.unwrap_or_default()),
+            local: LocalBrowser::new(),
             queue_selected: 0,
             focus: Focus::Library,
             help_open: false,
@@ -488,16 +476,23 @@ impl App {
         &self.player
     }
 
-    pub fn tree(&self) -> &LibraryTree {
-        &self.tree
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Local browse navigation.
+    pub fn local_browser(&self) -> &LocalBrowser {
+        &self.local
     }
 
     pub fn music_dir(&self) -> &Path {
-        self.tree.root_path()
+        self.library.root_path()
     }
 
+    /// The open folder's path from the music root while a folder is shown;
+    /// empty otherwise.
     pub fn library_path(&self) -> &[String] {
-        &self.library_path
+        self.local.folder_path()
     }
 
     pub fn focus(&self) -> Focus {
@@ -619,48 +614,23 @@ impl App {
             .map(|s| s.text.as_str())
     }
 
-    /// The open library directory.
-    pub fn library_dir(&self) -> &DirNode {
-        let path: Vec<&str> = self.library_path.iter().map(String::as_str).collect();
-        // The tree never shrinks, so the path always resolves; fall back to
-        // the root defensively.
-        self.tree.dir(&path).unwrap_or_else(|| self.tree.root())
+    pub fn library_rows(&self) -> Vec<LocalRow<'_>> {
+        self.local.rows(&self.library, 0, usize::MAX)
     }
 
-    pub fn library_rows(&self) -> Vec<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        dir.dirs()
-            .iter()
-            .map(LibraryRow::Dir)
-            .chain(dir.tracks().iter().map(LibraryRow::Track))
-            .collect()
-    }
-
-    /// Number of rows in the open directory.
+    /// Number of rows in the shown local view.
     pub fn library_row_count(&self) -> usize {
-        self.library_len()
+        self.local.len(&self.library)
     }
 
     /// At most `len` rows starting at row `start`, without building the rest.
-    pub fn library_rows_window(&self, start: usize, len: usize) -> Vec<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        dir.dirs()
-            .iter()
-            .map(LibraryRow::Dir)
-            .chain(dir.tracks().iter().map(LibraryRow::Track))
-            .skip(start)
-            .take(len)
-            .collect()
-    }
-
-    fn library_len(&self) -> usize {
-        let dir = self.library_dir();
-        dir.dirs().len() + dir.tracks().len()
+    pub fn library_rows_window(&self, start: usize, len: usize) -> Vec<LocalRow<'_>> {
+        self.local.rows(&self.library, start, len)
     }
 
     /// Selected library row index; always in range when there are rows.
     pub fn library_selected(&self) -> usize {
-        self.library_selected
+        self.local.selected()
     }
 
     /// Selected queue row index; always in range when there are entries.
@@ -668,35 +638,13 @@ impl App {
         self.queue_selected
     }
 
-    fn selected_row(&self) -> Option<LibraryRow<'_>> {
-        let dir = self.library_dir();
-        let i = self.library_selected;
-        match dir.dirs().get(i) {
-            Some(d) => Some(LibraryRow::Dir(d)),
-            None => dir
-                .tracks()
-                .get(i - dir.dirs().len())
-                .map(LibraryRow::Track),
-        }
-    }
-
-    fn selected_key(&self) -> Option<RowKey> {
-        self.selected_row().map(|row| match row {
-            LibraryRow::Dir(d) => RowKey::Dir(d.name().to_owned()),
-            LibraryRow::Track(t) => RowKey::Track(t.local_path().unwrap_or(Path::new("")).into()),
-        })
-    }
-
-    fn row_index(&self, key: &RowKey) -> Option<usize> {
-        let dir = self.library_dir();
-        match key {
-            RowKey::Dir(name) => dir.dirs().iter().position(|d| d.name() == name),
-            RowKey::Track(path) => dir
-                .tracks()
-                .iter()
-                .position(|t| t.local_path() == Some(path.as_path()))
-                .map(|i| i + dir.dirs().len()),
-        }
+    /// Library keys act on the local browser (not search results, and
+    /// not while there is no local library to show).
+    fn local_browse_active(&self) -> bool {
+        self.focus == Focus::Library
+            && self.source == Source::Local
+            && self.local_search.is_none()
+            && self.scan != ScanState::NoLibrary
     }
 
     // ----- inputs ------------------------------------------------------
@@ -773,8 +721,8 @@ impl App {
                     self.browser_mut().go_up();
                 } else if self.local_results_active() {
                     self.local_search = None;
-                } else if self.focus == Focus::Library {
-                    self.go_to_parent();
+                } else if self.local_browse_active() {
+                    self.local.go_up(&self.library);
                 }
                 Vec::new()
             }
@@ -802,7 +750,7 @@ impl App {
                     self.apply_job_outcomes(outcomes, now);
                 } else if self.local_results_active() {
                     self.enqueue_search_result(placement, now);
-                } else if self.focus == Focus::Library {
+                } else if self.local_browse_active() {
                     self.enqueue_selected(placement, now);
                 }
                 Vec::new()
@@ -810,6 +758,8 @@ impl App {
             Action::CycleSort => {
                 if self.remote_active() {
                     self.browser_mut().cycle_album_sort();
+                } else if self.local_browse_active() {
+                    self.local.cycle_album_order(&self.library);
                 }
                 Vec::new()
             }
@@ -1175,13 +1125,20 @@ impl App {
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
         match event {
             ScanEvent::Batch(tracks) => {
-                let key = self.selected_key();
-                self.tree.extend(tracks);
+                let key = self.local.selected_key(&self.library);
+                self.library.extend(tracks);
                 if let ScanState::Scanning { tracks } = &mut self.scan {
-                    *tracks = self.tree.len();
+                    *tracks = self.library.len();
                 }
-                self.library_selected = key.and_then(|k| self.row_index(&k)).unwrap_or(0);
+                self.local.reselect(&self.library, key);
                 self.clamp_selections();
+            }
+            ScanEvent::Playlist(file) => {
+                let key = self.local.selected_key(&self.library);
+                if self.library.add_playlist(file).is_none() {
+                    tracing::debug!(max = MAX_PLAYLISTS, "playlist over the cap ignored");
+                }
+                self.local.reselect(&self.library, key);
             }
             ScanEvent::Finished {
                 tracks,
@@ -1195,6 +1152,10 @@ impl App {
                     errors,
                 };
                 let mut text = format!("Library scan complete: {}", count(tracks, "track"));
+                let playlists = self.library.playlists().len();
+                if playlists > 0 {
+                    text.push_str(&format!(", {}", count(playlists, "playlist")));
+                }
                 if skipped > 0 {
                     text.push_str(&format!(", {skipped} skipped"));
                 }
@@ -1258,9 +1219,7 @@ impl App {
     }
 
     fn clamp_selections(&mut self) {
-        self.library_selected = self
-            .library_selected
-            .min(self.library_len().saturating_sub(1));
+        self.local.clamp(&self.library);
         self.queue_selected = self
             .queue_selected
             .min(self.player.queue().len().saturating_sub(1));
@@ -1280,33 +1239,31 @@ impl App {
                 .min(search.results.tracks.len().saturating_sub(1));
             return;
         }
-        let len = match self.focus {
-            Focus::Library => self.library_len(),
-            Focus::Queue => self.player.queue().len(),
-        };
-        let selected = match self.focus {
-            Focus::Library => &mut self.library_selected,
-            Focus::Queue => &mut self.queue_selected,
-        };
-        *selected = selected
-            .saturating_add_signed(delta)
-            .min(len.saturating_sub(1));
+        match self.focus {
+            Focus::Library if self.local_browse_active() => {
+                self.local.move_selection(&self.library, delta);
+            }
+            Focus::Library => {}
+            Focus::Queue => {
+                self.queue_selected = self
+                    .queue_selected
+                    .saturating_add_signed(delta)
+                    .min(self.player.queue().len().saturating_sub(1));
+            }
+        }
     }
 
     fn activate_library(&mut self, now: Instant) -> Vec<PlayerCommand> {
-        match self.selected_row() {
-            Some(LibraryRow::Dir(dir)) => {
-                let name = dir.name().to_owned();
-                self.library_path.push(name);
-                self.library_selected = 0;
-                Vec::new()
-            }
-            Some(LibraryRow::Track(track)) => {
-                let track = track.clone();
+        if !self.local_browse_active() {
+            return Vec::new();
+        }
+        match self.local.activate(&self.library) {
+            local::Activated::Play(id) => {
+                let track = self.library.track(id).clone();
                 self.set_status(format!("Playing {}", track.display_name()), now);
                 self.player.play_track_now(track)
             }
-            None => Vec::new(),
+            local::Activated::Opened | local::Activated::Nothing => Vec::new(),
         }
     }
 
@@ -1317,7 +1274,7 @@ impl App {
         let Some(input) = self.local_input.take() else {
             return;
         };
-        let Some(results) = search::search(&self.tree, input.as_str()) else {
+        let Some(results) = search::search(self.library.tree(), input.as_str()) else {
             return;
         };
         // A failed scan also left only part of the library.
@@ -1455,23 +1412,20 @@ impl App {
         }
     }
 
-    fn go_to_parent(&mut self) {
-        let Some(left) = self.library_path.pop() else {
+    /// `a`/`A` in the local browser: the selected track, or every track
+    /// of the selected folder, artist, album or playlist, in order.
+    fn enqueue_selected(&mut self, placement: Placement, now: Instant) {
+        let Some(ids) = self.local.selected_tracks(&self.library) else {
             return;
         };
-        self.library_selected = self.row_index(&RowKey::Dir(left)).unwrap_or(0);
-    }
-
-    fn enqueue_selected(&mut self, placement: Placement, now: Instant) {
-        let tracks: Vec<Track> = match self.selected_row() {
-            Some(LibraryRow::Track(track)) => vec![track.clone()],
-            Some(LibraryRow::Dir(dir)) => {
-                let mut tracks = Vec::new();
-                collect_tracks(dir, &mut tracks);
-                tracks
-            }
-            None => return,
-        };
+        if ids.is_empty() {
+            self.set_status("Nothing to add", now);
+            return;
+        }
+        let tracks = ids
+            .into_iter()
+            .map(|id| self.library.track(id).clone())
+            .collect();
         self.enqueue_with_status(tracks, placement, now);
     }
 
@@ -1562,15 +1516,6 @@ impl App {
             None => Vec::new(),
         }
     }
-}
-
-/// All tracks below `dir` in browse order: sub-directories first (each
-/// recursively), then the directory's own tracks.
-fn collect_tracks(dir: &DirNode, out: &mut Vec<Track>) {
-    for sub in dir.dirs() {
-        collect_tracks(sub, out);
-    }
-    out.extend(dir.tracks().iter().cloned());
 }
 
 /// `1 track`, `1,234 tracks`.
@@ -2431,6 +2376,7 @@ mod tests {
         );
     }
 
+    /// An app with `rels` scanned, showing Folders.
     fn app_with(rels: &[&str]) -> (App, Instant) {
         let now = Instant::now();
         let mut app = App::new(ROOT.into());
@@ -2438,15 +2384,34 @@ mod tests {
             ScanEvent::Batch(rels.iter().map(|r| track(r)).collect()),
             now,
         );
+        open_local(&mut app, local::HomeEntry::Folders, now);
         (app, now)
+    }
+
+    /// Goes back to the local Home and opens `entry`.
+    fn open_local(app: &mut App, entry: local::HomeEntry, now: Instant) {
+        while *app.local_browser().current() != local::View::Home {
+            app.handle_action(Action::Parent, now);
+        }
+        let at = local::HOME_ENTRIES
+            .iter()
+            .position(|e| *e == entry)
+            .unwrap();
+        press(app, &[Action::Up; 4], now);
+        press(app, &vec![Action::Down; at], now);
+        press(app, &[Action::Activate], now);
     }
 
     fn row_names(app: &App) -> Vec<String> {
         app.library_rows()
             .iter()
             .map(|row| match row {
-                LibraryRow::Dir(d) => format!("{}/", d.name()),
-                LibraryRow::Track(t) => t.title.clone(),
+                LocalRow::Home(e) => e.label().to_owned(),
+                LocalRow::Dir(d) => format!("{}/", d.name()),
+                LocalRow::Track(_, t) => t.title.clone(),
+                LocalRow::Artist(a) => a.name().to_owned(),
+                LocalRow::Album(album, artist) => format!("{} — {}", album.name(), artist.name()),
+                LocalRow::Playlist(p) => p.name.clone(),
             })
             .collect()
     }
@@ -2505,13 +2470,17 @@ mod tests {
         press(&mut app, &[Action::Parent], now);
         assert!(app.library_path().is_empty());
         assert_eq!(selected_name(&app), "b/");
-        // Parent at the root is a no-op.
+        // Parent at the folder root goes to Home, on Folders.
         press(&mut app, &[Action::Parent], now);
-        assert_eq!(selected_name(&app), "b/");
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        assert_eq!(selected_name(&app), "Folders");
+        // Parent at Home is a no-op.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Folders");
         // Nested.
         press(
             &mut app,
-            &[Action::Up, Action::Activate, Action::Activate],
+            &[Action::Activate, Action::Activate, Action::Activate],
             now,
         );
         assert_eq!(app.library_path(), ["a", "x"]);
@@ -2561,21 +2530,33 @@ mod tests {
 
     #[test]
     fn selection_is_valid_on_an_empty_library() {
-        let mut app = App::new(ROOT.into());
         let now = Instant::now();
-        assert!(app.library_rows().is_empty());
-        let commands = press(
-            &mut app,
-            &[
-                Action::Down,
-                Action::Activate,
-                Action::Enqueue,
-                Action::Parent,
-            ],
-            now,
-        );
-        assert!(commands.is_empty());
-        assert_eq!(app.library_selected(), 0);
+        for entry in local::HOME_ENTRIES {
+            let mut app = App::new(ROOT.into());
+            // Home is there before anything is scanned.
+            assert_eq!(
+                row_names(&app),
+                ["Playlists", "Folders", "Artists", "Albums"]
+            );
+            open_local(&mut app, entry, now);
+            assert!(app.library_rows().is_empty(), "{entry:?}");
+            let commands = press(
+                &mut app,
+                &[
+                    Action::Down,
+                    Action::Activate,
+                    Action::Enqueue,
+                    Action::EnqueueNext,
+                    Action::CycleSort,
+                ],
+                now,
+            );
+            assert!(commands.is_empty());
+            assert_eq!(app.library_selected(), 0);
+            assert!(app.player().queue().is_empty());
+        }
+        let mut app = App::new(ROOT.into());
+        open_local(&mut app, local::HomeEntry::Folders, now);
         app.handle_scan_event(ScanEvent::Batch(vec![track("a.flac")]), now);
         assert_eq!(selected_name(&app), "a");
     }
@@ -2636,6 +2617,10 @@ mod tests {
             ]),
             now,
         );
+        // Home entries add nothing.
+        press(&mut app, &[Action::Enqueue, Action::EnqueueNext], now);
+        assert!(app.player().queue().is_empty());
+        open_local(&mut app, local::HomeEntry::Folders, now);
         let commands = press(&mut app, &[Action::Enqueue], now);
         assert!(commands.is_empty(), "enqueue does not start playback");
         assert_eq!(queue_titles(&app), ["w", "y", "x", "a-side", "b-side"]);
@@ -3243,6 +3228,290 @@ mod tests {
         assert_eq!(queue_titles(&app), ["a", "a*", "b", "1", "2", "b", "b"]);
     }
 
+    // ----- local Home, tag lists and playlists ---------------------------
+
+    /// A local track with tags: `artist` and `album_artist` may be empty
+    /// (absent).
+    fn tagged(rel: &str, title: &str, artist: &str, album_artist: &str, album: &str) -> Track {
+        let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        Track::local(
+            format!("{ROOT}/{rel}").into(),
+            TrackMetadata {
+                title: some(title),
+                artist: some(artist),
+                album_artist: some(album_artist),
+                album: some(album),
+                track_no: rel
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.get(..2))
+                    .and_then(|n| n.parse().ok()),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    /// Two artists, a compilation and an untagged file.
+    fn tag_library() -> Vec<Track> {
+        vec![
+            tagged("m/x/02.flac", "M Two", "Miles", "", "Kind"),
+            tagged("m/x/01.flac", "M One", "miles", "", "kind"),
+            tagged("m/y/01.flac", "Y One", "Miles", "", "Blue"),
+            tagged("c/01.flac", "C One", "Guest", "Various", "Hits"),
+            tagged("c/02.flac", "C Two", "Miles", "Various", "Hits"),
+            tagged("loose.flac", "", "", "", ""),
+        ]
+    }
+
+    fn tag_app() -> (App, Instant) {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        app.handle_scan_event(ScanEvent::Batch(tag_library()), now);
+        (app, now)
+    }
+
+    fn path_titles(app: &App) -> Vec<String> {
+        app.local_browser().path_titles(app.library())
+    }
+
+    fn local_playlist(name: &str, rels: &[&str], unresolved: usize) -> ScanEvent {
+        ScanEvent::Playlist(crate::library::m3u::PlaylistFile {
+            path: format!("{ROOT}/{name}.m3u").into(),
+            name: name.into(),
+            entries: rels.iter().map(|r| format!("{ROOT}/{r}").into()).collect(),
+            unresolved,
+            cut: false,
+        })
+    }
+
+    #[test]
+    fn local_home_opens_each_list_and_h_goes_back_up_to_home() {
+        let (mut app, now) = tag_app();
+        assert_eq!(
+            row_names(&app),
+            ["Playlists", "Folders", "Artists", "Albums"]
+        );
+        assert!(path_titles(&app).is_empty());
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        // "Miles" is the more common spelling.
+        assert_eq!(row_names(&app), ["Miles", "Various", "Unknown artist"]);
+        assert_eq!(path_titles(&app), ["Artists"]);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(row_names(&app), ["Blue — Miles", "Kind — Miles"]);
+        press(&mut app, &[Action::Down, Action::Activate], now);
+        assert_eq!(row_names(&app), ["M One", "M Two"]);
+        assert_eq!(path_titles(&app), ["Artists", "Miles", "Kind"]);
+        // `h` back up: each level re-selects what it opened, ending at Home.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Kind — Miles");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Miles");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Artists");
+        press(&mut app, &[Action::Parent, Action::Parent], now);
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        // Albums: every album with its artist, A–Z by name.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+        assert_eq!(
+            row_names(&app),
+            [
+                "Blue — Miles",
+                "Hits — Various",
+                "Kind — Miles",
+                "Unknown album — Unknown artist"
+            ]
+        );
+        // Search from a list returns to it.
+        local_search_for(&mut app, "one", now);
+        assert_eq!(local_titles(&app), ["C One", "M One", "Y One"]);
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+        // Folders is the tree, unchanged.
+        open_local(&mut app, local::HomeEntry::Folders, now);
+        assert_eq!(row_names(&app), ["c/", "m/", "loose"]);
+        assert_eq!(path_titles(&app), ["Folders"]);
+        press(
+            &mut app,
+            &[Action::Down, Action::Activate, Action::Activate],
+            now,
+        );
+        assert_eq!(path_titles(&app), ["Folders", "m", "x"]);
+    }
+
+    #[test]
+    fn o_cycles_the_local_album_order_and_keeps_the_selected_album() {
+        let (mut app, now) = tag_app();
+        // Outside the Albums list, `o` does nothing.
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Down], now);
+        assert_eq!(selected_name(&app), "Hits — Various");
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(path_titles(&app), ["Albums (by artist)"]);
+        assert_eq!(
+            row_names(&app),
+            [
+                "Blue — Miles",
+                "Kind — Miles",
+                "Hits — Various",
+                "Unknown album — Unknown artist"
+            ]
+        );
+        assert_eq!(selected_name(&app), "Hits — Various");
+        // Home → Albums reopens the order last chosen.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        assert_eq!(path_titles(&app), ["Albums (by artist)"]);
+        press(&mut app, &[Action::CycleSort], now);
+        assert_eq!(path_titles(&app), ["Albums (A–Z)"]);
+    }
+
+    #[test]
+    fn local_lists_fill_in_during_a_scan_and_keep_the_selection() {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        assert!(app.library_rows().is_empty());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("1.flac", "a", "Moby", "", "Play")]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["Moby"]);
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                tagged("2.flac", "b", "ABBA", "", "Gold"),
+                tagged("3.flac", "c", "Zappa", "", "Apostrophe"),
+            ]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["ABBA", "Moby", "Zappa"]);
+        assert_eq!(selected_name(&app), "Moby");
+        // Inside an album, a track arriving before the selection.
+        press(&mut app, &[Action::Activate, Action::Activate], now);
+        assert_eq!(row_names(&app), ["a"]);
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![tagged("0.flac", "0", "Moby", "", "Play")]),
+            now,
+        );
+        assert_eq!(row_names(&app), ["0", "a"]);
+        assert_eq!(selected_name(&app), "a");
+        // Playlists arrive after the tracks.
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        assert!(app.library_rows().is_empty());
+        app.handle_scan_event(local_playlist("Road", &["1.flac"], 0), now);
+        app.handle_scan_event(local_playlist("Alpha", &[], 0), now);
+        assert_eq!(row_names(&app), ["Alpha", "Road"]);
+        assert_eq!(selected_name(&app), "Road");
+        app.handle_scan_event(local_playlist("Morning", &[], 0), now);
+        assert_eq!(row_names(&app), ["Alpha", "Morning", "Road"]);
+        assert_eq!(selected_name(&app), "Road");
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 4,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        assert_eq!(
+            app.status(now),
+            Some("Library scan complete: 4 tracks, 3 playlists")
+        );
+    }
+
+    #[test]
+    fn local_artist_album_and_playlist_enqueue_in_order() {
+        let (mut app, now) = tag_app();
+        app.handle_scan_event(
+            local_playlist(
+                "Mix",
+                &["c/02.flac", "m/x/01.flac", "gone.flac", "c/02.flac"],
+                2,
+            ),
+            now,
+        );
+        // `a` on an artist: albums A–Z, each in track order.
+        open_local(&mut app, local::HomeEntry::Artists, now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(queue_titles(&app), ["Y One", "M One", "M Two"]);
+        assert_eq!(app.status(now), Some("Added 3 tracks"));
+        // Play the first, then `A` an album and a playlist: both next, in
+        // press order, the playlist with its duplicate.
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::Activate, Action::SwitchFocus],
+            now,
+        );
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Down, Action::EnqueueNext], now);
+        assert_eq!(app.status(now), Some("Playing next: 2 tracks"));
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        assert_eq!(row_names(&app), ["Mix"]);
+        press(&mut app, &[Action::EnqueueNext], now);
+        assert_eq!(
+            queue_titles(&app),
+            [
+                "Y One*", "C One", "C Two", "C Two", "M One", "C Two", "M One", "M Two"
+            ]
+        );
+        // Inside the playlist: matched tracks in file order, duplicates
+        // kept; Enter plays one.
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(path_titles(&app), ["Playlists", "Mix"]);
+        assert_eq!(row_names(&app), ["C Two", "M One", "C Two"]);
+        let commands = press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        assert_eq!(load_path(&commands), PathBuf::from("/music/c/02.flac"));
+        // The selection stays on the second "C Two" as batches arrive.
+        app.handle_scan_event(ScanEvent::Batch(vec![track("z.flac")]), now);
+        assert_eq!(app.library_selected(), 2);
+        // `a` on an album row and on a track in an album.
+        open_local(&mut app, local::HomeEntry::Albums, now);
+        press(&mut app, &[Action::Up; 4], now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert_eq!(app.status(now), Some("Added Miles - Y One"));
+        press(&mut app, &[Action::Activate, Action::Enqueue], now);
+        assert_eq!(app.status(now), Some("Added Miles - Y One"));
+    }
+
+    #[test]
+    fn an_empty_playlist_adds_nothing() {
+        let (mut app, now) = tag_app();
+        app.handle_scan_event(local_playlist("Gone", &["nope.flac"], 1), now);
+        open_local(&mut app, local::HomeEntry::Playlists, now);
+        press(&mut app, &[Action::Enqueue], now);
+        assert!(app.player().queue().is_empty());
+        assert_eq!(app.status(now), Some("Nothing to add"));
+        press(&mut app, &[Action::Activate], now);
+        assert!(app.library_rows().is_empty());
+        assert!(press(&mut app, &[Action::Activate, Action::Enqueue], now).is_empty());
+    }
+
+    #[test]
+    fn without_a_local_library_local_keys_do_nothing() {
+        let now = Instant::now();
+        let mut app = App::with_sources(None, Some(client()));
+        press(&mut app, &[Action::SelectLocal], now);
+        let commands = press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Activate,
+                Action::Activate,
+                Action::Enqueue,
+                Action::CycleSort,
+            ],
+            now,
+        );
+        assert!(commands.is_empty());
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        assert_eq!(app.library_selected(), 0);
+    }
+
     #[test]
     fn play_next_with_nothing_current_appends() {
         let (mut app, now) = app_with(&["a.flac", "b.flac"]);
@@ -3513,6 +3782,7 @@ mod tests {
             ScanEvent::Batch(vec![track("d/1.flac"), track("d/2.flac")]),
             now,
         );
+        open_local(&mut app, local::HomeEntry::Folders, now);
         press(&mut app, &[Action::Activate, Action::Down], now);
         assert_eq!(app.library_path(), ["d"]);
         assert_eq!(selected_name(&app), "2");

@@ -153,3 +153,25 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - A legitimate response beyond 100,000 objects (e.g. more than about 100k artists) loses the excess silently.
   - A duplicate key Coda reads fails the response.
   - Browse position is not persisted; Navidrome opens on Home.
+
+## 2026-11-01 — M5 slice 2: local home, tag-based artists and albums, `.m3u` playlists
+- **Delivered:**
+  - A local Home (Playlists / Folders / Artists / Albums) with path titles and a "scanning…" note.
+  - Artists and albums grouped from tags: album artist, else artist; case- and whitespace-insensitive keys; unknowns last. `o` sorts albums A–Z or by artist.
+  - `.m3u`/`.m3u8` playlists collected by the scan and resolved without touching the file system, inside the canonical root only. Windows `\` separators are supported, and the rows show missing counts.
+  - Each track is stored once in `LibraryTree` (`TrackId`).
+  - `album_artist` is optional in `state.json`, which stays version 1.
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (523 lib + integration) pass. On the pre-polish tree the developer ran the 20 ignored mpv tests and the Debian container (clippy and tests), all passing.
+  - PTY smoke against generated tagged FLACs and hostile playlists: 36/36.
+  - 50k tracks: worst batch about 2.8 ms on the input loop.
+- **Review:** one round, nothing blocking; 400k-entry randomised resolve check against a real tree with symlinks found no escape. Polish fixed:
+  - a too-broad URL detection
+  - Windows separators
+  - `O_NOCTTY`
+  - a symlinked-folder integration test
+- **Limitations:**
+  - Playlist matching has no Unicode normalisation and is case-sensitive.
+  - Absolute entries must use the canonical root.
+  - Folders holding only playlists don't appear under Folders.
+  - `l` is unbound (M6).

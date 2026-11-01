@@ -231,6 +231,10 @@ struct EntryFile {
     artist: Option<String>,
     #[serde(default)]
     album: Option<String>,
+    /// Added after version 1 shipped: optional, and left out when absent,
+    /// so files with and without it are both version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    album_artist: Option<String>,
     #[serde(default)]
     track_no: Option<u32>,
     #[serde(default)]
@@ -272,6 +276,7 @@ impl EntryFile {
             title: Some(track.title.clone()),
             artist: track.artist.clone(),
             album: track.album.clone(),
+            album_artist: track.album_artist.clone(),
             track_no: track.track_no,
             disc_no: track.disc_no,
             duration_ms: track
@@ -287,6 +292,7 @@ impl EntryFile {
             title: self.title,
             artist: self.artist,
             album: self.album,
+            album_artist: self.album_artist,
             track_no: self.track_no,
             disc_no: self.disc_no,
             duration: self.duration_ms.map(Duration::from_millis),
@@ -516,6 +522,7 @@ mod tests {
                 title: Some(title.into()),
                 artist: Some("Artist".into()),
                 album: Some("Album".into()),
+                album_artist: Some("Album Artist".into()),
                 track_no: Some(3),
                 disc_no: Some(1),
                 duration: Some(Duration::from_millis(183_250)),
@@ -568,6 +575,38 @@ mod tests {
         let empty = Session::default();
         save(&path, &empty).unwrap();
         assert_eq!(load(&path).0, empty);
+    }
+
+    #[test]
+    fn album_artist_is_optional_within_version_1() {
+        // A version 1 file written before `album_artist` existed.
+        let old = br#"{"version":1,"volume":50,"repeat":"off","current":0,
+            "queue":[{"source":{"local":"/music/a.flac"},"title":"A",
+            "artist":"X","album":"Y","track_no":1,"disc_no":null,"duration_ms":1000}]}"#;
+        let (session, skipped) = decode(old).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(session.tracks[0].album_artist, None);
+        assert_eq!(session.tracks[0].artist.as_deref(), Some("X"));
+        // Absent: left out of the file, which stays version 1.
+        let json = String::from_utf8(encode(&session).unwrap()).unwrap();
+        assert!(!json.contains("album_artist"), "{json}");
+        assert!(json.contains(r#""version":1"#), "{json}");
+        // Present: kept through a round trip, capped like other tags.
+        let mut with = sample();
+        with.tracks[0].album_artist = Some("Album Artist".into());
+        let json = encode(&with).unwrap();
+        assert!(String::from_utf8_lossy(&json).contains(r#""album_artist":"Album Artist""#));
+        assert_eq!(decode(&json).unwrap().0, with);
+        let long = format!(
+            r#"{{"version":1,"volume":50,"repeat":"off","current":null,
+            "queue":[{{"source":{{"navidrome":"s"}},"album_artist":"{}"}}]}}"#,
+            "x".repeat(10_000)
+        );
+        let (session, _) = decode(long.as_bytes()).unwrap();
+        assert_eq!(
+            session.tracks[0].album_artist.as_ref().unwrap().len(),
+            MAX_METADATA_CHARS
+        );
     }
 
     #[test]

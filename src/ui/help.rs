@@ -16,7 +16,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("a / A", "Add / play next (track, album, …)"),
     ("1 / 2", "Local / Navidrome library"),
     ("/", "Search (Enter run, Esc cancel)"),
-    ("r / o", "Refresh / sort albums (Navidrome)"),
+    ("r / o", "Refresh (Navidrome) / sort albums"),
     ("d", "Remove entry (queue)"),
     ("J / K", "Move entry down / up (queue)"),
     ("g", "Select current entry (queue)"),
