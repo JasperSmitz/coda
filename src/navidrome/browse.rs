@@ -37,18 +37,40 @@
 //!   one when the Navidrome account changes). Its requests carry it, and
 //!   a response from another generation is ignored, so nothing fetched
 //!   from an old server lands in the new browser.
+//!
+//! Playlist editing (the user's own playlists only, by the `owner` the
+//! server reports):
+//! - Changes are [`EditRequest`]s, queued and handed out one at a time
+//!   ([`Browser::take_edit_requests`]); the loop runs each as a small
+//!   sequential job ([`super::edit`]) and feeds the [`EditResponse`] back
+//!   ([`Browser::handle_edit_response`]). A response from another
+//!   generation is ignored, so an edit in flight across an account swap
+//!   is dropped.
+//! - "Add to playlist" reuses the enqueue jobs: a job's destination is the
+//!   queue or a playlist, and a playlist job turns into an edit in its
+//!   turn. The picker lists "New playlist…" and the user's own playlists
+//!   A–Z.
+//! - Moving songs in a playlist view changes a local draft (one at a
+//!   time), shown instead of the cached list until it is saved (one
+//!   replace) or discarded.
+//! - After every edit, the Playlists list and the playlist are reloaded: a
+//!   shown list is refetched with a new request that supersedes any one
+//!   in flight (whose answer is then neither cached nor shown); a list no
+//!   view shows is only dropped from the cache.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::{Semaphore, mpsc};
 
-use super::api::MAX_ALBUM_LIST_SIZE;
+use super::api::{MAX_ALBUM_LIST_SIZE, MAX_PLAYLIST_ENTRIES};
+use super::edit::{EditId, EditOp, EditRequest, EditResponse, EditResult};
 use super::{
-    Album, AlbumPage, AlbumSort, Artist, Client, Error, Playlist, PlaylistSongs, SearchResults,
+    Access, Album, AlbumPage, AlbumSort, Artist, Client, Error, Hidden, Playlist, PlaylistSongs,
+    SearchResults,
 };
 use crate::line_input::LineInput;
-use crate::model::Track;
+use crate::model::{Track, thousands};
 use crate::queue::Placement;
 
 pub use crate::line_input::MAX_QUERY_CHARS;
@@ -68,6 +90,48 @@ pub const DEFAULT_VIEWPORT_ROWS: usize = 40;
 pub const HOME_TITLE: &str = "Home";
 pub const ARTISTS_TITLE: &str = "Artists";
 pub const PLAYLISTS_TITLE: &str = "Playlists";
+/// Upper bound on the songs one edit adds (the playlist entry cap).
+pub const MAX_EDIT_SONGS: usize = MAX_PLAYLIST_ENTRIES;
+/// After an edit refused because the playlist changed on the server.
+pub const STALE_PLAYLIST: &str = "Playlist changed on the server; reloaded";
+/// Refusals of edits to a playlist the user may not change.
+pub const READ_ONLY_OTHER: &str = "Read-only: this playlist belongs to another user";
+pub const READ_ONLY_FLAGGED: &str = "Read-only: the server does not allow changing this playlist";
+pub const READ_ONLY_UNKNOWN: &str = "Read-only: the server does not say who owns this playlist";
+/// Refusal of index-based edits when not every entry could be read.
+pub const INCOMPLETE_PLAYLIST: &str =
+    "This playlist has entries Coda cannot show; edit it in Navidrome";
+/// Refusal while the shown playlist has an unsaved order.
+pub const UNSAVED_ORDER: &str = "Unsaved order: w saves, Esc discards";
+/// Refusal while an earlier edit of the same playlist has not answered.
+pub const WAITING_FOR_EDIT: &str = "Waiting for the previous change…";
+/// Refusal while the new order is being saved.
+pub const SAVING_ORDER: &str = "Saving the new order…";
+/// After Esc on an unsaved order.
+pub const ORDER_DISCARDED: &str = "New order discarded";
+/// Refusal of removing a playlist's only song (Navidrome ignores an empty
+/// replace).
+pub const LAST_SONG: &str = "Cannot remove the last song; delete the playlist instead";
+/// Title suffix of a playlist with an unsaved order.
+pub const MODIFIED: &str = " (modified)";
+/// The first row of the playlist picker.
+pub const NEW_PLAYLIST_ROW: &str = "New playlist…";
+
+/// Why `username` may not edit a playlist with `access`. Another owner
+/// comes first: Navidrome also flags other users' playlists `readonly`.
+pub fn read_only_reason(access: &Access, username: &str) -> &'static str {
+    match &access.owner {
+        Some(owner) if owner.to_lowercase() != username.to_lowercase() => READ_ONLY_OTHER,
+        _ if access.readonly => READ_ONLY_FLAGGED,
+        None => READ_ONLY_UNKNOWN,
+        Some(_) => READ_ONLY_FLAGGED,
+    }
+}
+
+/// `1 song`, `1,234 songs`.
+fn songs_text(n: usize) -> String {
+    format!("{} song{}", thousands(n), if n == 1 { "" } else { "s" })
+}
 
 /// An entry of the Home view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,12 +456,176 @@ enum JobTarget {
     Artist(String),
 }
 
+/// Where an enqueue job's songs go.
+#[derive(Debug, Clone)]
+enum Dest {
+    Queue(Placement),
+    /// Added to one of the user's playlists, by an edit.
+    Playlist(PlaylistDest),
+}
+
+#[derive(Debug, Clone)]
+enum PlaylistDest {
+    Existing { id: String, name: String },
+    New { name: String },
+}
+
 #[derive(Debug, Clone)]
 struct Job {
     label: String,
     target: JobTarget,
-    placement: Placement,
+    dest: Dest,
     error: Option<String>,
+}
+
+/// The playlist picker of "Add to playlist" (`P`): "New playlist…", then
+/// the user's own playlists A–Z.
+#[derive(Debug, Clone)]
+pub struct Picker {
+    /// What is added (untrusted).
+    label: String,
+    target: JobTarget,
+    /// Of the Playlists list.
+    load: Load,
+    /// The user's own playlists, A–Z, once the list is loaded.
+    choices: Vec<Playlist>,
+    /// 0 is "New playlist…"; `i` is `choices[i - 1]`.
+    selected: usize,
+    /// The id of the selected playlist (`None`: "New playlist…"), so a
+    /// reload keeps the selection on it.
+    selected_id: Option<String>,
+}
+
+impl Picker {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn load(&self) -> &Load {
+        &self.load
+    }
+
+    pub fn choices(&self) -> &[Playlist] {
+        &self.choices
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// Rows, "New playlist…" included.
+    pub fn len(&self) -> usize {
+        self.choices.len() + 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+/// What a name prompt is for.
+#[derive(Debug, Clone)]
+enum PromptKind {
+    /// A new playlist, empty or with a job's songs.
+    NewPlaylist {
+        from: Option<(String, JobTarget)>,
+    },
+    /// A new playlist with the queue's Navidrome songs.
+    SaveQueue {
+        songs: Vec<String>,
+        local: usize,
+    },
+    Rename {
+        playlist_id: String,
+        old: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct Prompt {
+    kind: PromptKind,
+    input: LineInput,
+    /// The text it was opened with (as the input holds it: possibly cut).
+    prefilled: String,
+}
+
+impl Prompt {
+    fn new(kind: PromptKind, text: &str) -> Self {
+        let input = LineInput::with_text(text);
+        Self {
+            kind,
+            prefilled: input.as_str().to_owned(),
+            input,
+        }
+    }
+}
+
+/// A changed order of a playlist, not yet saved.
+#[derive(Debug, Clone)]
+struct Draft {
+    playlist_id: String,
+    /// The entries (song ids, in order) the change started from.
+    base: Vec<String>,
+    /// The reordered songs, shown instead of the cached list.
+    songs: Content,
+    /// The edit saving it, while it runs. Only that edit's answer may end
+    /// the draft.
+    saving: Option<EditId>,
+}
+
+/// An entry to remove from the shown playlist; see
+/// [`Browser::removal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    pub playlist_id: String,
+    pub index: usize,
+    pub song_id: String,
+    /// The song's display name (untrusted).
+    pub song: String,
+    /// The playlist's title (untrusted).
+    pub playlist: String,
+    /// Entries the server hides, which the removal (a replace) drops.
+    pub hidden: Hidden,
+}
+
+/// What `w` needs: see [`Browser::save_order`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveOrder {
+    /// The save started, or was refused; the status message says which.
+    Message(String),
+    /// The playlist has entries the server hides, which saving would
+    /// drop: the user must confirm first.
+    Confirm(Hidden),
+}
+
+/// The warning before a change that rewrites a playlist with `hidden`
+/// entries; `again` names the key and what it does, e.g. `w again to
+/// save`. The instruction comes first, so a narrow status line cuts only
+/// the explanation.
+pub fn hidden_warning(hidden: Hidden, again: &str) -> String {
+    let what = "(missing files or other libraries)";
+    match hidden {
+        Hidden::Some(1) => {
+            format!("Press {again}: this also removes 1 entry Navidrome hides {what}")
+        }
+        Hidden::Some(n) => format!(
+            "Press {again}: this also removes {} entries Navidrome hides {what}",
+            thousands(n)
+        ),
+        Hidden::None | Hidden::Suspect => {
+            format!("Press {again}: this may also remove entries Navidrome hides {what}")
+        }
+    }
+}
+
+/// An edit waiting or running, with what its status message needs.
+#[derive(Debug, Clone)]
+struct PendingEdit {
+    request: EditRequest,
+    /// The playlist's name (the new name, for a create or rename).
+    playlist: String,
+    /// The song removed, or the old name of a renamed playlist.
+    subject: String,
 }
 
 /// Progress of enqueue jobs, in job order.
@@ -415,6 +643,9 @@ pub enum JobOutcome {
     Queued { label: String, after: String },
     /// The job's data could not be fetched; nothing is added.
     Failed { label: String, error: String },
+    /// A playlist edit was queued, or there was nothing to add to the
+    /// playlist; `message` says which.
+    Editing { message: String },
 }
 
 /// What Enter on the selected row asks for.
@@ -448,6 +679,15 @@ pub struct Browser {
     outbox: Vec<FetchRequest>,
     jobs: VecDeque<Job>,
     input: Option<LineInput>,
+    /// The Navidrome user, to tell their own playlists from others'.
+    username: String,
+    picker: Option<Picker>,
+    prompt: Option<Prompt>,
+    draft: Option<Draft>,
+    /// Edits waiting for the one running.
+    edits: VecDeque<PendingEdit>,
+    edit_running: Option<PendingEdit>,
+    next_edit_id: u64,
 }
 
 impl Browser {
@@ -460,6 +700,16 @@ impl Browser {
     pub fn with_generation(generation: Generation) -> Self {
         Self {
             generation,
+            ..Self::default()
+        }
+    }
+
+    /// A browser for the client of `generation`, logged in as `username`
+    /// (whose playlists are editable).
+    pub fn for_user(generation: Generation, username: &str) -> Self {
+        Self {
+            generation,
+            username: username.to_owned(),
             ..Self::default()
         }
     }
@@ -492,13 +742,23 @@ impl Browser {
         self.stack.last()
     }
 
-    /// The cached list of a ready view.
+    /// The cached list of a ready view (a playlist with an unsaved order
+    /// shows that order).
     pub fn content(&self, view: &View) -> Option<&Content> {
         match (&view.load, &view.resource) {
             (Load::Ready, Resource::Home) => Some(&HOME),
+            (Load::Ready, Resource::Playlist(id)) if self.draft_for(id).is_some() => {
+                self.draft_for(id).map(|d| &d.songs)
+            }
             (Load::Ready, resource) => self.cache.get(resource),
             _ => None,
         }
+    }
+
+    fn draft_for(&self, playlist_id: &str) -> Option<&Draft> {
+        self.draft
+            .as_ref()
+            .filter(|draft| draft.playlist_id == playlist_id)
     }
 
     pub fn current_content(&self) -> Option<&Content> {
@@ -534,9 +794,18 @@ impl Browser {
     }
 
     /// The view's title as shown: a playlist cut at the entry cap says
-    /// so, e.g. `Road Trip (first 10,000 of 12,345)`.
+    /// so, e.g. `Road Trip (first 10,000 of 12,345)`, and one with an
+    /// unsaved order says `(modified)`.
     pub fn title(&self, view: &View) -> String {
-        format!("{}{}", view.title, self.truncation_note(&view.resource))
+        let modified = match &view.resource {
+            Resource::Playlist(id) if self.draft_for(id).is_some() => MODIFIED,
+            _ => "",
+        };
+        format!(
+            "{}{}{modified}",
+            view.title,
+            self.truncation_note(&view.resource)
+        )
     }
 
     fn truncation_note(&self, resource: &Resource) -> String {
@@ -885,11 +1154,16 @@ impl Browser {
     /// order) at `placement`. Missing lists are fetched; the job completes
     /// after every earlier job, in its turn.
     pub fn enqueue_selected(&mut self, placement: Placement) -> Vec<JobOutcome> {
-        let Some(row) = self.selected_row() else {
-            return Vec::new();
-        };
-        let (label, target) = match row {
-            Row::Header(_) | Row::Home(_) => return Vec::new(),
+        match self.selected_target() {
+            Some((label, target)) => self.push_job(label, target, Dest::Queue(placement)),
+            None => Vec::new(),
+        }
+    }
+
+    /// What `a` (or "Add to playlist") on the selected row would add.
+    fn selected_target(&self) -> Option<(String, JobTarget)> {
+        Some(match self.selected_row()? {
+            Row::Header(_) | Row::Home(_) => return None,
             Row::Song(t) => (t.display_name(), JobTarget::Song(Box::new(t.clone()))),
             Row::Album(a) => (
                 a.name.clone(),
@@ -900,11 +1174,15 @@ impl Browser {
                 JobTarget::Songs(Resource::Playlist(p.id.clone())),
             ),
             Row::Artist(a) => (a.name.clone(), JobTarget::Artist(a.id.clone())),
-        };
+        })
+    }
+
+    /// Queues a job behind the others and starts what it needs.
+    fn push_job(&mut self, label: String, target: JobTarget, dest: Dest) -> Vec<JobOutcome> {
         self.jobs.push_back(Job {
             label: label.clone(),
             target,
-            placement,
+            dest,
             error: None,
         });
         let mut outcomes = self.pump();
@@ -974,25 +1252,37 @@ impl Browser {
     fn pump(&mut self) -> Vec<JobOutcome> {
         let mut outcomes = Vec::new();
         while let Some(job) = self.jobs.front() {
-            if let Some(error) = &job.error {
-                outcomes.push(JobOutcome::Failed {
-                    label: job.label.clone(),
-                    error: error.clone(),
-                });
+            let ready = if let Some(error) = &job.error {
+                Err(error.clone())
             } else if let Some(tracks) = self.tracks(&job.target) {
-                let note = match &job.target {
-                    JobTarget::Songs(resource) => self.truncation_note(resource),
-                    _ => String::new(),
-                };
-                outcomes.push(JobOutcome::Added {
-                    label: format!("{}{note}", job.label),
-                    tracks,
-                    placement: job.placement,
-                });
+                Ok(tracks)
             } else {
                 break;
+            };
+            let Some(job) = self.jobs.pop_front() else {
+                break;
+            };
+            match ready {
+                Err(error) => outcomes.push(JobOutcome::Failed {
+                    label: job.label,
+                    error,
+                }),
+                Ok(tracks) => {
+                    let note = match &job.target {
+                        JobTarget::Songs(resource) => self.truncation_note(resource),
+                        _ => String::new(),
+                    };
+                    let label = format!("{}{note}", job.label);
+                    outcomes.push(match job.dest {
+                        Dest::Queue(placement) => JobOutcome::Added {
+                            label,
+                            tracks,
+                            placement,
+                        },
+                        Dest::Playlist(dest) => self.add_to_playlist(&label, &tracks, dest),
+                    });
+                }
             }
-            self.jobs.pop_front();
         }
         let missing: Vec<Resource> = self
             .jobs
@@ -1004,6 +1294,664 @@ impl Browser {
             self.request_for_job(resource);
         }
         outcomes
+    }
+
+    // ----- playlist editing ----------------------------------------------
+
+    /// The Navidrome user this browser edits as.
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// The picker of "Add to playlist", while open.
+    pub fn picker(&self) -> Option<&Picker> {
+        self.picker.as_ref()
+    }
+
+    /// The name prompt, while open: its title and text.
+    pub fn prompt(&self) -> Option<(&'static str, &str)> {
+        self.prompt.as_ref().map(|prompt| {
+            let title = match prompt.kind {
+                PromptKind::NewPlaylist { .. } => "New playlist",
+                PromptKind::SaveQueue { .. } => "Save queue as playlist",
+                PromptKind::Rename { .. } => "Rename playlist",
+            };
+            (title, prompt.input.as_str())
+        })
+    }
+
+    /// Edits waiting or running.
+    pub fn pending_edits(&self) -> usize {
+        self.edits.len() + usize::from(self.edit_running.is_some())
+    }
+
+    /// `true` while the shown view is a playlist with an unsaved order:
+    /// leaving or reloading it is refused ([`UNSAVED_ORDER`]).
+    pub fn has_unsaved_order(&self) -> bool {
+        matches!(
+            self.current().map(|v| &v.resource),
+            Some(Resource::Playlist(id)) if self.draft_for(id).is_some()
+        )
+    }
+
+    /// The next edit to run, once the previous one has answered.
+    pub fn take_edit_requests(&mut self) -> Vec<EditRequest> {
+        if self.edit_running.is_some() {
+            return Vec::new();
+        }
+        match self.edits.pop_front() {
+            Some(pending) => {
+                let request = pending.request.clone();
+                self.edit_running = Some(pending);
+                vec![request]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn queue_edit(&mut self, op: EditOp, playlist: String, subject: String) -> EditId {
+        self.next_edit_id += 1;
+        let id = EditId(self.next_edit_id);
+        self.edits.push_back(PendingEdit {
+            request: EditRequest {
+                generation: self.generation,
+                id,
+                op,
+            },
+            playlist,
+            subject,
+        });
+        id
+    }
+
+    /// Edits queued but not started.
+    pub fn queued_edits(&self) -> usize {
+        self.edits.len()
+    }
+
+    /// `true` while an edit of `playlist_id` is queued or running.
+    fn edit_pending_for(&self, playlist_id: &str) -> bool {
+        self.edits
+            .iter()
+            .chain(&self.edit_running)
+            .any(|pending| match &pending.request.op {
+                EditOp::Create { .. } => false,
+                EditOp::Add {
+                    playlist_id: id, ..
+                }
+                | EditOp::Rename {
+                    playlist_id: id, ..
+                }
+                | EditOp::Delete { playlist_id: id }
+                | EditOp::Remove {
+                    playlist_id: id, ..
+                }
+                | EditOp::Replace {
+                    playlist_id: id, ..
+                } => id == playlist_id,
+            })
+    }
+
+    /// A finished job's songs, as an edit of the destination playlist.
+    fn add_to_playlist(&mut self, label: &str, tracks: &[Track], dest: PlaylistDest) -> JobOutcome {
+        let mut songs: Vec<String> = tracks
+            .iter()
+            .filter_map(|t| t.navidrome_id().map(str::to_owned))
+            .collect();
+        let cut = if songs.len() > MAX_EDIT_SONGS {
+            let note = format!(
+                " (first {} of {})",
+                thousands(MAX_EDIT_SONGS),
+                thousands(songs.len())
+            );
+            songs.truncate(MAX_EDIT_SONGS);
+            note
+        } else {
+            String::new()
+        };
+        let n = songs_text(songs.len());
+        match dest {
+            PlaylistDest::Existing { id, name } => {
+                if songs.is_empty() {
+                    return JobOutcome::Editing {
+                        message: format!("Nothing to add from {label}"),
+                    };
+                }
+                let message = format!("Adding {n} from {label}{cut} to {name}…");
+                self.queue_edit(
+                    EditOp::Add {
+                        playlist_id: id,
+                        songs,
+                    },
+                    name,
+                    String::new(),
+                );
+                JobOutcome::Editing { message }
+            }
+            PlaylistDest::New { name } => {
+                let message = format!("Creating {name} with {n} from {label}{cut}…");
+                self.queue_edit(
+                    EditOp::Create {
+                        name: name.clone(),
+                        songs,
+                    },
+                    name,
+                    String::new(),
+                );
+                JobOutcome::Editing { message }
+            }
+        }
+    }
+
+    /// `P`: opens the playlist picker for the selected song, album,
+    /// playlist or artist. The Playlists list is fetched if needed.
+    /// Returns `false` (and does nothing) on a row that adds nothing.
+    pub fn open_picker(&mut self) -> bool {
+        let Some((label, target)) = self.selected_target() else {
+            return false;
+        };
+        let load = if self.cache.contains_key(&Resource::Playlists) {
+            Load::Ready
+        } else {
+            Load::Loading(match self.in_flight.get(&Resource::Playlists) {
+                Some(id) => *id,
+                None => self.request(Resource::Playlists),
+            })
+        };
+        self.picker = Some(Picker {
+            label,
+            target,
+            load,
+            choices: Vec::new(),
+            selected: 0,
+            selected_id: None,
+        });
+        self.fill_picker();
+        true
+    }
+
+    /// Lists the user's own playlists in the picker once they are loaded,
+    /// keeping the selection on the same playlist (or "New playlist…" if
+    /// it is gone).
+    fn fill_picker(&mut self) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        if picker.load != Load::Ready {
+            return;
+        }
+        if let Some(Content::Playlists(list)) = self.cache.get(&Resource::Playlists) {
+            let mut own: Vec<Playlist> = list
+                .iter()
+                .filter(|p| p.access.editable_by(&self.username))
+                .cloned()
+                .collect();
+            own.sort_by_cached_key(|p| p.name.to_lowercase());
+            picker.choices = own;
+        }
+        let found = picker
+            .selected_id
+            .as_ref()
+            .and_then(|id| picker.choices.iter().position(|p| &p.id == id));
+        match found {
+            Some(i) => picker.selected = i + 1,
+            None => {
+                picker.selected = 0;
+                picker.selected_id = None;
+            }
+        }
+    }
+
+    pub fn picker_move(&mut self, delta: isize) {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.selected = picker
+                .selected
+                .saturating_add_signed(delta)
+                .min(picker.choices.len());
+            picker.selected_id = picker
+                .selected
+                .checked_sub(1)
+                .and_then(|i| picker.choices.get(i))
+                .map(|p| p.id.clone());
+        }
+    }
+
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+    }
+
+    /// Enter in the picker: "New playlist…" asks for a name; a playlist
+    /// gets the songs (fetched first if needed, in press order with the
+    /// queue jobs).
+    pub fn picker_choose(&mut self) -> Vec<JobOutcome> {
+        let Some(picker) = self.picker.take() else {
+            return Vec::new();
+        };
+        if picker.selected == 0 {
+            self.prompt = Some(Prompt::new(
+                PromptKind::NewPlaylist {
+                    from: Some((picker.label, picker.target)),
+                },
+                "",
+            ));
+            return Vec::new();
+        }
+        // The choices stay listed while the list reloads, so the selected
+        // row is always one the user sees; if not, the picker stays open.
+        let Some(playlist) = picker.choices.get(picker.selected - 1) else {
+            self.picker = Some(picker);
+            return Vec::new();
+        };
+        let dest = PlaylistDest::Existing {
+            id: playlist.id.clone(),
+            name: playlist.name.clone(),
+        };
+        self.push_job(picker.label, picker.target, Dest::Playlist(dest))
+    }
+
+    /// `N` in the Playlists list: asks for the name of a new, empty
+    /// playlist.
+    pub fn open_new_playlist(&mut self) {
+        self.prompt = Some(Prompt::new(PromptKind::NewPlaylist { from: None }, ""));
+    }
+
+    /// `S` in the queue: asks for the name of a new playlist holding
+    /// `songs` (the queue's Navidrome songs; `local` tracks were left
+    /// out), prefilled with `default_name`.
+    pub fn open_save_queue(&mut self, songs: Vec<String>, local: usize, default_name: &str) {
+        self.prompt = Some(Prompt::new(
+            PromptKind::SaveQueue { songs, local },
+            default_name,
+        ));
+    }
+
+    /// The playlist selected in the Playlists list, if the user may edit
+    /// it.
+    fn selected_own_playlist(&self) -> Result<Playlist, &'static str> {
+        match self.current() {
+            Some(view) if view.resource == Resource::Playlists => {}
+            _ => return Err(""),
+        }
+        match self.selected_row() {
+            Some(Row::Playlist(p)) if p.access.editable_by(&self.username) => Ok(p.clone()),
+            Some(Row::Playlist(p)) => Err(read_only_reason(&p.access, &self.username)),
+            _ => Err(""),
+        }
+    }
+
+    /// `e` in the Playlists list: asks for a new name, prefilled. `Err`
+    /// with the reason (empty when not in the list) if it cannot be
+    /// renamed.
+    pub fn open_rename(&mut self) -> Result<(), &'static str> {
+        let playlist = self.selected_own_playlist()?;
+        self.prompt = Some(Prompt::new(
+            PromptKind::Rename {
+                playlist_id: playlist.id,
+                old: playlist.name.clone(),
+            },
+            &playlist.name,
+        ));
+        Ok(())
+    }
+
+    /// The playlist `D` would delete: `(id, name)`. `Err` with the reason
+    /// (empty when not in the Playlists list).
+    pub fn deletion(&self) -> Result<(String, String), &'static str> {
+        self.selected_own_playlist().map(|p| (p.id, p.name))
+    }
+
+    /// Deletes the playlist `id` (named `name`). Returns `true` once the
+    /// edit is queued.
+    pub fn delete_playlist(&mut self, id: String, name: String) -> bool {
+        if self.draft_for(&id).is_some() {
+            self.draft = None;
+        }
+        self.queue_edit(EditOp::Delete { playlist_id: id }, name, String::new());
+        true
+    }
+
+    pub fn prompt_char(&mut self, c: char) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.input.push_char(c);
+        }
+    }
+
+    pub fn prompt_str(&mut self, text: &str) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.input.push_str(text);
+        }
+    }
+
+    pub fn prompt_backspace(&mut self) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.input.backspace();
+        }
+    }
+
+    pub fn cancel_prompt(&mut self) {
+        self.prompt = None;
+    }
+
+    /// Enter in the name prompt. A blank name cancels.
+    pub fn submit_prompt(&mut self) -> Vec<JobOutcome> {
+        let Some(prompt) = self.prompt.take() else {
+            return Vec::new();
+        };
+        let name = prompt.input.as_str().trim().to_owned();
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let untouched = prompt.input.as_str() == prompt.prefilled;
+        let message = match prompt.kind {
+            PromptKind::NewPlaylist {
+                from: Some((label, target)),
+            } => {
+                return self.push_job(label, target, Dest::Playlist(PlaylistDest::New { name }));
+            }
+            PromptKind::NewPlaylist { from: None } => {
+                let message = format!("Creating {name}…");
+                self.queue_edit(
+                    EditOp::Create {
+                        name: name.clone(),
+                        songs: Vec::new(),
+                    },
+                    name,
+                    String::new(),
+                );
+                message
+            }
+            PromptKind::SaveQueue { songs, local } => {
+                let left_out = match local {
+                    0 => String::new(),
+                    1 => " (1 local track left out)".to_owned(),
+                    n => format!(" ({} local tracks left out)", thousands(n)),
+                };
+                let message = format!("Saving {} as {name}{left_out}…", songs_text(songs.len()));
+                self.queue_edit(
+                    EditOp::Create {
+                        name: name.clone(),
+                        songs,
+                    },
+                    name,
+                    String::new(),
+                );
+                message
+            }
+            PromptKind::Rename { playlist_id, old } => {
+                // An untouched prefill is unchanged, even if it had to be
+                // cut to fit the input.
+                if untouched || name == old {
+                    "Name unchanged".to_owned()
+                } else {
+                    let message = format!("Renaming {old} to {name}…");
+                    self.queue_edit(
+                        EditOp::Rename {
+                            playlist_id,
+                            name: name.clone(),
+                        },
+                        name,
+                        old,
+                    );
+                    message
+                }
+            }
+        };
+        vec![JobOutcome::Editing { message }]
+    }
+
+    /// The shown playlist's songs and id, if a ready playlist view is
+    /// shown and the user may change its entries.
+    fn editable_songs(&self) -> Result<(String, &PlaylistSongs), &'static str> {
+        let view = self.current().ok_or("")?;
+        let Resource::Playlist(id) = &view.resource else {
+            return Err("");
+        };
+        let Some(Content::PlaylistSongs(songs)) = self.content(view) else {
+            return Err("");
+        };
+        if !songs.access.editable_by(&self.username) {
+            return Err(read_only_reason(&songs.access, &self.username));
+        }
+        if !songs.is_complete() {
+            return Err(INCOMPLETE_PLAYLIST);
+        }
+        Ok((id.clone(), songs))
+    }
+
+    /// The entry `d` would remove: the selected song of the shown
+    /// playlist. `Err` with the reason (empty when not in a playlist).
+    pub fn removal(&self) -> Result<Removal, &'static str> {
+        let (playlist_id, songs) = self.editable_songs()?;
+        if self.draft.is_some() {
+            return Err(UNSAVED_ORDER);
+        }
+        if self.edit_pending_for(&playlist_id) {
+            return Err(WAITING_FOR_EDIT);
+        }
+        if songs.tracks.len() == 1 {
+            return Err(LAST_SONG);
+        }
+        let view = self.current().ok_or("")?;
+        let track = songs.tracks.get(view.selected).ok_or("")?;
+        Ok(Removal {
+            playlist_id,
+            index: view.selected,
+            song_id: track.navidrome_id().unwrap_or_default().to_owned(),
+            song: track.display_name(),
+            playlist: view.title.clone(),
+            hidden: songs.hidden_entries(),
+        })
+    }
+
+    /// Removes `removal`'s entry, if the playlist on the server still
+    /// holds what is shown. Returns `true` once the edit is queued.
+    pub fn remove_entry(&mut self, removal: Removal) -> bool {
+        let expected = match self
+            .cache
+            .get(&Resource::Playlist(removal.playlist_id.clone()))
+        {
+            Some(Content::PlaylistSongs(songs)) => songs.song_ids(),
+            _ => return false,
+        };
+        // The list behind the confirmation; never remove another entry.
+        if expected.get(removal.index) != Some(&removal.song_id) || expected.len() < 2 {
+            return false;
+        }
+        self.queue_edit(
+            EditOp::Remove {
+                playlist_id: removal.playlist_id,
+                index: removal.index,
+                expected,
+                hidden: removal.hidden.bound(),
+            },
+            removal.playlist,
+            removal.song,
+        );
+        true
+    }
+
+    /// `J`/`K` in a playlist: moves the selected song down (`1`) or up
+    /// (`-1`) in a draft order; the selection follows it. `Err` with the
+    /// reason (empty when not in a playlist).
+    pub fn move_entry(&mut self, delta: isize) -> Result<(), &'static str> {
+        let (playlist_id, songs) = self.editable_songs()?;
+        let Some(view) = self.current() else {
+            return Err("");
+        };
+        let from = view.selected;
+        let to = match from.checked_add_signed(delta) {
+            Some(to) if to < songs.tracks.len() => to,
+            _ => return Ok(()),
+        };
+        match &self.draft {
+            Some(draft) if draft.playlist_id != playlist_id => return Err(UNSAVED_ORDER),
+            Some(draft) if draft.saving.is_some() => return Err(SAVING_ORDER),
+            Some(_) => {}
+            None if self.edit_pending_for(&playlist_id) => return Err(WAITING_FOR_EDIT),
+            None => {
+                self.draft = Some(Draft {
+                    base: songs.song_ids(),
+                    songs: Content::PlaylistSongs(songs.clone()),
+                    playlist_id: playlist_id.clone(),
+                    saving: None,
+                });
+            }
+        }
+        if let Some(Draft {
+            songs: Content::PlaylistSongs(songs),
+            base,
+            ..
+        }) = self.draft.as_mut()
+        {
+            songs.tracks.swap(from, to);
+            // Moved back to where it started: nothing to save.
+            if songs.song_ids() == *base {
+                self.draft = None;
+            }
+        }
+        if let Some(view) = self.stack.last_mut() {
+            view.selected = to;
+        }
+        Ok(())
+    }
+
+    /// `w` in a playlist with an unsaved order: saves it (one replace,
+    /// after checking the playlist did not change on the server).
+    /// With hidden entries (see [`Hidden`]), the save needs `confirmed`:
+    /// without it, [`SaveOrder::Confirm`] asks for it and nothing is sent.
+    pub fn save_order(&mut self, confirmed: bool) -> Option<SaveOrder> {
+        if !self.has_unsaved_order() {
+            return None;
+        }
+        let title = self.current().map(|v| v.title.clone()).unwrap_or_default();
+        let draft = self.draft.as_ref()?;
+        if draft.saving.is_some() {
+            return Some(SaveOrder::Message(SAVING_ORDER.to_owned()));
+        }
+        if self.edit_pending_for(&draft.playlist_id) {
+            return Some(SaveOrder::Message(WAITING_FOR_EDIT.to_owned()));
+        }
+        let Content::PlaylistSongs(songs) = &draft.songs else {
+            return None;
+        };
+        let hidden = songs.hidden_entries();
+        if hidden != Hidden::None && !confirmed {
+            return Some(SaveOrder::Confirm(hidden));
+        }
+        let op = EditOp::Replace {
+            playlist_id: draft.playlist_id.clone(),
+            expected: draft.base.clone(),
+            songs: songs.song_ids(),
+            hidden: hidden.bound(),
+        };
+        let id = self.queue_edit(op, title.clone(), String::new());
+        if let Some(draft) = self.draft.as_mut() {
+            draft.saving = Some(id);
+        }
+        Some(SaveOrder::Message(format!(
+            "Saving the new order of {title}…"
+        )))
+    }
+
+    /// The id of the playlist whose unsaved order is shown.
+    pub fn unsaved_order_playlist(&self) -> Option<&str> {
+        match self.current().map(|v| &v.resource) {
+            Some(Resource::Playlist(id)) if self.draft_for(id).is_some() => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Esc in a playlist with an unsaved order: drops it, unless it is
+    /// being saved (the save would land anyway). Returns the status
+    /// message, or `None` without an unsaved order.
+    pub fn discard_order(&mut self) -> Option<&'static str> {
+        if !self.has_unsaved_order() {
+            return None;
+        }
+        if self.draft.as_ref().is_some_and(|d| d.saving.is_some()) {
+            return Some(SAVING_ORDER);
+        }
+        self.draft = None;
+        self.fix_selection();
+        Some(ORDER_DISCARDED)
+    }
+
+    /// Applies a finished edit: reloads the lists it changed and returns
+    /// the status message. A response for another generation, or for an
+    /// edit that is not running, is ignored.
+    pub fn handle_edit_response(&mut self, response: EditResponse) -> Option<String> {
+        if response.generation != self.generation {
+            return None;
+        }
+        let pending = self
+            .edit_running
+            .take_if(|pending| pending.request.id == response.id)?;
+        let message = edit_message(&pending, &response.result);
+        let result = &response.result;
+        match &pending.request.op {
+            EditOp::Create { .. } => {}
+            EditOp::Delete { playlist_id } => {
+                if matches!(result, EditResult::Done { .. }) {
+                    self.cache.remove(&Resource::Playlist(playlist_id.clone()));
+                }
+            }
+            EditOp::Replace { playlist_id, .. } => {
+                let saved_or_stale = matches!(result, EditResult::Done { .. } | EditResult::Stale);
+                // Only the answer of the edit saving the draft ends it.
+                if let Some(draft) = self
+                    .draft
+                    .as_mut()
+                    .filter(|d| d.saving == Some(response.id))
+                {
+                    draft.saving = None;
+                    if saved_or_stale {
+                        self.draft = None;
+                    }
+                }
+                if !saved_or_stale {
+                    // Nothing changed: the draft stays on screen as it was.
+                    self.fix_selection();
+                    return Some(message);
+                }
+                self.reload(Resource::Playlist(playlist_id.clone()));
+            }
+            EditOp::Add { playlist_id, .. }
+            | EditOp::Rename { playlist_id, .. }
+            | EditOp::Remove { playlist_id, .. } => {
+                self.reload(Resource::Playlist(playlist_id.clone()));
+            }
+        }
+        self.reload(Resource::Playlists);
+        if let EditOp::Delete { playlist_id } = &pending.request.op {
+            // A view still showing the deleted playlist shows the server's
+            // answer for it.
+            self.reload(Resource::Playlist(playlist_id.clone()));
+        }
+        self.fix_selection();
+        Some(message)
+    }
+
+    /// Drops `resource` from the cache; if a view (or the picker) shows
+    /// it, or a request for it is in flight (whose answer may predate the
+    /// edit), fetches it again with a new request that supersedes that one.
+    fn reload(&mut self, resource: Resource) {
+        self.cache.remove(&resource);
+        let picker_waits = resource == Resource::Playlists && self.picker.is_some();
+        if !picker_waits
+            && !self.stack.iter().any(|v| v.resource == resource)
+            && !self.in_flight.contains_key(&resource)
+        {
+            return;
+        }
+        let id = self.request(resource.clone());
+        for view in self.stack.iter_mut().filter(|v| v.resource == resource) {
+            view.load = Load::Loading(id);
+        }
+        // The picker keeps listing the old choices until the new list
+        // arrives.
+        if let Some(picker) = self.picker.as_mut().filter(|_| picker_waits) {
+            picker.load = Load::Loading(id);
+        }
     }
 
     // ----- responses -------------------------------------------------------
@@ -1022,10 +1970,17 @@ impl Browser {
         if generation != self.generation {
             return Vec::new();
         }
+        // A newer request for the same list was sent after an edit: this
+        // answer may predate the edit, so it is neither cached nor shown.
+        let superseded = matches!(self.in_flight.get(&resource), Some(newer) if *newer != id);
         if self.in_flight.get(&resource) == Some(&id) {
             self.in_flight.remove(&resource);
         }
         self.job_fetches.remove(&id);
+        if superseded {
+            tracing::debug!(id = id.0, "superseded response ignored");
+            return self.pump();
+        }
         if let Resource::AlbumPage { sort, offset } = resource {
             self.apply_page(id, sort, offset, result);
             self.fix_selection();
@@ -1062,6 +2017,12 @@ impl Browser {
             if view.load == Load::Loading(id) || failed_same_list {
                 view.load = load.clone();
             }
+        }
+        if let Some(picker) = self.picker.as_mut()
+            && picker.load == Load::Loading(id)
+        {
+            picker.load = load;
+            self.fill_picker();
         }
         self.fix_selection();
         self.pump()
@@ -1130,6 +2091,58 @@ impl Browser {
             if view.resource == resource && view.load == Load::Loading(id) {
                 view.load = load.clone();
             }
+        }
+    }
+}
+
+/// The status message for a finished edit.
+fn edit_message(pending: &PendingEdit, result: &EditResult) -> String {
+    let playlist = &pending.playlist;
+    let subject = &pending.subject;
+    let op = &pending.request.op;
+    let error = match result {
+        EditResult::Stale => return STALE_PLAYLIST.to_owned(),
+        EditResult::Done { .. } => {
+            return match op {
+                EditOp::Create { songs, .. } if songs.is_empty() => format!("Created {playlist}"),
+                EditOp::Create { songs, .. } => {
+                    format!("Created {playlist} with {}", songs_text(songs.len()))
+                }
+                EditOp::Add { songs, .. } => {
+                    format!("Added {} to {playlist}", songs_text(songs.len()))
+                }
+                EditOp::Rename { .. } => format!("Renamed {subject} to {playlist}"),
+                EditOp::Delete { .. } => format!("Deleted {playlist}"),
+                EditOp::Remove { .. } => format!("Removed {subject} from {playlist}"),
+                EditOp::Replace { .. } => format!("Saved the new order of {playlist}"),
+            };
+        }
+        EditResult::Failed(error) | EditResult::Partial { error, .. } => error,
+    };
+    match (op, result) {
+        (EditOp::Create { songs, .. }, EditResult::Partial { added, .. }) => format!(
+            "Created {playlist} with {} of {} songs; could not add the rest: {error}",
+            thousands(*added),
+            thousands(songs.len())
+        ),
+        (EditOp::Add { songs, .. }, EditResult::Partial { added, .. }) => format!(
+            "Added {} of {} songs to {playlist}; could not add the rest: {error}",
+            thousands(*added),
+            thousands(songs.len())
+        ),
+        (EditOp::Create { .. }, _) => format!("Could not create {playlist}: {error}"),
+        (EditOp::Add { .. }, _) => format!("Could not add to {playlist}: {error}"),
+        (EditOp::Rename { .. }, _) => format!("Could not rename {subject}: {error}"),
+        (EditOp::Delete { .. }, _) => format!("Could not delete {playlist}: {error}"),
+        (EditOp::Remove { .. }, EditResult::Failed(Error::RequestTooLarge)) => {
+            format!("Could not remove {subject}: too many songs to change on this server")
+        }
+        (EditOp::Replace { .. }, EditResult::Failed(Error::RequestTooLarge)) => format!(
+            "Could not save the order of {playlist}: too many songs to reorder on this server; Esc discards"
+        ),
+        (EditOp::Remove { .. }, _) => format!("Could not remove {subject}: {error}"),
+        (EditOp::Replace { .. }, _) => {
+            format!("Could not save the order of {playlist}: {error}; w retries, Esc discards")
         }
     }
 }
@@ -1515,6 +2528,7 @@ mod tests {
             name: format!("Playlist {id}"),
             song_count: None,
             duration: None,
+            access: Default::default(),
         }
     }
 
@@ -2038,6 +3052,8 @@ mod tests {
         let cut = Content::PlaylistSongs(PlaylistSongs {
             tracks: vec![song("s1"), song("s2")],
             served: 12_345,
+            access: Default::default(),
+            song_count: None,
         });
         let outcomes = ok(&mut b, &p1, cut);
         assert_eq!(
@@ -2056,6 +3072,8 @@ mod tests {
         let whole = Content::PlaylistSongs(PlaylistSongs {
             tracks: vec![song("s1")],
             served: 1,
+            access: Default::default(),
+            song_count: None,
         });
         b.refresh();
         let again = one(&mut b);

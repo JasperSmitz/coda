@@ -116,3 +116,15 @@ Each entry should state:
 - **Root cause:** `..` is only exact lexically while every folder before it is a real folder; the entry's own names may be symlinks, the walked folder and the canonical root are not.
 - **Rule:** resolve without touching the file system. Allow `..` only before the first name of a relative entry, relative to a folder known to contain no symlinks (one the scanner walked below a canonical root); refuse `..` after a name and in absolute entries; map foreign separators (`\`) before applying these rules. Use the result only as a key into the set of paths the scan actually found, never as something to open, so the worst an entry can do is select a scanned track.
 - **Where verified:** M5 slice 2 review, including a randomised check of 400k entries; `entries_cannot_climb_out_of_the_root`, `windows_separators_and_drive_letters` in `src/library/m3u.rs`, `a_playlist_entry_through_a_symlinked_folder_is_missing` in `tests/library_scan.rs`.
+
+### A local cancel must not race an in-flight commit of the same state
+- **Context / symptom:** pressing Esc while a playlist's new order was being saved said "discarded", but the save still landed on the server; a later `J` started a new draft, which the first save's answer then cleared.
+- **Root cause:** the draft (local state) and the save (an async commit of that state) were linked only by the playlist id. Discarding dropped the local copy without cancelling the request, and the answer could not tell its draft from a newer one.
+- **Rule:** while a commit of some local state is in flight, refuse a local cancel of that state (say it is being saved), and tie the state to the commit's request id so that only that request's answer may end it.
+- **Where verified:** M5 slice 3 review; `esc_during_a_save_is_refused_and_only_that_save_ends_the_draft`, `a_stale_answer_for_another_save_does_not_end_a_new_draft` in `src/app.rs`.
+
+### Check what a list API hides before rewriting the list from it
+- **Context / symptom:** removing a song from a Navidrome playlist (a replace of the whole list with the songs shown) would also delete entries the user never saw.
+- **Root cause:** Navidrome's `getPlaylist` omits entries whose file is missing and songs in libraries the user cannot access, while the stored playlist keeps them; a replace writes only what was shown. Its `songCount` counts every stored entry.
+- **Rule:** before rewriting a server-side list from what the API shows, check for entries the API hides (compare the stored count with the returned entries). If some are hidden, say so and require confirmation, and recheck at write time that no more are hidden than the user confirmed.
+- **Where verified:** M5 slice 3 re-review, traced in Navidrome's source (`GetWithTracks`, `refreshCounters`); `removing_from_a_playlist_with_hidden_entries_warns_first`, `saving_an_order_over_hidden_entries_needs_a_second_w` in `src/app.rs`, `more_hidden_entries_than_confirmed_on_the_refetch_is_stale` in `tests/navidrome_edit.rs`.

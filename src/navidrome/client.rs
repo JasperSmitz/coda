@@ -4,9 +4,24 @@
 //! `s`, `v`, `c` and `f=json`. The plaintext password (`p=`) is never
 //! sent. Bodies are read with a size cap. Errors never contain the request
 //! URL: every `reqwest::Error` is stripped with `without_url` first.
+//!
+//! Reads are GET requests. Playlist writes carry lists of song ids, so
+//! they are sent as an `application/x-www-form-urlencoded` POST (auth
+//! parameters in the body, nothing in the URL but the path) when the
+//! server advertises the OpenSubsonic `formPost` extension, detected once
+//! per client ([`Client::transport`]); otherwise as GET, whose URL must
+//! stay within [`MAX_GET_URL_BYTES`]. A request over its limit is refused
+//! before it is sent ([`Error::RequestTooLarge`]); [`Client::id_batches`]
+//! splits id lists into requests that fit. Neither URLs nor bodies are
+//! ever logged: both carry the token.
 
 use std::net::IpAddr;
+use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+use tokio::sync::OnceCell;
+use url::form_urlencoded;
 
 use url::{Host, Url};
 
@@ -29,6 +44,13 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_PLAYLIST_BODY_BYTES: usize = 24 * 1024 * 1024;
 /// Random bytes per salt (hex-encoded, so twice as many characters).
 const SALT_BYTES: usize = 12;
+/// Upper bound on the URL of a GET write: common reverse-proxy and server
+/// limits on the request line and headers are about 8 KiB.
+pub const MAX_GET_URL_BYTES: usize = 8 * 1024;
+/// Upper bound on the body of a form POST. Navidrome accepts 10 MB, but a
+/// reverse proxy may not (nginx's default `client_max_body_size` is 1 MB);
+/// 10,000 Navidrome song ids take about 300 KB.
+pub const MAX_POST_BODY_BYTES: usize = 512 * 1024;
 pub const SEARCH_ARTIST_COUNT: u32 = 20;
 pub const SEARCH_ALBUM_COUNT: u32 = 20;
 pub const SEARCH_SONG_COUNT: u32 = 50;
@@ -147,6 +169,13 @@ pub enum Error {
     /// cancelled).
     #[error("request did not complete")]
     Aborted,
+    /// A write over [`MAX_GET_URL_BYTES`] or [`MAX_POST_BODY_BYTES`]; it
+    /// was not sent.
+    #[error("too many songs for one request")]
+    RequestTooLarge,
+    /// A replace with no songs; it was not sent.
+    #[error("a playlist cannot be emptied this way; delete it instead")]
+    EmptyReplace,
 }
 
 impl Error {
@@ -179,21 +208,38 @@ impl Error {
             Self::Server { code, .. } => format!("subsonic error code {code}"),
             Self::Decode(detail) => format!("decode: {detail}"),
             Self::Setup(_) => "HTTP client setup failed".to_owned(),
-            Self::Auth | Self::TooLarge | Self::InvalidUrl(_) | Self::Random | Self::Aborted => {
-                self.to_string()
-            }
+            Self::Auth
+            | Self::TooLarge
+            | Self::InvalidUrl(_)
+            | Self::Random
+            | Self::Aborted
+            | Self::RequestTooLarge
+            | Self::EmptyReplace => self.to_string(),
         }
     }
 }
 
-/// Subsonic API client for one server. Cheap to clone (the HTTP client is
-/// shared). `Debug` shows nothing but the type name.
+/// How playlist writes are sent; see [`Client::transport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// Form POST (OpenSubsonic `formPost`): everything, auth included, in
+    /// the body, within [`MAX_POST_BODY_BYTES`].
+    FormPost,
+    /// GET with everything in the query, within [`MAX_GET_URL_BYTES`].
+    Get,
+}
+
+/// Subsonic API client for one server. Cheap to clone (the HTTP client and
+/// the detected write transport are shared). `Debug` shows nothing but the
+/// type name.
 #[derive(Clone)]
 pub struct Client {
     base: Url,
     username: String,
     password: Password,
     http: reqwest::Client,
+    /// Whether the server supports `formPost`, once known.
+    form_post: Arc<OnceCell<bool>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -236,6 +282,7 @@ impl Client {
             username,
             password,
             http,
+            form_post: Arc::new(OnceCell::new()),
         })
     }
 
@@ -353,6 +400,8 @@ impl Client {
             .playlist
             .ok_or_else(|| Error::Decode("getPlaylist: missing playlist".into()))?;
         Ok(PlaylistSongs {
+            access: playlist.access(),
+            song_count: playlist.song_count,
             served: playlist.entry.served,
             tracks: playlist
                 .entry
@@ -424,6 +473,141 @@ impl Client {
             .map(drop)
     }
 
+    // ----- playlist writes ---------------------------------------------
+
+    /// How this server takes writes: [`Transport::FormPost`] if
+    /// `getOpenSubsonicExtensions` lists `formPost`, else
+    /// [`Transport::Get`]. Asked once per client (clones share the
+    /// answer). Only a definite answer is remembered: the list, a Subsonic
+    /// error (other than rejected credentials) or HTTP 400/404/405/410/501,
+    /// the last ones meaning a server without the endpoint. Anything else fails the write
+    /// and is asked again next time.
+    pub async fn transport(&self) -> Result<Transport, Error> {
+        let form_post = self
+            .form_post
+            .get_or_try_init(|| self.detect_form_post())
+            .await?;
+        Ok(if *form_post {
+            Transport::FormPost
+        } else {
+            Transport::Get
+        })
+    }
+
+    async fn detect_form_post(&self) -> Result<bool, Error> {
+        match self
+            .get::<api::ExtensionsReply>("getOpenSubsonicExtensions", &[])
+            .await
+        {
+            Ok(reply) => {
+                let form_post = reply
+                    .extensions
+                    .items
+                    .iter()
+                    .any(|e| e.name.as_deref() == Some("formPost"));
+                tracing::debug!(form_post, "navidrome write transport detected");
+                Ok(form_post)
+            }
+            // The server answered that it has no such endpoint: a plain
+            // Subsonic server. Remembered.
+            Err(error @ (Error::Server { .. } | Error::Http(400 | 404 | 405 | 410 | 501))) => {
+                tracing::debug!(detail = %error.detail(), "no OpenSubsonic extensions; writes use GET");
+                Ok(false)
+            }
+            // Anything else (rejected credentials, a timeout, 408, 429, 5xx,
+            // a redirect, an unreadable body) says nothing certain about
+            // the API: not remembered, and the write fails with it.
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Splits `ids` into consecutive runs that each fit one `endpoint`
+    /// request with the `fixed` parameters plus one `key=<id>` per id, in
+    /// the current [`Transport`]. No ids give one empty run.
+    /// [`Error::RequestTooLarge`] if not even one id fits.
+    pub async fn id_batches(
+        &self,
+        endpoint: &str,
+        fixed: &[(&str, &str)],
+        key: &str,
+        ids: &[String],
+    ) -> Result<Vec<Range<usize>>, Error> {
+        let (base, limit) = match self.transport().await? {
+            Transport::FormPost => (self.signed_form(fixed)?.len(), MAX_POST_BODY_BYTES),
+            Transport::Get => (
+                self.signed_url(endpoint, fixed)?.as_str().len(),
+                MAX_GET_URL_BYTES,
+            ),
+        };
+        split_ids(base, limit, key, ids)
+    }
+
+    /// `createPlaylist` named `name` with `song_ids` in order, in one
+    /// request. Returns the new playlist's id, if the server sends it back
+    /// (Subsonic 1.14 and later do).
+    pub async fn create_playlist(
+        &self,
+        name: &str,
+        song_ids: &[String],
+    ) -> Result<Option<String>, Error> {
+        let mut params = vec![("name", name)];
+        params.extend(song_ids.iter().map(|id| ("songId", id.as_str())));
+        let reply = self
+            .write::<api::CreatedReply>("createPlaylist", &params, MAX_PLAYLIST_BODY_BYTES)
+            .await?;
+        Ok(reply
+            .playlist
+            .and_then(|p| p.id)
+            .filter(|id| !id.is_empty()))
+    }
+
+    /// `createPlaylist` with `playlistId`: replaces the playlist's songs
+    /// with `song_ids`, in order, in one request (never batched: a partial
+    /// replace would lose songs). An empty list is refused
+    /// ([`Error::EmptyReplace`]): Navidrome ignores it and keeps the songs.
+    pub async fn replace_playlist(
+        &self,
+        playlist_id: &str,
+        song_ids: &[String],
+    ) -> Result<(), Error> {
+        if song_ids.is_empty() {
+            return Err(Error::EmptyReplace);
+        }
+        let mut params = vec![("playlistId", playlist_id)];
+        params.extend(song_ids.iter().map(|id| ("songId", id.as_str())));
+        self.write::<api::CreatedReply>("createPlaylist", &params, MAX_PLAYLIST_BODY_BYTES)
+            .await
+            .map(drop)
+    }
+
+    /// `updatePlaylist`: appends `song_ids`, in order, in one request.
+    pub async fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        song_ids: &[String],
+    ) -> Result<(), Error> {
+        let mut params = vec![("playlistId", playlist_id)];
+        params.extend(song_ids.iter().map(|id| ("songIdToAdd", id.as_str())));
+        self.write::<api::EmptyReply>("updatePlaylist", &params, MAX_BODY_BYTES)
+            .await
+            .map(drop)
+    }
+
+    /// `updatePlaylist`: renames the playlist.
+    pub async fn rename_playlist(&self, playlist_id: &str, name: &str) -> Result<(), Error> {
+        let params = [("playlistId", playlist_id), ("name", name)];
+        self.write::<api::EmptyReply>("updatePlaylist", &params, MAX_BODY_BYTES)
+            .await
+            .map(drop)
+    }
+
+    /// `deletePlaylist`.
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<(), Error> {
+        self.write::<api::EmptyReply>("deletePlaylist", &[("id", playlist_id)], MAX_BODY_BYTES)
+            .await
+            .map(drop)
+    }
+
     /// A freshly signed stream URL for `song_id`. Pure apart from the salt.
     /// No transcoding parameters are sent (server defaults apply).
     pub fn stream_url(&self, song_id: &str) -> Result<StreamUrl, Error> {
@@ -431,27 +615,78 @@ impl Client {
         StreamUrl::new(url).ok_or(Error::InvalidUrl(UrlError::Scheme))
     }
 
-    fn signed_url(&self, endpoint: &str, params: &[(&str, &str)]) -> Result<Url, Error> {
-        let mut url = self
-            .base
+    fn endpoint_url(&self, endpoint: &str) -> Result<Url, Error> {
+        self.base
             .join(&format!("rest/{endpoint}"))
-            .map_err(|_| Error::InvalidUrl(UrlError::Invalid))?;
+            .map_err(|_| Error::InvalidUrl(UrlError::Invalid))
+    }
+
+    /// The auth parameters with a fresh salt, then `params`, appended to
+    /// `target` (a URL query or a form body; both use the same encoding).
+    fn sign<T: form_urlencoded::Target>(
+        &self,
+        target: &mut form_urlencoded::Serializer<'_, T>,
+        params: &[(&str, &str)],
+    ) -> Result<(), Error> {
         let salt = salt()?;
         let token = token(self.password.expose(), &salt);
-        {
-            let mut query = url.query_pairs_mut();
-            query
-                .append_pair("u", &self.username)
-                .append_pair("t", &token)
-                .append_pair("s", &salt)
-                .append_pair("v", API_VERSION)
-                .append_pair("c", CLIENT_NAME)
-                .append_pair("f", "json");
-            for (key, value) in params {
-                query.append_pair(key, value);
-            }
+        target
+            .append_pair("u", &self.username)
+            .append_pair("t", &token)
+            .append_pair("s", &salt)
+            .append_pair("v", API_VERSION)
+            .append_pair("c", CLIENT_NAME)
+            .append_pair("f", "json");
+        for (key, value) in params {
+            target.append_pair(key, value);
         }
+        Ok(())
+    }
+
+    fn signed_url(&self, endpoint: &str, params: &[(&str, &str)]) -> Result<Url, Error> {
+        let mut url = self.endpoint_url(endpoint)?;
+        self.sign(&mut url.query_pairs_mut(), params)?;
         Ok(url)
+    }
+
+    /// A form body with the auth parameters and `params`.
+    fn signed_form(&self, params: &[(&str, &str)]) -> Result<String, Error> {
+        let mut form = form_urlencoded::Serializer::new(String::new());
+        self.sign(&mut form, params)?;
+        Ok(form.finish())
+    }
+
+    /// Sends a write in the server's [`Transport`]; refused before sending
+    /// if it is over the transport's limit.
+    async fn write<R: api::Reply>(
+        &self,
+        endpoint: &str,
+        params: &[(&str, &str)],
+        max_body: usize,
+    ) -> Result<R, Error> {
+        let request = match self.transport().await? {
+            Transport::FormPost => {
+                let body = self.signed_form(params)?;
+                if body.len() > MAX_POST_BODY_BYTES {
+                    return Err(Error::RequestTooLarge);
+                }
+                self.http
+                    .post(self.endpoint_url(endpoint)?)
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(body)
+            }
+            Transport::Get => {
+                let url = self.signed_url(endpoint, params)?;
+                if url.as_str().len() > MAX_GET_URL_BYTES {
+                    return Err(Error::RequestTooLarge);
+                }
+                self.http.get(url)
+            }
+        };
+        self.send(endpoint, request, max_body).await
     }
 
     async fn get<R: api::Reply>(
@@ -470,8 +705,19 @@ impl Client {
         max_body: usize,
     ) -> Result<R, Error> {
         let url = self.signed_url(endpoint, params)?;
+        self.send(endpoint, self.http.get(url), max_body).await
+    }
+
+    /// Sends `request` and parses the reply, with a body cap of `max_body`
+    /// bytes. Logs the endpoint only.
+    async fn send<R: api::Reply>(
+        &self,
+        endpoint: &str,
+        request: reqwest::RequestBuilder,
+        max_body: usize,
+    ) -> Result<R, Error> {
         tracing::debug!(endpoint, "navidrome request");
-        let mut response = self.http.get(url).send().await.map_err(Error::network)?;
+        let mut response = request.send().await.map_err(Error::network)?;
         let status = response.status();
         if status.is_redirection() {
             tracing::debug!(
@@ -527,6 +773,40 @@ fn check_status<R: api::Reply>(endpoint: &str, mut response: R) -> Result<R, Err
             "{endpoint}: missing or unknown status"
         ))),
     }
+}
+
+/// Splits `ids` into consecutive runs whose requests stay within `limit`
+/// bytes, starting from a request of `base` bytes; each id adds
+/// `&<key>=<id>`, form-encoded. No ids give one empty run.
+fn split_ids(
+    base: usize,
+    limit: usize,
+    key: &str,
+    ids: &[String],
+) -> Result<Vec<Range<usize>>, Error> {
+    let key_len = form_urlencoded::byte_serialize(key.as_bytes())
+        .map(str::len)
+        .sum::<usize>();
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut size = base;
+    for (i, id) in ids.iter().enumerate() {
+        let id_len = form_urlencoded::byte_serialize(id.as_bytes())
+            .map(str::len)
+            .sum::<usize>();
+        let pair = 2 + key_len + id_len;
+        if base + pair > limit {
+            return Err(Error::RequestTooLarge);
+        }
+        if size + pair > limit {
+            batches.push(start..i);
+            start = i;
+            size = base;
+        }
+        size += pair;
+    }
+    batches.push(start..ids.len());
+    Ok(batches)
 }
 
 /// Lowercase hex md5 of `password + salt`.
@@ -630,6 +910,41 @@ mod tests {
         assert_eq!(get("t").unwrap(), token("sesame", &salt));
         assert_ne!(a, b, "fresh salt per URL");
         assert!(!a.expose().contains("sesame"));
+    }
+
+    #[test]
+    fn ids_split_into_requests_that_fit() {
+        let ids: Vec<String> = ["aa", "b&", "c"].map(String::from).to_vec();
+        // `&k=aa` is 5 bytes, `&k=b%26` 7, `&k=c` 4.
+        assert_eq!(split_ids(10, 100, "k", &ids).unwrap(), vec![0..3]);
+        assert_eq!(split_ids(10, 22, "k", &ids).unwrap(), [0..2, 2..3]);
+        assert_eq!(split_ids(10, 20, "k", &ids).unwrap(), [0..1, 1..2, 2..3]);
+        assert_eq!(split_ids(10, 15, "k", &ids[..1]).unwrap(), vec![0..1]);
+        assert!(matches!(
+            split_ids(10, 16, "k", &ids),
+            Err(Error::RequestTooLarge)
+        ));
+        assert_eq!(split_ids(10, 10, "k", &[]).unwrap(), vec![0..0]);
+        // The key is encoded too.
+        assert_eq!(
+            split_ids(0, 9, "a b", &["x".to_owned(), "y".to_owned()]).unwrap(),
+            [0..1, 1..2]
+        );
+    }
+
+    #[test]
+    fn signed_forms_match_signed_urls_in_length() {
+        // Batching relies on a signed request having the same length every
+        // time (the salt and token have fixed lengths).
+        let c = client("https://h.example/nd");
+        let params = [("playlistId", "p 1"), ("name", "x&y")];
+        let url = c.signed_url("updatePlaylist", &params).unwrap();
+        let form = c.signed_form(&params).unwrap();
+        assert_eq!(url.query().unwrap().len(), form.len());
+        for _ in 0..20 {
+            assert_eq!(c.signed_form(&params).unwrap().len(), form.len());
+        }
+        assert!(!form.contains("sesame"));
     }
 
     #[test]

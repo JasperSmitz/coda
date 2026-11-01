@@ -30,7 +30,7 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use super::{Album, Artist, Playlist, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
+use super::{Access, Album, Artist, Playlist, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
 use crate::model::{MAX_METADATA_CHARS, Track, TrackMetadata, clean_text};
 use crate::queue::MAX_QUEUE_LEN;
 
@@ -50,6 +50,9 @@ pub const MAX_PLAYLISTS: usize = 10_000;
 /// Upper bound on the songs kept from one `getPlaylist`: more could never
 /// be queued anyway.
 pub const MAX_PLAYLIST_ENTRIES: usize = MAX_QUEUE_LEN;
+/// Upper bound on the OpenSubsonic extensions read from
+/// `getOpenSubsonicExtensions` (Navidrome lists about ten).
+pub const MAX_EXTENSIONS: usize = 100;
 /// Upper bound on the items kept from any other list (artists of an index
 /// entry, index entries, albums of an artist, songs of an album, search
 /// results).
@@ -159,6 +162,54 @@ reply!(SearchReply { "searchResult3" => search_result3: SearchResult3 });
 reply!(AlbumListReply { "albumList2" => album_list2: AlbumList2 });
 reply!(PlaylistsReply { "playlists" => playlists: Playlists });
 reply!(PlaylistReply { "playlist" => playlist: RawPlaylist });
+reply!(
+    /// `createPlaylist`: the new playlist (Subsonic 1.14+). Only its id is
+    /// read; its entries are drained unparsed.
+    CreatedReply { "playlist" => playlist: CreatedPlaylist }
+);
+
+/// The part of a created playlist Coda reads.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CreatedPlaylist {
+    #[serde(deserialize_with = "id")]
+    pub id: Option<String>,
+}
+
+/// `getOpenSubsonicExtensions`: `status`, `error` and the extension list
+/// (an array, unlike the other sections).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsReply {
+    #[serde(deserialize_with = "text")]
+    pub status: Option<String>,
+    #[serde(deserialize_with = "object")]
+    pub error: Option<ApiError>,
+    #[serde(
+        rename = "openSubsonicExtensions",
+        deserialize_with = "extension_items"
+    )]
+    pub extensions: Counted<RawExtension>,
+}
+
+impl Reply for ExtensionsReply {
+    fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    fn take_error(&mut self) -> Option<ApiError> {
+        self.error.take()
+    }
+}
+
+/// One OpenSubsonic extension. Its `versions` are not read: every
+/// extension Coda uses has only version 1.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawExtension {
+    #[serde(deserialize_with = "text")]
+    pub name: Option<String>,
+}
 reply!(
     /// Every section, for tests of the field parsers.
     #[cfg(test)]
@@ -293,6 +344,11 @@ pub struct RawPlaylist {
     pub song_count: Option<u32>,
     #[serde(deserialize_with = "saturating_secs")]
     pub duration: Option<Duration>,
+    #[serde(deserialize_with = "text")]
+    pub owner: Option<String>,
+    /// OpenSubsonic; absent from plain Subsonic servers.
+    #[serde(deserialize_with = "boolean")]
+    pub readonly: Option<bool>,
     #[serde(deserialize_with = "playlist_entries")]
     pub entry: Counted<RawSong>,
 }
@@ -318,12 +374,22 @@ impl<T> Default for Counted<T> {
 impl RawPlaylist {
     /// `None` if the id is missing, empty or oversized.
     pub fn into_playlist(self) -> Option<Playlist> {
+        let access = self.access();
         Some(Playlist {
             id: valid_id(self.id)?,
             name: clean_text(self.name).unwrap_or_else(|| UNKNOWN_PLAYLIST.to_owned()),
             song_count: self.song_count,
             duration: self.duration,
+            access,
         })
+    }
+
+    /// The owner (capped) and the read-only flag (`false` when absent).
+    pub fn access(&self) -> Access {
+        Access {
+            owner: clean_text(self.owner.clone()),
+            readonly: self.readonly.unwrap_or(false),
+        }
     }
 }
 
@@ -391,11 +457,12 @@ enum Scalar<'a> {
     U64(u64),
     I64(i64),
     F64(f64),
+    Bool(bool),
 }
 
-/// Reads one JSON value of any type without building it: a string or
-/// number is handed to `accept`; `null`, booleans, arrays and objects are
-/// skipped (their contents drained unparsed) and give `None`.
+/// Reads one JSON value of any type without building it: a string,
+/// number or boolean is handed to `accept`; `null`, arrays and objects
+/// are skipped (their contents drained unparsed) and give `None`.
 fn scalar<'de, D, T>(
     deserializer: D,
     accept: impl for<'a> FnOnce(Scalar<'a>) -> Option<T>,
@@ -431,8 +498,8 @@ where
             Ok((self.0)(Scalar::F64(v)))
         }
 
-        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-            Ok(None)
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok((self.0)(Scalar::Bool(v)))
         }
 
         fn visit_bytes<E: serde::de::Error>(self, _: &[u8]) -> Result<Self::Value, E> {
@@ -492,7 +559,15 @@ fn id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::E
         }
         Scalar::U64(n) => Some(n.to_string()),
         Scalar::I64(n) => Some(n.to_string()),
-        Scalar::F64(_) => None,
+        Scalar::F64(_) | Scalar::Bool(_) => None,
+    })
+}
+
+/// A JSON boolean; anything else is `None` (a string `"true"` too).
+fn boolean<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    scalar(deserializer, |value| match value {
+        Scalar::Bool(b) => Some(b),
+        _ => None,
     })
 }
 
@@ -740,6 +815,13 @@ where
     capped_list(deserializer, MAX_PLAYLISTS)
 }
 
+fn extension_items<'de, D>(deserializer: D) -> Result<Counted<RawExtension>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list(deserializer, MAX_EXTENSIONS)
+}
+
 fn playlist_entries<'de, D>(deserializer: D) -> Result<Counted<RawSong>, D::Error>
 where
     D: Deserializer<'de>,
@@ -953,6 +1035,106 @@ mod tests {
             (playlists[3].song_count, playlists[3].duration),
             (None, None)
         );
+    }
+
+    #[test]
+    fn playlist_owner_and_readonly_are_read_leniently() {
+        use crate::navidrome::Access;
+        let r = response(json!({
+            "status": "ok",
+            "playlists": { "playlist": [
+                { "id": "1", "owner": "  listener", "readonly": false },
+                { "id": "2", "owner": "someone", "readonly": true },
+                { "id": "3", "readonly": "true", "owner": 7 },
+                { "id": "4", "owner": ["listener"], "readonly": 1 },
+                { "id": "5", "owner": "o".repeat(10_000), "readonly": { "x": true } },
+            ]}
+        }));
+        let access: Vec<Access> = r
+            .playlists
+            .unwrap()
+            .playlist
+            .items
+            .into_iter()
+            .filter_map(RawPlaylist::into_playlist)
+            .map(|p| p.access)
+            .collect();
+        assert_eq!(
+            access[0],
+            Access {
+                owner: Some("listener".into()),
+                readonly: false
+            }
+        );
+        assert_eq!(
+            access[1],
+            Access {
+                owner: Some("someone".into()),
+                readonly: true
+            }
+        );
+        // Wrong types count as missing: no owner, not flagged.
+        assert_eq!(access[2], Access::default());
+        assert_eq!(access[3], Access::default());
+        assert_eq!(
+            access[4].owner.as_ref().unwrap().chars().count(),
+            MAX_METADATA_CHARS
+        );
+        assert!(!access[4].readonly);
+        // `getPlaylist` carries them too.
+        let r = response(json!({
+            "status": "ok",
+            "playlist": { "id": "p", "owner": "listener", "readonly": true, "entry": [] }
+        }));
+        let playlist = r.playlist.unwrap();
+        assert_eq!(playlist.access().owner.as_deref(), Some("listener"));
+        assert!(playlist.access().readonly);
+    }
+
+    #[test]
+    fn extensions_and_created_ids_are_read_from_their_own_replies() {
+        let body = json!({ "subsonic-response": {
+            "status": "ok",
+            "openSubsonicExtensions": [
+                { "name": "formPost", "versions": [1] },
+                "formPost",
+                { "name": { "nested": "formPost" } },
+                { "versions": [[[[1]]]] },
+            ],
+            "playlist": { "id": "ignored" }
+        }});
+        let r = parse::<ExtensionsReply>(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let names: Vec<Option<String>> = r.extensions.items.into_iter().map(|e| e.name).collect();
+        assert_eq!(names, [Some("formPost".into()), None, None]);
+        assert_eq!(r.extensions.served, 4);
+        // A missing or mistyped list is empty.
+        for extensions in [
+            json!(null),
+            json!("formPost"),
+            json!({ "name": "formPost" }),
+        ] {
+            let body = json!({ "subsonic-response": {
+                "status": "ok", "openSubsonicExtensions": extensions
+            }});
+            let r = parse::<ExtensionsReply>(&serde_json::to_vec(&body).unwrap()).unwrap();
+            assert!(r.extensions.items.is_empty());
+        }
+        let many: Vec<Value> = (0..1_000)
+            .map(|i| json!({ "name": format!("x{i}") }))
+            .collect();
+        let body =
+            json!({ "subsonic-response": { "status": "ok", "openSubsonicExtensions": many }});
+        let r = parse::<ExtensionsReply>(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(r.extensions.items.len(), MAX_EXTENSIONS);
+        // `createPlaylist` reads only the new id; entries are drained.
+        let body = json!({ "subsonic-response": { "status": "ok", "playlist": {
+            "id": "new1", "entry": [{ "id": "s1" }, { "nested": [[{}]] }]
+        }}});
+        let r = parse::<CreatedReply>(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(r.playlist.unwrap().id.as_deref(), Some("new1"));
+        let body = json!({ "subsonic-response": { "status": "ok", "playlist": { "id": true } } });
+        let r = parse::<CreatedReply>(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(r.playlist.unwrap().id, None);
     }
 
     #[test]

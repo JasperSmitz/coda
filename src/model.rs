@@ -83,6 +83,14 @@ impl Track {
         }
     }
 
+    /// The Navidrome song id, if this track is streamed from Navidrome.
+    pub fn navidrome_id(&self) -> Option<&str> {
+        match &self.source {
+            TrackSource::Navidrome { song_id } => Some(song_id),
+            TrackSource::Local { .. } => None,
+        }
+    }
+
     /// `true` for tracks streamed from a server.
     pub fn is_remote(&self) -> bool {
         matches!(self.source, TrackSource::Navidrome { .. })

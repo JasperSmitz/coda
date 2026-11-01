@@ -1,6 +1,7 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar, the status line, the help overlay and the Settings
-//! overlay (`crate::ui::settings`).
+//! now-playing bar, the status line, the help overlay, the playlist
+//! picker and name prompt, and the Settings overlay
+//! (`crate::ui::settings`).
 //!
 //! Untrusted names (tags, file names, server responses, the search input)
 //! are sanitised and truncated by display width, so control characters and
@@ -12,7 +13,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, LineGauge, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, LineGauge, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
@@ -22,7 +23,7 @@ use crate::app::{
 use crate::library::browse::{Row as LocalRow, View as LocalView};
 use crate::library::{Library, LocalPlaylist};
 use crate::model::Track;
-use crate::navidrome::browse::{Browser, Load, More, Resource, Row};
+use crate::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
 use crate::ui::{help, settings};
 
@@ -37,6 +38,10 @@ pub const REMOTE_MARKER: &str = "☁";
 const SEARCH_PROMPT: &str = "Search: ";
 /// Shown right-aligned on the search input line when it fits.
 const SEARCH_HINT: &str = "Enter search · Esc cancel";
+/// Below the playlist name input.
+const PROMPT_HINT: &str = "Enter save · Esc cancel (empty name cancels)";
+/// Widest the picker and prompt boxes get.
+const DIALOG_WIDTH: u16 = 60;
 
 /// Widget state that persists between frames: the first visible row of
 /// each panel, so the view does not jump between frames.
@@ -110,6 +115,14 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     draw_status(frame, app, status, now);
     if app.help_open() {
         view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
+    }
+    if let Some(browser) = app.browser() {
+        if let Some(picker) = browser.picker() {
+            draw_picker(frame, picker, frame.area());
+        }
+        if let Some((title, text)) = browser.prompt() {
+            draw_prompt(frame, title, text, frame.area());
+        }
     }
     if app.settings_open() {
         if app.settings().busy().is_some() {
@@ -563,6 +576,105 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
             };
             row_line(&left, track.duration.map(format_time), width)
         }
+    }
+}
+
+/// A box of at most `width` × `height`, centred in `area`.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// The "Add to playlist" picker: "New playlist…", then the user's own
+/// playlists A–Z, with a note while the list loads or when it failed.
+/// Builds only the visible rows.
+fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
+    let note = match picker.load() {
+        Load::Loading(_) => Some(("Loading your playlists…".to_owned(), Color::Yellow)),
+        Load::Failed(error) => Some((format!("Could not load playlists: {error}"), Color::Red)),
+        Load::Ready if picker.choices().is_empty() => {
+            Some(("No playlists of your own yet".to_owned(), Color::DarkGray))
+        }
+        Load::Ready => None,
+    };
+    let rows = picker.len().saturating_add(usize::from(note.is_some()));
+    let height = u16::try_from(rows.saturating_add(2)).unwrap_or(u16::MAX);
+    let popup = centered(area, DIALOG_WIDTH, height);
+    frame.render_widget(Clear, popup);
+    let title = format!("Add {} to", picker.label());
+    let block = panel_block(title, true, popup.width);
+    let mut body = block.inner(popup);
+    frame.render_widget(block, popup);
+    if let Some((text, color)) = note
+        && body.height > 1
+    {
+        let [list, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
+        let line = Line::styled(
+            fit(&text, usize::from(footer.width)),
+            Style::default().fg(color),
+        );
+        frame.render_widget(Paragraph::new(line), footer);
+        body = list;
+    }
+    let width = usize::from(body.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+    let height = usize::from(body.height);
+    let offset = scroll_offset(0, picker.selected(), picker.len(), height);
+    let items: Vec<ListItem> = (offset..picker.len().min(offset.saturating_add(height)))
+        .map(|i| {
+            note_row_built();
+            match i.checked_sub(1).and_then(|j| picker.choices().get(j)) {
+                Some(playlist) => ListItem::new(row_line(
+                    &playlist.name,
+                    playlist.song_count.map(|n| count(n as usize, "song")),
+                    width,
+                )),
+                None => ListItem::new(Line::styled(
+                    fit(NEW_PLAYLIST_ROW, width),
+                    Style::default().add_modifier(Modifier::ITALIC),
+                )),
+            }
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(picker.selected() - offset));
+    frame.render_stateful_widget(list_widget(items, Block::new(), true), body, &mut state);
+}
+
+/// The playlist name prompt: a box with the input (the end of the text,
+/// with the cursor after it) and a hint.
+fn draw_prompt(frame: &mut Frame, title: &str, text: &str, area: Rect) {
+    let popup = centered(area, DIALOG_WIDTH, 4);
+    frame.render_widget(Clear, popup);
+    let block = panel_block(title.to_owned(), true, popup.width);
+    let body = block.inner(popup);
+    frame.render_widget(block, popup);
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let shown = fit_tail(text, usize::from(body.width).saturating_sub(1));
+    let cursor_x = shown.width();
+    frame.render_widget(Paragraph::new(Line::raw(shown)), Rect { height: 1, ..body });
+    let x = body.x + (cursor_x as u16).min(body.width - 1);
+    frame.set_cursor_position((x, body.y));
+    if body.height > 1 {
+        let hint = Line::styled(
+            fit(PROMPT_HINT, usize::from(body.width)),
+            Style::default().fg(Color::DarkGray),
+        );
+        frame.render_widget(
+            Paragraph::new(hint),
+            Rect {
+                y: body.y + 1,
+                height: 1,
+                ..body
+            },
+        );
     }
 }
 
@@ -1102,10 +1214,13 @@ mod tests {
         assert!(screen.contains("Switch panel"), "{screen}");
         assert!(screen.contains("Ctrl-C"), "{screen}");
         for text in [
-            "Move entry down / up",
-            "Select current entry",
-            "Shuffle upcoming",
-            "Clear queue",
+            "Queue: remove / move down / up",
+            "Queue: select current / shuffle",
+            "Queue: clear / save as playlist",
+            "Add to a Navidrome playlist",
+            "Playlists: new / rename / delete",
+            "Playlist: remove / move song",
+            "Playlist: save / discard order",
             "Repeat: off / all / one",
             "Streamed from Navidrome",
         ] {
@@ -2348,18 +2463,21 @@ mod tests {
                     name: "Road Trip".into(),
                     song_count: Some(12),
                     duration: Some(Duration::from_secs(2712)),
+                    access: Default::default(),
                 },
                 Playlist {
                     id: "p2".into(),
                     name: "\u{202E}Huge\u{1b}[2J".into(),
                     song_count: Some(u32::MAX),
                     duration: Some(Duration::MAX),
+                    access: Default::default(),
                 },
                 Playlist {
                     id: "p3".into(),
                     name: "Bare".into(),
                     song_count: None,
                     duration: None,
+                    access: Default::default(),
                 },
             ])),
         );
@@ -2480,6 +2598,7 @@ mod tests {
                 name: "Big".into(),
                 song_count: Some(10_000),
                 duration: None,
+                access: Default::default(),
             }])),
         );
         press(&mut app, &[Action::Activate]);
@@ -2507,5 +2626,160 @@ mod tests {
         let keys: Vec<&str> = help::BINDINGS.iter().map(|(k, _)| *k).collect();
         assert!(keys.contains(&"a / A"), "{keys:?}");
         assert!(keys.contains(&"r / o"), "{keys:?}");
+    }
+
+    fn nav_playlist(id: &str, name: &str, owner: &str, songs: u32) -> crate::navidrome::Playlist {
+        crate::navidrome::Playlist {
+            id: id.into(),
+            name: name.into(),
+            song_count: Some(songs),
+            duration: None,
+            access: crate::navidrome::Access {
+                owner: Some(owner.into()),
+                readonly: false,
+            },
+        }
+    }
+
+    /// Navidrome only, in the Playlists list holding `lists`.
+    fn nav_playlists(lists: Vec<crate::navidrome::Playlist>) -> App {
+        let mut app = nav_home();
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        answer(&mut app, &request, Ok(Content::Playlists(lists)));
+        app
+    }
+
+    #[test]
+    fn the_playlist_picker_renders_new_playlist_first_then_own_playlists() {
+        let mut app = nav_playlists(vec![
+            nav_playlist("p1", "Zebra", "u", 3),
+            nav_playlist("p2", "Theirs", "someone", 9),
+            nav_playlist("p3", "apple", "u", 1),
+        ]);
+        press(&mut app, &[Action::AddToPlaylist, Action::Down]);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Add Zebra to"), "{screen}");
+        let new = screen.find(NEW_PLAYLIST_ROW).expect(&screen);
+        let apple = screen.find("> apple").expect(&screen);
+        let zebra = screen.rfind("Zebra").unwrap();
+        assert!(new < apple && apple < zebra, "{screen}");
+        assert!(
+            screen.contains("1 song") && screen.contains("3 songs"),
+            "{screen}"
+        );
+        // The other user's playlist appears in the list behind, not in the
+        // picker: it shows once.
+        assert_eq!(screen.matches("Theirs").count(), 1, "{screen}");
+        assert_full_width(&screen, 80);
+        render(&app, 20, 6, now);
+        render(&app, 1, 1, now);
+    }
+
+    #[test]
+    fn the_picker_says_when_the_playlists_are_loading_or_failed() {
+        let (mut app, request) = nav_app();
+        answer(
+            &mut app,
+            &request,
+            Ok(Content::Artists(vec![nav_artist("a1", "Miles")])),
+        );
+        press(&mut app, &[Action::AddToPlaylist]);
+        let lists = app.take_fetch_requests().remove(0);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Add Miles to"), "{screen}");
+        assert!(screen.contains(NEW_PLAYLIST_ROW), "{screen}");
+        assert!(screen.contains("Loading your playlists…"), "{screen}");
+        answer(&mut app, &lists, Err(crate::navidrome::Error::Http(503)));
+        let screen = render(&app, 80, 24, now);
+        assert!(
+            screen.contains("Could not load playlists: server returned HTTP 503"),
+            "{screen}"
+        );
+        assert!(!screen.contains("secret-host"), "{screen}");
+    }
+
+    #[test]
+    fn a_large_picker_builds_only_visible_rows() {
+        let lists = (0..10_000)
+            .map(|i| nav_playlist(&format!("p{i}"), &format!("List {i:05}"), "u", 1))
+            .collect();
+        let mut app = nav_playlists(lists);
+        press(&mut app, &[Action::AddToPlaylist]);
+        for _ in 0..5_000 {
+            app.handle_action(Action::Down, Instant::now());
+        }
+        let now = Instant::now();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut view = ViewState::default();
+        let built = rows_built_by(|| draw_to(&mut terminal, &app, &mut view, now));
+        assert!(built < 60, "{built}");
+        let screen = buffer_text(&terminal);
+        assert!(screen.contains("> List 04999"), "{screen}");
+    }
+
+    #[test]
+    fn the_name_prompt_shows_its_title_text_and_hint() {
+        let mut app = nav_playlists(vec![nav_playlist("p1", "Road Trip", "u", 3)]);
+        press(&mut app, &[Action::RenamePlaylist]);
+        let now = Instant::now();
+        let screen = render(&app, 80, 24, now);
+        assert!(screen.contains("Rename playlist"), "{screen}");
+        assert!(screen.contains("Road Trip"), "{screen}");
+        assert!(screen.contains("Enter save · Esc cancel"), "{screen}");
+        // Hostile pasted text stays on its line.
+        app.handle_paste(&format!("\u{202E}{}", "雨".repeat(300)));
+        let screen = render(&app, 80, 24, now);
+        assert_full_width(&screen, 80);
+        assert!(screen.contains("…雨"), "the end is shown: {screen}");
+        render(&app, 10, 3, now);
+        render(&app, 1, 1, now);
+    }
+
+    #[test]
+    fn a_reordered_playlist_says_modified_and_read_only_edits_say_why() {
+        let mut app = nav_playlists(vec![
+            nav_playlist("p1", "Mine", "u", 2),
+            nav_playlist("p2", "Theirs", "someone", 2),
+        ]);
+        press(&mut app, &[Action::Activate]);
+        let request = app.take_fetch_requests().remove(0);
+        let songs = |owner: &str| {
+            Content::PlaylistSongs(crate::navidrome::PlaylistSongs {
+                tracks: vec![
+                    nav_track("s1", "One", "Band", 60),
+                    nav_track("s2", "Two", "Band", 60),
+                ],
+                served: 2,
+                access: crate::navidrome::Access {
+                    owner: Some(owner.into()),
+                    readonly: false,
+                },
+                song_count: None,
+            })
+        };
+        answer(&mut app, &request, Ok(songs("u")));
+        press(&mut app, &[Action::MoveEntryDown]);
+        let now = Instant::now();
+        let screen = render(&app, 100, 24, now);
+        assert!(screen.contains("› Mine (modified) ┐"), "{screen}");
+        let two = screen.find("Band - Two").unwrap();
+        let one = screen.find("> Band - One").unwrap();
+        assert!(two < one, "{screen}");
+        press(
+            &mut app,
+            &[Action::Back, Action::Parent, Action::Down, Action::Activate],
+        );
+        let request = app.take_fetch_requests().remove(0);
+        answer(&mut app, &request, Ok(songs("someone")));
+        press(&mut app, &[Action::RemoveFromPlaylist]);
+        let screen = render(&app, 100, 24, now);
+        assert!(
+            screen.contains(crate::navidrome::browse::READ_ONLY_OTHER),
+            "{screen}"
+        );
+        assert!(!screen.contains("(modified)"), "{screen}");
     }
 }

@@ -38,14 +38,23 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('/') if focus == Focus::Library => Action::OpenSearch,
         KeyCode::Esc if focus == Focus::Library => Action::Back,
         KeyCode::Char('r') if focus == Focus::Library => Action::Refresh,
+        // Navidrome playlist editing (provisional keys; M6 decides).
+        KeyCode::Char('P') if focus == Focus::Library => Action::AddToPlaylist,
+        KeyCode::Char('N') if focus == Focus::Library => Action::NewPlaylist,
+        KeyCode::Char('e') if focus == Focus::Library => Action::RenamePlaylist,
+        KeyCode::Char('D') if focus == Focus::Library => Action::DeletePlaylist,
+        KeyCode::Char('d') if focus == Focus::Library => Action::RemoveFromPlaylist,
+        KeyCode::Char('w') if focus == Focus::Library => Action::SaveOrder,
         KeyCode::Char('1') => Action::SelectLocal,
         KeyCode::Char('2') => Action::SelectNavidrome,
         KeyCode::Char('d') if focus == Focus::Queue => Action::Remove,
-        KeyCode::Char('J') if focus == Focus::Queue => Action::MoveEntryDown,
-        KeyCode::Char('K') if focus == Focus::Queue => Action::MoveEntryUp,
+        // In the queue: move the entry; in a Navidrome playlist: the song.
+        KeyCode::Char('J') => Action::MoveEntryDown,
+        KeyCode::Char('K') => Action::MoveEntryUp,
         KeyCode::Char('C') if focus == Focus::Queue => Action::ClearQueue,
         KeyCode::Char('g') if focus == Focus::Queue => Action::SelectCurrent,
         KeyCode::Char('s') if focus == Focus::Queue => Action::ShuffleUpcoming,
+        KeyCode::Char('S') if focus == Focus::Queue => Action::SaveQueueAsPlaylist,
         KeyCode::Char('R') => Action::CycleRepeat,
         KeyCode::Char(' ') => Action::TogglePause,
         KeyCode::Char('n') => Action::Next,
@@ -158,16 +167,50 @@ mod tests {
     #[test]
     fn queue_only_keys() {
         let cases = [
-            (ch('d'), Action::Remove),
-            (ch('J'), Action::MoveEntryDown),
-            (ch('K'), Action::MoveEntryUp),
             (ch('C'), Action::ClearQueue),
             (ch('g'), Action::SelectCurrent),
             (ch('s'), Action::ShuffleUpcoming),
+            (ch('S'), Action::SaveQueueAsPlaylist),
         ];
         for (k, action) in cases {
             assert_eq!(queue(k), Some(action), "{k:?}");
             assert_eq!(lib(k), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn playlist_editing_keys_are_free_in_their_panel() {
+        // `d`, `J` and `K` keep their queue meaning.
+        assert_eq!(queue(ch('d')), Some(Action::Remove));
+        assert_eq!(queue(ch('J')), Some(Action::MoveEntryDown));
+        assert_eq!(queue(ch('K')), Some(Action::MoveEntryUp));
+        let library = [
+            (ch('P'), Action::AddToPlaylist),
+            (ch('N'), Action::NewPlaylist),
+            (ch('e'), Action::RenamePlaylist),
+            (ch('D'), Action::DeletePlaylist),
+            (ch('d'), Action::RemoveFromPlaylist),
+            (ch('w'), Action::SaveOrder),
+            (ch('J'), Action::MoveEntryDown),
+            (ch('K'), Action::MoveEntryUp),
+        ];
+        for (k, action) in library {
+            assert_eq!(lib(k), Some(action), "{k:?}");
+        }
+        for k in [ch('P'), ch('N'), ch('e'), ch('D'), ch('w')] {
+            assert_eq!(queue(k), None, "{k:?}");
+        }
+        // Shifted letters as some terminals report them.
+        let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+        assert_eq!(lib(shifted('P')), Some(Action::AddToPlaylist));
+        assert_eq!(queue(shifted('S')), Some(Action::SaveQueueAsPlaylist));
+        // Lowercase neighbours are unchanged.
+        assert_eq!(lib(ch('n')), Some(Action::Next));
+        assert_eq!(lib(ch('p')), Some(Action::Previous));
+        assert_eq!(queue(ch('s')), Some(Action::ShuffleUpcoming));
+        // In an input, all of them are text.
+        for c in ['P', 'N', 'e', 'D', 'd', 'w', 'S'] {
+            assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
         }
     }
 

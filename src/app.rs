@@ -20,6 +20,11 @@
 //! [`MAX_CONCURRENT_FETCHES`] at a time; results come back through
 //! [`App::handle_fetch_response`].
 //!
+//! Navidrome playlist edits work the same way: the browser queues
+//! [`EditRequest`]s ([`App::take_edit_requests`]), the loop runs each as
+//! a sequential job ([`navidrome::edit::spawn_edit`]), one at a time, and
+//! the result comes back through [`App::handle_edit_response`].
+//!
 //! Settings (`,`) are a [`Settings`] overlay: like the browser, it emits
 //! requests (ping, save, disconnect) that the loop performs on tasks and
 //! blocking threads. A saved or removed Navidrome account is swapped in
@@ -64,10 +69,12 @@ use crate::line_input::LineInput;
 use crate::model::Track;
 use crate::model::TrackSource;
 use crate::navidrome;
+use crate::navidrome::Hidden;
 use crate::navidrome::browse::{
     self, Activated, Browser, FetchRequest, FetchResponse, Generation, JobOutcome,
-    MAX_CONCURRENT_FETCHES,
+    MAX_CONCURRENT_FETCHES, Removal, SaveOrder, UNSAVED_ORDER,
 };
+use crate::navidrome::edit::{EditId, EditRequest, EditResponse};
 use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
 use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
@@ -98,6 +105,10 @@ pub const SETTINGS_SAVE_WAIT: Duration = Duration::from_secs(5);
 pub const CLEAR_CONFIRM: Duration = Duration::from_secs(3);
 /// Status after the first `C`.
 pub const CLEAR_PROMPT: &str = "Press C again to clear the queue";
+/// Status for "Add to playlist" (`P`) on local tracks.
+pub const LOCAL_TO_PLAYLIST: &str = "Only Navidrome songs can be added to a Navidrome playlist";
+/// Status for `S` without Navidrome songs in the queue.
+pub const NO_REMOTE_IN_QUEUE: &str = "No Navidrome songs in the queue to save";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -126,6 +137,10 @@ pub enum Connection {
 pub const NAVIDROME_NOT_CONFIGURED: &str = "Navidrome is not configured";
 /// Below [`NAVIDROME_NOT_CONFIGURED`]: Enter opens the Connect form.
 pub const PRESS_ENTER_TO_CONNECT: &str = "Press Enter to connect";
+/// Status when quitting is refused while a playlist change is pending.
+pub const SAVING_PLAYLIST: &str = "A playlist change is being saved; press again to quit";
+/// Upper bound on waiting at exit for the playlist change that is running.
+pub const EDIT_SAVE_WAIT: Duration = Duration::from_secs(5);
 /// Status when quitting is refused while settings are being saved.
 pub const SAVING_SETTINGS: &str = "Saving settings… press Ctrl-C again to quit";
 /// Status when `/` is pressed on the local source without a music
@@ -194,6 +209,20 @@ pub enum Action {
     CloseHelp,
     /// `,`: open the Settings overlay.
     OpenSettings,
+    /// Queue (`S`): save the queue's Navidrome songs as a new playlist.
+    SaveQueueAsPlaylist,
+    /// Library (`P`): add the selection to a Navidrome playlist (picker).
+    AddToPlaylist,
+    /// Playlists list (`N`): create an empty playlist.
+    NewPlaylist,
+    /// Playlists list (`e`): rename the selected playlist.
+    RenamePlaylist,
+    /// Playlists list (`D`, twice): delete the selected playlist.
+    DeletePlaylist,
+    /// Playlist view (`d`, twice): remove the selected song.
+    RemoveFromPlaylist,
+    /// Playlist view (`w`): save the changed order.
+    SaveOrder,
     Quit,
 }
 
@@ -212,8 +241,31 @@ impl Action {
                 | Self::CycleSort
                 | Self::OpenSearch
                 | Self::Refresh
+                | Self::AddToPlaylist
+                | Self::NewPlaylist
+                | Self::RenamePlaylist
+                | Self::DeletePlaylist
+                | Self::RemoveFromPlaylist
+                | Self::SaveOrder
+                | Self::MoveEntryUp
+                | Self::MoveEntryDown
         )
     }
+}
+
+/// A playlist edit armed by its first key press; the second press within
+/// [`CLEAR_CONFIRM`], on the same item and with nothing in between,
+/// confirms it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditArm {
+    Delete(String),
+    /// Saving an order that drops hidden entries.
+    SaveOrder(String),
+    Remove {
+        playlist_id: String,
+        index: usize,
+        song_id: String,
+    },
 }
 
 /// A new Navidrome client (or none) for the loop to start a ping and a
@@ -280,6 +332,9 @@ pub struct App {
     help_scroll: usize,
     /// Until when a second `C` clears the queue.
     clear_armed_until: Option<Instant>,
+    /// A playlist delete or removal awaiting its second press, and until
+    /// when.
+    edit_armed: Option<(EditArm, Instant)>,
     /// The local search input while it is open.
     local_input: Option<LineInput>,
     /// Local search results, while shown.
@@ -325,6 +380,13 @@ pub struct App {
     /// A first quit was refused while settings were being saved; the next
     /// one quits (the exit still waits, bounded, for the save).
     quit_armed: bool,
+    /// A first quit was refused while a playlist change was pending; the
+    /// next one quits.
+    edit_quit_armed: bool,
+    /// The loop is running an edit (maintained by its runner). Unlike the
+    /// browser's pending edits, it survives an account swap, so an edit
+    /// still running for the old account warns at quit too.
+    edit_in_flight: bool,
 }
 
 impl App {
@@ -347,7 +409,9 @@ impl App {
             music_dir.clone(),
             navidrome.as_ref(),
         ));
-        let mut browser = navidrome.as_ref().map(|_| Browser::new());
+        let mut browser = navidrome
+            .as_ref()
+            .map(|client| Browser::for_user(Generation::default(), client.username()));
         let source = match (&music_dir, &mut browser) {
             (None, Some(browser)) => {
                 browser.ensure_started();
@@ -364,6 +428,7 @@ impl App {
             help_open: false,
             help_scroll: 0,
             clear_armed_until: None,
+            edit_armed: None,
             local_input: None,
             local_search: None,
             scan,
@@ -386,6 +451,8 @@ impl App {
             client_change: None,
             unscrobbled_load: None,
             quit_armed: false,
+            edit_quit_armed: false,
+            edit_in_flight: false,
         }
     }
 
@@ -564,9 +631,14 @@ impl App {
         self.navidrome.as_ref()
     }
 
-    /// `true` while a search input (local or Navidrome) takes all keys.
+    /// `true` while a text input (local or Navidrome search, or a
+    /// playlist name) takes all keys.
     pub fn input_open(&self) -> bool {
-        self.local_input.is_some() || self.browser.as_ref().is_some_and(|b| b.input().is_some())
+        self.local_input.is_some()
+            || self
+                .browser
+                .as_ref()
+                .is_some_and(|b| b.input().is_some() || b.prompt().is_some())
     }
 
     /// The local search input while it is open.
@@ -582,6 +654,14 @@ impl App {
     /// Scrobbles to send, in order.
     pub fn take_scrobble_requests(&mut self) -> Vec<ScrobbleRequest> {
         std::mem::take(&mut self.scrobbles)
+    }
+
+    /// The next playlist edit to run (at most one at a time).
+    pub fn take_edit_requests(&mut self) -> Vec<EditRequest> {
+        self.browser
+            .as_mut()
+            .map(Browser::take_edit_requests)
+            .unwrap_or_default()
     }
 
     /// Fetches to spawn, in order.
@@ -664,7 +744,7 @@ impl App {
                 Action::InputBackspace => input.backspace(),
                 Action::InputSubmit => self.submit_local_search(),
                 Action::InputCancel => self.local_input = None,
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
@@ -675,7 +755,35 @@ impl App {
                 Action::InputBackspace => browser.input_backspace(),
                 Action::InputSubmit => browser.submit_search(),
                 Action::InputCancel => browser.cancel_search(),
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if let Some(browser) = self.browser.as_mut().filter(|b| b.prompt().is_some()) {
+            match action {
+                Action::InputChar(c) => browser.prompt_char(c),
+                Action::InputBackspace => browser.prompt_backspace(),
+                Action::InputSubmit => {
+                    let outcomes = browser.submit_prompt();
+                    self.apply_job_outcomes(outcomes, now);
+                }
+                Action::InputCancel => browser.cancel_prompt(),
+                Action::Quit => self.request_quit(now),
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if let Some(browser) = self.browser.as_mut().filter(|b| b.picker().is_some()) {
+            match action {
+                Action::Up => browser.picker_move(-1),
+                Action::Down => browser.picker_move(1),
+                Action::Activate => {
+                    let outcomes = browser.picker_choose();
+                    self.apply_job_outcomes(outcomes, now);
+                }
+                Action::Back | Action::Parent => browser.close_picker(),
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
@@ -688,13 +796,14 @@ impl App {
                     self.help_scroll =
                         (self.help_scroll + 1).min(help::BINDINGS.len().saturating_sub(1));
                 }
-                Action::Quit => self.quit = true,
+                Action::Quit => self.request_quit(now),
                 _ => {}
             }
             return Vec::new();
         }
-        // Any other action cancels a pending `C`.
+        // Any other action cancels a pending `C`, `D` or `d`.
         let clear_armed = self.clear_armed_until.take();
+        let edit_armed = self.edit_armed.take();
         let commands = match action {
             Action::Activate if self.prompt_active() => {
                 self.settings.open_connect();
@@ -716,6 +825,12 @@ impl App {
                 Focus::Library => self.activate_library(now),
                 Focus::Queue => self.activate_queue(),
             },
+            Action::Parent | Action::Refresh
+                if self.remote_active() && self.browser_mut().has_unsaved_order() =>
+            {
+                self.set_status(UNSAVED_ORDER, now);
+                Vec::new()
+            }
             Action::Parent => {
                 if self.remote_active() {
                     self.browser_mut().go_up();
@@ -727,8 +842,15 @@ impl App {
                 Vec::new()
             }
             Action::Back => {
+                let discarded = if self.remote_active() && !self.local_results_active() {
+                    self.browser_mut().discard_order()
+                } else {
+                    None
+                };
                 if self.local_results_active() {
                     self.local_search = None;
+                } else if let Some(message) = discarded {
+                    self.set_status(message, now);
                 } else if self.remote_active()
                     && self
                         .browser_mut()
@@ -778,7 +900,9 @@ impl App {
                 Vec::new()
             }
             Action::OpenSearch => {
-                if self.remote_active() {
+                if self.remote_active() && self.browser_mut().has_unsaved_order() {
+                    self.set_status(UNSAVED_ORDER, now);
+                } else if self.remote_active() {
                     self.browser_mut().open_search();
                 } else if self.focus == Focus::Library {
                     if self.scan == ScanState::NoLibrary {
@@ -804,8 +928,66 @@ impl App {
                 Focus::Library => Vec::new(),
             },
             Action::MoveEntryUp | Action::MoveEntryDown => {
+                let up = action == Action::MoveEntryUp;
                 if self.focus == Focus::Queue {
-                    self.move_selected_entry(action == Action::MoveEntryUp);
+                    self.move_selected_entry(up);
+                } else if self.remote_active()
+                    && let Err(reason) = self.browser_mut().move_entry(if up { -1 } else { 1 })
+                    && !reason.is_empty()
+                {
+                    self.set_status(reason, now);
+                }
+                Vec::new()
+            }
+            Action::SaveQueueAsPlaylist => {
+                if self.focus == Focus::Queue {
+                    self.save_queue_as_playlist(now);
+                }
+                Vec::new()
+            }
+            Action::AddToPlaylist => {
+                if self.remote_active() {
+                    self.browser_mut().open_picker();
+                } else if self.local_results_active() || self.local_browse_active() {
+                    self.set_status(LOCAL_TO_PLAYLIST, now);
+                }
+                Vec::new()
+            }
+            Action::NewPlaylist => {
+                if self.remote_active()
+                    && self
+                        .browser_mut()
+                        .current()
+                        .is_some_and(|v| v.resource == browse::Resource::Playlists)
+                {
+                    self.browser_mut().open_new_playlist();
+                }
+                Vec::new()
+            }
+            Action::RenamePlaylist => {
+                if self.remote_active()
+                    && let Err(reason) = self.browser_mut().open_rename()
+                    && !reason.is_empty()
+                {
+                    self.set_status(reason, now);
+                }
+                Vec::new()
+            }
+            Action::DeletePlaylist => {
+                if self.remote_active() {
+                    self.delete_playlist(edit_armed, now);
+                }
+                Vec::new()
+            }
+            Action::RemoveFromPlaylist => {
+                if self.remote_active() {
+                    self.remove_from_playlist(edit_armed, now);
+                }
+                Vec::new()
+            }
+            Action::SaveOrder => {
+                if self.remote_active() {
+                    self.save_order(edit_armed, now);
                 }
                 Vec::new()
             }
@@ -854,7 +1036,7 @@ impl App {
                 Vec::new()
             }
             Action::Quit => {
-                self.quit = true;
+                self.request_quit(now);
                 Vec::new()
             }
         };
@@ -1000,15 +1182,22 @@ impl App {
     /// Quits. While settings are being saved, the first request only
     /// warns and the second quits; the exit then still waits (up to
     /// [`SETTINGS_SAVE_WAIT`]) for the save, so the process does not stop
-    /// between the keychain write and the config write.
+    /// between the keychain write and the config write. Likewise while a
+    /// playlist change is queued or running (the exit waits up to
+    /// [`EDIT_SAVE_WAIT`] for the running one; queued ones are dropped).
     fn request_quit(&mut self, now: Instant) {
         let saving = matches!(
             self.settings.busy(),
             Some(settings::Busy::Saving | settings::Busy::Disconnecting)
         );
+        let editing =
+            self.edit_in_flight || self.browser.as_ref().is_some_and(|b| b.pending_edits() > 0);
         if saving && !self.quit_armed {
             self.quit_armed = true;
             self.set_status(SAVING_SETTINGS, now);
+        } else if editing && !saving && !self.edit_quit_armed {
+            self.edit_quit_armed = true;
+            self.set_status(SAVING_PLAYLIST, now);
         } else {
             self.quit = true;
         }
@@ -1058,7 +1247,7 @@ impl App {
         self.generation = Generation(self.generation.0 + 1);
         self.browser = client
             .as_ref()
-            .map(|_| Browser::with_generation(self.generation));
+            .map(|client| Browser::for_user(self.generation, client.username()));
         match self.browser.as_mut() {
             Some(browser) if self.source == Source::Navidrome => browser.ensure_started(),
             None if self.source == Source::Navidrome && self.scan != ScanState::NoLibrary => {
@@ -1086,16 +1275,39 @@ impl App {
         );
     }
 
-    /// Bracketed paste: into the open search input, local or Navidrome
-    /// (through the typed-character filter, so newlines never submit),
-    /// ignored otherwise.
+    /// Bracketed paste: into the open search input, local or Navidrome,
+    /// or the playlist name prompt (through the typed-character filter, so
+    /// newlines never submit), ignored otherwise.
     pub fn handle_paste(&mut self, text: &str) {
         if self.settings.is_open() {
             self.settings.handle_paste(text);
         } else if let Some(input) = self.local_input.as_mut() {
             input.push_str(text);
         } else if let Some(browser) = self.browser.as_mut() {
-            browser.input_str(text);
+            if browser.prompt().is_some() {
+                browser.prompt_str(text);
+            } else {
+                browser.input_str(text);
+            }
+        }
+    }
+
+    /// Applies a finished playlist edit: shows what it did and reloads the
+    /// lists it changed. A result for a replaced client is ignored.
+    pub fn handle_edit_response(&mut self, response: EditResponse, now: Instant) {
+        if response.generation != self.generation {
+            tracing::debug!(id = response.id.0, "edit result for an old client ignored");
+            return;
+        }
+        let Some(browser) = self.browser.as_mut() else {
+            return;
+        };
+        let message = browser.handle_edit_response(response);
+        if browser.pending_edits() == 0 && !self.edit_in_flight {
+            self.edit_quit_armed = false;
+        }
+        if let Some(message) = message {
+            self.set_status(message, now);
         }
     }
 
@@ -1359,6 +1571,7 @@ impl App {
                 JobOutcome::Failed { label, error } => {
                     failures.push(format!("Could not add {label}: {error}"));
                 }
+                JobOutcome::Editing { message } => last = Some(message),
             }
         }
         let text = match failures.as_slice() {
@@ -1507,6 +1720,99 @@ impl App {
         self.set_status(text, now);
     }
 
+    /// `S`: asks for a name and saves the queue's Navidrome songs, in
+    /// queue order, as a new playlist. Local tracks are left out.
+    fn save_queue_as_playlist(&mut self, now: Instant) {
+        let Some(browser) = self.browser.as_mut() else {
+            self.set_status(NAVIDROME_NOT_CONFIGURED, now);
+            return;
+        };
+        let entries = self.player.queue().entries();
+        let songs: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e.track.navidrome_id().map(str::to_owned))
+            .collect();
+        let local = entries.len() - songs.len();
+        if songs.is_empty() {
+            self.set_status(NO_REMOTE_IN_QUEUE, now);
+            return;
+        }
+        browser.open_save_queue(songs, local, &queue_playlist_name(SystemTime::now()));
+    }
+
+    /// `D`: the first press asks for confirmation; a second one within
+    /// [`CLEAR_CONFIRM`] on the same playlist deletes it.
+    fn delete_playlist(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let (id, name) = match self.browser_mut().deletion() {
+            Ok(target) => target,
+            Err("") => return,
+            Err(reason) => return self.set_status(reason, now),
+        };
+        let arm = EditArm::Delete(id.clone());
+        if confirms(armed, &arm, now) {
+            let text = format!("Deleting {name}…");
+            if self.browser_mut().delete_playlist(id, name) {
+                self.set_status(text, now);
+            }
+        } else {
+            self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+            self.set_status(format!("Press D again to delete {name}"), now);
+        }
+    }
+
+    /// `d` in a playlist: the first press asks for confirmation; a second
+    /// one within [`CLEAR_CONFIRM`] on the same entry removes it.
+    fn remove_from_playlist(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let removal: Removal = match self.browser_mut().removal() {
+            Ok(removal) => removal,
+            Err("") => return,
+            Err(reason) => return self.set_status(reason, now),
+        };
+        let arm = EditArm::Remove {
+            playlist_id: removal.playlist_id.clone(),
+            index: removal.index,
+            song_id: removal.song_id.clone(),
+        };
+        if confirms(armed, &arm, now) {
+            let text = format!("Removing {}…", removal.song);
+            if self.browser_mut().remove_entry(removal) {
+                self.set_status(text, now);
+            }
+        } else {
+            self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+            let again = format!("d again to remove {}", removal.song);
+            let text = match removal.hidden {
+                Hidden::None => format!("Press {again}"),
+                hidden => browse::hidden_warning(hidden, &again),
+            };
+            self.set_status(text, now);
+        }
+    }
+
+    /// `w`: saves the shown unsaved order. If the playlist has entries the
+    /// server hides, which the save would drop, the first press warns and
+    /// a second one within [`CLEAR_CONFIRM`] (with nothing in between)
+    /// saves.
+    fn save_order(&mut self, armed: Option<(EditArm, Instant)>, now: Instant) {
+        let Some(playlist_id) = self
+            .browser_mut()
+            .unsaved_order_playlist()
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let arm = EditArm::SaveOrder(playlist_id);
+        let confirmed = confirms(armed, &arm, now);
+        match self.browser_mut().save_order(confirmed) {
+            Some(SaveOrder::Message(message)) => self.set_status(message, now),
+            Some(SaveOrder::Confirm(hidden)) => {
+                self.edit_armed = Some((arm, now + CLEAR_CONFIRM));
+                self.set_status(browse::hidden_warning(hidden, "w again to save"), now);
+            }
+            None => {}
+        }
+    }
+
     fn remove_selected(&mut self) -> Vec<PlayerCommand> {
         match self.player.queue().entries().get(self.queue_selected) {
             Some(entry) => {
@@ -1516,6 +1822,64 @@ impl App {
             None => Vec::new(),
         }
     }
+}
+
+/// `true` if `armed` is `arm`, pressed before its deadline.
+fn confirms(armed: Option<(EditArm, Instant)>, arm: &EditArm, now: Instant) -> bool {
+    armed.is_some_and(|(armed, until)| armed == *arm && now < until)
+}
+
+/// The suggested name of a saved queue: `Queue 2026-11-01`, the local
+/// date (the UTC date if the local one cannot be determined).
+pub fn queue_playlist_name(now: SystemTime) -> String {
+    let secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (year, month, day) = local_date(secs).unwrap_or_else(|| {
+        let (y, m, d) = civil_from_days(secs / 86_400);
+        (i64::try_from(y).unwrap_or(i64::MAX), m, d)
+    });
+    format!("Queue {year:04}-{month:02}-{day:02}")
+}
+
+/// The local calendar date of `secs` after the Unix epoch, by the
+/// process's time zone (`TZ`, else the system's), via `localtime_r`.
+fn local_date(secs: u64) -> Option<(i64, u64, u64)> {
+    let time = libc::time_t::try_from(secs).ok()?;
+    // SAFETY: `tm` is plain data, fully written by `localtime_r` on
+    // success; both pointers are valid for the call, and `localtime_r`
+    // (unlike `localtime`) uses no shared static buffer. It may read the
+    // `TZ` environment variable (to load the time zone); that is sound
+    // because Coda never modifies its environment at runtime (no
+    // `set_var`/`remove_var`), so no other thread writes it meanwhile.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut tm).is_null() {
+            return None;
+        }
+        tm
+    };
+    Some((
+        i64::from(tm.tm_year) + 1900,
+        u64::try_from(tm.tm_mon).ok()? + 1,
+        u64::try_from(tm.tm_mday).ok()?,
+    ))
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (Howard
+/// Hinnant's `civil_from_days`, for non-negative days).
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// `1 track`, `1,234 tracks`.
@@ -1594,7 +1958,10 @@ pub async fn run(
         .map(|client| spawn_ping(client, Generation::default()));
     let scrobbler = navidrome.clone().filter(|_| scrobble).map(Scrobbler::spawn);
     let mut app = App::with_sources(music_dir, navidrome);
-    let mut settings_io = SettingsIo::new(settings.config_path.clone(), SecretStore::system);
+    let mut writers = Writers {
+        settings: SettingsIo::new(settings.config_path.clone(), SecretStore::system),
+        edits: EditRunner::default(),
+    };
     app.set_settings_context(settings);
     app.set_scrobbling(scrobbler.is_some());
     let now = Instant::now();
@@ -1617,16 +1984,21 @@ pub async fn run(
         sources,
         signals,
         &mut saver,
-        &mut settings_io,
+        &mut writers,
     )
     .await;
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
+    let queued = app.browser().map_or(0, Browser::queued_edits);
+    if queued > 0 {
+        tracing::info!(queued, "queued playlist changes dropped at exit");
+    }
     tokio::join!(
         saver.finish(&mut app),
         shutdown_backend(playback),
-        settings_io.finish(SETTINGS_SAVE_WAIT)
+        writers.settings.finish(SETTINGS_SAVE_WAIT),
+        writers.edits.finish(EDIT_SAVE_WAIT)
     );
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
@@ -1882,6 +2254,71 @@ impl Fetches {
     }
 }
 
+/// Work that changes something outside Coda (the config file and
+/// keychain, the user's playlists); each is waited for, bounded, at exit.
+struct Writers {
+    settings: SettingsIo,
+    edits: EditRunner,
+}
+
+/// Runs playlist edits one at a time, across client changes too: the next
+/// edit (of any generation) starts only once the running one has
+/// answered. Edits are not aborted when the client changes (the old
+/// server's change completes; its result is dropped by the generation
+/// check).
+#[derive(Default)]
+struct EditRunner {
+    /// The edit running: its generation, id and task.
+    running: Option<(Generation, EditId, JoinHandle<()>)>,
+}
+
+impl EditRunner {
+    /// Starts the app's next edit with its current client, unless one is
+    /// running.
+    fn pump(&mut self, app: &mut App, responses: &mpsc::UnboundedSender<EditResponse>) {
+        if self.running.is_some() {
+            return;
+        }
+        // A browser, and so an edit, exists only with a client.
+        let Some(client) = app.navidrome_client().cloned() else {
+            return;
+        };
+        for request in app.take_edit_requests() {
+            let key = (request.generation, request.id);
+            let task = navidrome::edit::spawn_edit(client.clone(), request, responses.clone());
+            self.running = Some((key.0, key.1, task));
+            app.edit_in_flight = true;
+        }
+    }
+
+    /// An edit answered; if it is the running one, the next may start.
+    fn answered(&mut self, app: &mut App, response: &EditResponse) {
+        if self.running.as_ref().is_some_and(|(generation, id, _)| {
+            (*generation, *id) == (response.generation, response.id)
+        }) {
+            self.running = None;
+            app.edit_in_flight = false;
+            if app.browser.as_ref().is_none_or(|b| b.pending_edits() == 0) {
+                app.edit_quit_armed = false;
+            }
+        }
+    }
+
+    /// Waits up to `wait` for the running edit at exit.
+    async fn finish(self, wait: Duration) {
+        let Some((_, _, task)) = self.running else {
+            return;
+        };
+        if task.is_finished() {
+            return;
+        }
+        tracing::info!("waiting for a playlist change before exit");
+        if tokio::time::timeout(wait, task).await.is_err() {
+            tracing::warn!("a playlist change did not finish before exit");
+        }
+    }
+}
+
 /// Performs the Settings overlay's requests: the ping on a Tokio task, the
 /// keychain and config writes on blocking threads. Each request answers
 /// exactly once, through a drop guard. Logs only kinds and outcomes.
@@ -2072,7 +2509,7 @@ async fn event_loop(
     sources: Sources,
     mut signals: Signals,
     saver: &mut Saver,
-    settings_io: &mut SettingsIo,
+    writers: &mut Writers,
 ) -> io::Result<()> {
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(TICK);
@@ -2087,12 +2524,13 @@ async fn event_loop(
     let mut fetches = Fetches::new();
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
     let (settings_tx, mut settings_rx) = mpsc::unbounded_channel();
+    let (edit_tx, mut edit_rx) = mpsc::unbounded_channel();
     let mut playback_open = true;
     let mut dirty = true;
 
     loop {
         for request in app.take_settings_requests() {
-            settings_io.spawn(request, &settings_tx);
+            writers.settings.spawn(request, &settings_tx);
         }
         if let Some(change) = app.take_client_change() {
             fetches.restart();
@@ -2109,6 +2547,7 @@ async fn event_loop(
                 .unzip();
         }
         fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
+        writers.edits.pump(app, &edit_tx);
         for request in app.take_scrobble_requests() {
             if let Some(scrobbler) = &scrobbler {
                 scrobbler.send(request);
@@ -2189,6 +2628,12 @@ async fn event_loop(
             // The loop holds a sender, so this never yields `None`.
             Some(response) = fetch_rx.recv() => {
                 app.handle_fetch_response(response, Instant::now());
+                dirty = true;
+            },
+            // Likewise.
+            Some(response) = edit_rx.recv() => {
+                writers.edits.answered(app, &response);
+                app.handle_edit_response(response, Instant::now());
                 dirty = true;
             },
             // Likewise.
@@ -5330,6 +5775,9 @@ mod tests {
             panic!("{response:?}");
         };
         assert!(message.starts_with("Could not write"), "{message}");
+        // The message names the (random) temporary path, which may itself
+        // contain "pw"; only the rest must be free of secrets.
+        let message = message.replace(&dir.path().display().to_string(), "<dir>");
         for secret in ["pw", "you@", "new.example", "old.example"] {
             assert!(!message.contains(secret), "{secret}: {message}");
         }
@@ -5582,5 +6030,1255 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         assert_eq!(store().unwrap().get("me@h.example").unwrap().expose(), "pw");
+    }
+
+    // ----- Navidrome playlist editing ------------------------------------
+
+    use crate::navidrome::browse::{
+        INCOMPLETE_PLAYLIST, MODIFIED, READ_ONLY_FLAGGED, READ_ONLY_OTHER, READ_ONLY_UNKNOWN,
+        STALE_PLAYLIST,
+    };
+    use crate::navidrome::edit::{EditOp, EditResult};
+    use crate::navidrome::{Access, Playlist, PlaylistSongs};
+
+    fn owned_by(owner: Option<&str>, readonly: bool) -> Access {
+        Access {
+            owner: owner.map(str::to_owned),
+            readonly,
+        }
+    }
+
+    /// A playlist of the test client's user (`u`; the server may spell it
+    /// in another case).
+    fn own(id: &str, name: &str) -> Playlist {
+        Playlist {
+            id: id.into(),
+            name: name.into(),
+            song_count: None,
+            duration: None,
+            access: owned_by(Some("U"), false),
+        }
+    }
+
+    /// Another user's playlist, flagged read-only as Navidrome does.
+    fn others(id: &str, name: &str) -> Playlist {
+        Playlist {
+            access: owned_by(Some("someone"), true),
+            ..own(id, name)
+        }
+    }
+
+    fn playlist_songs(ids: &[&str], access: Access) -> Content {
+        Content::PlaylistSongs(PlaylistSongs {
+            tracks: ids.iter().map(|id| remote(id)).collect(),
+            served: ids.len(),
+            access,
+            song_count: None,
+        })
+    }
+
+    fn own_songs(ids: &[&str]) -> Content {
+        playlist_songs(ids, owned_by(Some("u"), false))
+    }
+
+    /// Navidrome only, in the Playlists list holding `lists`.
+    fn playlists_app(lists: Vec<Playlist>) -> (App, Instant) {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Playlists);
+        respond(&mut app, &request, Ok(Content::Playlists(lists)));
+        (app, now)
+    }
+
+    /// Opens the selected playlist and answers it with `songs`.
+    fn open_playlist(app: &mut App, songs: Content, now: Instant) {
+        press(app, &[Action::Activate], now);
+        let request = one_request(app);
+        assert!(matches!(request.resource, Resource::Playlist(_)));
+        respond(app, &request, Ok(songs));
+    }
+
+    fn one_edit(app: &mut App) -> EditRequest {
+        let mut edits = app.take_edit_requests();
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        edits.remove(0)
+    }
+
+    fn answer_edit(app: &mut App, request: &EditRequest, result: EditResult) {
+        app.handle_edit_response(
+            EditResponse {
+                generation: request.generation,
+                id: request.id,
+                result,
+            },
+            Instant::now(),
+        );
+    }
+
+    fn status_text(app: &App, now: Instant) -> String {
+        app.status(now).unwrap_or_default().to_owned()
+    }
+
+    fn shown_title(app: &App) -> String {
+        let browser = browser(app);
+        browser.title(browser.current().unwrap())
+    }
+
+    fn song_titles(app: &App) -> Vec<String> {
+        browser(app)
+            .current_content()
+            .unwrap()
+            .rows(0, usize::MAX)
+            .into_iter()
+            .map(|row| match row {
+                browse::Row::Song(t) => t.title.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn server_error(message: &str) -> navidrome::Error {
+        navidrome::Error::Server {
+            code: 0,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn playlists_of_other_users_are_read_only_with_a_short_message() {
+        let (mut app, now) = playlists_app(vec![
+            others("p1", "Theirs"),
+            own("p2", "Flagged"),
+            own("p3", "Unknown"),
+        ]);
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert!(browser(&app).prompt().is_none());
+        assert_eq!(status_text(&app, now), READ_ONLY_OTHER);
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), READ_ONLY_OTHER);
+        // `N` and `P` still work from someone else's playlist.
+        press(&mut app, &[Action::NewPlaylist], now);
+        assert_eq!(browser(&app).prompt(), Some(("New playlist", "")));
+        press(&mut app, &[Action::InputCancel], now);
+        // Inside it, nothing can change either.
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(Some("someone"), true)),
+            now,
+        );
+        for action in [
+            Action::RemoveFromPlaylist,
+            Action::MoveEntryDown,
+            Action::MoveEntryUp,
+        ] {
+            app.set_status("", now);
+            press(&mut app, &[action, action], now);
+            assert_eq!(status_text(&app, now), READ_ONLY_OTHER, "{action:?}");
+        }
+        assert!(!shown_title(&app).contains(MODIFIED));
+        // The server's own read-only flag, and an unknown owner.
+        press(&mut app, &[Action::Parent, Action::Down], now);
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(Some("u"), true)),
+            now,
+        );
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(status_text(&app, now), READ_ONLY_FLAGGED);
+        press(&mut app, &[Action::Parent, Action::Down], now);
+        open_playlist(
+            &mut app,
+            playlist_songs(&["s1", "s2"], owned_by(None, false)),
+            now,
+        );
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), READ_ONLY_UNKNOWN);
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn new_and_rename_prompts_emit_edits_and_an_empty_name_cancels() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Road Trip")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        assert!(app.input_open());
+        // Prompt keys are text, not commands.
+        type_text(&mut app, "  Night ", now);
+        app.handle_paste("Drive\n\u{1b}");
+        assert_eq!(
+            browser(&app).prompt(),
+            Some(("New playlist", "  Night Drive "))
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(!app.input_open());
+        assert_eq!(status_text(&app, now), "Creating Night Drive…");
+        let create = one_edit(&mut app);
+        assert_eq!(
+            create.op,
+            EditOp::Create {
+                name: "Night Drive".into(),
+                songs: Vec::new()
+            }
+        );
+        // An empty name cancels.
+        press(&mut app, &[Action::NewPlaylist, Action::InputSubmit], now);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "   ", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        // Rename: prefilled; unchanged does nothing.
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert_eq!(
+            browser(&app).prompt(),
+            Some(("Rename playlist", "Road Trip"))
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Name unchanged");
+        press(&mut app, &[Action::RenamePlaylist], now);
+        type_text(&mut app, "s", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("new".into()),
+            },
+        );
+        assert_eq!(status_text(&app, now), "Created Night Drive");
+        let rename = one_edit(&mut app);
+        assert_eq!(
+            rename.op,
+            EditOp::Rename {
+                playlist_id: "p1".into(),
+                name: "Road Trips".into()
+            }
+        );
+        assert!(app.take_edit_requests().is_empty(), "nothing else queued");
+        // The Playlists list was reloaded after the create.
+        let reload = one_request(&mut app);
+        assert_eq!(reload.resource, Resource::Playlists);
+        assert_eq!(current_load(&app), Load::Loading(reload.id));
+        answer_edit(&mut app, &rename, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Renamed Road Trip to Road Trips");
+    }
+
+    #[test]
+    fn delete_needs_a_second_press_on_the_same_playlist_soon() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        press(&mut app, &[Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete One");
+        assert!(app.take_edit_requests().is_empty());
+        // Anything in between disarms it, and so does moving to another.
+        press(&mut app, &[Action::Down, Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete Two");
+        press(&mut app, &[Action::Up, Action::DeletePlaylist], now);
+        assert_eq!(status_text(&app, now), "Press D again to delete One");
+        // Too late.
+        let later = now + CLEAR_CONFIRM + Duration::from_millis(1);
+        app.handle_action(Action::DeletePlaylist, later);
+        assert!(app.take_edit_requests().is_empty());
+        assert_eq!(status_text(&app, later), "Press D again to delete One");
+        app.handle_action(Action::DeletePlaylist, later);
+        let delete = one_edit(&mut app);
+        assert_eq!(
+            delete.op,
+            EditOp::Delete {
+                playlist_id: "p1".into()
+            }
+        );
+        assert_eq!(status_text(&app, later), "Deleting One…");
+        answer_edit(&mut app, &delete, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, later), "Deleted One");
+        assert_eq!(one_request(&mut app).resource, Resource::Playlists);
+    }
+
+    #[test]
+    fn remove_needs_a_second_press_and_a_stale_playlist_is_reloaded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s1"]), now);
+        press(&mut app, &[Action::Down, Action::Down], now);
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), "Press d again to remove Remote s1");
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        let remove = one_edit(&mut app);
+        assert_eq!(
+            remove.op,
+            EditOp::Remove {
+                playlist_id: "p1".into(),
+                index: 2,
+                expected: vec!["s1".into(), "s2".into(), "s1".into()],
+                hidden: 0,
+            }
+        );
+        // The queue is not touched.
+        assert!(app.player().queue().is_empty());
+        answer_edit(&mut app, &remove, EditResult::Stale);
+        assert_eq!(status_text(&app, now), STALE_PLAYLIST);
+        // The shown playlist is fetched again, and so is the Playlists list
+        // below it (counts may have changed).
+        let reloads = requests(&mut app);
+        let resources: Vec<&Resource> = reloads.iter().map(|r| &r.resource).collect();
+        assert_eq!(
+            resources,
+            [&Resource::Playlist("p1".into()), &Resource::Playlists]
+        );
+        let reload = reloads[0].clone();
+        respond(&mut app, &reload, Ok(own_songs(&["s1", "s3", "s2", "s1"])));
+        assert_eq!(
+            song_titles(&app),
+            ["Remote s1", "Remote s3", "Remote s2", "Remote s1"]
+        );
+        // A successful removal reloads it too.
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        let remove = one_edit(&mut app);
+        answer_edit(&mut app, &remove, EditResult::Done { created: None });
+        // The selection kept its row across the reload.
+        assert_eq!(status_text(&app, now), "Removed Remote s2 from Mix");
+        assert_eq!(
+            requests(&mut app)[0].resource,
+            Resource::Playlist("p1".into())
+        );
+    }
+
+    #[test]
+    fn index_edits_are_refused_on_a_playlist_with_unreadable_entries() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        let Content::PlaylistSongs(mut songs) = own_songs(&["s1", "s2"]) else {
+            unreachable!()
+        };
+        songs.served = 3;
+        open_playlist(&mut app, Content::PlaylistSongs(songs), now);
+        for action in [Action::RemoveFromPlaylist, Action::MoveEntryDown] {
+            press(&mut app, &[action], now);
+            assert_eq!(status_text(&app, now), INCOMPLETE_PLAYLIST);
+        }
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn reordering_is_a_draft_until_saved_or_discarded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert!(
+            !shown_title(&app).contains(MODIFIED),
+            "nothing above the first"
+        );
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s1", "Remote s3"]);
+        assert_eq!(current_selected(&app), 1, "the selection follows");
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        // Leaving or reloading is refused while it is unsaved.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+        press(&mut app, &[Action::Refresh], now);
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(view_titles(&app), ["Playlists", "Mix"]);
+        // Removing is refused too.
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+        // Esc discards.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), "New order discarded");
+        assert_eq!(song_titles(&app), ["Remote s1", "Remote s2", "Remote s3"]);
+        assert_eq!(shown_title(&app), "Mix");
+        // Moving back to the start is no change.
+        press(&mut app, &[Action::MoveEntryDown, Action::MoveEntryUp], now);
+        assert_eq!(shown_title(&app), "Mix");
+        press(&mut app, &[Action::SaveOrder], now);
+        assert!(app.take_edit_requests().is_empty(), "nothing to save");
+        // Move s1 to the end and save.
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 0);
+        press(
+            &mut app,
+            &[
+                Action::MoveEntryDown,
+                Action::MoveEntryDown,
+                Action::SaveOrder,
+            ],
+            now,
+        );
+        assert_eq!(status_text(&app, now), "Saving the new order of Mix…");
+        let replace = one_edit(&mut app);
+        assert_eq!(
+            replace.op,
+            EditOp::Replace {
+                playlist_id: "p1".into(),
+                expected: vec!["s1".into(), "s2".into(), "s3".into()],
+                songs: vec!["s2".into(), "s3".into(), "s1".into()],
+                hidden: 0,
+            }
+        );
+        press(&mut app, &[Action::MoveEntryUp], now);
+        assert_eq!(status_text(&app, now), "Saving the new order…");
+        // A failure keeps the draft on screen, unreloaded, so `w` retries.
+        answer_edit(&mut app, &replace, EditResult::Failed(server_error("busy")));
+        assert_eq!(
+            status_text(&app, now),
+            "Could not save the order of Mix: server error 0: busy; w retries, Esc discards"
+        );
+        assert!(
+            requests(&mut app).is_empty(),
+            "nothing changed, nothing reloaded"
+        );
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s3", "Remote s1"]);
+        // Too long for one request on this server: no retry offered.
+        press(&mut app, &[Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &replace,
+            EditResult::Failed(navidrome::Error::RequestTooLarge),
+        );
+        assert_eq!(
+            status_text(&app, now),
+            "Could not save the order of Mix: too many songs to reorder on this server; Esc discards"
+        );
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        press(&mut app, &[Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(&mut app, &replace, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Saved the new order of Mix");
+        let reload = requests(&mut app).remove(0);
+        assert_eq!(reload.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &reload, Ok(own_songs(&["s2", "s3", "s1"])));
+        assert_eq!(shown_title(&app), "Mix");
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s3", "Remote s1"]);
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(view_titles(&app), ["Playlists"]);
+    }
+
+    #[test]
+    fn a_stale_reorder_is_dropped_and_the_playlist_reloaded() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let replace = one_edit(&mut app);
+        answer_edit(&mut app, &replace, EditResult::Stale);
+        assert_eq!(status_text(&app, now), STALE_PLAYLIST);
+        let reload = requests(&mut app).remove(0);
+        assert_eq!(reload.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &reload, Ok(own_songs(&["s9", "s1", "s2"])));
+        assert_eq!(shown_title(&app), "Mix");
+        assert_eq!(song_titles(&app), ["Remote s9", "Remote s1", "Remote s2"]);
+    }
+
+    #[test]
+    fn the_picker_lists_new_playlist_then_own_playlists_a_to_z() {
+        let (mut app, now) = nav_app_with_artists(&["a1"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        // The Playlists list is fetched for it.
+        let lists = one_request(&mut app);
+        assert_eq!(lists.resource, Resource::Playlists);
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.label(), "Artist a1");
+        assert_eq!(picker.load(), &Load::Loading(lists.id));
+        respond(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![
+                own("p1", "beta"),
+                others("p2", "Alpha (theirs)"),
+                own("p3", "Alpha"),
+                Playlist {
+                    access: owned_by(Some("u"), true),
+                    ..own("p4", "Smart")
+                },
+            ])),
+        );
+        let picker = browser(&app).picker().unwrap();
+        let names: Vec<&str> = picker.choices().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta"]);
+        assert_eq!(picker.selected(), 0);
+        // Keys move in the picker; the view behind does not.
+        press(&mut app, &[Action::Down, Action::Down, Action::Down], now);
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2);
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 0);
+        // Esc closes; `P` again uses the cached list.
+        press(&mut app, &[Action::Back], now);
+        assert!(browser(&app).picker().is_none());
+        assert_eq!(view_titles(&app), ["Artists"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        assert!(requests(&mut app).is_empty());
+        assert_eq!(browser(&app).picker().unwrap().load(), &Load::Ready);
+        // "New playlist…": a name, then the artist's songs are fetched.
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(browser(&app).prompt(), Some(("New playlist", "")));
+        type_text(&mut app, "Fresh", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Fetching Artist a1…");
+        let artist = one_request(&mut app);
+        respond(&mut app, &artist, Ok(Content::Albums(vec![album("x")])));
+        let songs_request = one_request(&mut app);
+        respond(&mut app, &songs_request, Ok(songs(&["s1", "s2"])));
+        assert_eq!(
+            status_text(&app, now),
+            "Creating Fresh with 2 songs from Artist a1…"
+        );
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Create {
+                name: "Fresh".into(),
+                songs: vec!["s1".into(), "s2".into()]
+            }
+        );
+        // Nothing reached the queue.
+        assert!(app.player().queue().is_empty());
+    }
+
+    #[test]
+    fn adding_a_playlist_to_another_reports_a_partial_failure() {
+        let (mut app, now) = playlists_app(vec![own("p1", "b list"), own("p2", "A list")]);
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Activate],
+            now,
+        );
+        assert!(browser(&app).picker().is_none());
+        let source = one_request(&mut app);
+        assert_eq!(source.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &source, Ok(own_songs(&["s1", "s2", "s1"])));
+        assert_eq!(
+            status_text(&app, now),
+            "Adding 3 songs from b list to A list…"
+        );
+        let add = one_edit(&mut app);
+        assert_eq!(
+            add.op,
+            EditOp::Add {
+                playlist_id: "p2".into(),
+                songs: vec!["s1".into(), "s2".into(), "s1".into()]
+            }
+        );
+        answer_edit(
+            &mut app,
+            &add,
+            EditResult::Partial {
+                created: None,
+                added: 1,
+                error: server_error("disk full"),
+            },
+        );
+        assert_eq!(
+            status_text(&app, now),
+            "Added 1 of 3 songs to A list; could not add the rest: server error 0: disk full"
+        );
+        // The shown Playlists list is reloaded.
+        assert_eq!(one_request(&mut app).resource, Resource::Playlists);
+    }
+
+    #[test]
+    fn local_tracks_cannot_go_to_a_navidrome_playlist() {
+        let (mut app, now) = app_with(&["a/one.flac"]);
+        press(&mut app, &[Action::AddToPlaylist], now);
+        assert_eq!(status_text(&app, now), LOCAL_TO_PLAYLIST);
+    }
+
+    #[test]
+    fn the_queue_is_saved_as_a_playlist_of_its_navidrome_songs() {
+        let (mut app, now) = nav_home();
+        app.player.enqueue(remote("s1"));
+        app.player.enqueue(track("local.flac"));
+        app.player.enqueue(remote("s2"));
+        app.player.enqueue(remote("s1"));
+        // Only in the queue panel.
+        press(&mut app, &[Action::SaveQueueAsPlaylist], now);
+        assert!(browser(&app).prompt().is_none());
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        let (title, text) = browser(&app).prompt().unwrap();
+        assert_eq!(title, "Save queue as playlist");
+        assert!(
+            text.starts_with("Queue 20") && text.len() == "Queue 2026-11-01".len(),
+            "{text}"
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert!(
+            status_text(&app, now).starts_with("Saving 3 songs as Queue 20"),
+            "{}",
+            status_text(&app, now)
+        );
+        assert!(status_text(&app, now).ends_with("(1 local track left out)…"));
+        let EditOp::Create { songs, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(songs, ["s1", "s2", "s1"]);
+        assert_eq!(app.player().queue().len(), 4, "the queue is unchanged");
+        // Without Navidrome songs, or without Navidrome.
+        let (mut app, now) = queued_app(&["a", "b"]);
+        press(&mut app, &[Action::SaveQueueAsPlaylist], now);
+        assert_eq!(status_text(&app, now), NAVIDROME_NOT_CONFIGURED);
+        let (mut app, now) = nav_home();
+        app.player.enqueue(track("local.flac"));
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), NO_REMOTE_IN_QUEUE);
+    }
+
+    #[test]
+    fn the_default_queue_name_is_the_local_date() {
+        // The UTC fallback.
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(951_782_400 / 86_400), (2000, 2, 29));
+        assert_eq!(civil_from_days(1_793_491_199 / 86_400), (2026, 10, 31));
+        assert_eq!(civil_from_days(1_793_491_200 / 86_400), (2026, 11, 1));
+        // The local date is within a day of the UTC date (time zones span
+        // UTC-12 to UTC+14) and is what the name uses.
+        for secs in [0u64, 951_782_400, 1_793_491_200, 1_793_534_400] {
+            let (y, m, d) = local_date(secs).expect("localtime_r");
+            let local = format!("Queue {y:04}-{m:02}-{d:02}");
+            let at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            assert_eq!(queue_playlist_name(at), local);
+            let near: Vec<String> = [secs.saturating_sub(86_400), secs, secs + 86_400]
+                .iter()
+                .map(|s| {
+                    let (y, m, d) = civil_from_days(s / 86_400);
+                    format!("Queue {y:04}-{m:02}-{d:02}")
+                })
+                .collect();
+            assert!(near.contains(&local), "{local} vs {near:?}");
+        }
+    }
+
+    #[test]
+    fn edits_run_one_at_a_time_and_one_in_flight_at_a_swap_is_dropped() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        for name in ["A", "B"] {
+            press(&mut app, &[Action::NewPlaylist], now);
+            type_text(&mut app, name, now);
+            press(&mut app, &[Action::InputSubmit], now);
+        }
+        let first = one_edit(&mut app);
+        assert_eq!(first.generation, Generation(0));
+        assert!(app.take_edit_requests().is_empty(), "B waits for A");
+        assert_eq!(browser(&app).pending_edits(), 2);
+        connect_in_app(&mut app, other_client(), true, now);
+        let swapped = status_text(&app, now);
+        answer_edit(&mut app, &first, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), swapped, "the old result is dropped");
+        assert!(
+            app.take_edit_requests().is_empty(),
+            "B went with the old browser"
+        );
+        assert_eq!(browser(&app).pending_edits(), 0);
+        assert!(requests(&mut app).is_empty(), "nothing reloaded");
+    }
+
+    #[test]
+    fn a_reload_after_an_edit_supersedes_an_older_fetch() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::Refresh], now);
+        let older = one_request(&mut app);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Two", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p2".into()),
+            },
+        );
+        let newer = one_request(&mut app);
+        assert_eq!(newer.resource, Resource::Playlists);
+        assert_ne!(newer.id, older.id);
+        // The older answer may predate the change: neither cached nor shown.
+        respond(
+            &mut app,
+            &older,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert_eq!(current_load(&app), Load::Loading(newer.id));
+        assert!(browser(&app).cached(&Resource::Playlists).is_none());
+        respond(
+            &mut app,
+            &newer,
+            Ok(Content::Playlists(vec![own("p1", "One"), own("p2", "Two")])),
+        );
+        assert_eq!(current_load(&app), Load::Ready);
+        assert_eq!(browser(&app).current_content().unwrap().len(), 2);
+    }
+
+    // ----- review follow-up: drafts, picker, quitting, serialisation -----
+
+    use crate::navidrome::browse::{LAST_SONG, ORDER_DISCARDED, SAVING_ORDER, WAITING_FOR_EDIT};
+
+    #[test]
+    fn esc_during_a_save_is_refused_and_only_that_save_ends_the_draft() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let save = one_edit(&mut app);
+        // Esc while it runs: refused, the draft stays.
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        // `J` after the refused Esc is refused too; no new draft.
+        press(&mut app, &[Action::MoveEntryDown], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+        assert_eq!(song_titles(&app), ["Remote s2", "Remote s1", "Remote s3"]);
+        answer_edit(&mut app, &save, EditResult::Done { created: None });
+        assert_eq!(status_text(&app, now), "Saved the new order of Mix");
+        assert_eq!(shown_title(&app), "Mix");
+        // After the save, a new draft works and Esc discards it.
+        let reload = requests(&mut app).remove(0);
+        respond(&mut app, &reload, Ok(own_songs(&["s2", "s1", "s3"])));
+        press(&mut app, &[Action::MoveEntryDown, Action::Back], now);
+        assert_eq!(status_text(&app, now), ORDER_DISCARDED);
+        assert_eq!(shown_title(&app), "Mix");
+    }
+
+    #[test]
+    fn a_stale_answer_for_another_save_does_not_end_a_new_draft() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        let save = one_edit(&mut app);
+        // An answer with another id (a forged or old one) leaves it alone.
+        answer_edit(
+            &mut app,
+            &EditRequest {
+                id: crate::navidrome::edit::EditId(save.id.0 + 7),
+                ..save.clone()
+            },
+            EditResult::Done { created: None },
+        );
+        assert_eq!(shown_title(&app), format!("Mix{MODIFIED}"));
+        press(&mut app, &[Action::Back], now);
+        assert_eq!(status_text(&app, now), SAVING_ORDER);
+    }
+
+    #[test]
+    fn the_picker_keeps_its_choices_and_selection_across_a_reload() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        // An edit is running when the picker opens.
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Down],
+            now,
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2, "Two");
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p3".into()),
+            },
+        );
+        let reload = one_request(&mut app);
+        assert_eq!(reload.resource, Resource::Playlists);
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.load(), &Load::Loading(reload.id));
+        let names: Vec<&str> = picker.choices().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["One", "Two"], "old choices stay while loading");
+        // The new list puts another playlist first; the selection follows Two.
+        respond(
+            &mut app,
+            &reload,
+            Ok(Content::Playlists(vec![
+                own("p1", "One"),
+                own("p2", "Two"),
+                own("p3", "Ab"),
+            ])),
+        );
+        let picker = browser(&app).picker().unwrap();
+        assert_eq!(picker.selected(), 3);
+        assert_eq!(picker.choices()[2].name, "Two");
+        press(&mut app, &[Action::Back], now);
+    }
+
+    #[test]
+    fn enter_in_a_reloading_picker_adds_to_the_playlist_shown() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One"), own("p2", "Two")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        press(&mut app, &[Action::AddToPlaylist, Action::Down], now);
+        answer_edit(&mut app, &create, EditResult::Done { created: None });
+        let reload = one_request(&mut app);
+        // Still loading: Enter acts on the row shown ("One").
+        press(&mut app, &[Action::Activate], now);
+        assert!(browser(&app).picker().is_none());
+        let songs = one_request(&mut app);
+        assert_eq!(songs.resource, Resource::Playlist("p1".into()));
+        respond(&mut app, &songs, Ok(own_songs(&["s1"])));
+        let add = one_edit(&mut app);
+        assert_eq!(
+            add.op,
+            EditOp::Add {
+                playlist_id: "p1".into(),
+                songs: vec!["s1".into()]
+            }
+        );
+        // A selected playlist that is gone after a reload falls back to
+        // "New playlist…".
+        respond(
+            &mut app,
+            &reload,
+            Ok(Content::Playlists(vec![own("p1", "One"), own("p2", "Two")])),
+        );
+        press(
+            &mut app,
+            &[Action::AddToPlaylist, Action::Down, Action::Down],
+            now,
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 2);
+        answer_edit(&mut app, &add, EditResult::Done { created: None });
+        let lists = requests(&mut app)
+            .into_iter()
+            .find(|r| r.resource == Resource::Playlists)
+            .unwrap();
+        respond(
+            &mut app,
+            &lists,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert_eq!(browser(&app).picker().unwrap().selected(), 0);
+    }
+
+    #[test]
+    fn quitting_with_a_pending_change_warns_first() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        press(&mut app, &[Action::Quit], now);
+        assert!(!app.should_quit());
+        assert_eq!(status_text(&app, now), SAVING_PLAYLIST);
+        press(&mut app, &[Action::Quit], now);
+        assert!(app.should_quit());
+        // Once the change answered, quitting is immediate again.
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(&mut app, &[Action::InputSubmit, Action::Quit], now);
+        let create = one_edit(&mut app);
+        answer_edit(&mut app, &create, EditResult::Done { created: None });
+        press(&mut app, &[Action::Quit], now);
+        assert!(app.should_quit());
+        // From the help overlay too.
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "Zed", now);
+        press(
+            &mut app,
+            &[Action::InputSubmit, Action::ToggleHelp, Action::Quit],
+            now,
+        );
+        assert!(!app.should_quit());
+        assert_eq!(app.browser().unwrap().queued_edits(), 1);
+    }
+
+    #[test]
+    fn index_edits_wait_for_a_pending_change_of_the_same_playlist() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2", "s3"]), now);
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert_eq!(app.browser().unwrap().pending_edits(), 1);
+        for action in [Action::RemoveFromPlaylist, Action::MoveEntryDown] {
+            press(&mut app, &[action], now);
+            assert_eq!(status_text(&app, now), WAITING_FOR_EDIT, "{action:?}");
+        }
+        assert!(!shown_title(&app).contains(MODIFIED));
+        assert_eq!(app.take_edit_requests().len(), 1, "only the first");
+    }
+
+    #[test]
+    fn the_last_song_cannot_be_removed() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Solo")]);
+        open_playlist(&mut app, own_songs(&["s1"]), now);
+        press(
+            &mut app,
+            &[Action::RemoveFromPlaylist, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert_eq!(status_text(&app, now), LAST_SONG);
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn search_cannot_open_over_an_unsaved_order() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Mix")]);
+        open_playlist(&mut app, own_songs(&["s1", "s2"]), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::OpenSearch], now);
+        assert!(!app.input_open());
+        assert_eq!(status_text(&app, now), UNSAVED_ORDER);
+    }
+
+    #[test]
+    fn an_untouched_rename_sends_nothing_even_for_a_cut_name() {
+        let long = "n".repeat(300);
+        let (mut app, now) = playlists_app(vec![own("p1", &long)]);
+        press(&mut app, &[Action::RenamePlaylist], now);
+        assert_eq!(
+            browser(&app).prompt().unwrap().1.chars().count(),
+            MAX_QUERY_CHARS
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        assert_eq!(status_text(&app, now), "Name unchanged");
+        assert!(app.take_edit_requests().is_empty());
+    }
+
+    #[test]
+    fn an_edit_supersedes_a_fetch_in_flight_for_a_list_no_view_shows() {
+        let (mut app, now) = playlists_app(vec![own("p1", "One")]);
+        press(&mut app, &[Action::Refresh], now);
+        let older = one_request(&mut app);
+        press(&mut app, &[Action::Parent], now);
+        assert!(view_titles(&app).is_empty(), "on Home");
+        app.player.enqueue(remote("s1"));
+        press(
+            &mut app,
+            &[Action::SwitchFocus, Action::SaveQueueAsPlaylist],
+            now,
+        );
+        press(&mut app, &[Action::InputSubmit], now);
+        let create = one_edit(&mut app);
+        answer_edit(
+            &mut app,
+            &create,
+            EditResult::Done {
+                created: Some("p2".into()),
+            },
+        );
+        let newer = one_request(&mut app);
+        assert_eq!(newer.resource, Resource::Playlists);
+        respond(
+            &mut app,
+            &older,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        assert!(
+            browser(&app).cached(&Resource::Playlists).is_none(),
+            "predates the edit"
+        );
+        respond(
+            &mut app,
+            &newer,
+            Ok(Content::Playlists(vec![
+                own("p1", "One"),
+                own("p2", "Queue"),
+            ])),
+        );
+        let Some(Content::Playlists(lists)) = browser(&app).cached(&Resource::Playlists) else {
+            panic!()
+        };
+        assert_eq!(lists.len(), 2);
+    }
+
+    // ----- the loop's edit runner ----------------------------------------
+
+    use wiremock::matchers::path as at_path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn subsonic_ok(body: serde_json::Value) -> ResponseTemplate {
+        let mut response = serde_json::json!({ "status": "ok", "version": "1.16.1" });
+        if let (Some(target), serde_json::Value::Object(extra)) = (response.as_object_mut(), body) {
+            target.extend(extra);
+        }
+        ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({ "subsonic-response": response }))
+    }
+
+    async fn edit_server(delete_delay: Duration) -> MockServer {
+        let server = MockServer::start().await;
+        let mount = |endpoint: &str, response: ResponseTemplate| {
+            Mock::given(at_path(format!("/nd/rest/{endpoint}"))).respond_with(response)
+        };
+        mount(
+            "getOpenSubsonicExtensions",
+            subsonic_ok(serde_json::json!({ "openSubsonicExtensions": [{ "name": "formPost" }] })),
+        )
+        .mount(&server)
+        .await;
+        mount(
+            "deletePlaylist",
+            subsonic_ok(serde_json::json!({})).set_delay(delete_delay),
+        )
+        .mount(&server)
+        .await;
+        mount(
+            "createPlaylist",
+            subsonic_ok(serde_json::json!({ "playlist": { "id": "p9" } })),
+        )
+        .mount(&server)
+        .await;
+        server
+    }
+
+    fn client_for(server: &MockServer) -> navidrome::Client {
+        navidrome::Client::new(
+            navidrome::client::parse_base_url(&format!("{}/nd", server.uri())).unwrap(),
+            "u".into(),
+            navidrome::Password::new("p".into()),
+        )
+        .unwrap()
+    }
+
+    /// Navidrome only, against `client`, in the Playlists list (answered
+    /// by hand).
+    fn runner_app(client: navidrome::Client) -> (App, Instant) {
+        let mut app = App::with_sources(None, Some(client));
+        let now = Instant::now();
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        (app, now)
+    }
+
+    fn endpoints(requests: &[wiremock::Request]) -> Vec<String> {
+        requests
+            .iter()
+            .map(|r| r.url.path().rsplit('/').next().unwrap().to_owned())
+            .filter(|e| e != "getOpenSubsonicExtensions")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_edit_running_across_a_same_account_swap_finishes_before_the_next_starts() {
+        let server = edit_server(Duration::from_millis(400)).await;
+        let client = client_for(&server);
+        let (mut app, now) = runner_app(client.clone());
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        assert!(runner.running.is_some());
+        // The same account is saved again: a new generation and browser.
+        connect_in_app(&mut app, client, true, now);
+        app.handle_settings_input(Input::Esc, now);
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.generation, Generation(1));
+        respond(
+            &mut app,
+            &request,
+            Ok(Content::Playlists(vec![own("p1", "One")])),
+        );
+        press(&mut app, &[Action::NewPlaylist], now);
+        type_text(&mut app, "New", now);
+        press(&mut app, &[Action::InputSubmit], now);
+        // The old edit still runs: the new one waits, queued.
+        runner.pump(&mut app, &tx);
+        assert_eq!(app.browser().unwrap().queued_edits(), 1);
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.generation, Generation(0));
+        assert_eq!(
+            endpoints(&server.received_requests().await.unwrap()),
+            ["deletePlaylist"]
+        );
+        runner.answered(&mut app, &first);
+        app.handle_edit_response(first, Instant::now());
+        runner.pump(&mut app, &tx);
+        assert_eq!(app.browser().unwrap().queued_edits(), 0);
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.generation, Generation(1));
+        runner.answered(&mut app, &second);
+        app.handle_edit_response(second, Instant::now());
+        assert_eq!(status_text(&app, Instant::now()), "Created New");
+        assert_eq!(
+            endpoints(&server.received_requests().await.unwrap()),
+            ["deletePlaylist", "createPlaylist"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exit_waits_for_the_running_edit_but_only_so_long() {
+        // A quick edit is waited for.
+        let server = edit_server(Duration::from_millis(200)).await;
+        let (mut app, now) = runner_app(client_for(&server));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        let started = Instant::now();
+        runner.finish(Duration::from_secs(5)).await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(matches!(
+            rx.try_recv().unwrap().result,
+            crate::navidrome::edit::EditResult::Done { .. }
+        ));
+        // A hung one is not.
+        let server = edit_server(Duration::from_secs(10)).await;
+        let (mut app, now) = runner_app(client_for(&server));
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        let started = Instant::now();
+        runner.finish(Duration::from_millis(100)).await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Nothing running: returns at once.
+        EditRunner::default().finish(Duration::from_secs(5)).await;
+    }
+
+    // ----- hidden entries and the old account's edit at quit -------------
+
+    /// Own songs whose stored count is `count` (hidden entries beyond).
+    fn counted_songs(ids: &[&str], count: Option<u32>) -> Content {
+        let Content::PlaylistSongs(mut songs) = own_songs(ids) else {
+            unreachable!()
+        };
+        songs.song_count = count;
+        Content::PlaylistSongs(songs)
+    }
+
+    #[test]
+    fn removing_from_a_playlist_with_hidden_entries_warns_first() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Gaps")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(5)), now);
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(
+            status_text(&app, now),
+            "Press d again to remove Remote s1: this also removes 3 entries Navidrome hides \
+             (missing files or other libraries)"
+        );
+        assert!(app.take_edit_requests().is_empty());
+        // Any other key cancels.
+        press(
+            &mut app,
+            &[Action::CycleRepeat, Action::RemoveFromPlaylist],
+            now,
+        );
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::RemoveFromPlaylist], now);
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Remove {
+                playlist_id: "p1".into(),
+                index: 0,
+                expected: vec!["s1".into(), "s2".into()],
+                hidden: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn saving_an_order_over_hidden_entries_needs_a_second_w() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Gaps")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(3)), now);
+        // Reordering itself is allowed; the warning comes at save.
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert_eq!(
+            status_text(&app, now),
+            "Press w again to save: this also removes 1 entry Navidrome hides (missing files or \
+             other libraries)"
+        );
+        assert!(app.take_edit_requests().is_empty());
+        // Another key cancels: the next `w` warns again.
+        press(&mut app, &[Action::CycleRepeat, Action::SaveOrder], now);
+        assert!(app.take_edit_requests().is_empty());
+        press(&mut app, &[Action::SaveOrder], now);
+        assert_eq!(status_text(&app, now), "Saving the new order of Gaps…");
+        assert_eq!(
+            one_edit(&mut app).op,
+            EditOp::Replace {
+                playlist_id: "p1".into(),
+                expected: vec!["s1".into(), "s2".into()],
+                songs: vec!["s2".into(), "s1".into()],
+                hidden: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_suspect_count_warns_and_no_count_saves_at_once() {
+        let (mut app, now) = playlists_app(vec![own("p1", "Odd"), own("p2", "Plain")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], Some(1)), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert!(
+            status_text(&app, now)
+                .starts_with("Press w again to save: this may also remove entries Navidrome hides"),
+            "{}",
+            status_text(&app, now)
+        );
+        press(&mut app, &[Action::SaveOrder], now);
+        let EditOp::Replace { hidden, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(hidden, usize::MAX);
+        // A server that sends no songCount: no warning, as before.
+        let (mut app, now) = playlists_app(vec![own("p1", "Plain")]);
+        open_playlist(&mut app, counted_songs(&["s1", "s2"], None), now);
+        press(&mut app, &[Action::MoveEntryDown, Action::SaveOrder], now);
+        assert_eq!(status_text(&app, now), "Saving the new order of Plain…");
+        let EditOp::Replace { hidden, .. } = one_edit(&mut app).op else {
+            panic!()
+        };
+        assert_eq!(hidden, 0);
+    }
+
+    #[tokio::test]
+    async fn quit_warns_while_an_edit_for_the_old_account_still_runs() {
+        let server = edit_server(Duration::from_millis(300)).await;
+        let client = client_for(&server);
+        let (mut app, now) = runner_app(client.clone());
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut runner = EditRunner::default();
+        press(
+            &mut app,
+            &[Action::DeletePlaylist, Action::DeletePlaylist],
+            now,
+        );
+        runner.pump(&mut app, &tx);
+        connect_in_app(&mut app, client, true, now);
+        app.handle_settings_input(Input::Esc, now);
+        assert_eq!(app.browser().unwrap().pending_edits(), 0, "a fresh browser");
+        press(&mut app, &[Action::Quit], now);
+        assert!(!app.should_quit());
+        assert_eq!(status_text(&app, now), SAVING_PLAYLIST);
+        let response = rx.recv().await.unwrap();
+        runner.answered(&mut app, &response);
+        app.handle_edit_response(response, Instant::now());
+        // Done: the warning is disarmed and quitting is immediate.
+        let (mut fresh, now) = (app, Instant::now());
+        fresh.handle_action(Action::Quit, now);
+        assert!(fresh.should_quit());
     }
 }

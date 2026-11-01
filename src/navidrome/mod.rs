@@ -9,6 +9,7 @@
 pub mod api;
 pub mod browse;
 pub mod client;
+pub mod edit;
 pub mod scrobble;
 
 use std::time::Duration;
@@ -43,6 +44,32 @@ pub struct Playlist {
     /// As reported by the server (saturated at `u32::MAX`).
     pub song_count: Option<u32>,
     pub duration: Option<Duration>,
+    /// Who may edit it; see [`Access`].
+    pub access: Access,
+}
+
+/// Who owns a playlist, as the server reports it: the `owner` username
+/// and OpenSubsonic's `readonly` flag (Navidrome sets it for other users'
+/// playlists and for smart playlists).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Access {
+    /// Untrusted, capped like other metadata. `None` when not sent.
+    pub owner: Option<String>,
+    pub readonly: bool,
+}
+
+impl Access {
+    /// `true` if `username` may change the playlist: it owns it (compared
+    /// case-insensitively, as Navidrome usernames are) and the server does
+    /// not mark it read-only. An unknown owner is never editable.
+    pub fn editable_by(&self, username: &str) -> bool {
+        !self.readonly
+            && !username.is_empty()
+            && self
+                .owner
+                .as_deref()
+                .is_some_and(|owner| owner.to_lowercase() == username.to_lowercase())
+    }
 }
 
 /// The songs of a playlist (`getPlaylist`), in playlist order.
@@ -53,9 +80,69 @@ pub struct PlaylistSongs {
     pub tracks: Vec<crate::model::Track>,
     /// How many entries the server sent in all, usable or not.
     pub served: usize,
+    /// Who may edit it.
+    pub access: Access,
+    /// The server's `songCount`. Navidrome counts every stored entry,
+    /// including the ones `getPlaylist` hides (missing files, libraries
+    /// the user cannot access); `None` when not sent.
+    pub song_count: Option<u32>,
+}
+
+/// Entries of a playlist the server stores but does not return, which a
+/// replace of the list would remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hidden {
+    /// None, or the server does not send `songCount` (nothing to compare).
+    None,
+    /// `songCount` exceeds the entries returned by this many.
+    Some(usize),
+    /// `songCount` is below the entries returned: the counts disagree, so
+    /// hidden entries cannot be ruled out.
+    Suspect,
+}
+
+impl Hidden {
+    /// An upper bound for comparisons: a confirmation of `self` covers any
+    /// state whose bound is not higher.
+    pub fn bound(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Some(n) => n,
+            Self::Suspect => usize::MAX,
+        }
+    }
 }
 
 impl PlaylistSongs {
+    /// Entries the server stores but did not return; see [`Hidden`].
+    pub fn hidden_entries(&self) -> Hidden {
+        let Some(count) = self.song_count else {
+            return Hidden::None;
+        };
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        match count.cmp(&self.served) {
+            std::cmp::Ordering::Equal => Hidden::None,
+            std::cmp::Ordering::Greater => Hidden::Some(count - self.served),
+            std::cmp::Ordering::Less => Hidden::Suspect,
+        }
+    }
+
+    /// `true` if every entry the server sent is held, in order: none was
+    /// skipped (no usable id) and the list was not cut at the cap. Only
+    /// then do positions match the server's, so only then may entries be
+    /// removed by index or the order replaced.
+    pub fn is_complete(&self) -> bool {
+        self.served == self.tracks.len()
+    }
+
+    /// The song ids in playlist order.
+    pub fn song_ids(&self) -> Vec<String> {
+        self.tracks
+            .iter()
+            .filter_map(|t| t.navidrome_id().map(str::to_owned))
+            .collect()
+    }
+
     /// `(kept, total)` entries when the playlist was cut at
     /// [`api::MAX_PLAYLIST_ENTRIES`].
     pub fn truncated(&self) -> Option<(usize, usize)> {

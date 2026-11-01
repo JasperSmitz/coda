@@ -216,6 +216,17 @@ Keys are provisional, and M6 decides the final keymap. Check that each one is fr
   - rename;
   - delete.
 
+### Decisions made during slice 3
+- **Navidrome behaviour** (source commit `ec2e0a9`):
+  - `getPlaylist` hides entries with missing files and entries from libraries the user can't access.
+  - `songIndexToRemove` counts stored positions, including the hidden entries. Coda therefore never removes by index: a removal is a checked replace of the shown list.
+  - A replace drops hidden entries. When `songCount` exceeds the returned entries, `d`/`w` warn and need a second press, and a refetch that hides more than was confirmed is refused as stale.
+  - Navidrome ignores an empty replace, so the last song can't be removed; delete the playlist instead.
+- **Transport:** POST form when `formPost` is advertised (Navidrome does), batched at 512 KiB. Otherwise GET under 8 KiB.
+- **Edits:** run one at a time across all playlists and account swaps. Quit warns, and exit waits up to 5 s for the running edit.
+- **Editable:** only the user's own playlists, owner compared case-insensitively. Navidrome's `readonly` is respected, which covers smart playlists.
+- **Default playlist name:** "Queue <local date>". Local tracks are skipped when the queue is saved, with a count.
+
 ## Later (not in M5 unless approved)
 Editing local `.m3u` playlists, starring/favourites, genre and year browsing.
 

@@ -175,3 +175,34 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Absolute entries must use the canonical root.
   - Folders holding only playlists don't appear under Folders.
   - `l` is unbound (M6).
+
+## 2026-11-01 — M5 slice 3: Navidrome playlist editing (M5 complete)
+- **Delivered** (provisional keys until M6):
+  - Save the queue as a playlist (`S`).
+  - Add to a playlist through a picker (`P`).
+  - New playlist (`N`), rename (`e`), delete (`D D`).
+  - Remove a song (`d d`).
+  - Reorder (`J`/`K`, then `w` to save or `Esc` to discard).
+- **How edits work:**
+  - Edits run as sequential jobs in a loop-level runner, each answering exactly once, with generation drops.
+  - Removal and reorder are checked replaces: a refetch compares ids in order and the hidden-entry count.
+  - Partial batches are reported honestly.
+  - Writes go as POST form when `formPost` is advertised, otherwise as GET under 8 KiB.
+- **Tests:**
+  - macOS: fmt, clippy (both) and `cargo test --all-targets` (563 lib, 20 edit tests, plus the rest) pass; the 20 ignored mpv tests pass.
+  - Linux container: fmt, clippy and three test runs pass.
+  - PTY smoke against a recording fake Subsonic server: 59/59 in both the GET and the POST mode.
+- **Review:** three rounds. Fixed:
+  - Esc racing a save
+  - the picker selecting by index
+  - quitting mid-edit
+  - edits overlapping across account swaps
+  - unsafe index removal (Navidrome's hidden entries)
+  - silent loss of hidden entries (now a warning with confirmation and a recheck)
+  - detection caching
+  - a long-flaky settings test that matched "pw" in a temp path
+- **Limitations:**
+  - A few-millisecond window between the stale check and the write remains, since Subsonic has no conditional write.
+  - Queued edits that never started are dropped at quit, counted in the log.
+  - On servers without `formPost`, playlists over about 250 songs can't be reordered or have songs removed.
+  - Not yet run against the owner's real server.
