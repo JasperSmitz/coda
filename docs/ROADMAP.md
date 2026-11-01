@@ -50,13 +50,19 @@ Brief: `docs/plans/m5-library-home.md`. Slices: 1. Navidrome home, playlists (re
 - All-albums list (`getAlbumList2`, paged) with useful sort orders.
 - Local `.m3u` playlists may follow the same layout.
 
-## M6 — Keybindings and interaction (proposed)
-- Rework keys that feel clunky, based on the owner's notes; e.g. `a` appends to the queue and `A` inserts as next.
+## M6 — Audio visualizer (in progress)
+Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11-01) so the owner can try the current keys first.
+1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation.
+2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder.
+
+## M7 — Keybindings and quality of life (proposed)
+The owner is trying the current keys first; their notes set the scope.
+- Play a whole album or playlist directly, instead of only adding it to the queue. Options: Enter plays the whole list while another key opens it, or a modifier plays it (Shift+Enter is reported only by terminals with the kitty keyboard protocol, so it needs a fallback).
+- Settle the provisional keys from M4 and M5: `,` `S` `P` `N` `e` `D` `w`, and `l`, which is not bound yet.
 - Configurable keybindings only once the defaults are settled.
 
-## M7 — Visual extras (proposed)
-- Cover art: real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), a block-character fallback elsewhere.
-- Visualizer: a level meter from mpv's audio statistics is feasible; a real spectrum needs an audio tap and is exploratory.
+## M8 — Cover art (proposed)
+- Real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), and a block-character fallback elsewhere.
 
 ## Postponed indefinitely
 - **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.
