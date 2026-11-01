@@ -76,10 +76,77 @@
 - **Render:** Home, playlist list, playlist songs, album list with the sort in the title, the paging footer, and help still fitting 80x24.
 - **PTY smoke** against a fake Subsonic server with playlists and more than 500 albums: page through, change the sort, play a playlist, then `A` a song.
 
-## Slice 2 — local home (proposed, briefed in detail after slice 1)
-- The local source gets the same Home: `Playlists`, `Folders` (today's tree), `Artists`, `Albums`.
-- Artists and albums are derived from tags. This needs an album-artist tag in `TrackMetadata` (fallback: artist) and grouping by (album artist, album), with track and disc order.
-- `.m3u`/`.m3u8` files found during the scan are local playlists. Relative paths resolve against the playlist's folder; entries outside the music folder, URLs and missing files are skipped and counted.
+## Slice 2 — local home, tag-based artists and albums, `.m3u` playlists
+
+### Home
+- The local source opens on **Home**: `Playlists`, `Folders`, `Artists`, `Albums`.
+  - `Folders` is today's directory tree, unchanged.
+  - Keys and titles work as on Navidrome: `Enter`/`l` opens, `h`/`Backspace` goes back up and ends at Home, `a`/`A` enqueue, and `/` searches (local search is unchanged; its results return to where search was opened).
+  - Titles show the path, e.g. `Local › Albums (by artist)`.
+- During a scan, Home and the lists are usable and fill in as tracks arrive. A small "Scanning…" note stays in the title until the scan finishes.
+
+### Artists and albums from tags
+- `TrackMetadata` and `Track` gain `album_artist` (lofty's album-artist item).
+  - The saved session must stay compatible: a version 1 `state.json` without the field still loads, and the field is optional when saving.
+  - Remote tracks fill it when the API provides it, and otherwise leave it `None`.
+- **Grouping:**
+  - Artist key: album artist, else artist, else "Unknown artist".
+  - An album is (artist key, album tag), so the same album name under two album artists gives two albums.
+  - Tracks without an album tag go into "Unknown album" under their artist.
+  - Keys compare case-insensitively with surrounding whitespace trimmed; the most common spelling is displayed.
+- **Sorting:**
+  - Artists A–Z, case-insensitive.
+  - An artist's albums A–Z.
+  - Album tracks by disc, track, then title, then path (the same rule as the tree).
+- **Albums list:** every album, with `o` cycling A–Z by name or by artist. Each row shows the artist.
+- **Performance:**
+  - The index updates with scan batches or is rebuilt off the input loop. It must never block a frame: measure with 50,000 synthetic tracks, as local search did.
+  - Memory: the index refers to tracks (indices or shared handles) rather than cloning them where practical.
+
+### `.m3u` / `.m3u8` playlists
+- The scan also collects `*.m3u` and `*.m3u8` files under the music folder, with the same symlink rules as audio files.
+- **Parsing** (a pure function that the tests drive directly):
+  - Read at most 1 MiB per file and at most 10,000 entries; larger files are cut, with a note.
+  - `.m3u8` is UTF-8. A plain `.m3u` is tried as UTF-8 and otherwise decoded lossily.
+  - Blank lines and `#` lines are skipped; `#EXTINF` titles are ignored, because tags are the source of truth. A leading BOM is ignored.
+  - Relative entries resolve against the playlist's folder. An absolute entry is accepted only if it falls inside the music folder after normalisation.
+  - URLs (anything with a scheme) are skipped.
+  - An entry must match a scanned track by normalised path. Anything else counts as missing.
+- **Display:**
+  - The name is the file stem. Playlists sort A–Z.
+  - Each row shows "N tracks" and, when some entries are missing, ", M missing".
+  - The playlist view lists the matched tracks in file order, keeping duplicates.
+- **Resolution:** playlists are resolved against the library after the scan finishes, or on demand when opened; never on the input loop if that could take longer than a frame.
+- **Never:** follow a playlist entry outside the music folder, execute anything, or log entry paths.
+
+### Tests
+- **Grouping:**
+  - album artist vs artist fallback
+  - case and whitespace merging
+  - same album name under two artists
+  - unknown artist and album
+  - track order
+  - the 50k-track timing
+- **Session:** a version 1 file without `album_artist` loads, and the round trip keeps the field.
+- **m3u parser:**
+  - relative and absolute paths, entries outside the root (`..`, absolute elsewhere, symlinked folders), URLs
+  - comments, `#EXTINF` and BOM
+  - CRLF line endings
+  - lossy `.m3u`
+  - caps and duplicates
+  - missing entries counted
+- **App/browser:**
+  - Home navigation
+  - `h` back up to Home
+  - lists filling in during a scan
+  - `a`/`A` on an artist, album or playlist, in order
+  - `o` on Albums
+- **Render:**
+  - Home
+  - artists, albums (both sorts), playlist rows with missing counts
+  - the scanning note
+  - help still fits 80x24
+- **PTY smoke:** a temporary music folder with tagged files, including compilations and a missing album tag, plus playlists (relative, absolute inside and outside, missing, URL).
 
 ## Slice 3 — Navidrome playlist editing (approved by owner 2026-11-01; briefed in detail after slice 2)
 - **Save the queue as a new playlist** (`createPlaylist`, name typed in a single-line input).
