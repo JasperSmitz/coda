@@ -31,13 +31,43 @@
 - **Throwaway code.** Prototype code may live in the scratchpad, or behind an `#[ignore]` real-mpv test. Do not change the shipping playback path in the spike, apart from test-only hooks if needed.
 - **Tests.** Real-mpv probes use generated test signals (sine sweeps or tones at known frequencies), so the band levels can be checked against expectations.
 
-## Slice 2 — visualizer (briefed after slice 1)
-These constraints already hold:
+## Slice 2 — visualizer
+**Owner decisions (2026-11-01):** the full visualizer (7 bands plus an L/R level meter), with **always-stereo output** (`--audio-channels=stereo` at spawn, always). Keeping the graph attached while hidden until the next track change or stop is accepted.
+
+Implement the spike's recommendation (see "Recommendation for slice 2" below) with these constraints:
 - **Where it shows:** in the now-playing area, toggled with `v` (provisional, settled in M7). Off by default until the owner decides otherwise; the toggle is saved in the session.
 - **No work when nothing is shown.** No updates and no redraws while it is hidden, paused or stopped, or while no track is playing. While visible, cap updates at about 30 per second and draw only the visualizer area.
 - **Untrusted input.** Metadata values are parsed defensively: bounded numbers, NaN and infinity rejected, missing keys tolerated.
 - **Behind the backend boundary.** All of it stays behind the playback boundary (`PlaybackEvent`/`PlaybackCommand`), with no mpv details in the UI.
 - **Rendering.** Unicode block characters, with sensible behaviour at small widths and in `NO_COLOR`/16-colour terminals.
+- **Graph and arguments:**
+  - Graph: exactly the spike's `recommended` graph with `N=2048`.
+  - `--audio-channels=stereo` is added to the spawn arguments.
+  - The graph lives in one constant in the mpv module, with a test that it is never part of the spawn arguments.
+- **Attaching:**
+  - Attach lazily with `af add` on first visibility while playing.
+  - An error reply means "Visualizer unavailable", shown once in the status line, and no retry for the session.
+  - Detach at the next track change or stop if the visualizer is hidden.
+- **Timing:**
+  - Align values to the time code, so each value is shown when playback reaches it.
+  - Drop values belonging to an older load or from before a seek.
+  - While paused, show nothing new and let the bars settle to zero quickly or freeze them (developer's choice, stated in the report).
+- **Display:**
+  - Light smoothing (fast attack, slower decay), so it stays calm, as VISION asks.
+  - Bands at or above Nyquist are hidden.
+- **Layout:**
+  - The visualizer takes a fixed small height (e.g. 3–4 rows) inside or under the now-playing bar.
+  - When the terminal is too small, it hides itself, and the rest of the layout must still work.
+  - Help still fits 80x24.
+- **Tests:**
+  - Pure parsing and normalisation: hostile strings, `-inf`, NaN, missing keys, extra channels.
+  - Time-code alignment with a fake clock.
+  - Smoothing.
+  - The boundary event coalescing.
+  - Render tests at several sizes and with NO_COLOR.
+  - App: toggle persistence; no polling when hidden, paused or stopped.
+  - Real-mpv `#[ignore]` tests: tones peak in the right band, the output is bit-identical with and without the visualizer, and a graph with a missing filter is reported as unavailable while playback continues.
+  - All existing mpv tests still pass with `--audio-channels=stereo`.
 
 ## Findings (slice 1 spike, 2026-11-01)
 
