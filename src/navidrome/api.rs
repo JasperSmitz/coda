@@ -50,6 +50,9 @@ pub const MAX_PLAYLISTS: usize = 10_000;
 /// Upper bound on the songs kept from one `getPlaylist`: more could never
 /// be queued anyway.
 pub const MAX_PLAYLIST_ENTRIES: usize = MAX_QUEUE_LEN;
+/// The `size` of a `getRandomSongs` request (the Subsonic maximum), and
+/// the songs kept from one reply.
+pub const RANDOM_SONGS_SIZE: usize = 500;
 /// Upper bound on the OpenSubsonic extensions read from
 /// `getOpenSubsonicExtensions` (Navidrome lists about ten).
 pub const MAX_EXTENSIONS: usize = 100;
@@ -162,6 +165,7 @@ reply!(SearchReply { "searchResult3" => search_result3: SearchResult3 });
 reply!(AlbumListReply { "albumList2" => album_list2: AlbumList2 });
 reply!(PlaylistsReply { "playlists" => playlists: Playlists });
 reply!(PlaylistReply { "playlist" => playlist: RawPlaylist });
+reply!(RandomSongsReply { "randomSongs" => random_songs: RandomSongs });
 reply!(
     /// `createPlaylist`: the new playlist (Subsonic 1.14+). Only its id is
     /// read; its entries are drained unparsed.
@@ -221,6 +225,7 @@ reply!(
         "albumList2" => album_list2: AlbumList2,
         "playlists" => playlists: Playlists,
         "playlist" => playlist: RawPlaylist,
+        "randomSongs" => random_songs: RandomSongs,
     }
 );
 
@@ -321,6 +326,14 @@ pub struct SearchResult3 {
 pub struct AlbumList2 {
     #[serde(deserialize_with = "album_items")]
     pub album: Counted<RawAlbum>,
+}
+
+/// `getRandomSongs`. Subsonic omits `song` for an empty list.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RandomSongs {
+    #[serde(deserialize_with = "random_song_items")]
+    pub song: Counted<RawSong>,
 }
 
 /// `getPlaylists`. Subsonic omits `playlist` when there are none.
@@ -808,6 +821,13 @@ where
     capped_list(deserializer, MAX_ALBUM_LIST_SIZE)
 }
 
+fn random_song_items<'de, D>(deserializer: D) -> Result<Counted<RawSong>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list(deserializer, RANDOM_SONGS_SIZE)
+}
+
 fn playlist_items<'de, D>(deserializer: D) -> Result<Counted<RawPlaylist>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1175,6 +1195,7 @@ mod tests {
             "album",
             "searchResult3",
             "albumList2",
+            "randomSongs",
             "error",
         ] {
             let body = format!(
@@ -1240,6 +1261,26 @@ mod tests {
         let broken = &body.as_bytes()[..body.len() / 2];
         assert!(parse::<ArtistsReply>(broken).is_err());
         assert_eq!(BUDGET.get(), MAX_RESPONSE_OBJECTS);
+    }
+
+    #[test]
+    fn random_songs_keep_the_first_items_up_to_the_request_size() {
+        let songs: Vec<String> = (0..RANDOM_SONGS_SIZE + 10)
+            .map(|i| format!(r#"{{"id": "s{i}", "title": "T{i}"}}"#))
+            .collect();
+        let body = format!(
+            r#"{{"subsonic-response": {{"status": "ok", "randomSongs": {{"song": [{}]}},
+                "playlist": {{"id": "ignored"}}}}}}"#,
+            songs.join(",")
+        );
+        let r = parse::<RandomSongsReply>(body.as_bytes()).unwrap();
+        let list = r.random_songs.unwrap().song;
+        assert_eq!(list.items.len(), RANDOM_SONGS_SIZE);
+        assert_eq!(list.served, RANDOM_SONGS_SIZE + 10);
+        // Subsonic omits the array of an empty list.
+        let body = r#"{"subsonic-response": {"status": "ok", "randomSongs": {}}}"#;
+        let r = parse::<RandomSongsReply>(body.as_bytes()).unwrap();
+        assert_eq!(r.random_songs.unwrap().song.served, 0);
     }
 
     #[test]

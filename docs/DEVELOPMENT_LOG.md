@@ -268,3 +268,20 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Enter waiting behind superseded fetches;
   - artist shuffle fetching albums one at a time (introduced by the slot fix);
   - polish: unused queue API, the confirmation kind check, and the "Not deleted" status.
+
+## M7 slice 2 — shuffle all (2026-11-02)
+- **Implemented:** "Shuffle all" is the first entry of both home menus; Enter or `s` replaces the queue and plays.
+  - **Local:** the whole library index, shuffled. Above the 10,000-entry cap it plays a uniform random sample (`queue::sample`). During a running or failed scan it says "scanned so far".
+  - **Navidrome:** `getRandomSongs?size=500`.
+    - Parsed with its own reply type, using the streaming parser and the shared object budget.
+    - It runs as a play request, so the supersede, generation, cancel and hold/drop rules apply.
+    - Random songs are never cached. Repeated presses share the one request in flight, whose answer is still unseen.
+- **Tests:**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 656 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke: 41/41.
+- **Review:** one round, nothing blocking. Fixed:
+  - repeated presses piling up `getRandomSongs` tasks that held semaphore permits;
+  - an empty local library cancelling a pending Navidrome play;
+  - test gaps around held and dropped adds, and decode failures.
+- **Open UX point:** Home opens with Shuffle all selected, so a habitual Enter on launch replaces the restored queue. Flagged to the owner.

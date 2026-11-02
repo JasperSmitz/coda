@@ -25,7 +25,7 @@ use url::form_urlencoded;
 
 use url::{Host, Url};
 
-use super::api::{self, AUTH_ERROR_CODES, MAX_ALBUM_LIST_SIZE};
+use super::api::{self, AUTH_ERROR_CODES, MAX_ALBUM_LIST_SIZE, RANDOM_SONGS_SIZE};
 use super::{Album, AlbumPage, AlbumSort, Artist, Playlist, PlaylistSongs, SearchResults};
 use crate::model::Track;
 use crate::playback::StreamUrl;
@@ -410,6 +410,23 @@ impl Client {
                 .filter_map(api::RawSong::into_track)
                 .collect(),
         })
+    }
+
+    /// [`RANDOM_SONGS_SIZE`] random songs (`getRandomSongs`), in served
+    /// order. A new request gives a new selection; nothing is cached.
+    pub async fn random_songs(&self) -> Result<Vec<Track>, Error> {
+        let size = RANDOM_SONGS_SIZE.to_string();
+        let songs = self
+            .get::<api::RandomSongsReply>("getRandomSongs", &[("size", size.as_str())])
+            .await?
+            .random_songs
+            .ok_or_else(|| Error::Decode("getRandomSongs: missing randomSongs".into()))?;
+        Ok(songs
+            .song
+            .items
+            .into_iter()
+            .filter_map(api::RawSong::into_track)
+            .collect())
     }
 
     /// `search3` with bounded result counts. A response without a result

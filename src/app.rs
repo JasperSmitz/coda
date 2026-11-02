@@ -62,7 +62,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::library::browse::{LocalBrowser, Row as LocalRow};
+use crate::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
 use crate::library::scan::{self, ScanEvent};
 use crate::library::search::{self, SearchResults};
 use crate::library::{Library, MAX_PLAYLISTS};
@@ -80,7 +80,7 @@ use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
 use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
-use crate::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, shuffle_with_first};
+use crate::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
 use crate::resolve;
 use crate::secret_store::{SecretError, SecretStore};
 use crate::session::{self, Session};
@@ -1685,6 +1685,12 @@ impl App {
         if !self.local_browse_active() {
             return Vec::new();
         }
+        if matches!(
+            self.local.selected_row(&self.library),
+            Some(LocalRow::Home(LocalHomeEntry::ShuffleAll))
+        ) {
+            return self.shuffle_all_local(now);
+        }
         match self.local.play_context(&self.library, shuffle) {
             Some(context) => {
                 let tracks = context
@@ -1716,17 +1722,91 @@ impl App {
         shuffle: bool,
         now: Instant,
     ) -> Vec<PlayerCommand> {
-        let mut dropped = 0;
-        if let Some(browser) = self.browser.as_mut() {
-            let (n, outcomes) = browser.queue_replaced();
-            dropped = n;
-            self.apply_job_outcomes(outcomes, now);
-        }
+        let dropped = self.local_replace_started(now);
         let (commands, text) = self.replace_queue(label, tracks, start, shuffle);
         if let Some(text) = text {
             self.set_status(format!("{text}{}", dropped_note(dropped)), now);
         }
         commands
+    }
+
+    /// A local play is about to replace the queue: drops a Navidrome play
+    /// request still waiting and the Navidrome adds not applied yet (the
+    /// replace would wipe them). Returns how many adds were dropped.
+    fn local_replace_started(&mut self, now: Instant) -> usize {
+        let Some(browser) = self.browser.as_mut() else {
+            return 0;
+        };
+        let (dropped, outcomes) = browser.queue_replaced();
+        self.apply_job_outcomes(outcomes, now);
+        dropped
+    }
+
+    /// "Shuffle all" in the local Home: replaces the queue with every
+    /// track scanned so far, shuffled, and plays it. A library larger
+    /// than [`MAX_QUEUE_LEN`] gives a random sample of that many.
+    fn shuffle_all_local(&mut self, now: Instant) -> Vec<PlayerCommand> {
+        // A failed scan also left only part of the library.
+        let partial = matches!(
+            self.scan,
+            ScanState::Scanning { .. } | ScanState::Failed { .. }
+        );
+        if self.library.is_empty() {
+            // Nothing replaces the queue, so nothing waiting is cancelled.
+            let note = if partial {
+                " (0 tracks scanned so far)"
+            } else {
+                ""
+            };
+            self.set_status(format!("Nothing to play{note}"), now);
+            return Vec::new();
+        }
+        let all = self.library.tree().tracks();
+        let mut picked: Vec<usize> = (0..all.len()).collect();
+        sample(&mut picked, MAX_QUEUE_LEN, &mut self.rng);
+        let tracks: Vec<Track> = picked.into_iter().map(|i| all[i].clone()).collect();
+        let total = all.len();
+        let dropped = self.local_replace_started(now);
+        let (commands, text) = self.replace_queue_shuffled_all(tracks, total, partial);
+        if let Some(text) = text {
+            self.set_status(format!("{text}{}", dropped_note(dropped)), now);
+        }
+        commands
+    }
+
+    /// Replaces the queue with "Shuffle all"'s `tracks` (already in random
+    /// order, within the queue cap), picked from `total`, and plays them.
+    /// `partial`: only the tracks scanned so far. Returns the commands and
+    /// the status text.
+    fn replace_queue_shuffled_all(
+        &mut self,
+        tracks: Vec<Track>,
+        total: usize,
+        partial: bool,
+    ) -> (Vec<PlayerCommand>, Option<String>) {
+        if tracks.is_empty() {
+            return (Vec::new(), Some("Nothing to play".to_owned()));
+        }
+        let picked = tracks.len();
+        let commands = self.player.play_context(tracks, 0);
+        if commands.is_empty() {
+            // Refused (playback unavailable); the player says why.
+            return (commands, None);
+        }
+        self.queue_selected = 0;
+        tracing::debug!(
+            tracks = self.player.queue().len(),
+            total,
+            partial,
+            "queue replaced by shuffle all"
+        );
+        let counts = if picked < total {
+            format!("{} of {}", thousands(picked), count(total, "track"))
+        } else {
+            count(picked, "track")
+        };
+        let scope = if partial { " scanned so far" } else { "" };
+        (commands, Some(format!("Shuffling all ({counts}{scope})")))
     }
 
     /// [`App::play_tracks`] without dropping a waiting play request.
@@ -1861,6 +1941,16 @@ impl App {
                         continue;
                     }
                     let (play, text) = self.replace_queue(label, tracks, start, shuffle);
+                    commands = play;
+                    played = text.or(played);
+                }
+                JobOutcome::ShuffleAll { tracks, generation } => {
+                    if generation != self.generation {
+                        tracing::debug!("play request for an old client ignored");
+                        continue;
+                    }
+                    let total = tracks.len();
+                    let (play, text) = self.replace_queue_shuffled_all(tracks, total, false);
                     commands = play;
                     played = text.or(played);
                 }
@@ -3218,7 +3308,7 @@ mod tests {
             .iter()
             .position(|e| *e == entry)
             .unwrap();
-        press(app, &[Action::Up; 4], now);
+        press(app, &[Action::Up; local::HOME_ENTRIES.len()], now);
         press(app, &vec![Action::Down; at], now);
         press(app, &[Action::Activate], now);
     }
@@ -3353,11 +3443,15 @@ mod tests {
     fn selection_is_valid_on_an_empty_library() {
         let now = Instant::now();
         for entry in local::HOME_ENTRIES {
+            if entry == local::HomeEntry::ShuffleAll {
+                // Not a list; see `local_shuffle_all_*`.
+                continue;
+            }
             let mut app = App::new(ROOT.into());
             // Home is there before anything is scanned.
             assert_eq!(
                 row_names(&app),
-                ["Playlists", "Folders", "Artists", "Albums"]
+                ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
             );
             open_local(&mut app, entry, now);
             assert!(app.library_rows().is_empty(), "{entry:?}");
@@ -3774,6 +3868,8 @@ mod tests {
     #[test]
     fn local_s_on_an_artist_or_a_folder_shuffles_all_of_it_and_does_nothing_on_home() {
         let (mut app, now) = tag_app();
+        // On a Home list entry (not "Shuffle all").
+        press(&mut app, &[Action::Down], now);
         assert!(press(&mut app, &[Action::PlayShuffled], now).is_empty());
         assert!(app.player().queue().is_empty(), "Home: nothing yet");
         assert!(path_titles(&app).is_empty(), "and nothing opens");
@@ -4118,6 +4214,286 @@ mod tests {
         assert_eq!(queue_titles(&app), ["Remote old"]);
     }
 
+    // ----- Shuffle all ---------------------------------------------------
+
+    /// Local Home with "Shuffle all" selected.
+    fn select_local_shuffle_all(app: &mut App, now: Instant) {
+        while *app.local_browser().current() != local::View::Home {
+            app.handle_action(Action::Parent, now);
+        }
+        press(app, &[Action::Up; local::HOME_ENTRIES.len()], now);
+        assert_eq!(selected_name(app), "Shuffle all");
+    }
+
+    fn finished(app: &mut App, tracks: usize, now: Instant) {
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+    }
+
+    #[test]
+    fn local_shuffle_all_plays_every_track_once_in_a_seeded_order() {
+        let rels: Vec<String> = (0..20).map(|i| format!("d{}/{i:02}.flac", i % 3)).collect();
+        let rels: Vec<&str> = rels.iter().map(String::as_str).collect();
+        let (mut app, now) = app_with(&rels);
+        finished(&mut app, 20, now);
+        app.player.enqueue(track("old.flac"));
+        select_local_shuffle_all(&mut app, now);
+        // `l` does nothing on it.
+        assert!(press(&mut app, &[Action::Open], now).is_empty());
+        assert_eq!(*app.local_browser().current(), local::View::Home);
+        assert_eq!(queue_titles(&app), ["old"]);
+        app.rng = Rng::from_seed(5);
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(app.status(now), Some("Shuffling all (20 tracks)"));
+        let first = queue_titles(&app);
+        assert!(first[0].ends_with('*'), "plays from the first: {first:?}");
+        assert_eq!(
+            load_path(&commands),
+            app.player().queue().entries()[0]
+                .track
+                .local_path()
+                .unwrap()
+        );
+        let names: Vec<String> = first
+            .iter()
+            .map(|t| t.trim_end_matches('*').to_owned())
+            .collect();
+        let all: Vec<String> = (0..20).map(|i| format!("{i:02}")).collect();
+        assert_eq!(sorted(names.clone()), all, "every track once, nothing else");
+        assert_ne!(names, all, "shuffled");
+        assert_eq!(
+            *app.local_browser().current(),
+            local::View::Home,
+            "Home stays"
+        );
+        // The same seed gives the same order; `s` does the same as Enter.
+        app.rng = Rng::from_seed(5);
+        press(&mut app, &[Action::PlayShuffled], now);
+        assert_eq!(queue_titles(&app), first);
+        app.rng = Rng::from_seed(6);
+        press(&mut app, &[Action::Activate], now);
+        assert_ne!(queue_titles(&app), first);
+    }
+
+    #[test]
+    fn local_shuffle_all_samples_a_library_over_the_queue_cap() {
+        let extra = 5;
+        let total = MAX_QUEUE_LEN + extra;
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        app.handle_scan_event(
+            ScanEvent::Batch((0..total).map(|i| track(&format!("{i:05}.flac"))).collect()),
+            now,
+        );
+        finished(&mut app, total, now);
+        app.rng = Rng::from_seed(11);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(
+            app.status(now),
+            Some("Shuffling all (10,000 of 10,005 tracks)")
+        );
+        let queue = app.player().queue();
+        assert_eq!(queue.len(), MAX_QUEUE_LEN);
+        let mut picked: Vec<String> = queue
+            .entries()
+            .iter()
+            .map(|e| e.track.title.clone())
+            .collect();
+        picked.sort();
+        picked.dedup();
+        assert_eq!(picked.len(), MAX_QUEUE_LEN, "no track twice");
+        let first_n: Vec<String> = (0..MAX_QUEUE_LEN).map(|i| format!("{i:05}")).collect();
+        assert_ne!(picked, first_n, "a random sample, not the first tracks");
+    }
+
+    #[test]
+    fn local_shuffle_all_during_or_after_a_failed_scan_says_so() {
+        let (mut app, now) = app_with(&["a.flac", "b.flac"]);
+        select_local_shuffle_all(&mut app, now);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(
+            app.status(now),
+            Some("Shuffling all (2 tracks scanned so far)")
+        );
+        assert_eq!(sorted(queue_titles(&app)).len(), 2);
+        app.scan_closed(now);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(
+            app.status(now),
+            Some("Shuffling all (2 tracks scanned so far)")
+        );
+        // After a complete scan, no note.
+        let (mut app, now) = app_with(&["a.flac"]);
+        finished(&mut app, 1, now);
+        select_local_shuffle_all(&mut app, now);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(app.status(now), Some("Shuffling all (1 track)"));
+    }
+
+    #[test]
+    fn local_shuffle_all_in_an_empty_library_plays_nothing() {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        app.player.enqueue(track("kept.flac"));
+        // While the scan runs, it says so.
+        assert!(press(&mut app, &[Action::Activate], now).is_empty());
+        assert_eq!(
+            app.status(now),
+            Some("Nothing to play (0 tracks scanned so far)")
+        );
+        finished(&mut app, 0, now);
+        for action in [Action::Activate, Action::PlayShuffled] {
+            assert!(press(&mut app, &[action], now).is_empty());
+            assert_eq!(app.status(now), Some("Nothing to play"));
+            assert_eq!(queue_titles(&app), ["kept"]);
+        }
+    }
+
+    /// Navidrome only, on Home, with "Shuffle all" selected.
+    fn nav_shuffle_all() -> (App, Instant) {
+        let (mut app, now) = nav_home();
+        press(&mut app, &[Action::Up], now);
+        assert_eq!(current_selected(&app), 0);
+        app.player.enqueue(remote("old"));
+        (app, now)
+    }
+
+    #[test]
+    fn navidrome_shuffle_all_plays_random_songs_from_the_server() {
+        let (mut app, now) = nav_shuffle_all();
+        // `l` does nothing on it.
+        press(&mut app, &[Action::Open], now);
+        assert!(view_titles(&app).is_empty());
+        assert!(requests(&mut app).is_empty());
+        for action in [Action::Activate, Action::PlayShuffled] {
+            assert!(press(&mut app, &[action], now).is_empty());
+            assert_eq!(app.status(now), Some("Fetching random songs…"));
+            let request = one_request(&mut app);
+            assert_eq!(request.resource, Resource::RandomSongs);
+            let commands = respond_play(&mut app, &request, Ok(songs(&["r1", "r2", "r3"])));
+            assert_eq!(app.status(now), Some("Shuffling all (3 tracks)"));
+            let titles = queue_titles(&app);
+            assert_eq!(
+                sorted(
+                    titles
+                        .iter()
+                        .map(|t| t.trim_end_matches('*').to_owned())
+                        .collect()
+                ),
+                ["Remote r1", "Remote r2", "Remote r3"]
+            );
+            assert!(titles[0].ends_with('*'));
+            let first = app.player().queue().entries()[0].track.source.clone();
+            assert_eq!(
+                first,
+                TrackSource::Navidrome {
+                    song_id: stream_id(&commands)
+                }
+            );
+            assert!(browser(&app).cached(&Resource::RandomSongs).is_none());
+        }
+    }
+
+    #[test]
+    fn navidrome_shuffle_all_with_no_songs_or_a_failure_keeps_the_queue() {
+        let (mut app, now) = nav_shuffle_all();
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert!(respond_play(&mut app, &request, Ok(songs(&[]))).is_empty());
+        assert_eq!(app.status(now), Some("Nothing to play"));
+        assert_eq!(queue_titles(&app), ["Remote old"]);
+        press(&mut app, &[Action::Activate], now);
+        let request = one_request(&mut app);
+        assert!(respond_play(&mut app, &request, Err(navidrome::Error::Http(503))).is_empty());
+        assert_eq!(
+            app.status(now),
+            Some("Could not play random songs: server returned HTTP 503")
+        );
+        assert_eq!(queue_titles(&app), ["Remote old"]);
+    }
+
+    /// Local and Navidrome, `rels` scanned (and the scan finished), on
+    /// the Navidrome Home with a Shuffle all waiting for its songs.
+    fn both_with_pending_shuffle_all(rels: &[&str]) -> (App, Instant, FetchRequest) {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        if !rels.is_empty() {
+            app.handle_scan_event(
+                ScanEvent::Batch(rels.iter().map(|r| track(r)).collect()),
+                now,
+            );
+        } else {
+            assert_eq!(app.scan_state(), ScanState::Scanning { tracks: 0 });
+        }
+        app.player.enqueue(track("kept.flac"));
+        press(&mut app, &[Action::SelectNavidrome, Action::Activate], now);
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::RandomSongs);
+        press(&mut app, &[Action::SelectLocal], now);
+        assert_eq!(selected_name(&app), "Shuffle all");
+        (app, now, request)
+    }
+
+    #[test]
+    fn local_shuffle_all_cancels_a_pending_navidrome_shuffle_all() {
+        let (mut app, now, request) = both_with_pending_shuffle_all(&["a.flac", "b.flac"]);
+        finished(&mut app, 2, now);
+        press(&mut app, &[Action::Activate], now);
+        assert_eq!(app.status(now), Some("Shuffling all (2 tracks)"));
+        assert!(!browser(&app).play_pending());
+        // The late answer is dropped.
+        assert!(respond_play(&mut app, &request, Ok(songs(&["r"]))).is_empty());
+        assert_eq!(sorted(queue_titles(&app)).len(), 2);
+        assert!(!queue_titles(&app).iter().any(|t| t.starts_with("Remote")));
+    }
+
+    #[test]
+    fn local_shuffle_all_with_nothing_scanned_leaves_a_pending_play_alone() {
+        let (mut app, now, request) = both_with_pending_shuffle_all(&[]);
+        assert!(press(&mut app, &[Action::Activate], now).is_empty());
+        assert_eq!(
+            app.status(now),
+            Some("Nothing to play (0 tracks scanned so far)")
+        );
+        assert!(browser(&app).play_pending(), "not cancelled");
+        assert_eq!(queue_titles(&app), ["kept"]);
+        respond_play(&mut app, &request, Ok(songs(&["r"])));
+        assert_eq!(queue_titles(&app), ["Remote r*"]);
+    }
+
+    #[test]
+    fn navidrome_shuffle_all_is_superseded_by_a_later_play_and_ignores_old_clients() {
+        let (mut app, now) = nav_shuffle_all();
+        app.set_settings_context(settings_context(None, coda_owned()));
+        press(&mut app, &[Action::Activate], now);
+        let first = one_request(&mut app);
+        // Pressed again while it loads: no second request; the first
+        // answer (never shown) plays.
+        press(&mut app, &[Action::PlayShuffled, Action::Activate], now);
+        assert!(requests(&mut app).is_empty());
+        respond_play(&mut app, &first, Ok(songs(&["b"])));
+        assert_eq!(queue_titles(&app), ["Remote b*"]);
+        press(&mut app, &[Action::Activate], now);
+        let third = one_request(&mut app);
+        // A new client: the old request's answer is dropped, and so is an
+        // outcome of the old generation.
+        connect_in_app(&mut app, other_client(), true, now);
+        app.handle_settings_input(Input::Esc, now);
+        assert!(respond_play(&mut app, &third, Ok(songs(&["c"]))).is_empty());
+        let stale = JobOutcome::ShuffleAll {
+            tracks: vec![remote("c")],
+            generation: Generation(0),
+        };
+        assert!(app.apply_job_outcomes(vec![stale], now).is_empty());
+        assert_eq!(queue_titles(&app), ["Remote b*"]);
+    }
+
     #[test]
     fn a_failed_play_fetch_says_so_and_keeps_the_queue() {
         let (mut app, now) = nav_albums();
@@ -4261,9 +4637,12 @@ mod tests {
         (app, now)
     }
 
-    /// Navidrome only, on Home.
+    /// Navidrome only, on Home, with Playlists (the entry below "Shuffle
+    /// all") selected.
     fn nav_home() -> (App, Instant) {
-        (App::with_sources(None, Some(client())), Instant::now())
+        let (mut app, now) = (App::with_sources(None, Some(client())), Instant::now());
+        press(&mut app, &[Action::Down], now);
+        (app, now)
     }
 
     fn requests(app: &mut App) -> Vec<FetchRequest> {
@@ -4391,7 +4770,7 @@ mod tests {
         assert_eq!(current_selected(&app), 1);
         press(&mut app, &[Action::Parent, Action::Parent], now);
         assert!(view_titles(&app).is_empty());
-        assert_eq!(current_selected(&app), 1, "Home keeps its selection");
+        assert_eq!(current_selected(&app), 2, "Home keeps its selection");
         // Re-opening a cached list needs no request.
         press(&mut app, &[Action::Activate], now);
         assert_eq!(view_titles(&app), ["Artists"]);
@@ -4675,7 +5054,7 @@ mod tests {
         let (mut app, now) = tag_app();
         assert_eq!(
             row_names(&app),
-            ["Playlists", "Folders", "Artists", "Albums"]
+            ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
         );
         assert!(path_titles(&app).is_empty());
         open_local(&mut app, local::HomeEntry::Artists, now);
@@ -6475,7 +6854,11 @@ mod tests {
         assert!(!app.settings_open());
         press(&mut app, &[Action::SelectNavidrome], now);
         assert!(requests(&mut app).is_empty(), "Home fetches nothing");
-        press(&mut app, &[Action::Down, Action::Activate], now);
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
         let request = one_request(&mut app);
         assert_eq!(request.generation, Generation(1));
         assert_eq!(request.resource, Resource::Artists);
@@ -6495,7 +6878,11 @@ mod tests {
         assert!(view_titles(&app).is_empty());
         assert!(requests(&mut app).is_empty());
         app.handle_settings_input(Input::Esc, now);
-        press(&mut app, &[Action::Down, Action::Activate], now);
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Activate],
+            now,
+        );
         let new = one_request(&mut app);
         assert_eq!(new.generation, Generation(1));
         assert_eq!(
@@ -8215,7 +8602,7 @@ mod tests {
     fn runner_app(client: navidrome::Client) -> (App, Instant) {
         let mut app = App::with_sources(None, Some(client));
         let now = Instant::now();
-        press(&mut app, &[Action::Activate], now);
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let request = one_request(&mut app);
         respond(
             &mut app,
@@ -8247,7 +8634,7 @@ mod tests {
         // The same account is saved again: a new generation and browser.
         connect_in_app(&mut app, client, true, now);
         app.handle_settings_input(Input::Esc, now);
-        press(&mut app, &[Action::Activate], now);
+        press(&mut app, &[Action::Down, Action::Activate], now);
         let request = one_request(&mut app);
         assert_eq!(request.generation, Generation(1));
         respond(

@@ -506,7 +506,9 @@ fn draw_remote(
                     Resource::Artist(_) | Resource::Albums(_) | Resource::AlbumPage { .. } => {
                         "No albums"
                     }
-                    Resource::Album(_) | Resource::Playlist(_) => "No songs",
+                    Resource::Album(_) | Resource::Playlist(_) | Resource::RandomSongs => {
+                        "No songs"
+                    }
                     Resource::Search(_) => "No results",
                     Resource::Playlists => "No playlists",
                 };
@@ -1222,6 +1224,7 @@ mod tests {
     /// From the local Home (as a new app starts), opens Folders.
     fn open_folders(app: &mut App, now: Instant) {
         app.handle_action(Action::Down, now);
+        app.handle_action(Action::Down, now);
         app.handle_action(Action::Activate, now);
         assert_eq!(app.library_path(), [] as [String; 0]);
         assert!(matches!(
@@ -1310,7 +1313,7 @@ mod tests {
             now,
         );
         let screen = render(&app, 100, 20, now);
-        assert!(screen.contains("│> Playlists"), "Home first: {screen}");
+        assert!(screen.contains("│> Shuffle all"), "Home first: {screen}");
         open_folders(&mut app, now);
         let screen = render(&app, 100, 20, now);
         assert!(screen.contains("No music found in /music"), "{screen}");
@@ -2282,6 +2285,8 @@ mod tests {
     fn nav_app() -> (App, FetchRequest) {
         let mut app = App::with_sources(None, Some(nav_client()));
         let now = Instant::now();
+        // Past "Shuffle all" and Playlists, to Artists.
+        app.handle_action(Action::Down, now);
         app.handle_action(Action::Down, now);
         app.handle_action(Action::Activate, now);
         let request = app.take_fetch_requests().remove(0);
@@ -2646,7 +2651,7 @@ mod tests {
         // Home, with the scanning note in the title.
         let screen = render(&app, 140, 16, now);
         assert!(screen.contains("┌ Local (scanning…) ─"), "{screen}");
-        for (i, entry) in ["Playlists", "Folders", "Artists", "Albums"]
+        for (i, entry) in ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
             .iter()
             .enumerate()
         {
@@ -2656,7 +2661,7 @@ mod tests {
         // Artists, with album counts.
         local_press(
             &mut app,
-            &[Action::Down, Action::Down, Action::Activate],
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
             now,
         );
         let screen = render(&app, 140, 16, now);
@@ -2769,7 +2774,7 @@ mod tests {
         use crate::library::m3u::PlaylistFile;
         let now = Instant::now();
         let mut app = App::new("/music".into());
-        local_press(&mut app, &[Action::Activate], now);
+        local_press(&mut app, &[Action::Down, Action::Activate], now);
         let screen = render(&app, 100, 14, now);
         assert!(screen.contains("│Scanning…"), "{screen}");
         app.handle_scan_event(
@@ -2811,7 +2816,11 @@ mod tests {
             },
             now,
         );
+        // "Shuffle all" in an empty library plays nothing and says so.
         local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("Nothing to play"), "{screen}");
+        local_press(&mut app, &[Action::Down, Action::Activate], now);
         let screen = render(&app, 100, 14, now);
         assert!(
             screen.contains("No playlists (.m3u or .m3u8 files)"),
@@ -2837,7 +2846,13 @@ mod tests {
         app.handle_scan_event(ScanEvent::Batch(tracks), now);
         local_press(
             &mut app,
-            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+            &[
+                Action::Down,
+                Action::Down,
+                Action::Down,
+                Action::Down,
+                Action::Activate,
+            ],
             now,
         );
         assert_eq!(app.library_row_count(), 20_000);
@@ -2852,10 +2867,12 @@ mod tests {
     use crate::navidrome::browse::Resource as Res;
     use crate::navidrome::{AlbumPage, AlbumSort, Playlist};
 
-    /// Navidrome only, connected, on Home.
+    /// Navidrome only, connected, on Home, with Playlists (the entry
+    /// below "Shuffle all") selected.
     fn nav_home() -> App {
         let mut app = App::with_sources(None, Some(nav_client()));
         app.handle_navidrome_ping(Ok(()), Instant::now());
+        app.handle_action(Action::Down, Instant::now());
         app
     }
 
@@ -2883,6 +2900,7 @@ mod tests {
         let screen = render(&app, 100, 14, now);
         for expected in [
             "┌ Navidrome (connected) ─",
+            "  Shuffle all",
             "> Playlists",
             "Artists",
             "Albums",

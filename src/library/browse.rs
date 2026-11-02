@@ -1,5 +1,5 @@
 //! Local browse navigation: a stack of views rooted at a static Home
-//! (Playlists, Folders, Artists, Albums), over a [`Library`]. Plain
+//! (Shuffle all, Playlists, Folders, Artists, Albums), over a [`Library`]. Plain
 //! synchronous state with no I/O and no terminal types; separate from the
 //! Navidrome browser, whose views are fetched.
 //!
@@ -17,6 +17,9 @@ use crate::model::Track;
 /// An entry of the local Home view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeEntry {
+    /// Plays the whole library shuffled; handled by the app (it needs the
+    /// random generator), never opened.
+    ShuffleAll,
     Playlists,
     Folders,
     Artists,
@@ -26,6 +29,7 @@ pub enum HomeEntry {
 impl HomeEntry {
     pub fn label(self) -> &'static str {
         match self {
+            Self::ShuffleAll => "Shuffle all",
             Self::Playlists => "Playlists",
             Self::Folders => "Folders",
             Self::Artists => "Artists",
@@ -35,7 +39,8 @@ impl HomeEntry {
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 4] = [
+pub const HOME_ENTRIES: [HomeEntry; 5] = [
+    HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Folders,
     HomeEntry::Artists,
@@ -219,13 +224,13 @@ impl LocalBrowser {
 
     /// `l` (and Enter on what it cannot play): opens the selected Home
     /// entry, folder, artist, album or playlist. Returns `false` (and
-    /// does nothing) on a track or in an empty view.
+    /// does nothing) on a track, on "Shuffle all" or in an empty view.
     pub fn open_selected(&mut self, library: &Library) -> bool {
         let Some(row) = self.selected_row(library) else {
             return false;
         };
         let view = match row {
-            Row::Track(..) => return false,
+            Row::Track(..) | Row::Home(HomeEntry::ShuffleAll) => return false,
             Row::Home(HomeEntry::Playlists) => View::Playlists,
             Row::Home(HomeEntry::Folders) => View::Folder(Vec::new()),
             Row::Home(HomeEntry::Artists) => View::Artists,

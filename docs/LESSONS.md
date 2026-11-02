@@ -147,3 +147,9 @@ Each entry should state:
 - **Root cause:** the replace and the appends were each applied when their fetch completed, so network timing decided the result.
 - **Rule:** when a replace and appends can each complete asynchronously, define their order explicitly. The result must equal the result with everything cached. Drop appends that were requested before the replace; hold appends requested after it until it lands, and release them if it fails or is cancelled.
 - **Where verified:** M7 slice 1 review follow-up; `adds_pressed_before_a_play_are_dropped_by_it`, `adds_pressed_after_a_play_wait_for_it_even_when_their_data_comes_first`, `a_then_enter_on_the_same_album_queues_it_once`.
+
+### A request superseded only in bookkeeping still costs a permit and a round trip
+- **Context / symptom:** review of M7 slice 2. Each Shuffle all press sent a new `getRandomSongs` request. The browser ignored the older answers, but their tasks kept running and holding permits from the 4-request semaphore, so the press that mattered waited behind them. Holding Enter (key repeat) made it worse.
+- **Root cause:** supersede was implemented by moving the `in_flight` id, without aborting or reusing the older request.
+- **Rule:** a target that can be re-requested on every key press must either reuse the request already in flight or abort the superseded task. Pin it with a test that N presses leave at most one request outstanding.
+- **Where verified:** M7 slice 2 review follow-up; `repeated_shuffle_all_presses_share_the_request_in_flight`.

@@ -1005,3 +1005,136 @@ async fn nested_empty_objects_at_each_cap_parse_in_bounded_time() {
     assert_eq!((songs.served, songs.tracks.len()), (2, 1));
     assert!(started.elapsed() < Duration::from_secs(20));
 }
+
+#[tokio::test]
+async fn random_songs_asks_for_the_server_maximum_and_maps_songs_to_tracks() {
+    let (server, client) = server().await;
+    mount(
+        &server,
+        "getRandomSongs",
+        ok(json!({ "randomSongs": { "song": [
+            { "id": "s9", "title": "Nine", "artist": "Band", "album": "LP",
+              "track": 2, "discNumber": 1, "duration": 200 },
+            { "title": "no id" },
+            "not an object",
+            { "id": 42, "title": ["wrong", "type"] },
+        ]}})),
+    )
+    .await;
+    let tracks = client.random_songs().await.unwrap();
+    assert_eq!(tracks.len(), 2, "{tracks:?}");
+    assert_eq!(
+        tracks[0].source,
+        TrackSource::Navidrome {
+            song_id: "s9".into()
+        }
+    );
+    assert_eq!(tracks[0].title, "Nine");
+    assert_eq!(tracks[0].artist.as_deref(), Some("Band"));
+    assert_eq!(tracks[0].album.as_deref(), Some("LP"));
+    assert_eq!(tracks[0].track_no, Some(2));
+    assert_eq!(tracks[0].duration, Some(Duration::from_secs(200)));
+    assert_eq!(tracks[1].title, UNKNOWN_TITLE);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_signed(&requests[0]);
+    let q = query(&requests[0].url);
+    assert_eq!(param(&q, "size").as_deref(), Some("500"));
+    // Each call is a new request: nothing is cached.
+    client.random_songs().await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn random_songs_empty_failed_and_malformed_replies() {
+    // Subsonic omits the array of an empty list.
+    for body in [
+        json!({ "randomSongs": {} }),
+        json!({ "randomSongs": { "song": [] } }),
+    ] {
+        let (server, client) = self::server().await;
+        mount(&server, "getRandomSongs", ok(body)).await;
+        assert!(client.random_songs().await.unwrap().is_empty());
+    }
+    let (server, client) = self::server().await;
+    mount(&server, "getRandomSongs", failed(70, "not found")).await;
+    assert!(matches!(
+        client.random_songs().await,
+        Err(Error::Server { code: 70, .. })
+    ));
+    // A missing or mistyped section, and bodies that are not a Subsonic
+    // response, are decode errors.
+    for body in [
+        r#"{"subsonic-response": {"status": "ok"}}"#.to_owned(),
+        r#"{"subsonic-response": {"status": "ok", "randomSongs": [1]}}"#.to_owned(),
+        r#"{"subsonic-response": {"status": "ok", "randomSongs": {"song": [{"id": "1", "id": "2"}]}}}"#
+            .to_owned(),
+        r#"{"subsonic-response": {"status": "ok", "randomSongs": {"song": ["#.to_owned(),
+        "<html>not json</html>".to_owned(),
+    ] {
+        let (server, client) = self::server().await;
+        mount(
+            &server,
+            "getRandomSongs",
+            ResponseTemplate::new(200).set_body_raw(body.clone(), "application/json"),
+        )
+        .await;
+        let result = client.random_songs().await;
+        assert!(matches!(result, Err(Error::Decode(_))), "{body}: {result:?}");
+    }
+}
+
+/// More songs than were asked for, a hostile nested value in a song, and
+/// other sections full of nested objects: only the first 500 songs are
+/// built, the rest drained within the body cap and the response budget.
+#[tokio::test]
+async fn oversized_random_songs_replies_are_capped_drained_or_rejected() {
+    let (server, client) = self::server().await;
+    let songs: Vec<Value> = (0..2_000)
+        .map(|i| json!({ "id": format!("s{i}") }))
+        .collect();
+    mount(
+        &server,
+        "getRandomSongs",
+        ok(json!({ "randomSongs": { "song": songs } })),
+    )
+    .await;
+    let tracks = client.random_songs().await.unwrap();
+    assert_eq!(tracks.len(), 500);
+    assert_eq!(
+        tracks[499].source,
+        TrackSource::Navidrome {
+            song_id: "s499".into()
+        }
+    );
+
+    let (server, client) = self::server().await;
+    let body = nested_empty_objects(
+        MAX_BODY_BYTES - 64,
+        r#""randomSongs":{"song":[{"id":"s1","title":[[{},{}],{"a":[{}]}]},{"id":"s2"}]},"#,
+    );
+    mount(
+        &server,
+        "getRandomSongs",
+        ResponseTemplate::new(200).set_body_raw(body, "application/json"),
+    )
+    .await;
+    let started = std::time::Instant::now();
+    let tracks = client.random_songs().await.unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].title, UNKNOWN_TITLE);
+    assert!(started.elapsed() < Duration::from_secs(20));
+
+    let (server, client) = self::server().await;
+    let huge = format!(
+        r#"{{"subsonic-response":{{"status":"ok","randomSongs":{{}},"pad":"{}"}}}}"#,
+        "x".repeat(MAX_BODY_BYTES)
+    );
+    mount(
+        &server,
+        "getRandomSongs",
+        ResponseTemplate::new(200).set_body_raw(huge, "application/json"),
+    )
+    .await;
+    assert!(matches!(client.random_songs().await, Err(Error::TooLarge)));
+}

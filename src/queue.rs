@@ -315,6 +315,17 @@ pub fn shuffle_with_first<T>(items: &mut [T], first: Option<usize>, rng: &mut Rn
     }
 }
 
+/// Keeps a uniformly random sample of `k` items (all of them, if there
+/// are fewer), in random order (a partial Fisher–Yates shuffle).
+pub fn sample<T>(items: &mut Vec<T>, k: usize, rng: &mut Rng) {
+    let k = k.min(items.len());
+    for i in 0..k {
+        let j = i + rng.below(items.len() - i);
+        items.swap(i, j);
+    }
+    items.truncate(k);
+}
+
 /// A small seeded PRNG (SplitMix64) for shuffling. Not cryptographic.
 #[derive(Debug, Clone)]
 pub struct Rng(u64);
@@ -719,6 +730,37 @@ mod tests {
         }
         let mut empty: Vec<u32> = Vec::new();
         shuffle_with_first(&mut empty, Some(0), &mut Rng::from_seed(1));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn sample_keeps_k_distinct_items_and_reaches_every_one() {
+        let original: Vec<u32> = (0..100).collect();
+        // Fewer than `k`: all of them, shuffled.
+        let mut all = original.clone();
+        sample(&mut all, 1_000, &mut Rng::from_seed(3));
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, original);
+        assert_ne!(all, original);
+        // More than `k`: `k` distinct items, not just the first `k`.
+        let mut seen = [false; 100];
+        for seed in 0..50 {
+            let mut items = original.clone();
+            sample(&mut items, 10, &mut Rng::from_seed(seed));
+            assert_eq!(items.len(), 10);
+            let mut distinct = items.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 10, "{seed}");
+            for i in items {
+                seen[i as usize] = true;
+            }
+        }
+        assert!(seen[90..].iter().any(|s| *s), "the tail is sampled too");
+        assert!(seen.iter().filter(|s| **s).count() > 90);
+        let mut empty: Vec<u32> = Vec::new();
+        sample(&mut empty, 5, &mut Rng::from_seed(1));
         assert!(empty.is_empty());
     }
 

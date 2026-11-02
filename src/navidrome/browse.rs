@@ -150,6 +150,8 @@ fn songs_text(n: usize) -> String {
 /// An entry of the Home view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeEntry {
+    /// Plays a fresh set of random songs (`getRandomSongs`).
+    ShuffleAll,
     Playlists,
     Artists,
     Albums,
@@ -158,6 +160,7 @@ pub enum HomeEntry {
 impl HomeEntry {
     pub fn label(self) -> &'static str {
         match self {
+            Self::ShuffleAll => SHUFFLE_ALL_TITLE,
             Self::Playlists => PLAYLISTS_TITLE,
             Self::Artists => ARTISTS_TITLE,
             Self::Albums => "Albums",
@@ -166,8 +169,17 @@ impl HomeEntry {
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 3] =
-    [HomeEntry::Playlists, HomeEntry::Artists, HomeEntry::Albums];
+pub const HOME_ENTRIES: [HomeEntry; 4] = [
+    HomeEntry::ShuffleAll,
+    HomeEntry::Playlists,
+    HomeEntry::Artists,
+    HomeEntry::Albums,
+];
+
+/// The label of the "Shuffle all" Home entry (both sources).
+pub const SHUFFLE_ALL_TITLE: &str = "Shuffle all";
+/// What a "Shuffle all" play request is called while it waits or fails.
+const RANDOM_SONGS_LABEL: &str = "random songs";
 
 /// Title of an album list view, e.g. `Albums (newest)`.
 pub fn albums_title(sort: AlbumSort) -> String {
@@ -197,6 +209,10 @@ pub enum Resource {
     /// One page of [`Resource::Albums`] (`getAlbumList2`); requested, never
     /// cached or shown.
     AlbumPage { sort: AlbumSort, offset: usize },
+    /// A fresh set of random songs (`getRandomSongs`), for "Shuffle all".
+    /// Held only until the play request that asked for it takes it; never
+    /// reused.
+    RandomSongs,
 }
 
 impl Resource {
@@ -211,6 +227,7 @@ impl Resource {
             Self::Playlists => "getPlaylists",
             Self::Playlist(_) => "getPlaylist",
             Self::Albums(_) | Self::AlbumPage { .. } => "getAlbumList2",
+            Self::RandomSongs => "getRandomSongs",
         }
     }
 }
@@ -470,6 +487,8 @@ enum JobTarget {
     /// The songs of an album or playlist.
     Songs(Resource),
     Artist(String),
+    /// A fresh [`Resource::RandomSongs`] (only ever a play request's).
+    RandomSongs,
 }
 
 /// What a play request plays.
@@ -702,6 +721,13 @@ pub enum JobOutcome {
     PlayFailed { label: String, error: String },
     /// A play request dropped this many queue jobs pressed before it.
     AddsDropped(usize),
+    /// "Shuffle all": replace the queue with these random songs (already
+    /// in random order) and play them. Like [`JobOutcome::Play`], only
+    /// from the latest play request, for the browser's `generation`.
+    ShuffleAll {
+        tracks: Vec<Track>,
+        generation: Generation,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -936,7 +962,7 @@ impl Browser {
             return false;
         };
         let (resource, title) = match row {
-            Row::Header(_) | Row::Song(_) => return false,
+            Row::Header(_) | Row::Song(_) | Row::Home(HomeEntry::ShuffleAll) => return false,
             Row::Home(HomeEntry::Albums) => {
                 self.open_albums(self.album_sort);
                 return true;
@@ -984,7 +1010,9 @@ impl Browser {
     /// Drops a play request still waiting for its songs (another entry
     /// was played, or the queue was cleared) and releases the queue jobs
     /// it held, against the queue as it is. Returns their outcomes. Its
-    /// fetches still complete and are cached.
+    /// fetches still complete and are cached, except random songs, which
+    /// are dropped (a later Shuffle all may still take a request in
+    /// flight).
     pub fn cancel_play(&mut self) -> Vec<JobOutcome> {
         if self.end_play().is_none() {
             return Vec::new();
@@ -1036,6 +1064,10 @@ impl Browser {
         let view = self.current()?;
         let content = self.content(view)?;
         Some(match content.row(view.selected)? {
+            Row::Home(HomeEntry::ShuffleAll) => (
+                RANDOM_SONGS_LABEL.to_owned(),
+                PlayTarget::Fetch(JobTarget::RandomSongs),
+            ),
             Row::Header(_) | Row::Home(_) => return None,
             Row::Artist(_) if !shuffle => return None,
             Row::Song(track) => {
@@ -1070,6 +1102,10 @@ impl Browser {
     /// Makes this the latest play request, replacing any still waiting,
     /// and drops the queue jobs pressed before it.
     fn start_play(&mut self, label: String, target: PlayTarget, shuffle: bool) -> Vec<JobOutcome> {
+        // A random-songs request still in flight: its answer has never
+        // been shown (unwanted answers are dropped, never cached), so it
+        // is still a fresh set.
+        let random_in_flight = self.in_flight.get(&Resource::RandomSongs).copied();
         self.end_play();
         let dropped = self.drop_queue_jobs();
         let mut outcomes = Vec::new();
@@ -1088,6 +1124,17 @@ impl Browser {
                 outcomes.extend(self.pump());
             }
             PlayTarget::Fetch(target) => {
+                if matches!(target, JobTarget::RandomSongs) {
+                    // Every press plays a set not shown before: the one
+                    // still in flight if there is one (repeated presses
+                    // never pile up requests), else a new request.
+                    self.cache.remove(&Resource::RandomSongs);
+                    let id = match random_in_flight {
+                        Some(id) => id,
+                        None => self.request(Resource::RandomSongs),
+                    };
+                    self.play_fetches.insert(id);
+                }
                 self.play = Some(PlayJob {
                     label: label.clone(),
                     target,
@@ -1448,6 +1495,13 @@ impl Browser {
                     vec![resource.clone()]
                 }
             }
+            JobTarget::RandomSongs => {
+                if self.cache.contains_key(&Resource::RandomSongs) {
+                    Vec::new()
+                } else {
+                    vec![Resource::RandomSongs]
+                }
+            }
             JobTarget::Artist(id) => match self.cache.get(&Resource::Artist(id.clone())) {
                 Some(Content::Albums(albums)) => albums
                     .iter()
@@ -1470,6 +1524,7 @@ impl Browser {
             JobTarget::Song(track) => Some(vec![(**track).clone()]),
             JobTarget::Tracks(tracks) => Some(tracks.clone()),
             JobTarget::Songs(resource) => songs(resource),
+            JobTarget::RandomSongs => songs(&Resource::RandomSongs),
             JobTarget::Artist(id) => match self.cache.get(&Resource::Artist(id.clone()))? {
                 Content::Albums(albums) => {
                     let mut out = Vec::new();
@@ -1500,6 +1555,14 @@ impl Browser {
                     label: play.label,
                     error,
                 },
+                Ok(tracks) if matches!(play.target, JobTarget::RandomSongs) => {
+                    // Taken: the next press asks for a new set.
+                    self.cache.remove(&Resource::RandomSongs);
+                    JobOutcome::ShuffleAll {
+                        tracks,
+                        generation: self.generation,
+                    }
+                }
                 Ok(tracks) => {
                     let note = match &play.target {
                         JobTarget::Songs(resource) => self.truncation_note(resource),
@@ -2270,8 +2333,10 @@ impl Browser {
 
     // ----- responses -------------------------------------------------------
 
-    /// Applies a fetch result: the cache always, views only if they still
-    /// await `response.id`; album pages only if awaited (see [`Paging`]).
+    /// Applies a fetch result: the cache (except random songs, which go
+    /// only to a waiting Shuffle all and are never kept), views only if
+    /// they still await `response.id`; album pages only if awaited (see
+    /// [`Paging`]).
     /// Returns the enqueue jobs that completed. A response for another
     /// client generation is ignored.
     pub fn handle_response(&mut self, response: FetchResponse) -> Vec<JobOutcome> {
@@ -2294,6 +2359,16 @@ impl Browser {
         self.play_fetches.remove(&id);
         if superseded {
             tracing::debug!(id = id.0, "superseded response ignored");
+            return self.pump();
+        }
+        let random_wanted = self
+            .play
+            .as_ref()
+            .is_some_and(|play| matches!(play.target, JobTarget::RandomSongs));
+        if resource == Resource::RandomSongs && !random_wanted {
+            // Its play request was replaced or cancelled: never kept for a
+            // later press.
+            tracing::debug!(id = id.0, "unwanted random songs dropped");
             return self.pump();
         }
         if let Resource::AlbumPage { sort, offset } = resource {
@@ -2481,6 +2556,7 @@ pub async fn fetch(client: &Client, resource: &Resource) -> Result<Content, Erro
             .album_list(*sort, *offset, ALBUM_PAGE_SIZE)
             .await
             .map(Content::AlbumPage),
+        Resource::RandomSongs => client.random_songs().await.map(Content::Songs),
         // Never requested: Home is static, album lists load by page.
         Resource::Home | Resource::Albums(_) => {
             Err(Error::Decode("not a fetchable resource".to_owned()))
@@ -2601,8 +2677,8 @@ mod tests {
         )
     }
 
-    /// Goes back to Home and opens `entry`.
-    fn open_home(b: &mut Browser, entry: HomeEntry) {
+    /// Goes back to Home and selects `entry`, without opening it.
+    fn select_home(b: &mut Browser, entry: HomeEntry) {
         b.ensure_started();
         while b.stack().len() > 1 {
             b.go_up();
@@ -2614,6 +2690,11 @@ mod tests {
         for _ in 0..pos {
             b.move_selection(1);
         }
+    }
+
+    /// Goes back to Home and opens `entry`.
+    fn open_home(b: &mut Browser, entry: HomeEntry) {
+        select_home(b, entry);
         assert!(b.open_selected());
     }
 
@@ -3526,5 +3607,221 @@ mod tests {
                 error: "server returned HTTP 404".into()
             }]
         );
+    }
+
+    // ----- Shuffle all ----------------------------------------------------
+
+    fn shuffle_all(tracks: Vec<Track>, generation: Generation) -> JobOutcome {
+        JobOutcome::ShuffleAll { tracks, generation }
+    }
+
+    fn fetching_random() -> Vec<JobOutcome> {
+        vec![JobOutcome::Fetching {
+            label: RANDOM_SONGS_LABEL.to_owned(),
+        }]
+    }
+
+    #[test]
+    fn shuffle_all_asks_for_fresh_random_songs_on_every_press() {
+        let mut b = Browser::with_generation(Generation(3));
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        assert_eq!(HOME_ENTRIES[0], HomeEntry::ShuffleAll, "first entry");
+        // `l` does nothing on it.
+        assert!(!b.open_selected());
+        assert_eq!(b.stack().len(), 1);
+        assert!(b.take_requests().is_empty());
+        // Enter and `s` both play it.
+        for shuffled in [false, true] {
+            let outcomes = if shuffled {
+                b.play_shuffled()
+            } else {
+                b.activate()
+            };
+            assert_eq!(outcomes, fetching_random(), "{shuffled}");
+            assert!(b.play_pending());
+            let request = one(&mut b);
+            assert_eq!(request.resource, Resource::RandomSongs);
+            assert_eq!(request.generation, Generation(3));
+            let outcomes = ok(
+                &mut b,
+                &request,
+                Content::Songs(vec![song("s1"), song("s2")]),
+            );
+            assert_eq!(
+                outcomes,
+                [shuffle_all(vec![song("s1"), song("s2")], Generation(3))]
+            );
+            assert!(!b.play_pending());
+            // Taken, not kept: the next press asks again.
+            assert!(b.cached(&Resource::RandomSongs).is_none());
+            assert_eq!(b.stack().len(), 1, "Home stays");
+        }
+        // An empty reply plays nothing (the app says so).
+        b.activate();
+        let request = one(&mut b);
+        assert_eq!(
+            ok(&mut b, &request, Content::Songs(Vec::new())),
+            [shuffle_all(Vec::new(), Generation(3))]
+        );
+        // A failure reports the play request.
+        b.activate();
+        let request = one(&mut b);
+        let outcomes = err(&mut b, &request, Error::Http(500));
+        assert!(
+            matches!(outcomes.as_slice(), [JobOutcome::PlayFailed { label, .. }] if label == RANDOM_SONGS_LABEL),
+            "{outcomes:?}"
+        );
+        assert!(!b.play_pending());
+    }
+
+    #[test]
+    fn repeated_shuffle_all_presses_share_the_request_in_flight() {
+        let mut b = Browser::new();
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let first = one(&mut b);
+        // Pressed (or held) again before the answer: no new request; the
+        // one in flight has not been shown, so it is still a fresh set.
+        for _ in 0..20 {
+            assert_eq!(b.activate(), fetching_random());
+            assert_eq!(b.play_shuffled(), fetching_random());
+        }
+        assert!(b.take_requests().is_empty(), "at most one outstanding");
+        assert!(b.is_in_flight(&Resource::RandomSongs));
+        assert_eq!(
+            ok(&mut b, &first, Content::Songs(vec![song("a")])),
+            [shuffle_all(vec![song("a")], Generation(0))]
+        );
+        // Once answered, the next press asks again.
+        b.activate();
+        let second = one(&mut b);
+        assert_ne!(first.id, second.id);
+        // Superseded by another play and pressed again: the request still
+        // in flight is taken over rather than duplicated.
+        b.cancel_play();
+        assert!(b.take_requests().is_empty());
+        assert_eq!(b.activate(), fetching_random());
+        assert!(b.take_requests().is_empty());
+        assert_eq!(
+            ok(&mut b, &second, Content::Songs(vec![song("b")])),
+            [shuffle_all(vec![song("b")], Generation(0))]
+        );
+    }
+
+    #[test]
+    fn adds_around_a_pending_shuffle_all_follow_press_order() {
+        let mut b = Browser::new();
+        open_home(&mut b, HomeEntry::Artists);
+        let root = one(&mut b);
+        ok(&mut b, &root, Content::Artists(vec![artist("a")]));
+        assert!(b.open_selected());
+        let albums = one(&mut b);
+        ok(&mut b, &albums, Content::Albums(vec![album("x")]));
+        // `a` on an uncached album, then Shuffle all: the add is dropped.
+        let outcomes = b.enqueue_selected(Placement::End);
+        assert!(matches!(outcomes.as_slice(), [JobOutcome::Fetching { .. }]));
+        let x = one(&mut b);
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        let mut expected = vec![JobOutcome::AddsDropped(1)];
+        expected.extend(fetching_random());
+        assert_eq!(b.activate(), expected);
+        let random = one(&mut b);
+        assert!(ok(&mut b, &x, Content::Songs(vec![song("x1")])).is_empty());
+        assert_eq!(b.pending_jobs(), 0);
+        // `a` while it waits (data already there): held, then appended
+        // after the replace.
+        let outcomes = b.enqueue_tracks("t".into(), vec![song("t1")], Placement::End);
+        assert!(
+            !outcomes
+                .iter()
+                .any(|o| matches!(o, JobOutcome::Added { .. })),
+            "{outcomes:?}"
+        );
+        let outcomes = ok(&mut b, &random, Content::Songs(vec![song("r1")]));
+        assert_eq!(outcomes[0], shuffle_all(vec![song("r1")], Generation(0)));
+        assert!(
+            matches!(&outcomes[1..], [JobOutcome::Added { tracks, .. }] if *tracks == [song("t1")]),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_random_reply_fails_the_shuffle_all() {
+        let mut b = Browser::new();
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let request = one(&mut b);
+        let outcomes = err(&mut b, &request, Error::Decode("bad".into()));
+        assert_eq!(
+            outcomes,
+            [JobOutcome::PlayFailed {
+                label: RANDOM_SONGS_LABEL.to_owned(),
+                error: "unexpected response from server".to_owned(),
+            }]
+        );
+        assert!(!b.play_pending());
+    }
+
+    #[test]
+    fn a_random_reply_for_another_generation_is_ignored() {
+        let mut b = Browser::with_generation(Generation(2));
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let request = one(&mut b);
+        let stale = FetchResponse {
+            generation: Generation(1),
+            id: request.id,
+            resource: Resource::RandomSongs,
+            result: Ok(Content::Songs(vec![song("old")])),
+        };
+        assert!(b.handle_response(stale).is_empty());
+        assert!(b.play_pending());
+        assert!(b.is_in_flight(&Resource::RandomSongs));
+        assert_eq!(
+            ok(&mut b, &request, Content::Songs(vec![song("s")])),
+            [shuffle_all(vec![song("s")], Generation(2))]
+        );
+    }
+
+    #[test]
+    fn enter_elsewhere_supersedes_shuffle_all_and_its_songs_are_not_kept() {
+        let mut b = Browser::new();
+        open_home(&mut b, HomeEntry::Artists);
+        let root = one(&mut b);
+        ok(&mut b, &root, Content::Artists(vec![artist("a")]));
+        assert!(b.open_selected());
+        let albums = one(&mut b);
+        ok(&mut b, &albums, Content::Albums(vec![album("x")]));
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let random = one(&mut b);
+        // Back to the (cached) album list: Enter on the album replaces
+        // the waiting request.
+        open_home(&mut b, HomeEntry::Artists);
+        assert!(b.open_selected());
+        assert_eq!(b.current().unwrap().resource, Resource::Artist("a".into()));
+        assert!(b.take_requests().is_empty(), "cached");
+        let outcomes = b.activate();
+        assert!(
+            matches!(outcomes.as_slice(), [JobOutcome::Fetching { label }] if label == "Album x"),
+            "{outcomes:?}"
+        );
+        let songs = one(&mut b);
+        assert_eq!(songs.resource, Resource::Album("x".into()));
+        // The random answer arrives first: dropped, not cached.
+        assert!(ok(&mut b, &random, Content::Songs(vec![song("r")])).is_empty());
+        assert!(b.cached(&Resource::RandomSongs).is_none());
+        let outcomes = ok(&mut b, &songs, Content::Songs(vec![song("s1")]));
+        assert!(
+            matches!(outcomes.as_slice(), [JobOutcome::Play { tracks, .. }] if *tracks == [song("s1")]),
+            "{outcomes:?}"
+        );
+        // A cancelled Shuffle all's answer is not kept either.
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let random = one(&mut b);
+        assert!(b.cancel_play().is_empty());
+        assert!(ok(&mut b, &random, Content::Songs(vec![song("r")])).is_empty());
+        assert!(b.cached(&Resource::RandomSongs).is_none());
     }
 }
