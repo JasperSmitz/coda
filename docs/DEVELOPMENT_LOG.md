@@ -284,7 +284,7 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - repeated presses piling up `getRandomSongs` tasks that held semaphore permits;
   - an empty local library cancelling a pending Navidrome play;
   - test gaps around held and dropped adds, and decode failures.
-- **Open UX point:** Home opens with Shuffle all selected, so a habitual Enter on launch replaces the restored queue. Flagged to the owner.
+- **Owner decision:** Home opens with Shuffle all selected (kept, 2026-11-02), although a habitual Enter on launch replaces the restored queue.
 
 ## M7 slice 3 — wide visualizer and album length (2026-11-02)
 - **Implemented:**
