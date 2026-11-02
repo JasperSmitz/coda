@@ -104,6 +104,14 @@ impl Meter {
         (self.levels, self.bands) != before
     }
 
+    /// A gapless change ended: the bars of `from` carry on as `to`'s
+    /// instead of starting from silence.
+    pub fn hand_over(&mut self, from: LoadId, to: LoadId) {
+        if self.load == Some(from) {
+            self.load = Some(to);
+        }
+    }
+
     /// Drops to silence: paused, stopped, hidden or another track.
     pub fn reset(&mut self) {
         *self = Self::default();

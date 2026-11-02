@@ -21,12 +21,28 @@
 //! by `One`, so repeat cannot reload as fast as mpv opens files (or hammer
 //! a server). Position, unlike a reported duration, proves that real time
 //! passed, which bounds reloads to about one per second without a clock.
+//!
+//! Gapless playback (M8, ADR 0005): [`Player::sync_next`] announces the
+//! entry that follows the current load ([`PlayerCommand::SetNext`], with
+//! a fresh `LoadId`) whenever it changes: the queue's next entry, the first
+//! under [`RepeatMode::All`], or the current entry again under
+//! [`RepeatMode::One`] once the current load is proven (so an instant-EOF
+//! file is never repeated). The backend may play it on by itself and say
+//! so with [`PlaybackEvent::Advanced`]. An advance to the announced load
+//! moves the queue on exactly like an EOF would (a suspect end counts as a
+//! failure); an advance to anything else (the queue changed while mpv was
+//! already starting the old next entry) is corrected by loading the right
+//! entry with a `Load`, so a removed track never plays on. Until the new
+//! load is heard (`Started`), the previous track's tail is still playing:
+//! [`Player::status`], [`Player::position`], [`Player::playing_entry`]
+//! and [`Player::audible_load`] describe what is heard, not the queue's
+//! current entry.
 
 use std::time::Duration;
 
 use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use crate::queue::{MAX_QUEUE_LEN, Placement, Queue, QueueEntryId, Rng};
+use crate::queue::{MAX_QUEUE_LEN, Placement, Queue, QueueEntry, QueueEntryId, Rng};
 
 /// `<` restarts the current track instead of going back when the position
 /// is beyond this.
@@ -88,7 +104,15 @@ impl RepeatMode {
 /// rather than a resolved target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlayerCommand {
-    Load { load: LoadId, source: TrackSource },
+    Load {
+        load: LoadId,
+        source: TrackSource,
+    },
+    /// The entry to play without a gap after `after` (`None`: nothing).
+    SetNext {
+        after: LoadId,
+        next: Option<(LoadId, TrackSource)>,
+    },
     SetPause(bool),
     Stop,
     SeekRelative(f64),
@@ -98,11 +122,13 @@ pub enum PlayerCommand {
 }
 
 impl PlayerCommand {
-    /// The backend command for everything except `Load`, which needs
-    /// resolving first and is returned unchanged as `Err`.
-    pub fn into_playback(self) -> Result<PlaybackCommand, (LoadId, TrackSource)> {
+    /// The backend command for everything that names no track source.
+    /// `Load` and a `SetNext` with a next entry need resolving first and
+    /// are returned unchanged as `Err`.
+    pub fn into_playback(self) -> Result<PlaybackCommand, Self> {
         Ok(match self {
-            Self::Load { load, source } => return Err((load, source)),
+            Self::Load { .. } | Self::SetNext { next: Some(_), .. } => return Err(self),
+            Self::SetNext { after, next: None } => PlaybackCommand::SetNext { after, next: None },
             Self::SetPause(paused) => PlaybackCommand::SetPause(paused),
             Self::Stop => PlaybackCommand::Stop,
             Self::SeekRelative(seconds) => PlaybackCommand::SeekRelative(seconds),
@@ -123,6 +149,27 @@ pub enum PlaybackStatus {
     Paused,
     /// The backend exited; playback commands are no-ops.
     Unavailable,
+}
+
+/// The next entry announced to the backend after the load `after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Announced {
+    after: LoadId,
+    entry: Option<QueueEntryId>,
+    load: Option<LoadId>,
+}
+
+/// Earlier announcements of local entries after the current load that are
+/// remembered (see [`Player::on_advanced`]).
+const MAX_EARLIER_NEXT: usize = 8;
+
+/// The track still heard after a gapless advance, until the next one is.
+#[derive(Debug, Clone, Copy)]
+struct Outgoing {
+    load: LoadId,
+    entry: Option<QueueEntryId>,
+    position: Option<Duration>,
+    duration: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -162,6 +209,15 @@ pub struct Player {
     settings_revision: u64,
     unavailable: Option<String>,
     messages: Vec<String>,
+    /// What [`Self::sync_next`] last announced.
+    announced: Option<Announced>,
+    /// Earlier announcements of local entries after the same load, newest
+    /// last: an advance to one of them is the same file as the entry now
+    /// announced, if that entry is the same.
+    earlier_next: Vec<(LoadId, QueueEntryId)>,
+    /// After a gapless advance, the previous track until the new one is
+    /// heard.
+    outgoing: Option<Outgoing>,
 }
 
 impl Default for Player {
@@ -189,6 +245,9 @@ impl Player {
             settings_revision: 0,
             unavailable: None,
             messages: Vec::new(),
+            announced: None,
+            earlier_next: Vec::new(),
+            outgoing: None,
         }
     }
 
@@ -200,9 +259,17 @@ impl Player {
         self.current_load
     }
 
+    /// What is heard: after a gapless advance, the previous track still
+    /// plays until the current load is heard.
     pub fn status(&self) -> PlaybackStatus {
         if self.unavailable.is_some() {
             PlaybackStatus::Unavailable
+        } else if self.outgoing.is_some() {
+            if self.paused {
+                PlaybackStatus::Paused
+            } else {
+                PlaybackStatus::Playing
+            }
         } else if self.current_load.is_none() {
             PlaybackStatus::Stopped
         } else if !self.started {
@@ -214,12 +281,37 @@ impl Player {
         }
     }
 
+    /// The position of the track heard (see [`Self::status`]).
     pub fn position(&self) -> Option<Duration> {
-        self.position
+        self.outgoing.map_or(self.position, |o| o.position)
     }
 
+    /// The duration of the track heard (see [`Self::status`]).
     pub fn duration(&self) -> Option<Duration> {
-        self.duration
+        self.outgoing.map_or(self.duration, |o| o.duration)
+    }
+
+    /// The load heard: the current load, or during a gapless change the
+    /// previous one until the current one is heard. Visualizer readings
+    /// are shown for it.
+    pub fn audible_load(&self) -> Option<LoadId> {
+        self.outgoing.map(|o| o.load).or(self.current_load)
+    }
+
+    /// The queue entry heard (see [`Self::audible_load`]); the queue's
+    /// current entry unless a gapless change is under way.
+    pub fn playing_entry(&self) -> Option<&QueueEntry> {
+        self.outgoing
+            .and_then(|o| self.queue.get(o.entry?))
+            .or_else(|| self.queue.current_entry())
+    }
+
+    /// If `Started { load }` would end a gapless change, the load heard
+    /// until then.
+    pub fn handover_from(&self, load: LoadId) -> Option<LoadId> {
+        self.outgoing
+            .filter(|_| self.current_load == Some(load))
+            .map(|o| o.load)
     }
 
     /// The effective volume: the pending request if there is one, else the
@@ -366,6 +458,14 @@ impl Player {
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
+        // During a gapless change the track heard is the previous entry:
+        // its next one is the queue's current entry, not heard yet. Load it
+        // at once (cutting the previous track's tail).
+        if self.outgoing.is_some()
+            && let Some(current) = self.queue.current()
+        {
+            return self.user_load(current);
+        }
         if self.queue.current().is_none() {
             self.messages.push("Nothing is playing".into());
             return Vec::new();
@@ -386,6 +486,19 @@ impl Player {
     pub fn play_previous(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
             return Vec::new();
+        }
+        // During a gapless change the previous entry is still heard: `<`
+        // restarts or leaves that one. A seek would go to the new track, so
+        // a restart is a load.
+        if let Some(outgoing) = self.outgoing
+            && let Some(heard) = outgoing.entry.filter(|id| self.queue.get(*id).is_some())
+        {
+            let past_threshold = outgoing.position.is_some_and(|p| p > RESTART_THRESHOLD);
+            let target = match self.queue.id_before(heard) {
+                Some(previous) if !past_threshold => previous,
+                _ => heard,
+            };
+            return self.user_load(target);
         }
         let past_threshold = self.position.is_some_and(|p| p > RESTART_THRESHOLD);
         if self.is_started() && past_threshold {
@@ -579,6 +692,162 @@ impl Player {
         vec![PlayerCommand::Shutdown]
     }
 
+    // ----- gapless lookahead ------------------------------------------------
+
+    /// The entry to announce after the current load, if any: see the
+    /// module docs.
+    fn next_target(&self) -> Option<QueueEntryId> {
+        let current = self.queue.current()?;
+        if self.repeat == RepeatMode::One && self.proven {
+            return Some(current);
+        }
+        self.queue.id_after(current).or_else(|| self.wrap_target())
+    }
+
+    /// Announces the next entry to the backend if it changed since the last
+    /// announcement (the queue, the repeat mode, the current load or its
+    /// proof of playback changed). Call it after every change; the app
+    /// does so after each batch of player commands. A fresh load needs no
+    /// announcement of "nothing next": the backend holds none after it.
+    pub fn sync_next(&mut self) -> Option<PlayerCommand> {
+        let after = match self.current_load {
+            Some(load) if self.unavailable.is_none() => load,
+            _ => {
+                self.announced = None;
+                return None;
+            }
+        };
+        let entry = self.next_target();
+        let previous = self.announced.filter(|a| a.after == after);
+        if previous.is_some_and(|a| a.entry == entry) {
+            return None;
+        }
+        match previous {
+            None => self.earlier_next.clear(),
+            Some(previous) => {
+                let local = previous
+                    .entry
+                    .and_then(|id| self.queue.get(id))
+                    .is_some_and(|e| !e.track.is_remote());
+                if let (Some(load), Some(id), true) = (previous.load, previous.entry, local) {
+                    if self.earlier_next.len() >= MAX_EARLIER_NEXT {
+                        self.earlier_next.remove(0);
+                    }
+                    self.earlier_next.push((load, id));
+                }
+            }
+        }
+        let next = entry.and_then(|id| {
+            let source = self.queue.get(id)?.track.source.clone();
+            self.last_load += 1;
+            Some((LoadId(self.last_load), source))
+        });
+        self.announced = Some(Announced {
+            after,
+            entry,
+            load: next.as_ref().map(|(load, _)| *load),
+        });
+        if next.is_none() && previous.is_none_or(|a| a.load.is_none()) {
+            return None;
+        }
+        match &next {
+            Some((load, _)) => tracing::debug!(%after, %load, "announcing the next track"),
+            None => tracing::debug!(%after, "no next track any more"),
+        }
+        Some(PlayerCommand::SetNext { after, next })
+    }
+
+    /// The Navidrome client changed: stream URLs signed by the old one
+    /// must not start playing. An announced remote next entry is announced
+    /// again (or cleared, if it can no longer be resolved). During a
+    /// gapless change to a remote entry, that entry was opened with the old
+    /// client and is not heard yet: it is loaded again, like a stale
+    /// advance. The track heard plays on.
+    pub fn client_changed(&mut self) -> Vec<PlayerCommand> {
+        let remote = self
+            .announced
+            .and_then(|a| self.queue.get(a.entry?))
+            .is_some_and(|e| e.track.is_remote());
+        if remote {
+            self.announced = None;
+        }
+        self.earlier_next.clear();
+        let unheard_remote = self.outgoing.is_some()
+            && self
+                .queue
+                .current_entry()
+                .is_some_and(|e| e.track.is_remote());
+        match self.queue.current() {
+            Some(current) if unheard_remote => {
+                tracing::info!("next track opened with the previous client; loading it again");
+                // A load always starts playing; a paused player stays paused.
+                let paused = self.paused;
+                let mut commands = self.load_entry(current);
+                if paused {
+                    self.paused = true;
+                    commands.push(PlayerCommand::SetPause(true));
+                }
+                commands
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The backend went on from `from` to `to` without a gap.
+    fn on_advanced(&mut self, from: LoadId, to: LoadId) -> Vec<PlayerCommand> {
+        if self.current_load != Some(from) {
+            tracing::debug!(%from, %to, "stale Advanced ignored");
+            return Vec::new();
+        }
+        // The announced load; or an earlier announcement of the same local
+        // entry (the queue changed and changed back while mpv was already
+        // starting it): the same file, so it plays on without a cut.
+        let announced = self
+            .announced
+            .filter(|a| a.after == from)
+            .and_then(|a| {
+                let entry = a.entry?;
+                let same = a.load == Some(to) || self.earlier_next.contains(&(to, entry));
+                same.then_some(entry)
+            })
+            .filter(|id| self.queue.get(*id).is_some());
+        let Some(entry) = announced else {
+            // The queue changed while mpv was already starting the old next
+            // entry: play what the queue says instead, as after an EOF.
+            tracing::info!(%from, %to, "mpv went on to an entry that is no longer next; correcting");
+            let mut commands = self.on_track_ended(from, EndReason::Eof);
+            if !commands
+                .iter()
+                .any(|c| matches!(c, PlayerCommand::Load { .. } | PlayerCommand::Stop))
+            {
+                // Nothing to play: the stale entry must not play on.
+                commands.push(PlayerCommand::Stop);
+            }
+            return commands;
+        };
+        if !self.proven {
+            tracing::info!(%from, "track ended without playing; not repeated");
+            if let Some(stop) = self.count_failure() {
+                return stop;
+            }
+        }
+        let outgoing = Outgoing {
+            load: from,
+            entry: self.queue.current(),
+            position: self.position,
+            duration: self.duration,
+        };
+        self.queue.set_current(entry);
+        tracing::info!(load = %to, "playing the next track without a gap");
+        self.current_load = Some(to);
+        self.started = false;
+        self.proven = false;
+        self.position = None;
+        self.duration = None;
+        self.outgoing = Some(outgoing);
+        Vec::new()
+    }
+
     // ----- backend events -----------------------------------------------
 
     pub fn handle_event(&mut self, event: PlaybackEvent) -> Vec<PlayerCommand> {
@@ -586,12 +855,14 @@ impl Player {
             PlaybackEvent::Started { load } => {
                 if self.current_load == Some(load) {
                     self.started = true;
+                    self.outgoing = None;
                 } else {
                     tracing::debug!(%load, "stale Started ignored");
                 }
                 Vec::new()
             }
             PlaybackEvent::TrackEnded { load, reason } => self.on_track_ended(load, reason),
+            PlaybackEvent::Advanced { from, to } => self.on_advanced(from, to),
             PlaybackEvent::Position(position) => {
                 // Until the current load has started, positions belong to
                 // the previous track.
@@ -764,6 +1035,7 @@ impl Player {
 
     fn clear_load(&mut self) {
         self.current_load = None;
+        self.outgoing = None;
         self.started = false;
         self.proven = false;
         self.position = None;
@@ -787,6 +1059,7 @@ impl Player {
         let remote = matches!(source, TrackSource::Navidrome { .. });
         tracing::info!(%load, remote, "loading track");
         self.current_load = Some(load);
+        self.outgoing = None;
         self.started = false;
         self.proven = false;
         self.paused = false;
@@ -1365,7 +1638,24 @@ mod tests {
             load: LoadId(3),
             source: source.clone(),
         };
-        assert_eq!(load.into_playback(), Err((LoadId(3), source)));
+        assert_eq!(load.clone().into_playback(), Err(load));
+        // A next entry needs resolving too; "no next entry" does not.
+        let next = PlayerCommand::SetNext {
+            after: LoadId(3),
+            next: Some((LoadId(4), source)),
+        };
+        assert_eq!(next.clone().into_playback(), Err(next));
+        assert_eq!(
+            PlayerCommand::SetNext {
+                after: LoadId(3),
+                next: None
+            }
+            .into_playback(),
+            Ok(PlaybackCommand::SetNext {
+                after: LoadId(3),
+                next: None
+            })
+        );
     }
 
     #[test]
@@ -2055,5 +2345,536 @@ mod tests {
         assert!(p.is_queue_full());
         assert_eq!(p.enqueue(t("X")), None);
         assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
+    }
+
+    // ----- gapless lookahead (M8) ----------------------------------------
+
+    /// The `(after, next title)` of the next announcement, if any.
+    fn announced(p: &mut Player) -> Option<(LoadId, Option<(LoadId, String)>)> {
+        match p.sync_next()? {
+            PlayerCommand::SetNext { after, next } => Some((
+                after,
+                next.map(|(load, source)| match source {
+                    TrackSource::Local { path } => (
+                        load,
+                        path.file_stem().unwrap().to_string_lossy().into_owned(),
+                    ),
+                    TrackSource::Navidrome { song_id } => (load, song_id),
+                }),
+            )),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The title announced next, asserting it follows the current load.
+    fn next_title(p: &mut Player) -> Option<Option<String>> {
+        let (after, next) = announced(p)?;
+        assert_eq!(Some(after), p.current_load());
+        Some(next.map(|(_, title)| title))
+    }
+
+    fn some(title: &str) -> Option<Option<String>> {
+        Some(Some(title.to_owned()))
+    }
+
+    #[test]
+    fn the_next_entry_is_announced_once_and_again_when_it_changes() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        assert_eq!(announced(&mut p), None, "nothing is loaded");
+        start(&mut p, ids[0]);
+        assert_eq!(next_title(&mut p), some("B"));
+        assert_eq!(announced(&mut p), None, "unchanged");
+        // Moving B away makes C next.
+        p.move_down(ids[1]);
+        assert_eq!(next_title(&mut p), some("C"));
+        // Play next puts X first.
+        p.enqueue_next(t("X"));
+        assert_eq!(next_title(&mut p), some("X"));
+        // Removing it brings C back.
+        let x = p.queue().id_after(ids[0]).unwrap();
+        assert!(p.remove(x).is_empty());
+        assert_eq!(next_title(&mut p), some("C"));
+        // Nothing after the last entry: "no next" is announced once.
+        p.remove(ids[2]);
+        p.remove(ids[1]);
+        assert_eq!(next_title(&mut p), Some(None));
+        assert_eq!(announced(&mut p), None);
+        // A new entry at the end is next again.
+        p.enqueue(t("D"));
+        assert_eq!(next_title(&mut p), some("D"));
+        // Clearing the queue stops: nothing to announce.
+        assert_eq!(p.clear_queue(), [PlayerCommand::Stop]);
+        assert_eq!(announced(&mut p), None);
+    }
+
+    #[test]
+    fn every_announcement_gets_a_fresh_load_id() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let a = start(&mut p, ids[0]);
+        let (_, b) = announced(&mut p).unwrap();
+        p.move_down(ids[1]);
+        let (_, c) = announced(&mut p).unwrap();
+        p.move_up(ids[1]);
+        let (_, b2) = announced(&mut p).unwrap();
+        let loads = [a, b.unwrap().0, c.unwrap().0, b2.unwrap().0];
+        assert!(loads.windows(2).all(|w| w[0] < w[1]), "{loads:?}");
+        // A user load after them is newer still.
+        let (d, _) = load_of(&p.play_entry(ids[2]));
+        assert!(d > loads[3]);
+    }
+
+    #[test]
+    fn a_new_load_without_a_next_entry_announces_nothing() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        start(&mut p, ids[1]);
+        assert_eq!(announced(&mut p), None, "the backend holds none anyway");
+        start(&mut p, ids[0]);
+        assert_eq!(next_title(&mut p), some("B"));
+    }
+
+    #[test]
+    fn the_next_entry_follows_the_repeat_mode() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        start(&mut p, ids[1]);
+        assert_eq!(announced(&mut p), None);
+        // All: the first entry follows the last.
+        p.set_repeat(RepeatMode::All);
+        assert_eq!(next_title(&mut p), some("A"));
+        // One: the queue's next until the track has really played, so an
+        // instant-EOF file is never repeated…
+        p.set_repeat(RepeatMode::One);
+        assert_eq!(next_title(&mut p), Some(None));
+        p.play_entry(ids[0]);
+        let load = p.current_load().unwrap();
+        p.handle_event(PlaybackEvent::Started { load });
+        assert_eq!(next_title(&mut p), some("B"));
+        // …then the track itself.
+        p.handle_event(PlaybackEvent::Position(PROVEN_PLAYBACK));
+        assert_eq!(next_title(&mut p), some("A"));
+        // Off again: the queue's next.
+        p.set_repeat(RepeatMode::Off);
+        assert_eq!(next_title(&mut p), some("B"));
+        // A single entry under All repeats itself.
+        let (mut p, ids) = player_with(&["A"]);
+        p.set_repeat(RepeatMode::All);
+        start(&mut p, ids[0]);
+        assert_eq!(next_title(&mut p), some("A"));
+    }
+
+    #[test]
+    fn shuffle_changes_the_next_entry() {
+        let (mut p, ids) = player_with(&["A", "B", "C", "D", "E", "F"]);
+        start(&mut p, ids[0]);
+        assert_eq!(next_title(&mut p), some("B"));
+        let mut rng = Rng::from_seed(11);
+        p.shuffle_upcoming(&mut rng);
+        let expected = p.queue().id_after(ids[0]).unwrap();
+        let title = p.queue().get(expected).unwrap().track.title.clone();
+        if title == "B" {
+            assert_eq!(announced(&mut p), None);
+        } else {
+            assert_eq!(next_title(&mut p), some(&title));
+        }
+    }
+
+    /// Plays `ids[i]`, announces its next and advances to it gaplessly.
+    fn advance(p: &mut Player) -> (LoadId, LoadId, Vec<PlayerCommand>) {
+        let from = p.current_load().unwrap();
+        let (_, next) = announced(p).expect("a next entry");
+        let to = next.expect("a next entry").0;
+        let commands = p.handle_event(PlaybackEvent::Advanced { from, to });
+        (from, to, commands)
+    }
+
+    #[test]
+    fn a_gapless_advance_moves_the_queue_on_without_a_load() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let a = play_through(&mut p, ids[0]);
+        p.handle_event(PlaybackEvent::Duration(Some(Duration::from_secs(3))));
+        p.handle_event(PlaybackEvent::Position(Duration::from_millis(2900)));
+        let (from, b, commands) = advance(&mut p);
+        assert_eq!(from, a);
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        assert_eq!(p.current_load(), Some(b));
+        // A is still heard until B is.
+        assert_eq!(p.status(), PlaybackStatus::Playing);
+        assert_eq!(p.playing_entry().unwrap().track.title, "A");
+        assert_eq!(p.audible_load(), Some(a));
+        assert_eq!(p.position(), Some(Duration::from_millis(2900)));
+        assert_eq!(p.duration(), Some(Duration::from_secs(3)));
+        assert_eq!(p.handover_from(b), Some(a));
+        // Seeks wait for B (a seek now would land in B and cut A's tail).
+        assert!(p.seek_relative(5.0).is_empty());
+        // B's position before it is heard is ignored.
+        p.handle_event(PlaybackEvent::Position(Duration::ZERO));
+        assert_eq!(p.position(), Some(Duration::from_millis(2900)));
+        // B is heard.
+        p.handle_event(PlaybackEvent::Started { load: b });
+        assert_eq!(p.playing_entry().unwrap().track.title, "B");
+        assert_eq!(p.audible_load(), Some(b));
+        assert_eq!(p.position(), None);
+        assert_eq!(p.handover_from(b), None);
+        assert_eq!(p.status(), PlaybackStatus::Playing);
+        // What follows B is announced.
+        assert_eq!(next_title(&mut p), some("C"));
+        // Old A events are stale.
+        assert!(p.handle_event(ended(a, EndReason::Eof)).is_empty());
+        assert_eq!(p.current_load(), Some(b));
+    }
+
+    #[test]
+    fn pausing_while_the_previous_track_is_heard() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        play_through(&mut p, ids[0]);
+        advance(&mut p);
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(true)]);
+        assert_eq!(p.status(), PlaybackStatus::Paused);
+    }
+
+    #[test]
+    fn an_advance_from_or_to_a_load_that_is_not_current_is_ignored() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let a = play_through(&mut p, ids[0]);
+        let (_, next) = announced(&mut p).unwrap();
+        let b = next.unwrap().0;
+        // The user picked C meanwhile: an advance of A is stale.
+        let (c, _) = load_of(&p.play_entry(ids[2]));
+        assert!(
+            p.handle_event(PlaybackEvent::Advanced { from: a, to: b })
+                .is_empty()
+        );
+        assert_eq!(p.current_load(), Some(c));
+        assert_eq!(p.queue().current(), Some(ids[2]));
+        // And B's start is stale too.
+        p.handle_event(PlaybackEvent::Started { load: b });
+        assert_eq!(p.status(), PlaybackStatus::Loading);
+    }
+
+    #[test]
+    fn an_advance_to_an_entry_no_longer_next_is_corrected() {
+        // The user removed B while mpv was already starting it.
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let a = play_through(&mut p, ids[0]);
+        let (_, next) = announced(&mut p).unwrap();
+        let b = next.unwrap().0;
+        assert!(p.remove(ids[1]).is_empty());
+        let (_, next) = announced(&mut p).unwrap();
+        assert_eq!(next.unwrap().1, "C");
+        let commands = p.handle_event(PlaybackEvent::Advanced { from: a, to: b });
+        let (c, path) = load_of(&commands);
+        assert_eq!(path, PathBuf::from("/m/C.flac"));
+        assert_eq!(p.current_load(), Some(c));
+        assert_eq!(p.queue().current(), Some(ids[2]));
+        // B's events change nothing.
+        p.handle_event(PlaybackEvent::Started { load: b });
+        assert_eq!(p.status(), PlaybackStatus::Loading);
+        assert!(p.handle_event(ended(b, EndReason::Stopped)).is_empty());
+        assert_eq!(p.current_load(), Some(c));
+
+        // Nothing left to play: the stale entry is stopped.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let a = play_through(&mut p, ids[0]);
+        let (_, next) = announced(&mut p).unwrap();
+        let b = next.unwrap().0;
+        p.remove(ids[1]);
+        assert_eq!(next_title(&mut p), Some(None));
+        assert_eq!(
+            p.handle_event(PlaybackEvent::Advanced { from: a, to: b }),
+            [PlayerCommand::Stop]
+        );
+        assert_eq!(p.status(), PlaybackStatus::Stopped);
+        assert_eq!(p.queue().current(), Some(ids[0]));
+
+        // Under repeat one, a change of mode in the window is corrected
+        // the same way: the track repeats instead of B.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let a = play_through(&mut p, ids[0]);
+        let (_, next) = announced(&mut p).unwrap();
+        let b = next.unwrap().0;
+        p.set_repeat(RepeatMode::One);
+        assert_eq!(next_title(&mut p), some("A"));
+        let (_, path) = load_of(&p.handle_event(PlaybackEvent::Advanced { from: a, to: b }));
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+    }
+
+    #[test]
+    fn a_failing_next_track_advances_like_any_failure() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        play_through(&mut p, ids[0]);
+        let (_, b, _) = advance(&mut p);
+        let commands = p.handle_event(ended(b, EndReason::Error("loading failed".into())));
+        let (_, path) = load_of(&commands);
+        assert_eq!(path, PathBuf::from("/m/C.flac"));
+        assert_eq!(p.take_messages(), ["Could not play B: loading failed"]);
+        assert_eq!(p.playing_entry().unwrap().track.title, "C");
+    }
+
+    /// Every track starts, reports at most `position` and goes on without
+    /// a gap to the announced next one. Returns the number of tracks
+    /// started before playback stopped.
+    fn instant_gapless(n: usize, repeat: RepeatMode, position: Duration) -> (usize, Player) {
+        let names: Vec<String> = (0..n).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut p, _) = player_with(&refs);
+        p.set_repeat(repeat);
+        let mut commands = p.toggle_pause();
+        let mut plays = 1;
+        loop {
+            assert!(plays <= 10 * n + 10, "{repeat:?}: did not terminate");
+            assert!(
+                commands
+                    .iter()
+                    .all(|c| matches!(c, PlayerCommand::Load { .. })),
+                "{commands:?}"
+            );
+            let load = p.current_load().unwrap();
+            p.handle_event(PlaybackEvent::Started { load });
+            p.handle_event(PlaybackEvent::Position(position));
+            commands = match announced(&mut p) {
+                Some((_, Some((to, _)))) => {
+                    p.handle_event(PlaybackEvent::Advanced { from: load, to })
+                }
+                _ => p.handle_event(ended(load, EndReason::Eof)),
+            };
+            if p.current_load().is_none() {
+                return (plays, p);
+            }
+            plays += 1;
+        }
+    }
+
+    #[test]
+    fn instant_tracks_never_loop_when_advances_are_gapless() {
+        let almost = PROVEN_PLAYBACK - Duration::from_millis(1);
+        for repeat in [RepeatMode::Off, RepeatMode::One, RepeatMode::All] {
+            let (plays, mut p) = instant_gapless(4, repeat, almost);
+            assert_eq!(plays, 4, "{repeat:?}");
+            assert_eq!(p.status(), PlaybackStatus::Stopped, "{repeat:?}");
+            assert_eq!(
+                p.take_messages().last().map(String::as_str) == Some(NO_PLAYABLE_TRACKS),
+                repeat == RepeatMode::All,
+                "{repeat:?}"
+            );
+        }
+        // A single instant entry plays once under every mode.
+        for repeat in [RepeatMode::Off, RepeatMode::One, RepeatMode::All] {
+            let (plays, _) = instant_gapless(1, repeat, Duration::ZERO);
+            assert_eq!(plays, 1, "{repeat:?}");
+        }
+    }
+
+    #[test]
+    fn proven_tracks_repeat_gaplessly() {
+        // One: the same entry again and again, each play its own load.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::One);
+        play_through(&mut p, ids[0]);
+        let mut loads = vec![p.current_load().unwrap()];
+        for _ in 0..3 {
+            let (_, to, commands) = advance(&mut p);
+            assert!(commands.is_empty());
+            p.handle_event(PlaybackEvent::Started { load: to });
+            p.handle_event(PlaybackEvent::Position(PROVEN_PLAYBACK));
+            loads.push(to);
+        }
+        assert!(loads.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(p.queue().current(), Some(ids[0]));
+        // All: wraps around.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        p.set_repeat(RepeatMode::All);
+        play_through(&mut p, ids[1]);
+        advance(&mut p);
+        assert_eq!(p.queue().current(), Some(ids[0]));
+    }
+
+    #[test]
+    fn failures_in_a_row_count_across_gapless_advances() {
+        // A, B, C fail or end at once in a row under All: one round, then
+        // stop, mixing errors (which never go on gaplessly) and advances.
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        p.set_repeat(RepeatMode::All);
+        let a = start(&mut p, ids[0]);
+        let (_, next) = announced(&mut p).unwrap();
+        let b = next.unwrap().0;
+        assert!(
+            p.handle_event(PlaybackEvent::Advanced { from: a, to: b })
+                .is_empty()
+        );
+        let (c, _) = load_of(&p.handle_event(ended(b, EndReason::Error("x".into()))));
+        p.handle_event(PlaybackEvent::Started { load: c });
+        let (_, next) = announced(&mut p).unwrap();
+        let a2 = next.unwrap().0;
+        assert_eq!(
+            p.handle_event(PlaybackEvent::Advanced { from: c, to: a2 }),
+            [PlayerCommand::Stop]
+        );
+        assert_eq!(
+            p.take_messages().last().map(String::as_str),
+            Some(NO_PLAYABLE_TRACKS)
+        );
+    }
+
+    #[test]
+    fn a_client_change_announces_a_remote_next_entry_again() {
+        let mut p = Player::new();
+        let a = p.enqueue(t("A")).unwrap();
+        p.enqueue(remote("r1"));
+        start(&mut p, a);
+        let (_, first) = announced(&mut p).unwrap();
+        assert!(p.client_changed().is_empty());
+        let (_, again) = announced(&mut p).unwrap();
+        assert_eq!(again.as_ref().unwrap().1, "r1");
+        assert!(again.unwrap().0 > first.unwrap().0, "a fresh load id");
+        // A local next entry is kept as it is.
+        let (mut p, ids) = player_with(&["A", "B"]);
+        start(&mut p, ids[0]);
+        announced(&mut p);
+        assert!(p.client_changed().is_empty());
+        assert_eq!(announced(&mut p), None);
+    }
+
+    #[test]
+    fn nothing_is_announced_once_playback_is_unavailable() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        start(&mut p, ids[0]);
+        announced(&mut p);
+        p.handle_event(PlaybackEvent::BackendExited("gone".into()));
+        assert_eq!(announced(&mut p), None);
+    }
+
+    /// `names` queued; the entry at `from` plays (proven, at `position`)
+    /// and the backend advanced to the next one, which is not heard yet.
+    fn in_overlap(names: &[&str], from: usize, position: Duration) -> (Player, Vec<QueueEntryId>) {
+        let (mut p, ids) = player_with(names);
+        play_through(&mut p, ids[from]);
+        p.handle_event(PlaybackEvent::Position(position));
+        advance(&mut p);
+        assert!(p.handover_from(p.current_load().unwrap()).is_some());
+        (p, ids)
+    }
+
+    #[test]
+    fn next_during_the_overlap_loads_the_track_not_heard_yet() {
+        let (mut p, ids) = in_overlap(&["A", "B", "C"], 0, Duration::from_secs(100));
+        let b = p.current_load().unwrap();
+        let (load, path) = load_of(&p.play_next());
+        assert_eq!(path, PathBuf::from("/m/B.flac"), "not C: B was never heard");
+        assert!(load > b);
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        assert_eq!(p.playing_entry().unwrap().track.title, "B");
+        assert_eq!(p.status(), PlaybackStatus::Loading);
+    }
+
+    #[test]
+    fn previous_during_the_overlap_follows_the_track_heard() {
+        // Past the threshold: the heard track (A) restarts, by a load.
+        let (mut p, ids) = in_overlap(&["Z", "A", "B"], 1, Duration::from_secs(100));
+        let (_, path) = load_of(&p.play_previous());
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        // Early in it: the entry before the heard track.
+        let (mut p, ids) = in_overlap(&["Z", "A", "B"], 1, Duration::from_secs(2));
+        let (_, path) = load_of(&p.play_previous());
+        assert_eq!(path, PathBuf::from("/m/Z.flac"));
+        assert_eq!(p.queue().current(), Some(ids[0]));
+        // The first entry: it restarts.
+        let (mut p, _) = in_overlap(&["A", "B"], 0, Duration::from_secs(2));
+        let (_, path) = load_of(&p.play_previous());
+        assert_eq!(path, PathBuf::from("/m/A.flac"));
+    }
+
+    #[test]
+    fn pause_and_seek_during_the_overlap() {
+        let (mut p, _) = in_overlap(&["A", "B"], 0, Duration::from_secs(100));
+        assert!(p.seek_relative(5.0).is_empty(), "it would land in B");
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(true)]);
+        p.handle_event(PlaybackEvent::Paused(true));
+        assert_eq!(p.status(), PlaybackStatus::Paused);
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(false)]);
+    }
+
+    #[test]
+    fn an_advance_to_an_earlier_copy_of_the_same_local_entry_plays_on() {
+        // B moved away and back while mpv was already starting the copy
+        // announced first: the same file, so no correction.
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let a = play_through(&mut p, ids[0]);
+        let (_, first) = announced(&mut p).unwrap();
+        let first = first.unwrap().0;
+        p.move_down(ids[1]);
+        announced(&mut p).unwrap();
+        p.move_up(ids[1]);
+        let (_, again) = announced(&mut p).unwrap();
+        assert_ne!(again.unwrap().0, first);
+        let commands = p.handle_event(PlaybackEvent::Advanced { from: a, to: first });
+        assert!(commands.is_empty(), "{commands:?}");
+        assert_eq!(p.current_load(), Some(first));
+        assert_eq!(p.queue().current(), Some(ids[1]));
+        assert_eq!(p.playing_entry().unwrap().track.title, "A");
+
+        // A remote entry is always corrected: its first copy may have been
+        // signed by another client.
+        let mut p = Player::new();
+        let a_id = p.enqueue(t("A")).unwrap();
+        let r = p.enqueue(remote("r1")).unwrap();
+        p.enqueue(t("C"));
+        let a = play_through(&mut p, a_id);
+        let (_, first) = announced(&mut p).unwrap();
+        let first = first.unwrap().0;
+        p.move_down(r);
+        announced(&mut p).unwrap();
+        p.move_up(r);
+        announced(&mut p).unwrap();
+        let commands = p.handle_event(PlaybackEvent::Advanced { from: a, to: first });
+        assert!(
+            matches!(commands.as_slice(), [PlayerCommand::Load { .. }]),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn a_client_change_reloads_a_remote_track_not_heard_yet() {
+        let mut p = Player::new();
+        let a = p.enqueue(t("A")).unwrap();
+        p.enqueue(remote("r1"));
+        play_through(&mut p, a);
+        let (_, r1, _) = advance(&mut p);
+        let commands = p.client_changed();
+        let [PlayerCommand::Load { load, source }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert!(*load > r1);
+        assert_eq!(
+            *source,
+            TrackSource::Navidrome {
+                song_id: "r1".into()
+            }
+        );
+        assert_eq!(p.current_load(), Some(*load));
+        // A local track not heard yet plays on.
+        let (mut p, _) = in_overlap(&["A", "B"], 0, Duration::from_secs(2));
+        assert!(p.client_changed().is_empty());
+    }
+
+    #[test]
+    fn a_reload_after_a_client_change_keeps_the_player_paused() {
+        let mut p = Player::new();
+        let a = p.enqueue(t("A")).unwrap();
+        p.enqueue(remote("r1"));
+        play_through(&mut p, a);
+        advance(&mut p);
+        assert_eq!(p.toggle_pause(), [PlayerCommand::SetPause(true)]);
+        p.handle_event(PlaybackEvent::Paused(true));
+        let commands = p.client_changed();
+        let [
+            PlayerCommand::Load { load, .. },
+            PlayerCommand::SetPause(true),
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        p.handle_event(PlaybackEvent::Started { load: *load });
+        assert_eq!(p.status(), PlaybackStatus::Paused);
     }
 }

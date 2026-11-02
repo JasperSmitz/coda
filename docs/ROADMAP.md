@@ -59,10 +59,23 @@ Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11
 Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md`. Play in context: Enter plays what you point at, the queue is temporary.
 - **Slice 1 (completed, reviewed):** new keymap (`h`/`l` and arrows navigate, `,` `.` seek, `<` `>` previous/next, `r`/`R`, `D`, `O`); Enter replaces the queue with the album, playlist or view and starts at the selected track; `s` plays shuffled (tracks, albums, playlists, artists, folders); playlist deletion asks y/n.
 - **Slice 2 (completed, reviewed):** "Shuffle all" on each source's home (Navidrome via `getRandomSongs`, 500 songs).
-- **Slice 3 (completed, reviewed):** the visualizer spreads across the width with interpolated bars; album rows show the running time next to the year.
+- **Slice 3 (completed, reviewed):** the visualizer spreads across the width with interpolated bars; album rows show the running time before the year.
 - Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
-## M8 — Cover art (proposed)
+## M8 — Gapless playback (completed, reviewed)
+Brief: `docs/plans/m8-gapless.md`.
+Consecutive tracks play without a pause, for local files and Navidrome streams.
+- **Approach ("one ahead"):** Coda keeps owning the queue (ADR 0002, amended by ADR 0005) and keeps a copy of the next queue entry in mpv's playlist, so mpv's gapless audio and prefetching can move on by themselves.
+- **Slice 1, spike (completed):** findings in the brief.
+  - Measure today's gap (local and Navidrome).
+  - Verify the approach on the minimum and current mpv versions: entry ids, events, a queue change just before a track ends.
+  - Write down what the visualizer time code and scrobbling need at a seamless change.
+- **Slice 2 (completed, reviewed):** the feature, briefed from the spike findings.
+  - Every queue change updates mpv's next entry: remove, move, shuffle, play next, a context replace, and the repeat modes.
+  - Track-change handling stays under the exhaustive event-ordering tests.
+- **Related:** this also lays the groundwork for endless play, which needs the next track known ahead of time.
+
+## M9 — Cover art (proposed)
 - Real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), and a block-character fallback elsewhere.
 
 ## Postponed indefinitely

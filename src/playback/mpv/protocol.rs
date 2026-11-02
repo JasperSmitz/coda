@@ -30,6 +30,18 @@ pub enum MpvCommand {
     LoadStream {
         url: StreamUrl,
     },
+    /// `["loadfile", path, "append"]`: adds a file after the playlist's
+    /// entries without starting it. mpv plays it next when the current
+    /// entry ends.
+    AppendFile {
+        path: String,
+    },
+    /// `["loadfile", url, "append"]` for a signed stream URL.
+    AppendStream {
+        url: StreamUrl,
+    },
+    /// `["playlist-clear"]`: removes every entry except the one playing.
+    PlaylistClear,
     SetProperty {
         name: &'static str,
         value: Value,
@@ -67,6 +79,13 @@ impl MpvCommand {
             Self::LoadStream { url } => {
                 vec!["loadfile".into(), url.expose().into(), "replace".into()]
             }
+            Self::AppendFile { path } => {
+                vec!["loadfile".into(), path.as_str().into(), "append".into()]
+            }
+            Self::AppendStream { url } => {
+                vec!["loadfile".into(), url.expose().into(), "append".into()]
+            }
+            Self::PlaylistClear => vec!["playlist-clear".into()],
             Self::SetProperty { name, value } => {
                 vec!["set_property".into(), (*name).into(), value.clone()]
             }
@@ -92,7 +111,13 @@ impl MpvCommand {
     /// private data (a local path), so the raw line must not be logged
     /// even at `trace`.
     pub fn is_sensitive(&self) -> bool {
-        matches!(self, Self::LoadFile { .. } | Self::LoadStream { .. })
+        matches!(
+            self,
+            Self::LoadFile { .. }
+                | Self::LoadStream { .. }
+                | Self::AppendFile { .. }
+                | Self::AppendStream { .. }
+        )
     }
 
     /// `true` for requests sent many times a second (visualizer polls),
@@ -105,6 +130,8 @@ impl MpvCommand {
     pub fn describe(&self) -> String {
         match self {
             Self::LoadFile { .. } | Self::LoadStream { .. } => "loadfile".to_owned(),
+            Self::AppendFile { .. } | Self::AppendStream { .. } => "loadfile append".to_owned(),
+            Self::PlaylistClear => "playlist-clear".to_owned(),
             Self::SetProperty { name, .. } => format!("set_property {name}"),
             Self::GetProperty { name } => format!("get_property {name}"),
             Self::ObserveProperty { name, .. } => format!("observe_property {name}"),
@@ -344,6 +371,16 @@ mod tests {
             ),
             (MpvCommand::Stop, r#"{"command":["stop"],"request_id":3}"#),
             (MpvCommand::Quit, r#"{"command":["quit"],"request_id":3}"#),
+            (
+                MpvCommand::PlaylistClear,
+                r#"{"command":["playlist-clear"],"request_id":3}"#,
+            ),
+            (
+                MpvCommand::AppendFile {
+                    path: "/m/b.flac".into(),
+                },
+                r#"{"command":["loadfile","/m/b.flac","append"],"request_id":3}"#,
+            ),
         ];
         for (cmd, expected) in cases {
             assert_eq!(encode_request(3, &cmd), format!("{expected}\n"));
@@ -367,6 +404,26 @@ mod tests {
         };
         assert_eq!(graph.describe(), "af add");
         assert!(!graph.is_frequent() && !graph.is_sensitive());
+    }
+
+    #[test]
+    fn appends_are_as_private_as_loads() {
+        let path = MpvCommand::AppendFile {
+            path: "/secret/path.flac".into(),
+        };
+        assert!(path.is_sensitive());
+        assert_eq!(path.describe(), "loadfile append");
+        let url = url::Url::parse("https://h.example/rest/stream?id=a&t=secret-token").unwrap();
+        let stream = MpvCommand::AppendStream {
+            url: StreamUrl::new(url).unwrap(),
+        };
+        assert!(stream.is_sensitive());
+        assert_eq!(stream.describe(), "loadfile append");
+        assert!(!format!("{stream:?}").contains("secret"));
+        let line = encode_request(4, &stream);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["command"][2], "append");
+        assert!(!MpvCommand::PlaylistClear.is_sensitive());
     }
 
     #[test]

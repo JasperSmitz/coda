@@ -234,6 +234,21 @@ async fn run(
                         Err(reason) => state.load_rejected(load, &reason),
                     }
                 }
+                Some(PlaybackCommand::SetNext {
+                    after,
+                    next: Some((load, PlaybackTarget::File(path))),
+                }) => {
+                    // A next file is checked like a load. One that fails is
+                    // not held; its own load reports the problem later.
+                    let next = match precheck(&path).await {
+                        Ok(()) => Some((load, PlaybackTarget::File(path))),
+                        Err(reason) => {
+                            tracing::info!(%load, %reason, "next file not held");
+                            None
+                        }
+                    };
+                    state.handle_command(PlaybackCommand::SetNext { after, next })
+                }
                 Some(command) => state.handle_command(command),
             },
             line = lines.next_line() => match line {

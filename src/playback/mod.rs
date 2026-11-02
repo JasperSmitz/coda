@@ -12,6 +12,17 @@
 //!   a queue entry's source into a [`PlaybackTarget`] right before sending.
 //! - `Started`/`TrackEnded` carry the [`LoadId`] of the `Load` they belong
 //!   to, so the coordinator can discard events for superseded loads.
+//! - `SetNext { after, next }` names the track to play after `after`
+//!   without a gap (`None`: nothing). A backend may hold it ahead of time
+//!   and continue to it by itself when `after` ends; it then sends
+//!   `Advanced { from: after, to }` instead of `TrackEnded { after, Eof }`,
+//!   and `Started { to }` once `to` is heard. `SetNext` is ignored unless
+//!   `after` is the latest `Load` or advance, and a backend without a
+//!   lookahead ignores it altogether: `after` then ends with `TrackEnded`
+//!   as usual. A next file that does not exist is not held (no event; its
+//!   own `Load` reports it later).
+//! - `Advanced { to }` may name a track that is no longer the wanted next
+//!   (the change raced the end of `from`). The coordinator replaces it.
 //! - The visualizer is off until `SetVisualizer(true)`. While it is on and
 //!   a track is playing (not paused), the backend sends coalesced
 //!   [`PlaybackEvent::Visualizer`] frames, each shown when playback reaches
@@ -94,6 +105,11 @@ pub enum PlaybackCommand {
         load: LoadId,
         target: PlaybackTarget,
     },
+    /// What to play after `after` without a gap; see the module contract.
+    SetNext {
+        after: LoadId,
+        next: Option<(LoadId, PlaybackTarget)>,
+    },
     SetPause(bool),
     Stop,
     SeekRelative(f64),
@@ -130,6 +146,13 @@ pub enum PlaybackEvent {
     TrackEnded {
         load: LoadId,
         reason: EndReason,
+    },
+    /// `from` played to its end and the backend went on to `to` (announced
+    /// with `SetNext`) by itself, without a gap. `to`'s `Started` follows
+    /// once it is heard; until then `from`'s audio is still playing out.
+    Advanced {
+        from: LoadId,
+        to: LoadId,
     },
     Position(Duration),
     Duration(Option<Duration>),

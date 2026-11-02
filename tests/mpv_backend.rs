@@ -3,7 +3,6 @@
 
 mod common;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -527,7 +526,10 @@ async fn killed_mpv_reports_backend_exited() {
 struct Driven {
     /// Titles of tracks whose `Started` matched the player's current load.
     started: Vec<String>,
+    /// `Load` commands sent.
     loads: usize,
+    /// Gapless advances the player followed.
+    gapless: usize,
 }
 
 /// Sends `initial`, then pumps events through the player until `done`.
@@ -543,35 +545,42 @@ async fn drive(
     let mut driven = Driven {
         started: Vec::new(),
         loads: 0,
+        gapless: 0,
     };
-    let mut titles: HashMap<LoadId, String> = HashMap::new();
     let send = |player: &mut Player,
                 handle: &PlaybackHandle,
                 commands: Vec<PlayerCommand>,
-                driven: &mut Driven,
-                titles: &mut HashMap<LoadId, String>| {
-        // The app's own dispatch: unresolvable loads advance the queue.
+                driven: &mut Driven| {
+        // The app's own dispatch: unresolvable loads advance the queue,
+        // and the next track is announced.
         for command in resolve::dispatch(player, navidrome, commands) {
-            if let PlaybackCommand::Load { load, .. } = &command {
+            if let PlaybackCommand::Load { .. } = &command {
                 driven.loads += 1;
-                let title = player.queue().current_entry().unwrap().track.title.clone();
-                titles.insert(*load, title);
             }
             handle.send(command);
         }
     };
-    send(player, handle, initial, &mut driven, &mut titles);
+    send(player, handle, initial, &mut driven);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     while !done(player, &driven.started) {
         assert!(tokio::time::Instant::now() < deadline, "timed out");
         let event = next_event(handle).await;
-        if let PlaybackEvent::Started { load } = &event
-            && player.current_load() == Some(*load)
-        {
-            driven.started.push(titles[load].clone());
-        }
+        let advanced_to = match &event {
+            PlaybackEvent::Advanced { from, to } if player.current_load() == Some(*from) => {
+                Some(*to)
+            }
+            _ => None,
+        };
+        let started = matches!(&event, PlaybackEvent::Started { load } if player.current_load() == Some(*load));
         let commands = player.handle_event(event);
-        send(player, handle, commands, &mut driven, &mut titles);
+        if started {
+            let title = player.queue().current_entry().unwrap().track.title.clone();
+            driven.started.push(title);
+        }
+        if advanced_to.is_some() && player.current_load() == advanced_to {
+            driven.gapless += 1;
+        }
+        send(player, handle, commands, &mut driven);
     }
     driven
 }
@@ -601,7 +610,8 @@ async fn queue_of_short_wavs_plays_through_in_order_exactly_once() {
     })
     .await;
     assert_eq!(driven.started, names);
-    assert_eq!(driven.loads, names.len());
+    // Each track was loaded or reached without a gap, once.
+    assert_eq!(driven.loads + driven.gapless, names.len());
     assert_eq!(player.queue().current_entry().unwrap().track.title, "t5");
 
     // Nothing further happens afterwards.
@@ -773,7 +783,7 @@ async fn mixed_local_and_remote_queue_plays_through_in_order() {
     )
     .await;
     assert_eq!(driven.started, ["local1", "remote", "local2"]);
-    assert_eq!(driven.loads, 4);
+    assert_eq!(driven.loads + driven.gapless, 4);
     let messages = player.take_messages();
     assert!(
         messages
@@ -1340,4 +1350,429 @@ async fn a_seek_mpv_cannot_perform_does_not_freeze_the_visualizer() {
     assert!(after >= 5, "readings stopped after the seek: {after}");
     handle.shutdown(STEP).await;
     server.abort();
+}
+
+// ----- gapless playback (M8) ---------------------------------------------------
+
+fn set_next(after: u64, next: u64, path: &Path) -> PlaybackCommand {
+    PlaybackCommand::SetNext {
+        after: LoadId(after),
+        next: Some((LoadId(next), PlaybackTarget::File(path.to_path_buf()))),
+    }
+}
+
+/// Events until `pred` matches (included), each with the time it arrived
+/// since `start`.
+async fn timed_until(
+    handle: &mut PlaybackHandle,
+    start: tokio::time::Instant,
+    pred: impl Fn(&PlaybackEvent) -> bool,
+) -> Vec<(f64, PlaybackEvent)> {
+    let mut seen = Vec::new();
+    loop {
+        let event = timeout(Duration::from_secs(15), handle.recv())
+            .await
+            .expect("event within timeout")
+            .expect("backend still running");
+        let done = pred(&event);
+        seen.push((start.elapsed().as_secs_f64(), event));
+        if done {
+            return seen;
+        }
+    }
+}
+
+fn at(seen: &[(f64, PlaybackEvent)], event: &PlaybackEvent) -> f64 {
+    seen.iter()
+        .find(|(_, e)| e == event)
+        .unwrap_or_else(|| panic!("{event:?} not in {seen:?}"))
+        .0
+}
+
+const ADVANCED: PlaybackEvent = PlaybackEvent::Advanced {
+    from: LoadId(1),
+    to: LoadId(2),
+};
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn consecutive_tracks_render_bit_identically_across_a_gapless_join() {
+    // Seeded noise cut at an odd sample into A (20 s) and B (1 s): played
+    // back to back through the backend, the halves must give back the
+    // uncut signal, byte for byte.
+    const RATE: usize = 44100;
+    let dir = tempfile::tempdir().unwrap();
+    let whole = common::noise((RATE * 21 + 123) * 2, 7);
+    let cut = (RATE * 20 + 123) * 2;
+    let (a, b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+    common::write_samples(&a, RATE as u32, 2, &whole[..cut]);
+    common::write_samples(&b, RATE as u32, 2, &whole[cut..]);
+    let reference: Vec<u8> = whole.iter().flat_map(|s| s.to_le_bytes()).collect();
+    // `--ao=pcm` renders as fast as it can, so mpv may finish A before the
+    // next entry reaches it (then A simply ends); a few tries settle that.
+    for attempt in 1..=5 {
+        let out = dir.path().join(format!("out{attempt}.raw"));
+        let mut handle = mpv::spawn(MpvOptions {
+            extra_args: vec![
+                "--ao=pcm".to_owned(),
+                format!("--ao-pcm-file={}", out.display()),
+                "--ao-pcm-waveheader=no".to_owned(),
+            ],
+            ..MpvOptions::default()
+        })
+        .await
+        .expect("mpv starts");
+        handle.send(load(1, &a));
+        handle.send(set_next(1, 2, &b));
+        let (end, seen) = wait_for(&mut handle, |e| {
+            matches!(
+                e,
+                PlaybackEvent::TrackEnded {
+                    load: LoadId(2),
+                    ..
+                } | PlaybackEvent::TrackEnded {
+                    load: LoadId(1),
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(handle.shutdown(STEP).await, ShutdownOutcome::Clean);
+        if !seen.contains(&ADVANCED) {
+            eprintln!("attempt {attempt}: A ended before B was held: {end:?}");
+            continue;
+        }
+        assert_eq!(
+            end,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(2),
+                reason: EndReason::Eof
+            }
+        );
+        assert!(
+            seen.contains(&PlaybackEvent::Started { load: LoadId(2) }),
+            "{seen:?}"
+        );
+        let rendered = std::fs::read(&out).expect("pcm output");
+        assert_eq!(rendered.len(), reference.len());
+        let first_difference = rendered.iter().zip(&reference).position(|(x, y)| x != y);
+        assert_eq!(first_difference, None, "the join at byte {}", cut * 2);
+        return;
+    }
+    panic!("mpv never held the next track in time");
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn a_gapless_change_is_reported_and_the_next_track_starts_when_heard() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+    common::write_tones(&a, 44100, 2, &[(440.0, 2000)], 0.2);
+    common::write_tones(&b, 44100, 2, &[(880.0, 1000)], 0.2);
+    let mut handle = timed_backend().await;
+    let start = tokio::time::Instant::now();
+    handle.send(load(1, &a));
+    handle.send(set_next(1, 2, &b));
+    let seen = timed_until(&mut handle, start, |e| {
+        matches!(
+            e,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(2),
+                ..
+            }
+        )
+    })
+    .await;
+    let events: Vec<&PlaybackEvent> = seen.iter().map(|(_, e)| e).collect();
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(1),
+                ..
+            }
+        )),
+        "A ends in the advance, not on its own: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().unwrap().1,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(2),
+            reason: EndReason::Eof
+        }
+    );
+    let started_a = at(&seen, &PlaybackEvent::Started { load: LoadId(1) });
+    let advanced = at(&seen, &ADVANCED);
+    let started_b = at(&seen, &PlaybackEvent::Started { load: LoadId(2) });
+    eprintln!("A started {started_a:.3}, advanced {advanced:.3}, B heard {started_b:.3}");
+    // mpv moves on when A's decoding ends, the output's buffer before A is
+    // heard to its end (about 0.35-0.45 s with `--ao=null`); B's `Started`
+    // waits for that.
+    assert!(started_a < advanced && advanced < started_b, "{seen:?}");
+    let heard_after = started_b - advanced;
+    assert!((0.2..0.8).contains(&heard_after), "{heard_after:.3} s");
+    // B's start is where A's 2 s end, measured from A's start.
+    let gap = started_b - started_a - 2.0;
+    assert!((-0.15..0.25).contains(&gap), "{gap:.3} s");
+    // No position of B before it is heard.
+    let positions_between = seen
+        .iter()
+        .filter(|(t, e)| {
+            *t > advanced
+                && *t < started_b
+                && matches!(e, PlaybackEvent::Position(p) if !p.is_zero())
+        })
+        .count();
+    assert_eq!(positions_between, 0, "{seen:?}");
+    handle.shutdown(STEP).await;
+}
+
+/// Plays `[A (2 s), B (2 s), C (1 s)]` through the player and real mpv,
+/// removing B `edit_after` seconds after A is heard. With `deaf_from`, the
+/// player reads no events from that many seconds after A is heard until
+/// the edit, as if it were busy: mpv's advance to B then reaches it only
+/// after the edit. Returns the titles started for the player and how the
+/// change happened.
+async fn remove_next_during_playback(
+    edit_after: f64,
+    deaf_from: Option<f64>,
+) -> (Vec<String>, Player, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut player = Player::new();
+    let mut ids = Vec::new();
+    for (name, millis) in [("A", 2000), ("B", 2000), ("C", 1000)] {
+        let path = dir.path().join(format!("{name}.wav"));
+        common::write_tones(&path, 44100, 2, &[(440.0, millis)], 0.2);
+        ids.push(
+            player
+                .enqueue(Track::local(path, TrackMetadata::default()))
+                .unwrap(),
+        );
+    }
+    let mut handle = timed_backend().await;
+    let mut started = Vec::new();
+    let commands = player.play_entry(ids[0]);
+    handle.send_all(resolve::dispatch(&mut player, None, commands));
+    let mut edit_at = None;
+    let mut deaf_at: Option<tokio::time::Instant> = None;
+    let mut how = "loaded after A ended".to_owned();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out: {started:?}"
+        );
+        let deaf = edit_at.is_some() && deaf_at.is_some_and(|at| tokio::time::Instant::now() >= at);
+        let event = tokio::select! {
+            event = handle.recv(), if !deaf => event.expect("backend still running"),
+            _ = tokio::time::sleep_until(deaf_at.unwrap_or(deadline)), if edit_at.is_some() && !deaf && deaf_at.is_some() => continue,
+            _ = tokio::time::sleep_until(edit_at.unwrap_or(deadline)), if edit_at.is_some() => {
+                edit_at = None;
+                // B may be the current entry already (mpv moved on, B is
+                // not heard yet): then C replaces it at once.
+                let commands = player.remove(ids[1]);
+                handle.send_all(resolve::dispatch(&mut player, None, commands));
+                continue;
+            }
+        };
+        let is_start = matches!(&event, PlaybackEvent::Started { load } if player.current_load() == Some(*load));
+        let advanced = match &event {
+            PlaybackEvent::Advanced { from, to } if player.current_load() == Some(*from) => {
+                Some(*to)
+            }
+            _ => None,
+        };
+        let commands = player.handle_event(event);
+        if let Some(to) = advanced {
+            how = if player.current_load() == Some(to) {
+                let title = &player.queue().current_entry().unwrap().track.title;
+                format!("gapless to {title}")
+            } else {
+                "corrected a stale advance".to_owned()
+            };
+        }
+        if is_start {
+            let title = player.queue().current_entry().unwrap().track.title.clone();
+            if started.is_empty() {
+                let now = tokio::time::Instant::now();
+                edit_at = Some(now + Duration::from_secs_f64(edit_after));
+                deaf_at = deaf_from.map(|d| now + Duration::from_secs_f64(d));
+            }
+            started.push(title);
+        }
+        handle.send_all(resolve::dispatch(&mut player, None, commands));
+        if started.len() == 2 || (started.len() == 1 && player.status() == PlaybackStatus::Stopped)
+        {
+            break;
+        }
+    }
+    handle.shutdown(STEP).await;
+    (started, player, how)
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn a_next_track_removed_near_the_change_never_plays() {
+    // mpv decodes A to its end about 0.4 s before it is heard to its end
+    // (`--ao=null`), so removals from 1.2 s to 1.95 s after A's start cover
+    // "well before", "around mpv's choice" and "after mpv moved on, before
+    // B is heard".
+    let mut paths = Vec::new();
+    for edit_after in [1.2, 1.5, 1.58, 1.6, 1.62, 1.65, 1.7, 1.8, 1.95] {
+        let (started, player, how) = remove_next_during_playback(edit_after, None).await;
+        eprintln!("edit after {edit_after} s: {started:?}, {how}");
+        assert_eq!(started, ["A", "C"], "edit after {edit_after} s");
+        assert_eq!(player.queue().len(), 2);
+        paths.push(how);
+    }
+    // Well before mpv's choice, the edit is taken without a gap.
+    assert_eq!(paths[0], "gapless to C", "{paths:?}");
+    // Deterministically in the switch window: mpv has moved on to B
+    // (about 1.6 s), but the player has not seen it when B is removed
+    // (1.9 s, B is heard at 2 s). It corrects the stale advance.
+    let (started, _, how) = remove_next_during_playback(1.9, Some(1.0)).await;
+    eprintln!("edit after 1.9 s, events held from 1.0 s: {started:?}, {how}");
+    assert_eq!(started, ["A", "C"]);
+    assert_eq!(how, "corrected a stale advance");
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn a_slow_stream_joins_without_a_gap_thanks_to_prefetch() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    // B's server takes 1 s to answer. mpv fetches it while A plays, so the
+    // change does not wait for it.
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let b_wav = dir.path().join("b.wav");
+    common::write_tones(&b_wav, 44100, 2, &[(880.0, 1000)], 0.2);
+    Mock::given(method("GET"))
+        .and(path("/music/rest/stream"))
+        .and(query_param("id", "slow"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(std::fs::read(&b_wav).unwrap(), "audio/wav")
+                .set_delay(Duration::from_secs(1)),
+        )
+        .mount(&server)
+        .await;
+    let client = navidrome::Client::new(
+        navidrome::client::parse_base_url(&format!("{}/music", server.uri())).unwrap(),
+        "u".into(),
+        navidrome::Password::new("p".into()),
+    )
+    .unwrap();
+    let a = dir.path().join("a.wav");
+    common::write_tones(&a, 44100, 2, &[(440.0, 3000)], 0.2);
+    let mut handle = timed_backend().await;
+    let start = tokio::time::Instant::now();
+    handle.send(load(1, &a));
+    handle.send(PlaybackCommand::SetNext {
+        after: LoadId(1),
+        next: Some((
+            LoadId(2),
+            PlaybackTarget::Stream(client.stream_url("slow").unwrap()),
+        )),
+    });
+    let seen = timed_until(&mut handle, start, |e| {
+        matches!(
+            e,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(2),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(
+        seen.last().unwrap().1,
+        PlaybackEvent::TrackEnded {
+            load: LoadId(2),
+            reason: EndReason::Eof
+        },
+        "{seen:?}"
+    );
+    let started_a = at(&seen, &PlaybackEvent::Started { load: LoadId(1) });
+    let advanced = at(&seen, &ADVANCED);
+    let started_b = at(&seen, &PlaybackEvent::Started { load: LoadId(2) });
+    eprintln!("A started {started_a:.3}, advanced {advanced:.3}, B heard {started_b:.3}");
+    // Without prefetch, B would be heard only after its 1 s latency.
+    assert!(started_b - advanced < 0.6, "{seen:?}");
+    let gap = started_b - started_a - 3.0;
+    assert!((-0.15..0.3).contains(&gap), "{gap:.3} s: {seen:?}");
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    handle.shutdown(STEP).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn the_visualizer_carries_on_across_a_gapless_change() {
+    // A is a 400 Hz tone (band 2), B 2.5 kHz (band 4).
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+    common::write_tones(&a, 44100, 2, &[(400.0, 2500)], 0.25);
+    common::write_tones(&b, 44100, 2, &[(2500.0, 2000)], 0.25);
+    let mut handle = timed_backend().await;
+    let start = tokio::time::Instant::now();
+    handle.send(PlaybackCommand::SetVisualizer(true));
+    handle.send(load(1, &a));
+    handle.send(set_next(1, 2, &b));
+    let seen = timed_until(&mut handle, start, |e| {
+        matches!(
+            e,
+            PlaybackEvent::TrackEnded {
+                load: LoadId(2),
+                ..
+            } | PlaybackEvent::VisualizerUnavailable
+        )
+    })
+    .await;
+    assert!(
+        !seen
+            .iter()
+            .any(|(_, e)| *e == PlaybackEvent::VisualizerUnavailable),
+        "{seen:?}"
+    );
+    let advanced = at(&seen, &ADVANCED);
+    let started_b = at(&seen, &PlaybackEvent::Started { load: LoadId(2) });
+    let frames: Vec<(f64, LoadId, usize)> = seen
+        .iter()
+        .filter_map(|(t, e)| match e {
+            PlaybackEvent::Visualizer { load, frame } => Some((*t, *load, loudest_band(frame))),
+            _ => None,
+        })
+        .collect();
+    // A's readings until B is heard, then B's.
+    for &(t, load, band) in &frames {
+        if load == LoadId(1) {
+            assert!(t <= started_b + 0.01, "A's reading at {t:.3}: {frames:?}");
+            assert_eq!(band, 2, "A's reading at {t:.3} shows B: {frames:?}");
+        } else {
+            assert_eq!(load, LoadId(2));
+            assert!(t >= started_b, "B's reading at {t:.3} before it is heard");
+        }
+    }
+    // Readings never stop across the change (they come about every 45 ms).
+    let around: Vec<f64> = frames
+        .iter()
+        .map(|&(t, _, _)| t)
+        .filter(|t| (advanced - 0.5..started_b + 0.5).contains(t))
+        .collect();
+    let longest = around.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
+    eprintln!(
+        "advanced {advanced:.3}, B heard {started_b:.3}, {} readings around, longest pause {longest:.3} s",
+        around.len()
+    );
+    assert!(longest < 0.2, "{frames:?}");
+    // B's own band shows once it is heard.
+    let b_bands: Vec<usize> = frames
+        .iter()
+        .filter(|&&(_, load, _)| load == LoadId(2))
+        .map(|&(_, _, band)| band)
+        .collect();
+    assert!(b_bands.len() > 10, "{frames:?}");
+    assert!(b_bands.iter().filter(|&&b| b == 4).count() * 10 >= b_bands.len() * 9);
+    handle.shutdown(STEP).await;
 }

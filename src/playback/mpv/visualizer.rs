@@ -23,6 +23,14 @@
 //!   time code.
 //! - Removing the graph drops the audio inside it (23–55 ms), an audible
 //!   skip, so it is removed only at a track change or stop while hidden.
+//!   A gapless change (M8) is not a track change: the graph stays.
+//! - At a gapless change the next track's audio enters the graph while the
+//!   previous track's tail is still heard (about 0.25 s on CoreAudio,
+//!   seconds on slow outputs), and its time code restarts at 0. Readings
+//!   polled from then on go to a second aligner; the previous track's
+//!   queued readings keep being shown against its clock, extrapolated
+//!   from its last position, until the next track is heard
+//!   ([`Visualizer::started`]). Then the second aligner takes over.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -183,11 +191,16 @@ impl PlayClock {
     }
 
     fn position(&self, now: Instant) -> Option<f64> {
+        self.position_within(now, MAX_EXTRAPOLATION)
+    }
+
+    /// The position, extrapolated for at most `cap` since the last report.
+    fn position_within(&self, now: Instant, cap: Duration) -> Option<f64> {
         let (position, at) = self.anchor?;
         if self.paused {
             return Some(position);
         }
-        let elapsed = now.saturating_duration_since(at).min(MAX_EXTRAPOLATION);
+        let elapsed = now.saturating_duration_since(at).min(cap);
         Some(position + elapsed.as_secs_f64())
     }
 
@@ -238,6 +251,29 @@ impl Aligner {
         true
     }
 
+    /// Queues a reading of a track that is not heard yet (its position is
+    /// 0). Its readings only move forward, so one older than those queued
+    /// means the queued ones were the previous track's tail: they are
+    /// replaced.
+    fn offer_incoming(&mut self, sample: Sample) -> bool {
+        if self.last_time_code == Some(sample.time_code) {
+            return false;
+        }
+        self.last_time_code = Some(sample.time_code);
+        let at = unwrap_time_code(sample.time_code, 0.0);
+        if !(-MAX_LAG..=MAX_LEAD).contains(&at) {
+            return false;
+        }
+        if self.pending.back().is_some_and(|&(newest, _)| at <= newest) {
+            self.pending.clear();
+        }
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.pop_front();
+        }
+        self.pending.push_back((at, sample.frame));
+        true
+    }
+
     /// The newest reading the position has reached, dropping older ones.
     /// Readings (and the last one shown) more than [`MAX_LEAD`] ahead of
     /// the position belong to a position playback left without a seek
@@ -279,6 +315,14 @@ enum Attach {
     Unavailable,
 }
 
+/// The next track of a gapless change: decoding (its readings arrive)
+/// while the previous one is still heard.
+#[derive(Debug)]
+struct Incoming {
+    load: LoadId,
+    aligner: Aligner,
+}
+
 /// What the driver should do on a visualizer tick.
 #[derive(Debug, Default, PartialEq)]
 pub struct Tick {
@@ -312,6 +356,11 @@ pub struct Visualizer {
     sample_rate: Option<f64>,
     clock: PlayClock,
     aligner: Aligner,
+    /// A gapless change in progress (see the module docs).
+    incoming: Option<Incoming>,
+    /// During a gapless change, the generation of polls sent before it:
+    /// their readings are the previous track's.
+    outgoing_generation: Option<u64>,
 }
 
 impl Default for Visualizer {
@@ -338,6 +387,8 @@ impl Visualizer {
             sample_rate: None,
             clock: PlayClock::default(),
             aligner: Aligner::default(),
+            incoming: None,
+            outgoing_generation: None,
         }
     }
 
@@ -396,6 +447,8 @@ impl Visualizer {
     pub fn track_change(&mut self, next: Option<LoadId>) -> bool {
         self.expected = next;
         self.playing = None;
+        self.incoming = None;
+        self.outgoing_generation = None;
         self.restarting = true;
         self.clock.clear();
         self.forget_readings();
@@ -428,11 +481,49 @@ impl Visualizer {
         self.restarting = false;
     }
 
+    /// The track of `load` is heard: after a load, or at the end of a
+    /// gapless change, whose readings then take over.
     pub fn started(&mut self, load: LoadId) {
-        if self.expected == Some(load) {
+        if let Some(incoming) = self.incoming.take_if(|i| i.load == load) {
+            tracing::debug!(%load, "visualizer hands over to the next track");
+            self.aligner = incoming.aligner;
+            self.playing = Some(load);
+            // Its clock starts with its first position, reported next.
+            self.clock.clear();
+            self.outgoing_generation = None;
+        } else if self.expected == Some(load) {
             self.playing = Some(load);
         } else {
             tracing::debug!(%load, "visualizer ignores the start of a superseded load");
+        }
+    }
+
+    /// mpv went on to `next` without a gap: the graph stays, the readings
+    /// of the track still heard keep being shown, and new ones are the
+    /// next track's until it is heard ([`Self::started`]).
+    pub fn gapless_change(&mut self, next: LoadId) {
+        self.expected = Some(next);
+        let aligner = Aligner {
+            last_time_code: self.aligner.last_time_code,
+            ..Aligner::default()
+        };
+        self.outgoing_generation = Some(self.generation);
+        self.generation += 1;
+        self.incoming = Some(Incoming {
+            load: next,
+            aligner,
+        });
+    }
+
+    /// The position of the track heard. During a gapless change mpv no
+    /// longer reports it, so it is extrapolated for longer: up to the
+    /// largest output buffer believed.
+    fn clock_position(&self, now: Instant) -> Option<f64> {
+        if self.incoming.is_some() {
+            self.clock
+                .position_within(now, Duration::from_secs_f64(MAX_LEAD))
+        } else {
+            self.clock.position(now)
         }
     }
 
@@ -452,6 +543,14 @@ impl Visualizer {
     /// raced the end of a track and mpv took the graph unchecked while
     /// idle; if the graph is bad, every later track would fail too.
     pub fn ended(&mut self, load: LoadId, failed: bool) -> bool {
+        if self.incoming.as_ref().is_some_and(|i| i.load == load) {
+            // The next track of a gapless change ended before it was heard
+            // (it failed to open): nothing more to show.
+            self.incoming = None;
+            self.outgoing_generation = None;
+            self.playing = None;
+            self.forget_readings();
+        }
         if self.playing == Some(load) {
             self.playing = None;
         }
@@ -469,8 +568,10 @@ impl Visualizer {
         self.clock.set_paused(paused, now);
     }
 
+    /// mpv's `time-pos`. During a gapless change it is the next track's,
+    /// which is not heard yet, so it does not move the clock.
     pub fn position(&mut self, seconds: f64, now: Instant) {
-        if !self.restarting {
+        if !self.restarting && self.incoming.is_none() {
             self.clock.observe(seconds, now);
         }
     }
@@ -489,7 +590,7 @@ impl Visualizer {
             return Tick::default();
         }
         self.next_poll = Some(now + POLL_INTERVAL);
-        let event = match (self.playing, self.restarting, self.clock.position(now)) {
+        let event = match (self.playing, self.restarting, self.clock_position(now)) {
             (Some(load), false, Some(position)) => {
                 self.aligner
                     .take_due(position)
@@ -528,6 +629,24 @@ impl Visualizer {
         };
         // mpv ran the graph: it works, whatever happens to this reading.
         self.verified = true;
+        if let Some(incoming) = self.incoming.as_mut() {
+            if self.restarting {
+                return;
+            }
+            if generation == self.generation {
+                incoming.aligner.offer_incoming(sample);
+                return;
+            }
+            // A poll sent before the change: the track still heard. The
+            // next poll may return the same value again.
+            incoming.aligner.last_time_code = Some(sample.time_code);
+            if self.outgoing_generation == Some(generation)
+                && let Some(position) = self.clock_position(now)
+            {
+                self.aligner.offer(sample, position);
+            }
+            return;
+        }
         if generation != self.generation || self.restarting {
             // Not shown, but remembered: mpv keeps returning this value
             // until the graph produces the next one.
@@ -543,6 +662,10 @@ impl Visualizer {
         self.generation += 1;
         self.next_poll = None;
         self.aligner.clear();
+        self.outgoing_generation = None;
+        if let Some(incoming) = self.incoming.as_mut() {
+            incoming.aligner.clear();
+        }
     }
 
     /// Bands at or above half the sample rate only echo the whole signal.

@@ -13,6 +13,7 @@ A keyboard-first terminal music player for your local files and a personal [Navi
   - scrobble plays;
   - create, rename, reorder and delete your playlists.
 - **Setup:** a first run in the terminal, with the password stored in the macOS Keychain or the Linux Secret Service. You can connect or change Navidrome later without restarting.
+- **Gapless playback:** consecutive tracks play without a pause, local files and Navidrome streams alike (the next stream is fetched ahead).
 - **Session:** the queue, volume, repeat mode and visualizer are restored at the next launch.
 - **Visualizer:** an optional spectrum and level meter, in step with what you hear.
 - **Privacy:** logs never contain passwords, tokens, stream URLs, file paths or track titles.

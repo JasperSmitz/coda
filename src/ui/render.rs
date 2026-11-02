@@ -369,8 +369,10 @@ fn local_row(
 const MIN_NAME_WITH_LENGTH: usize = 20;
 
 /// The right-hand side of an album row with name `left` in a row `width`
-/// columns wide: `first · length` (`1959 · 46:12`, or `12 tracks ·
-/// 1:12:05` for a local album), or whichever of the two is known. When
+/// columns wide: `length · first` (`46:12 · 1959`, or `1:12:05 · 12
+/// tracks` for a local album), or whichever of the two is known. The
+/// length comes first so the fixed-width year sits at the right edge and
+/// the separators line up. When
 /// both are known but would leave the name fewer than
 /// [`MIN_NAME_WITH_LENGTH`] columns (or fewer than it needs), `first`
 /// wins and the length is left out.
@@ -385,7 +387,7 @@ fn album_detail(
         (Some(first), Some(length)) => (first, length),
         (first, length) => return first.or(length),
     };
-    let both = format!("{first} · {length}");
+    let both = format!("{length} · {first}");
     // At least one column for the name, as `row_line` requires.
     let name = fit(left, MIN_NAME_WITH_LENGTH).width().max(1);
     if both.width() + 1 + name <= width {
@@ -631,7 +633,7 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
         Row::Playlist(playlist) => {
             let songs = playlist.song_count.map(|n| count(n as usize, "song"));
             let right = match (songs, playlist.duration.map(format_time)) {
-                (Some(songs), Some(time)) => Some(format!("{songs} · {time}")),
+                (Some(songs), Some(time)) => Some(format!("{time} · {songs}")),
                 (songs, time) => songs.or(time),
             };
             row_line(&playlist.name, right, width)
@@ -868,7 +870,9 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
     let height = usize::from(block.inner(area).height);
     let offset = scroll_offset(view.queue_offset, app.queue_selected(), queue.len(), height);
     view.queue_offset = offset;
-    let current = queue.current();
+    // The entry heard, which during a gapless change is still the previous
+    // one for a moment.
+    let current = app.player().playing_entry().map(|e| e.id);
     let items: Vec<ListItem> = queue
         .entries()
         .iter()
@@ -939,7 +943,7 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) 
 
     let (label, color) = status_label(player.status());
     let label = format!("[{label}] ");
-    let entry = player.queue().current_entry();
+    let entry = player.playing_entry();
     let mut spans = vec![Span::styled(
         label.clone(),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1025,7 +1029,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     let meter = app.meter();
     let live = player.status() == PlaybackStatus::Playing
         && meter.load().is_some()
-        && meter.load() == player.current_load();
+        && meter.load() == player.audible_load();
     let (levels, bands) = if live {
         (meter.levels(), meter.bands())
     } else {
@@ -1839,6 +1843,57 @@ mod tests {
     }
 
     #[test]
+    fn the_now_playing_bar_switches_when_the_next_track_is_heard() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                tagged("1.flac", "First Song", "Artist", 100),
+                tagged("2.flac", "Second Song", "Artist", 100),
+            ]),
+            now,
+        );
+        open_folders(&mut app, now);
+        let commands = app.handle_action(Action::Activate, now);
+        let (load, next) = match commands.as_slice() {
+            [
+                PlaybackCommand::Load { load, .. },
+                PlaybackCommand::SetNext {
+                    next: Some((next, _)),
+                    ..
+                },
+            ] => (*load, *next),
+            other => panic!("{other:?}"),
+        };
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        app.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(99)), now);
+        // mpv went on to the second song, which is not heard yet.
+        app.handle_playback_event(
+            PlaybackEvent::Advanced {
+                from: load,
+                to: next,
+            },
+            now,
+        );
+        let (terminal, _) = drawn(&app, 100, 24, now);
+        let text = buffer_text(&terminal);
+        let bar = text
+            .lines()
+            .find(|l| l.contains("[Playing]"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(bar.contains("First Song"), "{bar}");
+        assert!(text.contains("1:39 / 1:40"), "{text}");
+        assert!(text.contains("▶ Artist - First Song"), "{text}");
+        // It is heard.
+        app.handle_playback_event(PlaybackEvent::Started { load: next }, now);
+        let (terminal, _) = drawn(&app, 100, 24, now);
+        let text = buffer_text(&terminal);
+        let bar = text.lines().find(|l| l.contains("[Playing]")).unwrap();
+        assert!(bar.contains("Second Song"), "{bar}");
+        assert!(text.contains("▶ Artist - Second Song"), "{text}");
+    }
+
+    #[test]
     fn a_visualizer_only_redraw_matches_a_full_redraw() {
         // Narrow, medium and wide layouts.
         for width in [34, 80, 160] {
@@ -2412,21 +2467,21 @@ mod tests {
         let hours = Some(Duration::from_secs(3600 + 12 * 60 + 5));
         let year = || Some("1959".to_owned());
         let detail = |first, length, width| album_detail("Kind of Blue", first, length, width);
-        assert_eq!(detail(year(), mins, 80), Some("1959 · 46:12".into()));
-        assert_eq!(detail(year(), hours, 80), Some("1959 · 1:12:05".into()));
+        assert_eq!(detail(year(), mins, 80), Some("46:12 · 1959".into()));
+        assert_eq!(detail(year(), hours, 80), Some("1:12:05 · 1959".into()));
         // Only what is known.
         assert_eq!(detail(None, mins, 80), Some("46:12".into()));
         assert_eq!(detail(year(), None, 80), Some("1959".into()));
         assert_eq!(detail(None, None, 80), None);
-        // "Kind of Blue" (12) + a space + "1959 · 46:12" (12) = 25 columns.
-        assert_eq!(detail(year(), mins, 25), Some("1959 · 46:12".into()));
+        // "Kind of Blue" (12) + a space + "46:12 · 1959" (12) = 25 columns.
+        assert_eq!(detail(year(), mins, 25), Some("46:12 · 1959".into()));
         assert_eq!(detail(year(), mins, 24), Some("1959".into()));
         // A long name keeps at least MIN_NAME_WITH_LENGTH columns.
         let long = "A Love Supreme (Deluxe Edition, Remastered)";
         let width = MIN_NAME_WITH_LENGTH + 1 + 12;
         assert_eq!(
             album_detail(long, year(), mins, width),
-            Some("1959 · 46:12".into())
+            Some("46:12 · 1959".into())
         );
         assert_eq!(
             album_detail(long, year(), mins, width - 1),
@@ -2442,7 +2497,7 @@ mod tests {
             assert!(line.width() <= width, "{width}: {text:?}");
             if text.contains("46:12") {
                 assert!(
-                    text.starts_with("Kind of Blue ") && text.ends_with(" 1959 · 46:12"),
+                    text.starts_with("Kind of Blue ") && text.ends_with(" 46:12 · 1959"),
                     "{width}: {text:?}"
                 );
             }
@@ -2468,11 +2523,11 @@ mod tests {
         let row = |album: &Album, width| remote_row(Row::Album(album), style, width).to_string();
         assert_eq!(
             row(&album, 40),
-            format!("Kind of Blue{}1959 · 46:12", " ".repeat(16))
+            format!("Kind of Blue{}46:12 · 1959", " ".repeat(16))
         );
         assert_eq!(row(&album, 20), "Kind of Blue    1959");
         album.duration = Some(Duration::from_secs(4325));
-        assert!(row(&album, 40).ends_with(" 1959 · 1:12:05"));
+        assert!(row(&album, 40).ends_with(" 1:12:05 · 1959"));
         album.year = None;
         assert!(row(&album, 40).ends_with(" 1:12:05"));
         album.duration = None;
@@ -2987,11 +3042,11 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
         let line = |text: &str| *lines.iter().find(|l| l.contains(text)).unwrap();
         assert!(
-            line("Long — Band").contains(" 1 track · 1:12:05│"),
+            line("Long — Band").contains(" 1:12:05 · 1 track│"),
             "{screen}"
         );
         assert!(
-            line("Whole — Band").contains(" 2 tracks · 3:00│"),
+            line("Whole — Band").contains(" 3:00 · 2 tracks│"),
             "{screen}"
         );
         // A track of unknown length: no total rather than a short one.
@@ -3110,7 +3165,7 @@ mod tests {
         assert!(at("Hits — Various Artists") < at("Kind of Blue — Miles Davis"));
         assert!(at("Kind of Blue — Miles Davis") < at("Unknown album — Unknown artist"));
         assert!(
-            lines[at("Kind of Blue")].contains("2 tracks · 3:00│"),
+            lines[at("Kind of Blue")].contains("3:00 · 2 tracks│"),
             "{screen}"
         );
         app.handle_action(Action::CycleSort, now);
@@ -3323,7 +3378,7 @@ mod tests {
         for expected in [
             "Navidrome (connected) › Playlists",
             "> Road Trip",
-            "12 songs · 45:12",
+            "45:12 · 12 songs",
             "4,294,967,295 songs",
             "Bare",
         ] {
