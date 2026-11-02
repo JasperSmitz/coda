@@ -1,10 +1,11 @@
 # Coda — Vision
 
 ## What it is
-Coda is a keyboard-first Rust TUI music player with a calm, compact interface. It plays local music files and, later, streams from a personal Navidrome server. It works by itself and may eventually provide the music module inside HEART.
+Coda is a keyboard-first Rust TUI music player with a calm, compact interface. It plays local music files and streams from a personal Navidrome server, sharing one queue. It works by itself; a HEART music module was once planned and is postponed indefinitely.
 
 ## User experience
-- Launch `coda`, browse a library, choose a track, and listen.
+- Launch `coda`, browse a library, and play in context: an album, playlist or artist, in order or shuffled.
+- Treat the queue as temporary: add to it on the fly; keep lasting collections as playlists.
 - See a single queue regardless of whether a track originates locally or on Navidrome.
 - Control play/pause, next/previous, seek and volume without leaving the terminal.
 - Keep the interface responsive during file scans and network operations.
@@ -18,4 +19,4 @@ Coda is a keyboard-first Rust TUI music player with a calm, compact interface. I
 5. **Small and understandable:** choose the simplest architecture that supports the current milestone.
 
 ## Not in the initial scope
-Artwork, lyrics, smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified.
+Lyrics, smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified. Cover art is proposed as M8; endless play and context-aware autoplay are noted for later.

@@ -10,6 +10,7 @@ Coda (`coda-player`, CLI: `coda`) is a standalone Rust terminal music player for
 - `docs/decisions/`: decisions and trade-offs, not speculative bureaucracy.
 - `docs/plans/`: approved implementation briefs when needed.
 - `docs/LESSONS.md`: verified, reusable lessons from defects and reviews.
+- `README.md` (overview, keys) and `docs/USAGE.md` (user-facing details): update them when user-visible behaviour changes.
 - Inspect the repository before asserting what exists. Code and tests prevail over outdated docs; reconcile discrepancies.
 
 ## Agent roles

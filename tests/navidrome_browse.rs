@@ -179,6 +179,26 @@ async fn playlists_and_album_pages_map_to_their_endpoints() {
 }
 
 #[tokio::test]
+async fn random_songs_map_to_get_random_songs_of_the_server_maximum() {
+    let (server, client) = server().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getRandomSongs"))
+        .and(query_param("size", "500"))
+        .respond_with(ok(json!({ "randomSongs": { "song": [
+            { "id": "s7", "title": "Seven" }, { "id": "s3", "title": "Three" }
+        ]}})))
+        .mount(&server)
+        .await;
+    let response = run(&client, 1, Resource::RandomSongs).await;
+    assert_eq!(response.resource, Resource::RandomSongs);
+    let Ok(Content::Songs(songs)) = response.result else {
+        panic!("{:?}", response.result);
+    };
+    let titles: Vec<&str> = songs.iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Seven", "Three"], "served order");
+}
+
+#[tokio::test]
 async fn errors_map_to_short_text_without_urls_or_secrets() {
     let (server, client) = server().await;
     Mock::given(method("GET"))

@@ -89,9 +89,8 @@ impl Queue {
 
     /// Where the next [`Queue::insert_next`] goes after: the last entry it
     /// added. It is forgotten when `current` changes (playback moved on,
-    /// or another entry was played), on play now
-    /// ([`Queue::insert_after_current`]), when the current entry is
-    /// removed, and on shuffle and clear. Appending, moving and removing
+    /// or another entry was played), when the current entry is removed,
+    /// and on shuffle and clear (which also covers replacing the queue). Appending, moving and removing
     /// other entries keep it: if the anchor entry is gone
     /// or now comes before the current one, inserts go right after the
     /// current entry again.
@@ -132,20 +131,6 @@ impl Queue {
         let entry = self.new_entry(track);
         let id = entry.id;
         self.entries.push(entry);
-        self.changed();
-        id
-    }
-
-    /// Inserts a new entry directly after the current one, or appends it
-    /// when there is no current entry. Does not change `current`.
-    pub fn insert_after_current(&mut self, track: Track) -> QueueEntryId {
-        self.next_anchor = None;
-        let Some(pos) = self.current.and_then(|id| self.position(id)) else {
-            return self.append(track);
-        };
-        let entry = self.new_entry(track);
-        let id = entry.id;
-        self.entries.insert(pos + 1, entry);
         self.changed();
         id
     }
@@ -312,6 +297,35 @@ impl Queue {
     }
 }
 
+/// Shuffles `items` for "play shuffled" (`s` in the library) with a
+/// Fisher–Yates shuffle. With `first` (an index into `items`), that item
+/// goes to the front and the rest are shuffled behind it; an index out of
+/// range is ignored.
+pub fn shuffle_with_first<T>(items: &mut [T], first: Option<usize>, rng: &mut Rng) {
+    let rest = match first.filter(|&i| i < items.len()) {
+        Some(i) => {
+            items.swap(0, i);
+            &mut items[1..]
+        }
+        None => items,
+    };
+    for i in (1..rest.len()).rev() {
+        let j = rng.below(i + 1);
+        rest.swap(i, j);
+    }
+}
+
+/// Keeps a uniformly random sample of `k` items (all of them, if there
+/// are fewer), in random order (a partial Fisher–Yates shuffle).
+pub fn sample<T>(items: &mut Vec<T>, k: usize, rng: &mut Rng) {
+    let k = k.min(items.len());
+    for i in 0..k {
+        let j = i + rng.below(items.len() - i);
+        items.swap(i, j);
+    }
+    items.truncate(k);
+}
+
 /// A small seeded PRNG (SplitMix64) for shuffling. Not cryptographic.
 #[derive(Debug, Clone)]
 pub struct Rng(u64);
@@ -373,40 +387,6 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(titles(&q), ["A", "B"]);
         assert_eq!(q.current(), None);
-    }
-
-    #[test]
-    fn insert_after_current_on_empty_queue() {
-        let mut q = Queue::new();
-        q.insert_after_current(t("X"));
-        assert_eq!(titles(&q), ["X"]);
-    }
-
-    #[test]
-    fn insert_after_current_without_current_appends() {
-        let mut q = Queue::new();
-        q.append(t("A"));
-        q.append(t("B"));
-        q.insert_after_current(t("X"));
-        assert_eq!(titles(&q), ["A", "B", "X"]);
-    }
-
-    #[test]
-    fn insert_after_current_in_middle_and_at_end() {
-        let mut q = Queue::new();
-        q.append(t("A"));
-        let b = q.append(t("B"));
-        q.append(t("C"));
-        q.set_current(b);
-        q.insert_after_current(t("X"));
-        assert_eq!(titles(&q), ["A", "B*", "X", "C"]);
-
-        let mut q = Queue::new();
-        q.append(t("A"));
-        let b = q.append(t("B"));
-        q.set_current(b);
-        q.insert_after_current(t("X"));
-        assert_eq!(titles(&q), ["A", "B*", "X"]);
     }
 
     #[test]
@@ -605,7 +585,7 @@ mod tests {
         // Each case starts as A* X(anchor) B and then disturbs the run;
         // the next insert goes right after the current entry again.
         type Disturb = fn(&mut Queue, [QueueEntryId; 3]);
-        let cases: [(&str, Disturb, &[&str]); 4] = [
+        let cases: [(&str, Disturb, &[&str]); 3] = [
             (
                 "next",
                 |q, _| {
@@ -619,13 +599,6 @@ mod tests {
                     q.set_current(b);
                 },
                 &["A", "X", "B*", "Y"],
-            ),
-            (
-                "play now",
-                |q, _| {
-                    q.insert_after_current(t("N"));
-                },
-                &["A*", "Y", "N", "X", "B"],
             ),
             (
                 "shuffle",
@@ -735,6 +708,60 @@ mod tests {
         assert_eq!(q.next_anchor(), Some(x));
         q.insert_next(t("Y"));
         assert_eq!(titles(&q), ["A*", "X", "Y"]);
+    }
+
+    #[test]
+    fn shuffle_with_first_puts_it_first_and_keeps_the_multiset() {
+        let original: Vec<u32> = (0..50).collect();
+        for first in [None, Some(0), Some(17), Some(49), Some(50)] {
+            let mut items = original.clone();
+            shuffle_with_first(&mut items, first, &mut Rng::from_seed(9));
+            if let Some(i) = first.filter(|&i| i < 50) {
+                assert_eq!(items[0], original[i], "{first:?}");
+            }
+            let mut sorted = items.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, original, "{first:?}");
+            assert_ne!(items, original, "{first:?} shuffled");
+            // The same seed gives the same order.
+            let mut again = original.clone();
+            shuffle_with_first(&mut again, first, &mut Rng::from_seed(9));
+            assert_eq!(items, again, "{first:?}");
+        }
+        let mut empty: Vec<u32> = Vec::new();
+        shuffle_with_first(&mut empty, Some(0), &mut Rng::from_seed(1));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn sample_keeps_k_distinct_items_and_reaches_every_one() {
+        let original: Vec<u32> = (0..100).collect();
+        // Fewer than `k`: all of them, shuffled.
+        let mut all = original.clone();
+        sample(&mut all, 1_000, &mut Rng::from_seed(3));
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, original);
+        assert_ne!(all, original);
+        // More than `k`: `k` distinct items, not just the first `k`.
+        let mut seen = [false; 100];
+        for seed in 0..50 {
+            let mut items = original.clone();
+            sample(&mut items, 10, &mut Rng::from_seed(seed));
+            assert_eq!(items.len(), 10);
+            let mut distinct = items.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 10, "{seed}");
+            for i in items {
+                seen[i as usize] = true;
+            }
+        }
+        assert!(seen[90..].iter().any(|s| *s), "the tail is sampled too");
+        assert!(seen.iter().filter(|s| **s).count() > 90);
+        let mut empty: Vec<u32> = Vec::new();
+        sample(&mut empty, 5, &mut Rng::from_seed(1));
+        assert!(empty.is_empty());
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
 use crate::queue::{MAX_QUEUE_LEN, Placement, Queue, QueueEntryId, Rng};
 
-/// `p` restarts the current track instead of going back when the position
+/// `<` restarts the current track instead of going back when the position
 /// is beyond this.
 pub const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 pub const VOLUME_STEP: u8 = 5;
@@ -46,6 +46,16 @@ pub const QUEUE_FULL: &str = "Queue is full (10,000 entries)";
 /// module docs on suspect ends.
 pub const PROVEN_PLAYBACK: Duration = Duration::from_secs(1);
 
+/// The part of a context of `len` tracks that fits in the queue when it
+/// is played from `start` ([`Player::play_context`]): everything when it
+/// fits; otherwise [`MAX_QUEUE_LEN`] tracks holding `start`, dropping
+/// tracks before it first and then from the end.
+pub fn context_window(len: usize, start: usize) -> std::ops::Range<usize> {
+    let excess = len.saturating_sub(MAX_QUEUE_LEN);
+    let from = excess.min(start);
+    from..len - (excess - from)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepeatMode {
     #[default]
@@ -55,7 +65,7 @@ pub enum RepeatMode {
 }
 
 impl RepeatMode {
-    /// `R`: off → all → one → off.
+    /// `r`: off → all → one → off.
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::All,
@@ -299,19 +309,28 @@ impl Player {
         self.queue.len() >= MAX_QUEUE_LEN
     }
 
-    /// Enter on a library track: insert a new entry directly after the
-    /// current one (or append when there is none) and play it now. The
-    /// previously current entry stays in place.
-    pub fn play_track_now(&mut self, track: Track) -> Vec<PlayerCommand> {
-        if self.refuse_if_unavailable() {
+    /// Enter (or `s`) in the library: replaces the queue with `tracks`
+    /// and plays the one at `start` (clamped to the last). A context
+    /// longer than [`MAX_QUEUE_LEN`] keeps the window
+    /// [`context_window`] picks, which always holds the start track.
+    /// Like any user load, the track gets a fresh `LoadId`, so events of
+    /// the replaced load are stale; the repeat mode is kept. Does nothing
+    /// for an empty context, or while playback is unavailable (the queue
+    /// is then left as it was).
+    pub fn play_context(&mut self, tracks: Vec<Track>, start: usize) -> Vec<PlayerCommand> {
+        if self.refuse_if_unavailable() || tracks.is_empty() {
             return Vec::new();
         }
-        if self.is_queue_full() {
-            self.messages.push(QUEUE_FULL.into());
-            return Vec::new();
-        }
-        let id = self.queue.insert_after_current(track);
-        self.user_load(id)
+        let start = start.min(tracks.len() - 1);
+        let window = context_window(tracks.len(), start);
+        self.queue.clear();
+        let ids: Vec<QueueEntryId> = tracks
+            .into_iter()
+            .skip(window.start)
+            .take(window.len())
+            .map(|track| self.queue.append(track))
+            .collect();
+        self.user_load(ids[start - window.start])
     }
 
     /// Enter on a queue entry: play it.
@@ -341,7 +360,7 @@ impl Player {
         }
     }
 
-    /// `n`: play the next entry; at the end of the queue, wrap around
+    /// `>`: play the next entry; at the end of the queue, wrap around
     /// under [`RepeatMode::All`], else do nothing.
     pub fn play_next(&mut self) -> Vec<PlayerCommand> {
         if self.refuse_if_unavailable() {
@@ -361,7 +380,7 @@ impl Player {
         }
     }
 
-    /// `p`: restart the track if past [`RESTART_THRESHOLD`], else play the
+    /// `<`: restart the track if past [`RESTART_THRESHOLD`], else play the
     /// previous entry; at the first entry, restart the track. Restarting
     /// needs a started track; while loading it is a no-op.
     pub fn play_previous(&mut self) -> Vec<PlayerCommand> {
@@ -412,7 +431,7 @@ impl Player {
         vec![PlayerCommand::SetVolume(volume)]
     }
 
-    /// `R`: cycles the repeat mode. Allowed while playback is unavailable.
+    /// `r`: cycles the repeat mode. Allowed while playback is unavailable.
     pub fn cycle_repeat(&mut self) {
         self.set_repeat(self.repeat.next());
         self.messages
@@ -483,7 +502,7 @@ impl Player {
     }
 
     /// Removes a queue entry. Removing the current entry while loaded acts
-    /// like `n` first (wrapping under [`RepeatMode::All`] to the first
+    /// like `>` first (wrapping under [`RepeatMode::All`] to the first
     /// other entry); with no next entry, playback stops.
     pub fn remove(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
         let mut commands = Vec::new();
@@ -505,7 +524,7 @@ impl Player {
     /// current one, is the second such failure in a row: instead of trying
     /// the following remote entries one by one, jump to the next local
     /// entry in a single pass (wrapping under [`RepeatMode::All`], like
-    /// `n`). The current entry and the remote entries passed over count as
+    /// `>`). The current entry and the remote entries passed over count as
     /// failures in a row. Stops when no local entry remains, or (under
     /// `All`) once every entry has failed in a row.
     pub fn skip_remote_entries(&mut self, load: LoadId) -> Vec<PlayerCommand> {
@@ -1401,7 +1420,7 @@ mod tests {
         assert!(p.play_next().is_empty());
         assert!(p.play_previous().is_empty());
         assert!(p.play_entry(ids[1]).is_empty());
-        assert!(p.play_track_now(t("X")).is_empty());
+        assert!(p.play_context(vec![t("X")], 0).is_empty());
         assert!(p.seek_relative(5.0).is_empty());
         assert!(p.volume_down().is_empty());
         let messages = p.take_messages();
@@ -1415,54 +1434,102 @@ mod tests {
         assert_eq!(p.status(), PlaybackStatus::Unavailable);
     }
 
-    // ----- Enter semantics (brief 3.2) -----------------------------------
+    // ----- play in context (M7) -----------------------------------------
+
+    fn tracks(names: &[&str]) -> Vec<Track> {
+        names.iter().map(|n| t(n)).collect()
+    }
 
     #[test]
-    fn enter_inserts_after_current_and_plays() {
+    fn play_context_replaces_the_queue_and_plays_the_start_track() {
         let (mut p, ids) = player_with(&["A", "B", "C"]);
-        start(&mut p, ids[1]);
-        let (_, path) = load_of(&p.play_track_now(t("X")));
-        assert_eq!(path, PathBuf::from("/m/X.flac"));
-        assert_eq!(titles(&p), ["A", "B", "X*", "C"]);
-        // `p` returns to B.
+        let old = start(&mut p, ids[1]);
+        p.set_repeat(RepeatMode::One);
+        let (load, path) = load_of(&p.play_context(tracks(&["X", "Y", "Z"]), 1));
+        assert_eq!(path, PathBuf::from("/m/Y.flac"));
+        assert!(load > old, "a fresh LoadId");
+        assert_eq!(titles(&p), ["X", "Y*", "Z"]);
+        assert_eq!(p.current_load(), Some(load));
+        assert_eq!(p.status(), PlaybackStatus::Loading);
+        assert_eq!(p.repeat(), RepeatMode::One, "repeat is kept");
+        // The replaced load's end is stale.
+        assert!(p.handle_event(ended(old, EndReason::Eof)).is_empty());
+        assert_eq!(titles(&p), ["X", "Y*", "Z"]);
+        // `p` walks back through the context.
         let (_, path) = load_of(&p.play_previous());
-        assert_eq!(path, PathBuf::from("/m/B.flac"));
+        assert_eq!(path, PathBuf::from("/m/X.flac"));
+        // Old entry ids are gone.
+        assert!(p.queue().get(ids[0]).is_none());
     }
 
     #[test]
-    fn enter_after_stopped_last_entry() {
+    fn play_context_clamps_the_start_and_ignores_an_empty_context() {
+        let (mut p, _) = player_with(&["A"]);
+        let (_, path) = load_of(&p.play_context(tracks(&["X", "Y"]), 9));
+        assert_eq!(path, PathBuf::from("/m/Y.flac"));
+        assert!(p.play_context(Vec::new(), 0).is_empty());
+        assert_eq!(titles(&p), ["X", "Y*"], "an empty context changes nothing");
+    }
+
+    #[test]
+    fn play_context_resets_failures_in_a_row() {
         let (mut p, ids) = player_with(&["A", "B"]);
-        let load = start(&mut p, ids[1]);
-        p.handle_event(ended(load, EndReason::Eof));
-        assert_eq!(p.status(), PlaybackStatus::Stopped);
-        load_of(&p.play_track_now(t("X")));
-        assert_eq!(titles(&p), ["A", "B", "X*"]);
+        p.set_repeat(RepeatMode::All);
+        let load = start(&mut p, ids[0]);
+        p.handle_event(ended(load, EndReason::Error("bad".into())));
+        assert_eq!(p.failures_in_a_row, 1);
+        load_of(&p.play_context(tracks(&["X"]), 0));
+        assert_eq!(p.failures_in_a_row, 0);
     }
 
     #[test]
-    fn enter_without_current_appends() {
-        let (mut p, _) = player_with(&["A", "B"]);
-        load_of(&p.play_track_now(t("X")));
-        assert_eq!(titles(&p), ["A", "B", "X*"]);
+    fn context_window_keeps_the_start_and_drops_from_the_front_first() {
+        let max = MAX_QUEUE_LEN;
+        assert_eq!(context_window(3, 1), 0..3);
+        assert_eq!(context_window(max, max - 1), 0..max);
+        // Too long by 5: the five before the start go first.
+        assert_eq!(context_window(max + 5, 100), 5..max + 5);
+        // Fewer than that before the start: the rest come off the end.
+        assert_eq!(context_window(max + 5, 2), 2..max + 2);
+        assert_eq!(context_window(max + 5, 0), 0..max);
+        assert_eq!(context_window(max + 5, max + 4), 5..max + 5);
+        for (len, start) in [
+            (max + 1, 0),
+            (max * 2, max),
+            (max * 3, 7),
+            (max * 3, max * 3 - 1),
+        ] {
+            let window = context_window(len, start);
+            assert_eq!(window.len(), max, "{len} {start}");
+            assert!(window.contains(&start), "{len} {start}");
+        }
     }
 
     #[test]
-    fn enter_on_empty_queue() {
+    fn play_context_over_the_cap_keeps_a_window_with_the_start() {
         let mut p = Player::new();
-        load_of(&p.play_track_now(t("X")));
-        assert_eq!(titles(&p), ["X*"]);
+        let names: Vec<String> = (0..MAX_QUEUE_LEN + 3).map(|i| i.to_string()).collect();
+        let context: Vec<Track> = names.iter().map(|n| t(n)).collect();
+        let (_, path) = load_of(&p.play_context(context, 1));
+        assert_eq!(path, PathBuf::from("/m/1.flac"));
+        assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
+        let entries = p.queue().entries();
+        assert_eq!(entries[0].track.title, "1");
+        assert_eq!(
+            entries[MAX_QUEUE_LEN - 1].track.title,
+            MAX_QUEUE_LEN.to_string()
+        );
+        assert_eq!(p.queue().position(p.queue().current().unwrap()), Some(0));
     }
 
     #[test]
-    fn enter_on_track_already_queued_adds_distinct_entry() {
-        let (mut p, ids) = player_with(&["A", "X", "C"]);
-        start(&mut p, ids[0]);
-        load_of(&p.play_track_now(t("X")));
-        assert_eq!(titles(&p), ["A", "X*", "X", "C"]);
-        let current = p.queue().current().unwrap();
-        assert_ne!(current, ids[1]);
-        assert!(p.queue().get(ids[1]).is_some());
-        assert_eq!(p.queue().position(ids[1]), Some(2));
+    fn play_context_on_a_full_queue_replaces_it() {
+        let mut p = Player::new();
+        let full: Vec<Track> = (0..MAX_QUEUE_LEN).map(|i| t(&i.to_string())).collect();
+        p.restore(full, None, RepeatMode::Off, 100);
+        assert!(p.is_queue_full());
+        load_of(&p.play_context(tracks(&["X"]), 0));
+        assert_eq!(titles(&p), ["X*"]);
     }
 
     // ----- repeat ----------------------------------------------------------
@@ -1987,8 +2054,6 @@ mod tests {
         assert_eq!(p.queue().current(), None);
         assert!(p.is_queue_full());
         assert_eq!(p.enqueue(t("X")), None);
-        assert!(p.play_track_now(t("X")).is_empty());
-        assert_eq!(p.take_messages(), [QUEUE_FULL]);
         assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
     }
 }

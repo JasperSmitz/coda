@@ -238,3 +238,65 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Bands show about 50–130 ms after the sound.
   - The Linux PulseAudio/PipeWire lead has not been measured acoustically.
   - The graph stays attached while hidden until the next track (about 3.5–6 % of a core).
+
+## M7 slice 1 — keymap and play in context (2026-11-02)
+- **Owner decisions:**
+  - Play in context; the queue is temporary.
+  - `h`/`l` and the arrow keys navigate, Enter plays, `s` plays shuffled.
+  - `,` `.` seek and `<` `>` go to the previous or next track.
+  - `r` repeat, `R` refresh, `O` settings.
+  - `D` removes an entry in one press; deleting a whole playlist asks y/n.
+  - Notes are in `docs/M7_QOL_Findings.md`; the brief is `docs/plans/m7-keybindings-qol.md`.
+- **Implemented:**
+  - `Player::play_context(tracks, start)` is the only way to replace the queue. When the context is longer than the cap, it keeps a window that contains the start track and drops from the front first.
+  - Enter in an album, playlist, folder or search results starts at the selected track, with the earlier tracks before it.
+  - `s` shuffles with the selected track first, using the seeded `Rng`. It works on tracks, albums, playlists, artists (local and Navidrome) and folders.
+  - An uncached Navidrome list becomes a single play request:
+    - a newer play replaces it;
+    - it is tagged with the client generation;
+    - it is cancelled by any local play, by Enter in the queue, and by `C C`.
+  - Adds are applied in key-press order. Adds pressed before Enter are dropped (with a note); adds pressed during a pending play wait for it and are released if it fails or is cancelled.
+  - The play request has a reserved fetch slot and borrows any free job slots, so at most 3 fetches run, within the 4-request semaphore.
+  - The help screen, README, ARCHITECTURE and every hint were updated; old keys are gone.
+- **Tests:**
+  - fmt, clippy (both variants) and `cargo test --all-targets` pass: 639 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke against a fake Subsonic server: 30/30.
+- **Review:** one round, nothing blocking. Fixed:
+  - add/play ordering that depended on fetch arrival, including the same album being queued twice;
+  - a pending play surviving `C C`;
+  - Enter waiting behind superseded fetches;
+  - artist shuffle fetching albums one at a time (introduced by the slot fix);
+  - polish: unused queue API, the confirmation kind check, and the "Not deleted" status.
+
+## M7 slice 2 — shuffle all (2026-11-02)
+- **Implemented:** "Shuffle all" is the first entry of both home menus; Enter or `s` replaces the queue and plays.
+  - **Local:** the whole library index, shuffled. Above the 10,000-entry cap it plays a uniform random sample (`queue::sample`). During a running or failed scan it says "scanned so far".
+  - **Navidrome:** `getRandomSongs?size=500`.
+    - Parsed with its own reply type, using the streaming parser and the shared object budget.
+    - It runs as a play request, so the supersede, generation, cancel and hold/drop rules apply.
+    - Random songs are never cached. Repeated presses share the one request in flight, whose answer is still unseen.
+- **Tests:**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 656 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke: 41/41.
+- **Review:** one round, nothing blocking. Fixed:
+  - repeated presses piling up `getRandomSongs` tasks that held semaphore permits;
+  - an empty local library cancelling a pending Navidrome play;
+  - test gaps around held and dropped adds, and decode failures.
+- **Owner decision:** Home opens with Shuffle all selected (kept, 2026-11-02), although a habitual Enter on launch replaces the restored queue.
+
+## M7 slice 3 — wide visualizer and album length (2026-11-02)
+- **Implemented:**
+  - **Visualizer:** at 42 columns or wider, the bars spread across the width, at most 48 bars, with the meter on the right. Between the 7 measured bands, the values follow a monotone cubic on a log-frequency axis (`spread_bands`/`band_curve`): it hits every band exactly and never overshoots. Bars beyond an unavailable band stay empty. Below 42 columns the layout is unchanged.
+  - **Album rows:**
+    - Navidrome shows `1959 · 46:12` from the album's `duration`, which was already parsed.
+    - Local shows `12 tracks · 46:12`, summed from the scan only when every track's length is known.
+    - The year (or count) wins when the name would get fewer than 20 columns.
+- **Tests:**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 667 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke: 41/41.
+  - The reviewer also fuzzed the curve (200k inputs) and checked the layout at every width up to `u16::MAX`.
+- **Review:** nothing blocking; fixed one doc inaccuracy.
+- **Not yet done:** no manual look in a real terminal; the appearance is pinned by buffer snapshots only.

@@ -16,6 +16,7 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::tree::{TrackId, compare_names};
 use crate::model::Track;
@@ -98,6 +99,10 @@ pub struct Album {
     spellings: Spellings,
     /// Sorted by disc, track number, title, path.
     tracks: Vec<TrackId>,
+    /// The tracks' durations summed (saturating).
+    duration: Duration,
+    /// Some track's duration is unknown.
+    duration_unknown: bool,
 }
 
 impl Album {
@@ -116,6 +121,13 @@ impl Album {
 
     pub fn tracks(&self) -> &[TrackId] {
         &self.tracks
+    }
+
+    /// The total running time; `None` if any track's duration is unknown
+    /// (a total that leaves tracks out would mislead) or there are no
+    /// tracks.
+    pub fn duration(&self) -> Option<Duration> {
+        (!self.duration_unknown && !self.tracks.is_empty()).then_some(self.duration)
     }
 }
 
@@ -215,7 +227,12 @@ impl TagIndex {
         let artist = self.artist_for(key_of(artist_tag));
         let album = self.album_for(artist, key_of(track.album.as_deref()));
         self.artists[artist.0 as usize].tracks += 1;
-        let list = &mut self.albums[album.0 as usize].tracks;
+        let album = &mut self.albums[album.0 as usize];
+        match track.duration {
+            Some(duration) => album.duration = album.duration.saturating_add(duration),
+            None => album.duration_unknown = true,
+        }
+        let list = &mut album.tracks;
         let at = list.partition_point(|t| {
             compare_album_tracks(&tracks[t.index()], track) != Ordering::Greater
         });
@@ -270,6 +287,8 @@ impl TagIndex {
                     key: lookup.1.clone(),
                     spellings: Spellings::default(),
                     tracks: Vec::new(),
+                    duration: Duration::ZERO,
+                    duration_unknown: false,
                 });
                 self.album_ids.insert(lookup, id);
                 self.place_album(id);
@@ -380,6 +399,54 @@ mod tests {
             .iter()
             .map(|t| tracks[t.index()].title.clone())
             .collect()
+    }
+
+    #[test]
+    fn an_album_length_is_known_only_if_every_track_length_is() {
+        let timed = |path: &str, album: &'static str, secs: Option<u64>| {
+            let mut track = track(
+                path,
+                Tags {
+                    artist: Some("A"),
+                    album: Some(album),
+                    ..Tags::default()
+                },
+            );
+            track.duration = secs.map(Duration::from_secs);
+            track
+        };
+        let tracks = [
+            timed("1.flac", "Whole", Some(200)),
+            timed("2.flac", "Whole", Some(2572)),
+            timed("3.flac", "Partial", Some(300)),
+            timed("4.flac", "Partial", None),
+            timed("5.flac", "Huge", Some(u64::MAX)),
+            timed("6.flac", "Huge", Some(10)),
+        ];
+        let mut index = TagIndex::default();
+        let length = |index: &TagIndex, name: &str| {
+            index
+                .albums(AlbumOrder::Name)
+                .iter()
+                .map(|a| index.album(*a))
+                .find(|a| a.name() == name)
+                .and_then(Album::duration)
+        };
+        // Grows as the scan finds tracks.
+        index.insert(TrackId(0), &tracks);
+        assert_eq!(length(&index, "Whole"), Some(Duration::from_secs(200)));
+        index.insert(TrackId(1), &tracks);
+        assert_eq!(length(&index, "Whole"), Some(Duration::from_secs(2772)));
+        index.insert(TrackId(2), &tracks);
+        assert_eq!(length(&index, "Partial"), Some(Duration::from_secs(300)));
+        // One unknown track: no length rather than a short total, and it
+        // stays unknown.
+        index.insert(TrackId(3), &tracks);
+        assert_eq!(length(&index, "Partial"), None);
+        // Saturates rather than overflowing.
+        index.insert(TrackId(4), &tracks);
+        index.insert(TrackId(5), &tracks);
+        assert_eq!(length(&index, "Huge"), Some(Duration::MAX));
     }
 
     #[test]

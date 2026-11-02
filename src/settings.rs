@@ -1,4 +1,4 @@
-//! The in-app Settings overlay (`,`) as pure state: [`Input`]s and driver
+//! The in-app Settings overlay (`O`) as pure state: [`Input`]s and driver
 //! [`Response`]s go in, [`Request`]s (ping, save, disconnect) and
 //! [`Change`]s (a new Navidrome client, or none) come out. No I/O and no
 //! Ratatui: the app's event loop performs the requests
@@ -422,7 +422,7 @@ impl Settings {
         // Any other key cancels a pending `d`.
         let armed = self.disconnect_armed_until.take();
         match input {
-            Input::Esc | Input::Char(',') => self.close(),
+            Input::Esc | Input::Char('O') => self.close(),
             Input::Char('c') if matches!(self.context.navidrome, Navidrome::NotConfigured) => {
                 self.start_form(FormKind::Connect);
             }
@@ -895,7 +895,7 @@ mod tests {
         let id = submit(&mut settings, "h.example", "me", "pw");
         settings.handle_response(Response::Pinged { id, result: Ok(()) });
         settings.take_requests();
-        for input in [Input::Esc, Input::Char(','), Input::Char('x'), Input::Enter] {
+        for input in [Input::Esc, Input::Char('O'), Input::Char('x'), Input::Enter] {
             key(&mut settings, input);
         }
         assert_eq!(settings.busy(), Some(Busy::Saving));
@@ -912,7 +912,7 @@ mod tests {
         key(&mut settings, Input::Esc);
         assert!(settings.form().is_none());
         assert!(settings.is_open());
-        key(&mut settings, Input::Char(','));
+        key(&mut settings, Input::Char('O'));
         assert!(!settings.is_open());
         settings.open();
         key(&mut settings, Input::Esc);

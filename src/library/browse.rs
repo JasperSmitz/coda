@@ -1,5 +1,5 @@
 //! Local browse navigation: a stack of views rooted at a static Home
-//! (Playlists, Folders, Artists, Albums), over a [`Library`]. Plain
+//! (Shuffle all, Playlists, Folders, Artists, Albums), over a [`Library`]. Plain
 //! synchronous state with no I/O and no terminal types; separate from the
 //! Navidrome browser, whose views are fetched.
 //!
@@ -17,6 +17,9 @@ use crate::model::Track;
 /// An entry of the local Home view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeEntry {
+    /// Plays the whole library shuffled; handled by the app (it needs the
+    /// random generator), never opened.
+    ShuffleAll,
     Playlists,
     Folders,
     Artists,
@@ -26,6 +29,7 @@ pub enum HomeEntry {
 impl HomeEntry {
     pub fn label(self) -> &'static str {
         match self {
+            Self::ShuffleAll => "Shuffle all",
             Self::Playlists => "Playlists",
             Self::Folders => "Folders",
             Self::Artists => "Artists",
@@ -35,7 +39,8 @@ impl HomeEntry {
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 4] = [
+pub const HOME_ENTRIES: [HomeEntry; 5] = [
+    HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Folders,
     HomeEntry::Artists,
@@ -84,12 +89,17 @@ pub enum RowKey {
     Playlist(PlaylistId),
 }
 
-/// What Enter did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Activated {
-    Opened,
-    Play(TrackId),
-    Nothing,
+/// What Enter or `s` plays: the tracks of the selection's context, in
+/// order, and where to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayContext {
+    /// The album, playlist, artist or folder name, or the track's name
+    /// when a track was selected (untrusted: from tags and file names).
+    pub label: String,
+    pub tracks: Vec<TrackId>,
+    /// The selected track's index in `tracks`; `None` when a whole album,
+    /// playlist, artist or folder was selected.
+    pub start: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,14 +222,15 @@ impl LocalBrowser {
             .min(len.saturating_sub(1));
     }
 
-    /// Enter: opens the selected entry, folder, artist, album or
-    /// playlist, or asks to play the selected track.
-    pub fn activate(&mut self, library: &Library) -> Activated {
+    /// `l` (and Enter on what it cannot play): opens the selected Home
+    /// entry, folder, artist, album or playlist. Returns `false` (and
+    /// does nothing) on a track, on "Shuffle all" or in an empty view.
+    pub fn open_selected(&mut self, library: &Library) -> bool {
         let Some(row) = self.selected_row(library) else {
-            return Activated::Nothing;
+            return false;
         };
         let view = match row {
-            Row::Track(id, _) => return Activated::Play(id),
+            Row::Track(..) | Row::Home(HomeEntry::ShuffleAll) => return false,
             Row::Home(HomeEntry::Playlists) => View::Playlists,
             Row::Home(HomeEntry::Folders) => View::Folder(Vec::new()),
             Row::Home(HomeEntry::Artists) => View::Artists,
@@ -234,7 +245,50 @@ impl LocalBrowser {
             Row::Playlist(playlist) => View::Playlist(playlist.id),
         };
         self.stack.push(Entry { view, selected: 0 });
-        Activated::Opened
+        true
+    }
+
+    /// What Enter (`shuffle == false`) or `s` (`true`) on the selected
+    /// row plays. A track plays in the list the view shows (an album, a
+    /// playlist with its duplicates, the tracks directly in a folder),
+    /// from that track; an album or playlist plays whole. Only `s` plays
+    /// an artist (every album, A–Z) or a folder (every track below it, as
+    /// `a` adds them); Enter opens those. `None` for Home entries, for
+    /// Enter on an artist or folder, and in an empty view.
+    pub fn play_context(&self, library: &Library, shuffle: bool) -> Option<PlayContext> {
+        let row = self.selected_row(library)?;
+        let whole = |label: &str, tracks: Vec<TrackId>| PlayContext {
+            label: label.to_owned(),
+            tracks,
+            start: None,
+        };
+        Some(match row {
+            Row::Home(_) => return None,
+            Row::Track(_, track) => {
+                let (tracks, start) = match self.current() {
+                    View::Folder(path) => {
+                        let dir = folder(library, path);
+                        (dir.tracks().to_vec(), self.selected() - dir.dirs().len())
+                    }
+                    View::Album(id) => {
+                        (library.tags().album(*id).tracks().to_vec(), self.selected())
+                    }
+                    View::Playlist(id) => (library.playlist(*id).tracks.clone(), self.selected()),
+                    // Tracks are only shown in the views above.
+                    _ => return None,
+                };
+                PlayContext {
+                    label: track.display_name(),
+                    tracks,
+                    start: Some(start),
+                }
+            }
+            Row::Album(album, _) => whole(album.name(), album.tracks().to_vec()),
+            Row::Playlist(playlist) => whole(&playlist.name, playlist.tracks.clone()),
+            Row::Artist(_) | Row::Dir(_) if !shuffle => return None,
+            Row::Artist(artist) => whole(artist.name(), self.selected_tracks(library)?),
+            Row::Dir(dir) => whole(dir.name(), self.selected_tracks(library)?),
+        })
     }
 
     /// Back to the previous view, selecting the row that opened the one
@@ -286,6 +340,19 @@ impl LocalBrowser {
             Row::Playlist(playlist) => ids.extend_from_slice(&playlist.tracks),
         }
         Some(ids)
+    }
+
+    /// The selected row's name, for status messages: a track's display
+    /// name, or a folder, artist, album or playlist name.
+    pub fn selected_label(&self, library: &Library) -> Option<String> {
+        Some(match self.selected_row(library)? {
+            Row::Home(entry) => entry.label().to_owned(),
+            Row::Dir(dir) => dir.name().to_owned(),
+            Row::Track(_, track) => track.display_name(),
+            Row::Artist(artist) => artist.name().to_owned(),
+            Row::Album(album, _) => album.name().to_owned(),
+            Row::Playlist(playlist) => playlist.name.clone(),
+        })
     }
 
     /// Title of each view below Home, e.g. `["Artists", "Name", "Album"]`
