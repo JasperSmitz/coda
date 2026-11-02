@@ -1,6 +1,6 @@
 # Coda — Architecture
 
-> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. M2 (Navidrome) is implemented: config file, Subsonic client, remote tracks in the unified queue, remote browsing and search. M3 (quality and convenience) is implemented: queue controls, repeat modes, session persistence, local search, Navidrome scrobbling and playback robustness. M4 slice 1 (first-run setup with the password in the OS keychain) and slice 2 (part A `coda --setup`, part B settings inside the app) are implemented. M5 slice 1 (Navidrome Home, playlists, paged album lists, `A` play next) slice 2 (local Home, tag-based artists and albums, `.m3u` playlists) and slice 3 (Navidrome playlist editing) are implemented. M6 slice 2 (the audio visualizer) is implemented. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
+> **Status:** M1 (local playback) is implemented: core, mpv backend, library scan and TUI. M2 (Navidrome) is implemented: config file, Subsonic client, remote tracks in the unified queue, remote browsing and search. M3 (quality and convenience) is implemented: queue controls, repeat modes, session persistence, local search, Navidrome scrobbling and playback robustness. M4 slice 1 (first-run setup with the password in the OS keychain) and slice 2 (part A `coda --setup`, part B settings inside the app) are implemented. M5 slice 1 (Navidrome Home, playlists, paged album lists, `A` play next) slice 2 (local Home, tag-based artists and albums, `.m3u` playlists) and slice 3 (Navidrome playlist editing) are implemented. M6 slice 2 (the audio visualizer) is implemented. M7 (keymap and play in context, Shuffle all, the wide visualizer and album running times) is implemented. Update this file to describe reality as work ships. Do not present proposed modules as existing code.
 
 ## Intended boundaries
 
@@ -11,7 +11,7 @@ Ratatui frontend / keyboard input
              |
   player state + unified queue
        /             \
-local source       Navidrome source (M2)
+local source       Navidrome source
              |
     playback controller
              |
@@ -22,7 +22,7 @@ The drawing is conceptual, not a dependency diagram. Source adapters locate/brow
 
 ## Responsibilities
 - **Domain:** track/source identity, queue semantics, player state and commands; no terminal widgets.
-- **Sources:** browse/scan metadata and resolve local paths or authorized remote streams. Local in M1; Navidrome via Subsonic/OpenSubsonic in M2.
+- **Sources:** browse/scan metadata and resolve local paths or authorized remote streams. Local files, and Navidrome via Subsonic/OpenSubsonic.
 - **Playback:** mpv process lifecycle, JSON IPC, playback status/progress and error reporting.
 - **Application:** coordinate async tasks and propagate player state/events to the UI.
 - **TUI:** draw views and translate keys to commands; never block on file/network I/O.

@@ -1,6 +1,6 @@
 # M7 — Keybindings & QoL findings
 
-Owner notes from daily use, collected before M7 is scoped. Write freely; rough notes are fine. The architect turns this into the M7 brief.
+Owner notes from daily use, collected before M7 was scoped. **Addressed in M7** (brief: `docs/plans/m7-keybindings-qol.md`); the key table below is the pre-M7 keymap, kept as a record. For current keys see the README.
 
 ## Already on the list
 

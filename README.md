@@ -1,55 +1,94 @@
 # Coda
 
-A keyboard-first terminal music player for local files and a personal Navidrome (Subsonic/OpenSubsonic) server, with one queue for both. Written in Rust; playback through mpv.
+A keyboard-first terminal music player for your local files and a personal [Navidrome](https://www.navidrome.org) (Subsonic/OpenSubsonic) server, with one queue for both. Written in Rust; playback through [mpv](https://mpv.io).
 
-**Status:** alpha. Local playback (M1) and Navidrome (M2) work; see `docs/ROADMAP.md`.
+**Status:** alpha, for personal use. Milestones M1–M7 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Features
+- **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks. "Shuffle all" plays your whole library.
+- **Local library:** browse by playlists (`.m3u`/`.m3u8`), folders, artists or albums. The scan runs in the background.
+- **Navidrome:**
+  - browse playlists, artists and albums (six sort orders);
+  - stream into the same queue as local tracks;
+  - scrobble plays;
+  - create, rename, reorder and delete your playlists.
+- **Setup:** a first run in the terminal, with the password stored in the macOS Keychain or the Linux Secret Service. You can connect or change Navidrome later without restarting.
+- **Session:** the queue, volume, repeat mode and visualizer are restored at the next launch.
+- **Visualizer:** an optional spectrum and level meter, in step with what you hear.
+- **Privacy:** logs never contain passwords, tokens, stream URLs, file paths or track titles.
 
 ## Requirements
-- Linux or macOS
-- Rust (stable)
+- Linux or macOS (Windows is not supported)
+- Rust (stable), to build
 - [mpv](https://mpv.io) 0.33 or newer, on `PATH`
-- To store the Navidrome password from setup on Linux: a running Secret Service (GNOME Keyring or KWallet). Building needs no D-Bus headers or OpenSSL.
-
-Install mpv:
+- To store a Navidrome password on Linux: a running Secret Service (GNOME Keyring or KWallet). Building needs no D-Bus headers or OpenSSL.
 
 ```sh
-# Arch Linux
-sudo pacman -S mpv
+# Install mpv
+sudo pacman -S mpv        # Arch Linux
+sudo apt install mpv      # Debian/Ubuntu
+brew install mpv          # macOS (Homebrew)
 
-# macOS (Homebrew)
-brew install mpv
+# Build and install Coda (puts `coda` in ~/.cargo/bin)
+cargo install --path .
 ```
 
-## Usage
+## Getting started
 
 ```sh
 coda
 ```
 
-The first time, with no music source configured, Coda runs a short setup in the terminal: an optional local music folder (`~/Music` is suggested when it exists) and an optional Navidrome server (URL, username, password). It checks the folder, tests the connection, stores the password in the OS keychain, writes the config file below, and starts the player. Skipping both writes nothing; Coda asks again next time. If `config.toml` is a symlink (e.g. into a dotfiles repository), setup replaces the link with a regular file and leaves the link's target unchanged. Setup only runs when stdin and stdout are terminals; otherwise Coda prints the usage error as before.
+On the first run, Coda asks for two optional sources:
+1. **A local music folder.** `~/Music` is suggested when it exists.
+2. **A Navidrome server:** its URL, your username and your password.
 
-To change the folder or server later, run the setup again:
+Coda tests the connection, stores the password in the OS keychain and saves the config. If you skip both, nothing is saved and Coda asks again next time.
 
-```sh
-coda --setup
-```
+| Command | What it does |
+|---|---|
+| `coda --setup` | Change the folder or the server later. |
+| `O` (in the app) | Open Settings: connect, edit or disconnect Navidrome while music keeps playing. |
+| `coda ~/Music` | Play a folder directly, without setup. `CODA_MUSIC_DIR=~/Music coda` does the same. |
 
-It starts from the current config file: the folder, URL and username are filled in and the password is asked again (Coda never reads the old one for this). A login embedded in the saved URL is never shown. Skipping the folder or Navidrome removes it from the config, and Navidrome's stored password with it; at least one of the two must stay. Settings made outside Coda are pointed out where they apply: `CODA_MUSIC_DIR` or a folder argument (checked before setup starts), the `CODA_NAVIDROME_*` variables (which keep overriding the file), and a hand-written `password` or `password_command`, which saving replaces with the keychain. While `CODA_NAVIDROME_URL` or `CODA_NAVIDROME_USER` is set without `CODA_NAVIDROME_PASSWORD`, setup cannot save a server (Coda would look its password up under the account those variables name); it offers keeping `[navidrome]` as it is, or removing it (then unset the variables too). If the account changes, the old keychain entry is deleted after the new config is written. Leaving with `Ctrl-C` changes nothing. While settings are being saved in the app, the first `Ctrl-C` only warns; a second one quits once the save has finished (waiting at most 5 seconds). A config file that does not parse, or has unsafe permissions, must be fixed by hand first. `--setup` needs a terminal; without one it exits with status 2.
+## Keys
+Press `?` in Coda for the full list.
 
-Navidrome can also be connected, changed or removed while Coda runs, without stopping playback. Press `O` for Settings: it shows the music folder and the Navidrome status (connected as user @ host, not configured, the last connection error, or configured outside Coda, naming the variable or config key). `c` connects when Navidrome is not configured, and `e` edits a server Coda set up: the same URL, username and password form as setup (the password is asked again), tested with a connection before anything is saved. The password goes to the keychain and `[navidrome]` to the config file; the music folder and `scrobble` in the file are kept, and the old keychain entry is deleted once the new config is written. `d` (twice) disconnects: it removes `[navidrome]` and the stored password, and is refused unless the config file keeps a music folder (a folder given only as an argument or in `CODA_MUSIC_DIR` does not count). A server configured outside Coda (`CODA_NAVIDROME_*`, or a hand-written `password` or `password_command`) is shown but not changed; while `CODA_NAVIDROME_URL` or `CODA_NAVIDROME_USER` is set without `CODA_NAVIDROME_PASSWORD`, connecting is refused for the same reason as in setup. Pressing `2` without Navidrome offers "Press Enter to connect", which opens the same form. The track playing keeps playing; queued Navidrome tracks use the new server from their next load (after a disconnect they are skipped like any track that cannot be played). The music folder is changed with `coda --setup`.
+| Key | Library | Queue |
+|---|---|---|
+| `j` `k` / `↓` `↑` | move | move |
+| `l` `→` / `h` `←` `Backspace` | open / go back | — |
+| `Enter` | play in context (replaces the queue) | play this entry |
+| `s` | play shuffled (replaces the queue) | shuffle the upcoming entries |
+| `a` / `A` | add to the queue / play next | — |
+| `D` | remove from a playlist; on a playlist, delete it (asks y/n) | remove |
+| `J` `K` | move a song in a playlist (`w` saves, `Esc` discards) | move |
+| `/` | search | — |
+| `o` / `R` | sort albums / reload (Navidrome) | — |
+| `P` / `N` / `e` | add to a playlist / new playlist / rename | — |
+| `S` / `g` / `C C` | — | save as a playlist / jump to current / clear |
 
-A file with settings is kept as `config.toml.bak.<time>` before it is replaced (not when it is exactly as Coda wrote it, so repeated saves do not pile up backups); only `scrobble` (and a kept `[navidrome]`) is carried over. **If the old file held a plaintext `password`, the backup still contains it: delete the backup once you no longer need it.**
+| Key | Anywhere |
+|---|---|
+| `Space` | pause |
+| `<` `>` | previous / next track |
+| `,` `.` | seek 5 s back / forward |
+| `+` `-` | volume |
+| `r` | repeat: off, all, one |
+| `v` | visualizer |
+| `1` `2` | local / Navidrome library |
+| `Tab` | switch between library and queue |
+| `O` / `?` / `q` | settings / help / quit |
 
-A folder can also be given directly, which skips setup:
+**How Enter works:**
+- **On a track:** it plays the album, playlist, folder or search results the track is shown in, starting at that track. The earlier tracks come before it, so `<` goes back through them.
+- **On an album or playlist:** it plays it from the start.
+- **On an artist or folder:** it opens it.
 
-```sh
-coda ~/Music
-# or
-CODA_MUSIC_DIR=~/Music coda
-```
+The queue is temporary: `a` and `A` add to it, and a playlist is how you keep one. Navidrome tracks are marked `☁` in the queue.
 
-### Configuration (optional)
-`~/.config/coda/config.toml` (or `$XDG_CONFIG_HOME/coda/config.toml`; `CODA_CONFIG` points elsewhere):
+## Configuration
+Setup writes `~/.config/coda/config.toml` (or `$XDG_CONFIG_HOME/coda/config.toml`; `CODA_CONFIG` points elsewhere). You can also write it yourself:
 
 ```toml
 music_dir = "~/Music"
@@ -64,14 +103,23 @@ scrobble = true            # report plays to Navidrome (default)
 # password = "..."                                    # only if the file is chmod 600
 ```
 
-`password_keychain = true` reads the password from the macOS Keychain or, on Linux, the Secret Service (GNOME Keyring, KWallet; it must be running and unlocked), under the service `coda` and the account `<username>@<host>[:<port>]`. macOS may ask once whether Coda may read it. If the entry is missing or the keychain cannot be read, Coda exits with a message suggesting `coda --setup`. Without a keychain, use `password_command` or `password`; Coda never writes a plaintext password itself.
+`CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file.
 
-`CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file. Coda uses salted-token auth and never logs URLs, tokens or passwords. With only Navidrome configured, Coda starts on the Navidrome library.
+**Files:**
 
-### Keys
-`?` shows all keys. Highlights: `1`/`2` switch between the local and Navidrome libraries. `Enter` plays what you point at in its context and replaces the queue: an album or playlist from its first track, or a track together with the album, playlist, folder or search results it is shown in, starting at that track (the earlier ones come before it, so `<` goes back through them); on an artist, folder or home entry it opens it, like `l`/`→`. `s` does the same in a random order (a selected track first); on an artist or folder it plays all of its tracks. `a` adds a track/folder/album/playlist/artist to the queue, `A` adds it to play next (right after the current track; several `A`s in a row keep their order), `/` searches the active library, `Space` pauses, `>`/`<` go to the next/previous track, `,`/`.` seek 5 s back/forward, `+`/`-` volume, `Tab` switches panels, `r` cycles repeat off/all/one, `v` shows or hides the visualizer, `O` opens Settings, `q` quits. A context longer than the queue's 10,000 entries is cut around the selected track, first before it and then at the end. While a Navidrome list for `Enter` or `s` is still loading, what you add with `a`/`A` waits and is added after it starts; adds still loading from before are dropped, since the new queue replaces them. Remote tracks are marked `☁` in the queue. The local library opens on a home menu: Shuffle all, Playlists (`.m3u`/`.m3u8` files in the music folder), Folders (the folder tree), Artists and Albums (grouped by tags: the album artist, else the artist); `h` (or `←`, Backspace) goes back up to it, and `o` in Albums switches between A–Z and by artist. A playlist lists the tracks it names that were scanned, in its order (paths relative to the playlist, or absolute inside the music folder; Windows `\` separators work; URLs, drive letters and anything outside the folder count as missing). Matching is exact: names are case-sensitive and not Unicode-normalised (an NFD name in a playlist does not match an NFC file name), and absolute entries must spell the music folder's real path (symlinks resolved, e.g. `/private/tmp` rather than `/tmp` on macOS). The Navidrome library opens on a home menu too: Shuffle all, Playlists, Artists and Albums. `Enter` or `s` on Shuffle all replaces the queue and plays: locally, every track in the library in a random order (a random 10,000 when there are more; while the scan is still running, or after it failed, the tracks scanned so far, and the status line says so); on Navidrome, 500 random songs from the server, a new set on every press. Albums load page by page as you scroll; `o` changes their order (A–Z, by artist, newest, most played, recently played, or 500 at random) and `R` reloads (or retries a page that failed). Your own Navidrome playlists can be edited: `S` in the queue panel saves the queue's Navidrome songs as a new playlist (local tracks are left out; the name defaults to `Queue <today's date>`); `P` on a song, album, artist or playlist adds it to a playlist you pick, or to a new one; in the Playlists list `N` creates an empty playlist, `e` renames and `D` deletes (it asks first, and only `y` deletes); in a playlist `D` removes the selected song, `J`/`K` move it (the title shows "(modified)"), and `w` saves the new order or `Esc` discards it. An empty name cancels. Playlists of other users are read-only. Before removing a song or saving a new order, Coda reloads the playlist; if it changed on the server meanwhile, nothing is changed and the new version is shown. Both rewrite the playlist from the songs Coda shows, so **entries Navidrome hides (songs whose files are missing, and songs in libraries you cannot access) are dropped from the playlist** when you remove a song or save a new order. When Navidrome's song count shows such entries, Coda warns first ("Press D again …: this also removes 3 entries Navidrome hides …") and changes the playlist only on a second `D` or `w`; any other key cancels. A server that does not report a song count gives no warning. The last song cannot be removed (delete the playlist instead). After a change that needed several requests and failed part-way, the status line says how much was done. While a change is being saved, the first `q` only warns; quitting then waits up to 5 seconds for it, and changes not yet started are dropped. Editing the queue never changes a playlist, and editing a playlist never changes the queue. In the queue panel: `Enter` plays the selected entry, `D` removes it, `J`/`K` move it, `s` shuffles the upcoming entries, `g` jumps to the current entry, `C` (twice) clears. The visualizer (off by default; `v`) shows seven frequency bands and a left/right level meter in the now-playing bar while a track plays, in step with what you hear; it needs a terminal of at least 20x16. Coda always plays in stereo (mono as both channels, surround downmixed by mpv). The queue, volume, repeat mode and whether the visualizer is shown are restored at the next launch (from `state.json` next to the log).
+| File | Where |
+|---|---|
+| Session (queue, volume, repeat, visualizer) | `$XDG_STATE_HOME/coda/state.json` |
+| Log | `$XDG_STATE_HOME/coda/coda.log` |
 
-Logs are written to `$XDG_STATE_HOME/coda/coda.log` (default `~/.local/state/coda/coda.log`). Set `CODA_LOG=debug` for more detail.
+`XDG_STATE_HOME` defaults to `~/.local/state`. Set `CODA_LOG=debug` for more detail in the log.
+
+**Backups:** when Coda replaces a config file it didn't write itself, it keeps the old one as `config.toml.bak.<time>`. **If that file held a plaintext `password`, so does the backup: delete it once you no longer need it.**
+
+## More detail
+- [`docs/USAGE.md`](docs/USAGE.md): the details of setup, settings, the keychain, playlist editing (including how Navidrome-hidden entries are handled), the local playlist rules, and limits.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how Coda is built.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): what's done and what's next.
 
 ## License
 MIT
