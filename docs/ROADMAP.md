@@ -62,7 +62,8 @@ Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md
 - **Slice 3 (completed, reviewed):** the visualizer spreads across the width with interpolated bars; album rows show the running time before the year.
 - Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
-## M8 — Gapless playback (proposed)
+## M8 — Gapless playback (in progress)
+Brief: `docs/plans/m8-gapless.md`.
 Consecutive tracks play without a pause, for local files and Navidrome streams.
 - **Approach ("one ahead"):** Coda keeps owning the queue (ADR 0002, to be amended by a new ADR) and keeps a copy of the next queue entry in mpv's playlist, so mpv's gapless audio and prefetching can move on by themselves.
 - **Slice 1, spike:**
