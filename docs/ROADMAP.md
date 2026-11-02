@@ -55,11 +55,12 @@ Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11
 1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation. **(completed)**
 2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder. **(completed, reviewed: 7 bands plus an L/R meter, always-stereo output)**
 
-## M7 — Keybindings and quality of life (proposed)
-The owner is trying the current keys first; their notes set the scope.
-- Play a whole album or playlist directly, instead of only adding it to the queue. Options: Enter plays the whole list while another key opens it, or a modifier plays it (Shift+Enter is reported only by terminals with the kitty keyboard protocol, so it needs a fallback).
-- Settle the provisional keys from M4 and M5: `,` `S` `P` `N` `e` `D` `w`, and `l`, which is not bound yet.
-- Configurable keybindings only once the defaults are settled.
+## M7 — Keybindings and quality of life (in progress)
+Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md`. Play in context: Enter plays what you point at, the queue is temporary.
+- **Slice 1:** new keymap (`h`/`l` and arrows navigate, `,` `.` seek, `<` `>` previous/next, `r`/`R`, `D`, `O`); Enter replaces the queue with the album, playlist or view and starts at the selected track; `s` plays shuffled (tracks, albums, playlists, artists, folders); playlist deletion asks y/n.
+- **Slice 2:** "Shuffle all" on each source's home (Navidrome via `getRandomSongs`, 500 songs).
+- **Slice 3:** the visualizer spreads across the width with interpolated bars.
+- Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
 ## M8 — Cover art (proposed)
 - Real images in terminals with an image protocol (Kitty, WezTerm, iTerm2, Ghostty), and a block-character fallback elsewhere.
