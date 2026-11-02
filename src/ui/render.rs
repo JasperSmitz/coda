@@ -633,7 +633,7 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
         Row::Playlist(playlist) => {
             let songs = playlist.song_count.map(|n| count(n as usize, "song"));
             let right = match (songs, playlist.duration.map(format_time)) {
-                (Some(songs), Some(time)) => Some(format!("{songs} · {time}")),
+                (Some(songs), Some(time)) => Some(format!("{time} · {songs}")),
                 (songs, time) => songs.or(time),
             };
             row_line(&playlist.name, right, width)
@@ -3325,7 +3325,7 @@ mod tests {
         for expected in [
             "Navidrome (connected) › Playlists",
             "> Road Trip",
-            "12 songs · 45:12",
+            "45:12 · 12 songs",
             "4,294,967,295 songs",
             "Bare",
         ] {
