@@ -369,8 +369,10 @@ fn local_row(
 const MIN_NAME_WITH_LENGTH: usize = 20;
 
 /// The right-hand side of an album row with name `left` in a row `width`
-/// columns wide: `first · length` (`1959 · 46:12`, or `12 tracks ·
-/// 1:12:05` for a local album), or whichever of the two is known. When
+/// columns wide: `length · first` (`46:12 · 1959`, or `1:12:05 · 12
+/// tracks` for a local album), or whichever of the two is known. The
+/// length comes first so the fixed-width year sits at the right edge and
+/// the separators line up. When
 /// both are known but would leave the name fewer than
 /// [`MIN_NAME_WITH_LENGTH`] columns (or fewer than it needs), `first`
 /// wins and the length is left out.
@@ -385,7 +387,7 @@ fn album_detail(
         (Some(first), Some(length)) => (first, length),
         (first, length) => return first.or(length),
     };
-    let both = format!("{first} · {length}");
+    let both = format!("{length} · {first}");
     // At least one column for the name, as `row_line` requires.
     let name = fit(left, MIN_NAME_WITH_LENGTH).width().max(1);
     if both.width() + 1 + name <= width {
@@ -2412,21 +2414,21 @@ mod tests {
         let hours = Some(Duration::from_secs(3600 + 12 * 60 + 5));
         let year = || Some("1959".to_owned());
         let detail = |first, length, width| album_detail("Kind of Blue", first, length, width);
-        assert_eq!(detail(year(), mins, 80), Some("1959 · 46:12".into()));
-        assert_eq!(detail(year(), hours, 80), Some("1959 · 1:12:05".into()));
+        assert_eq!(detail(year(), mins, 80), Some("46:12 · 1959".into()));
+        assert_eq!(detail(year(), hours, 80), Some("1:12:05 · 1959".into()));
         // Only what is known.
         assert_eq!(detail(None, mins, 80), Some("46:12".into()));
         assert_eq!(detail(year(), None, 80), Some("1959".into()));
         assert_eq!(detail(None, None, 80), None);
-        // "Kind of Blue" (12) + a space + "1959 · 46:12" (12) = 25 columns.
-        assert_eq!(detail(year(), mins, 25), Some("1959 · 46:12".into()));
+        // "Kind of Blue" (12) + a space + "46:12 · 1959" (12) = 25 columns.
+        assert_eq!(detail(year(), mins, 25), Some("46:12 · 1959".into()));
         assert_eq!(detail(year(), mins, 24), Some("1959".into()));
         // A long name keeps at least MIN_NAME_WITH_LENGTH columns.
         let long = "A Love Supreme (Deluxe Edition, Remastered)";
         let width = MIN_NAME_WITH_LENGTH + 1 + 12;
         assert_eq!(
             album_detail(long, year(), mins, width),
-            Some("1959 · 46:12".into())
+            Some("46:12 · 1959".into())
         );
         assert_eq!(
             album_detail(long, year(), mins, width - 1),
@@ -2442,7 +2444,7 @@ mod tests {
             assert!(line.width() <= width, "{width}: {text:?}");
             if text.contains("46:12") {
                 assert!(
-                    text.starts_with("Kind of Blue ") && text.ends_with(" 1959 · 46:12"),
+                    text.starts_with("Kind of Blue ") && text.ends_with(" 46:12 · 1959"),
                     "{width}: {text:?}"
                 );
             }
@@ -2468,11 +2470,11 @@ mod tests {
         let row = |album: &Album, width| remote_row(Row::Album(album), style, width).to_string();
         assert_eq!(
             row(&album, 40),
-            format!("Kind of Blue{}1959 · 46:12", " ".repeat(16))
+            format!("Kind of Blue{}46:12 · 1959", " ".repeat(16))
         );
         assert_eq!(row(&album, 20), "Kind of Blue    1959");
         album.duration = Some(Duration::from_secs(4325));
-        assert!(row(&album, 40).ends_with(" 1959 · 1:12:05"));
+        assert!(row(&album, 40).ends_with(" 1:12:05 · 1959"));
         album.year = None;
         assert!(row(&album, 40).ends_with(" 1:12:05"));
         album.duration = None;
@@ -2987,11 +2989,11 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
         let line = |text: &str| *lines.iter().find(|l| l.contains(text)).unwrap();
         assert!(
-            line("Long — Band").contains(" 1 track · 1:12:05│"),
+            line("Long — Band").contains(" 1:12:05 · 1 track│"),
             "{screen}"
         );
         assert!(
-            line("Whole — Band").contains(" 2 tracks · 3:00│"),
+            line("Whole — Band").contains(" 3:00 · 2 tracks│"),
             "{screen}"
         );
         // A track of unknown length: no total rather than a short one.
@@ -3110,7 +3112,7 @@ mod tests {
         assert!(at("Hits — Various Artists") < at("Kind of Blue — Miles Davis"));
         assert!(at("Kind of Blue — Miles Davis") < at("Unknown album — Unknown artist"));
         assert!(
-            lines[at("Kind of Blue")].contains("2 tracks · 3:00│"),
+            lines[at("Kind of Blue")].contains("3:00 · 2 tracks│"),
             "{screen}"
         );
         app.handle_action(Action::CycleSort, now);
