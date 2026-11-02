@@ -57,11 +57,13 @@ use crossterm::event::{
 use futures_util::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
 use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use crate::cover::{self, CoverRequest, CoverResponse, Covers, cache::DiskCache};
 use crate::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
 use crate::library::scan::{self, ScanEvent};
 use crate::library::search::{self, SearchResults};
@@ -86,6 +88,7 @@ use crate::secret_store::{SecretError, SecretStore};
 use crate::session::{self, Session};
 use crate::settings::{self, Change, Settings};
 use crate::setup::{self, Reply, SaveNavidrome};
+use crate::ui::cover::{ArtPainter, LateReplyFilter, TermEnv};
 use crate::ui::{help, keymap, render};
 use crate::visualizer::Meter;
 
@@ -417,6 +420,8 @@ pub struct App {
     /// Bumped when an application setting worth saving changes (the
     /// visualizer); added to the player's revision.
     settings_revision: u64,
+    /// The cover of the track heard (off unless [`App::set_cover_art`]).
+    covers: Covers,
 }
 
 impl App {
@@ -489,7 +494,34 @@ impl App {
             visualizer_sent: false,
             meter: Meter::default(),
             settings_revision: 0,
+            covers: Covers::new(false),
         }
+    }
+
+    /// Turns cover art on or off (`[ui] cover_art`; off by default). Off,
+    /// no cover is ever requested.
+    pub fn set_cover_art(&mut self, enabled: bool) {
+        self.covers = Covers::new(enabled);
+        self.covers.client_changed(self.generation);
+    }
+
+    /// The cover state, for rendering.
+    pub fn covers(&self) -> &Covers {
+        &self.covers
+    }
+
+    /// Points the cover at the track heard now, and returns the cover
+    /// loads to start (each supersedes any still running). The loop calls
+    /// this before every frame.
+    pub fn take_cover_requests(&mut self) -> Vec<CoverRequest> {
+        self.covers
+            .follow(self.player.playing_entry().map(|entry| &entry.track));
+        self.covers.take_requests()
+    }
+
+    /// A cover load finished. Returns `true` if the art changed.
+    pub fn handle_cover_response(&mut self, response: CoverResponse) -> bool {
+        self.covers.handle(response)
     }
 
     /// Sets what the Settings overlay shows and may change (see
@@ -1461,6 +1493,7 @@ impl App {
             self.apply_job_outcomes(outcomes, now);
         }
         self.generation = Generation(self.generation.0 + 1);
+        self.covers.client_changed(self.generation);
         self.browser = client
             .as_ref()
             .map(|client| Browser::for_user(self.generation, client.username()));
@@ -1623,7 +1656,7 @@ impl App {
     /// Also lets the visualizer's bars fall when readings stopped coming
     /// while playing (a stall: buffering, or a seek mpv did not perform).
     pub fn tick(&mut self, now: Instant) -> bool {
-        let faded = self.meter.fade(now);
+        let faded = self.meter.fade(now) | self.covers.expire(now);
         if self.status.as_ref().is_some_and(|s| now >= s.expires_at) {
             self.status = None;
             return true;
@@ -2374,6 +2407,10 @@ pub use crate::model::thousands;
 ///
 /// `settings` is what the Settings overlay shows and may change; a save
 /// still running at exit is awaited for up to [`SETTINGS_SAVE_WAIT`].
+///
+/// With cover art on, the terminal is asked once which image protocol it
+/// has, after it is set up and before the key reader starts
+/// ([`crate::ui::cover::detect`]), and the screen is then cleared.
 pub async fn run(
     mut playback: PlaybackHandle,
     music_dir: Option<PathBuf>,
@@ -2381,6 +2418,7 @@ pub async fn run(
     scrobble: bool,
     restored: session::Restored,
     settings: settings::Context,
+    covers: CoverConfig,
 ) -> io::Result<()> {
     let signals = match Signals::new() {
         Ok(signals) => signals,
@@ -2404,6 +2442,21 @@ pub async fn run(
     if let Err(error) = crossterm::execute!(io::stdout(), EnableBracketedPaste) {
         tracing::warn!(%error, "could not enable bracketed paste");
     }
+    // Before any key reader exists, so the replies are read here.
+    let mut terminal = terminal;
+    let detection = covers.enabled.then(|| detect_graphics(&mut terminal));
+    let art = CoverSetup {
+        painter: detection.map(|d| {
+            ArtPainter::new(d.graphics, getrandom::u32().unwrap_or(0x00C0DA))
+                .with_truecolor(TermEnv::from_process().truecolor())
+        }),
+        late_replies: LateReplyFilter::new(detection.and_then(|d| d.late), Instant::now()),
+        // Its folder is created only when a Navidrome cover is stored.
+        cache: covers
+            .cache_dir
+            .filter(|_| covers.enabled)
+            .map(|dir| Arc::new(DiskCache::new(dir))),
+    };
     // Never dropped implicitly: if a panic unwinds out of the loop after
     // the terminal hung up, `Terminal::drop` would `eprintln!` on the dead
     // tty, panic while panicking and abort, so `kill_on_drop` would never
@@ -2427,6 +2480,7 @@ pub async fn run(
     };
     app.set_settings_context(settings);
     app.set_scrobbling(scrobbler.is_some());
+    app.set_cover_art(covers.enabled);
     let now = Instant::now();
     playback.send_all(app.restore_session(restored.session, now));
     if let Some(notice) = restored.notice {
@@ -2439,6 +2493,7 @@ pub async fn run(
         ping,
         scrobbler,
         scrobble_failure,
+        art,
     };
     let result = event_loop(
         &mut terminal,
@@ -2450,6 +2505,8 @@ pub async fn run(
         &mut writers,
     )
     .await;
+    // The image goes before anything else is waited for.
+    write_art_cleanup();
     if let Err(error) = &result {
         tracing::error!(%error, "terminal error; quitting");
     }
@@ -2466,6 +2523,45 @@ pub async fn run(
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
     result
+}
+
+/// Cover art settings for [`run`].
+#[derive(Debug, Clone, Default)]
+pub struct CoverConfig {
+    /// `[ui] cover_art`.
+    pub enabled: bool,
+    /// Where Navidrome covers are cached (`None`: not cached).
+    pub cache_dir: Option<PathBuf>,
+}
+
+/// Asks the terminal how to draw art ([`crate::ui::cover::detect`]), then
+/// clears the screen if it was asked, so no query a terminal printed as
+/// text stays (ratatui's first frame skips cells that are blank in both
+/// buffers). Call after the terminal is set up and before any key reader
+/// starts.
+pub fn detect_graphics(terminal: &mut DefaultTerminal) -> crate::ui::cover::Detection {
+    let detection = crate::ui::cover::detect(&TermEnv::from_process());
+    // `resize` clears the screen and the back buffer like `clear`, without
+    // asking the terminal for the cursor position first.
+    if detection.queried
+        && let Err(error) = terminal
+            .size()
+            .and_then(|size| terminal.resize(Rect::new(0, 0, size.width, size.height)))
+    {
+        tracing::warn!(%error, "could not clear the screen");
+    }
+    detection
+}
+
+/// Deletes the Kitty image the terminal holds, if any (exit paths and the
+/// panic hook). Errors are ignored: the terminal may be gone.
+pub(crate) fn write_art_cleanup() {
+    if let Some(bytes) = crate::ui::cover::take_cleanup() {
+        use std::io::Write as _;
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(&bytes);
+        let _ = stdout.flush();
+    }
 }
 
 /// Writes one snapshot (blocking). [`session::save`] outside tests.
@@ -2607,6 +2703,7 @@ pub fn install_panic_hook(previous: PanicHook) {
             .unwrap_or_default();
         if std::thread::current().id() == ui_thread {
             tracing::error!(%message, %location, "panic on the UI thread");
+            write_art_cleanup();
             let _ = ratatui::try_restore();
             // `try_restore` does not show the cursor, and the leaked
             // terminal (see `run`) never will. Errors are ignored so a
@@ -2662,6 +2759,50 @@ struct Sources {
     scrobbler: Option<Scrobbler>,
     /// The first scrobble failure, if any.
     scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
+    /// Cover art: how it is drawn, and its cache.
+    art: CoverSetup,
+}
+
+/// What [`run`] set up for cover art.
+struct CoverSetup {
+    /// `None`: cover art is off.
+    painter: Option<ArtPainter>,
+    late_replies: LateReplyFilter,
+    cache: Option<Arc<DiskCache>>,
+}
+
+/// Runs cover loads, one at a time: a new request aborts the one before
+/// (whose answer, `Failed`, the cover state ignores), so skipping through
+/// tracks, or a client change, never leaves loads running that nobody
+/// will see.
+struct CoverLoader {
+    cache: Option<Arc<DiskCache>>,
+    running: Option<JoinHandle<()>>,
+}
+
+impl CoverLoader {
+    fn spawn(
+        &mut self,
+        requests: Vec<CoverRequest>,
+        client: Option<&navidrome::Client>,
+        responses: &mpsc::UnboundedSender<CoverResponse>,
+    ) {
+        for request in requests {
+            self.abort();
+            self.running = Some(cover::spawn_load(
+                request,
+                client.cloned(),
+                self.cache.clone(),
+                responses,
+            ));
+        }
+    }
+
+    fn abort(&mut self) {
+        if let Some(task) = self.running.take() {
+            task.abort();
+        }
+    }
 }
 
 /// Runs the browser's fetches for the current client, at most
@@ -2983,7 +3124,15 @@ async fn event_loop(
         mut ping,
         mut scrobbler,
         mut scrobble_failure,
+        art,
     } = sources;
+    view.art = art.painter;
+    let mut late_replies = art.late_replies;
+    let mut covers = CoverLoader {
+        cache: art.cache,
+        running: None,
+    };
+    let (cover_tx, mut cover_rx) = mpsc::unbounded_channel();
     let mut fetches = Fetches::new();
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
     let (settings_tx, mut settings_rx) = mpsc::unbounded_channel();
@@ -3001,6 +3150,9 @@ async fn event_loop(
         }
         if let Some(change) = app.take_client_change() {
             fetches.restart();
+            // A cover load is not aborted here: a Navidrome cover is asked
+            // again of the new client (that request aborts the old load),
+            // and a local one is unaffected.
             // Replacing the receivers drops the old ping's answer and the
             // old scrobbler, whose worker ends once its queue is sent.
             ping = change
@@ -3014,6 +3166,7 @@ async fn event_loop(
                 .unzip();
         }
         fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
+        covers.spawn(app.take_cover_requests(), app.navidrome_client(), &cover_tx);
         writers.edits.pump(app, &edit_tx);
         for request in app.take_scrobble_requests() {
             if let Some(scrobbler) = &scrobbler {
@@ -3021,8 +3174,7 @@ async fn event_loop(
             }
         }
         if dirty {
-            let completed =
-                terminal.draw(|frame| render::draw(frame, app, &mut view, Instant::now()))?;
+            let completed = render::draw_full(terminal, app, &mut view, Instant::now())?;
             last_frame = view.visualizer_area.map(|_| completed.buffer.clone());
             visualizer_dirty = false;
             if let Some(command) = app.set_visualizer_drawable(view.visualizer_drawable) {
@@ -3046,6 +3198,9 @@ async fn event_loop(
         }
         tokio::select! {
             input_event = input.next() => match input_event {
+                Some(Ok(Event::Key(key))) if late_replies.swallow(&key, Instant::now()) => {
+                    tracing::debug!("late terminal reply ignored");
+                }
                 Some(Ok(Event::Key(key))) if app.settings_open() => {
                     if key.kind != KeyEventKind::Release
                         && let Some(input) = crate::ui::onboarding::map_key(key)
@@ -3115,6 +3270,12 @@ async fn event_loop(
                 let commands = app.handle_fetch_response(response, Instant::now());
                 playback.send_all(commands);
                 dirty = true;
+            },
+            // Likewise.
+            Some(response) = cover_rx.recv() => {
+                if app.handle_cover_response(response) {
+                    dirty = true;
+                }
             },
             // Likewise.
             Some(response) = edit_rx.recv() => {
@@ -6659,6 +6820,77 @@ mod tests {
         }
         app.note_changes(now);
         app
+    }
+
+    #[tokio::test]
+    async fn a_new_cover_load_aborts_the_one_before() {
+        // A server that accepts connections and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = navidrome::Client::new(
+            navidrome::client::parse_base_url(&format!("http://{address}")).unwrap(),
+            "u".into(),
+            navidrome::Password::new("p".into()),
+        )
+        .unwrap();
+        let mut app = App::new("/music".into());
+        app.set_cover_art(true);
+        let mut loader = CoverLoader {
+            cache: None,
+            running: None,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tracks: Vec<Track> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                Track::navidrome(
+                    (*id).into(),
+                    TrackMetadata {
+                        cover_art: Some(format!("al-{id}")),
+                        ..TrackMetadata::default()
+                    },
+                )
+            })
+            .collect();
+        // Skipping through three tracks: one load each, each aborting the
+        // one before, which answers `Failed` (ignored).
+        let mut ids = Vec::new();
+        for track in &tracks {
+            app.covers.follow(Some(track));
+            let requests = app.covers.take_requests();
+            ids.extend(requests.iter().map(|r| r.id));
+            loader.spawn(requests, Some(&client), &tx);
+        }
+        assert_eq!(ids.len(), 3);
+        for id in &ids[..2] {
+            let response = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("an aborted load answers at once")
+                .unwrap();
+            assert_eq!(response.id, *id);
+            assert!(matches!(response.outcome, cover::Outcome::Failed));
+            assert!(!app.handle_cover_response(response), "not the wanted load");
+        }
+        // Only the last is still running.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err()
+        );
+        assert!(loader.running.as_ref().is_some_and(|t| !t.is_finished()));
+        loader.abort();
+        let last = rx.recv().await.unwrap();
+        assert_eq!(last.id, ids[2]);
+        // Its `Failed` answer leaves no art and asks nothing more meanwhile.
+        assert!(app.handle_cover_response(last));
+        assert!(app.covers().image().is_none());
+        assert!(app.take_cover_requests().is_empty());
     }
 
     #[tokio::test]

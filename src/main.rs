@@ -4,7 +4,8 @@
 //! password (possibly running `password_command`, which may prompt, or
 //! reading the OS keychain) and build the client, load the
 //! saved session, spawn mpv and connect, then hand over to [`app::run`],
-//! which restores the session, enters the TUI, starts the scan and pings
+//! which restores the session, enters the TUI (asking the terminal about
+//! images when cover art is on), starts the scan and pings
 //! the server. Errors before the TUI are printed
 //! to stderr; the TUI never writes to stdout/stderr.
 
@@ -169,6 +170,7 @@ async fn run() -> ExitCode {
         local = config.music_dir.is_some(),
         navidrome = navidrome.is_some(),
         scrobble,
+        cover_art = config.cover_art,
         "sources configured"
     );
 
@@ -186,6 +188,13 @@ async fn run() -> ExitCode {
         }
     };
 
+    let covers = app::CoverConfig {
+        enabled: config.cover_art,
+        cache_dir: coda_player::cover::cache::cache_dir(
+            std::env::var_os("XDG_CACHE_HOME"),
+            std::env::var_os("HOME"),
+        ),
+    };
     match app::run(
         handle,
         config.music_dir,
@@ -193,6 +202,7 @@ async fn run() -> ExitCode {
         scrobble,
         restored,
         settings,
+        covers,
     )
     .await
     {

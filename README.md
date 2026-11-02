@@ -16,6 +16,7 @@ A keyboard-first terminal music player for your local files and a personal [Navi
 - **Gapless playback:** consecutive tracks play without a pause, local files and Navidrome streams alike (the next stream is fetched ahead).
 - **Session:** the queue, volume, repeat mode and visualizer are restored at the next launch.
 - **Visualizer:** an optional spectrum and level meter, in step with what you hear.
+- **Cover art:** the cover of the track you hear, in the now-playing bar: a real image in Ghostty and Kitty, colour blocks in other terminals. From the file's tags or its folder, or from Navidrome (cached on disk). See [Cover art](docs/USAGE.md#cover-art).
 - **Privacy:** logs never contain passwords, tokens, stream URLs, file paths or track titles.
 
 ## Requirements
@@ -102,6 +103,9 @@ scrobble = true            # report plays to Navidrome (default)
 # Or, instead of password_keychain (at most one of the three):
 # password_command = ["pass", "show", "navidrome"]   # argv, no shell
 # password = "..."                                    # only if the file is chmod 600
+
+[ui]
+cover_art = true           # the cover in the now-playing bar (default); false turns it off
 ```
 
 `CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file.
@@ -112,8 +116,9 @@ scrobble = true            # report plays to Navidrome (default)
 |---|---|
 | Session (queue, volume, repeat, visualizer) | `$XDG_STATE_HOME/coda/state.json` |
 | Log | `$XDG_STATE_HOME/coda/coda.log` |
+| Navidrome covers (at most about 50 MB; safe to delete) | `$XDG_CACHE_HOME/coda/covers/` |
 
-`XDG_STATE_HOME` defaults to `~/.local/state`. Set `CODA_LOG=debug` for more detail in the log.
+`XDG_STATE_HOME` defaults to `~/.local/state`, `XDG_CACHE_HOME` to `~/.cache`. Set `CODA_LOG=debug` for more detail in the log.
 
 **Backups:** when Coda replaces a config file it didn't write itself, it keeps the old one as `config.toml.bak.<time>`. **If that file held a plaintext `password`, so does the backup: delete it once you no longer need it.**
 

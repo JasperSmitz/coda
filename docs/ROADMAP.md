@@ -75,11 +75,12 @@ Consecutive tracks play without a pause, for local files and Navidrome streams.
   - Track-change handling stays under the exhaustive event-ordering tests.
 - **Related:** this also lays the groundwork for endless play, which needs the next track known ahead of time.
 
-## M9 — Cover art (in progress)
+## M9 — Cover art (completed, reviewed; owner's on-screen check pending)
 Brief: `docs/plans/m9-cover-art.md`.
-- The cover of the track you hear, in the now-playing bar: a real image in terminals with an image protocol (Ghostty, Kitty, WezTerm, iTerm2), block characters elsewhere (Alacritty, Terminal.app).
+- The cover of the track you hear, in the now-playing bar: a real image with the Kitty graphics protocol (Ghostty, Kitty), half-block characters elsewhere (Alacritty, Terminal.app, WezTerm, iTerm2, tmux).
 - Sources: Navidrome `getCoverArt` (size-capped disk cache) and local embedded art or folder images.
-- Slice 1: feasibility spike. Slice 2: the feature.
+- **Slice 1, spike (completed):** findings in the brief.
+- **Slice 2 (completed, reviewed):** the feature, as recommended by the spike.
 
 ## M10 — Now playing screen (proposed)
 A display mode for when the queue is set and you just want to listen (owner, 2026-11-02): a toggle that swaps the panels for a large cover, a larger visualizer and the essential track info, without the text you don't need. Builds on M9.

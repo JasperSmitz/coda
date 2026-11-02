@@ -1,5 +1,5 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar (with the visualizer when shown), the status line, the help overlay, the playlist
+//! now-playing bar (with the cover art and the visualizer when shown), the status line, the help overlay, the playlist
 //! picker and name prompt, and the Settings overlay
 //! (`crate::ui::settings`).
 //!
@@ -26,12 +26,18 @@ use crate::library::{Library, LocalPlaylist};
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
+use crate::ui::cover::{ArtFrame, ArtPainter};
 use crate::ui::{help, settings};
 
 /// Below this width only the focused panel is shown.
 pub const NARROW_WIDTH: u16 = 60;
 const HIGHLIGHT_SYMBOL: &str = "> ";
 const NOW_PLAYING_HEIGHT: u16 = 4;
+/// The now-playing bar's height with art and without the visualizer:
+/// title, artist · album, a blank row and progress, beside the art.
+pub const ART_BAR_HEIGHT: u16 = 6;
+/// The art hides rather than leave the bar's text fewer columns than this.
+const MIN_TEXT_WITH_ART: u16 = 30;
 /// Rows the visualizer adds to the now-playing bar.
 pub const VISUALIZER_HEIGHT: u16 = 3;
 /// Smaller terminals do not show the visualizer, so the panels keep room.
@@ -83,6 +89,77 @@ pub struct ViewState {
     /// settings, the picker or the name prompt) covered it, whether or not
     /// it is shown. The app polls for readings only while this holds.
     pub visualizer_drawable: bool,
+    /// Draws cover art; `None` when cover art is off.
+    pub art: Option<ArtPainter>,
+}
+
+/// Where the art goes in the now-playing bar: `cols` × `rows` cells at the
+/// left of the bar's inner area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtLayout {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// The art's place on a `screen`, if it is shown: cover art is on, the
+/// track heard has a cover (or one is loading after a track that had
+/// one), and the screen has room (at least [`NARROW_WIDTH`] columns and
+/// as many rows as the visualizer needs). The art spans the bar's inner
+/// height: 5 rows beside the visualizer, else 4 (the bar grows to
+/// [`ART_BAR_HEIGHT`]).
+pub fn art_layout(screen: Rect, app: &App, painter: Option<&ArtPainter>) -> Option<ArtLayout> {
+    let painter = painter?;
+    if !app.covers().reserve() || app.player().playing_entry().is_none() {
+        return None;
+    }
+    if screen.width < NARROW_WIDTH || screen.height < VISUALIZER_MIN_SCREEN.1 {
+        return None;
+    }
+    let visualizer = app.visualizer_shown() && screen.width >= VISUALIZER_MIN_SCREEN.0;
+    let rows = if visualizer {
+        NOW_PLAYING_HEIGHT + VISUALIZER_HEIGHT - 2
+    } else {
+        ART_BAR_HEIGHT - 2
+    };
+    let cols = painter.columns(rows);
+    // Borders, the art and a one-column gap.
+    let text = screen.width.saturating_sub(2 + cols + 1);
+    (text >= MIN_TEXT_WITH_ART).then_some(ArtLayout { cols, rows })
+}
+
+/// What the art area shows on a `screen`: the cover heard, where
+/// [`art_layout`] puts it.
+pub fn art_frame(screen: Rect, app: &App, painter: &ArtPainter) -> Option<ArtFrame> {
+    let layout = art_layout(screen, app, Some(painter))?;
+    Some(ArtFrame {
+        image: app.covers().image()?.clone(),
+        cols: layout.cols,
+        rows: layout.rows,
+    })
+}
+
+/// A full frame: the art's terminal output first (a Kitty image's delete
+/// and transmission, sent apart from the cells so no overlay can lose
+/// it), then the frame itself.
+pub fn draw_full<'a, B>(
+    terminal: &'a mut ratatui::Terminal<B>,
+    app: &App,
+    view: &mut ViewState,
+    now: Instant,
+) -> std::io::Result<ratatui::CompletedFrame<'a>>
+where
+    B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write,
+{
+    if let Some(painter) = view.art.as_mut() {
+        let size = terminal.size()?;
+        let screen = Rect::new(0, 0, size.width, size.height);
+        painter.prepare(art_frame(screen, app, painter));
+        let output = painter.take_output();
+        if !output.is_empty() {
+            terminal.backend_mut().write_all(&output)?;
+        }
+    }
+    terminal.draw(|frame| draw(frame, app, view, now))
 }
 
 /// The first visible row for a list of `len` rows in a viewport of
@@ -127,10 +204,11 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         });
     view.visualizer_drawable = room && !overlay;
     let visualizer = app.visualizer_shown() && room;
-    let now_playing_height = if visualizer {
-        NOW_PLAYING_HEIGHT + VISUALIZER_HEIGHT
-    } else {
-        NOW_PLAYING_HEIGHT
+    let art = art_layout(screen, app, view.art.as_ref());
+    let now_playing_height = match (visualizer, art) {
+        (true, _) => NOW_PLAYING_HEIGHT + VISUALIZER_HEIGHT,
+        (false, Some(_)) => ART_BAR_HEIGHT,
+        (false, None) => NOW_PLAYING_HEIGHT,
     };
     let [panels, now_playing, status] = Layout::vertical([
         Constraint::Min(3),
@@ -151,7 +229,13 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         draw_library(frame, app, view, left, app.focus() == Focus::Library);
         draw_queue(frame, app, view, right, app.focus() == Focus::Queue);
     }
-    let visualizer_area = draw_now_playing(frame, app, now_playing, visualizer);
+    let visualizer_area = draw_now_playing(
+        frame,
+        app,
+        now_playing,
+        visualizer,
+        art.map(|layout| (layout, view.art.as_ref())),
+    );
     // A text input shows a cursor, which a visualizer-only redraw would
     // hide; while one is open the visualizer waits for full redraws.
     view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
@@ -926,20 +1010,54 @@ fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
 }
 
 /// Draws the now-playing bar; with `visualizer`, the visualizer below the
-/// progress line. Returns the visualizer's area.
-fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) -> Option<Rect> {
+/// progress line; with `art`, the cover at the left and everything else
+/// beside it (without the visualizer: title, artist · album, a blank row,
+/// progress). Returns the visualizer's area.
+fn draw_now_playing(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    visualizer: bool,
+    art: Option<(ArtLayout, Option<&ArtPainter>)>,
+) -> Option<Rect> {
     let player = app.player();
     let block = Block::bordered()
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Now Playing ");
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
+    let mut details = None;
+    if let Some((layout, painter)) = art {
+        let art_area = Rect {
+            width: layout.cols.min(inner.width),
+            height: layout.rows.min(inner.height),
+            ..inner
+        };
+        if let Some(painter) = painter {
+            painter.draw(frame.buffer_mut(), art_area);
+        }
+        let gap = art_area.width.saturating_add(1).min(inner.width);
+        inner = Rect {
+            x: inner.x + gap,
+            width: inner.width - gap,
+            ..inner
+        };
+        if !visualizer {
+            let [title, second, _, progress] =
+                Layout::vertical([Constraint::Length(1); 4]).areas(inner);
+            details = Some((title, second, progress));
+        }
+    }
     let [info, progress, visualizer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(if visualizer { VISUALIZER_HEIGHT } else { 0 }),
     ])
     .areas(inner);
+    let (info, second, progress) = match details {
+        Some((title, second, progress)) => (title, Some(second), progress),
+        None => (info, None, progress),
+    };
 
     let (label, color) = status_label(player.status());
     let label = format!("[{label}] ");
@@ -962,8 +1080,24 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) 
                 title,
                 Style::default().add_modifier(Modifier::BOLD),
             ));
-            if let Some(artist) = &entry.track.artist {
-                spans.push(Span::raw(fit(&format!(" — {artist}"), rest)));
+            match second {
+                // Artist and album get their own row beside the art.
+                Some(second) => {
+                    let line = [entry.track.artist.as_deref(), entry.track.album.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    frame.render_widget(
+                        Paragraph::new(fit(&line, usize::from(second.width))),
+                        second,
+                    );
+                }
+                None => {
+                    if let Some(artist) = &entry.track.artist {
+                        spans.push(Span::raw(fit(&format!(" — {artist}"), rest)));
+                    }
+                }
             }
         }
         None => spans.push(Span::styled(
@@ -1303,6 +1437,9 @@ pub fn format_time(duration: Duration) -> String {
         format!("{m}:{s:02}")
     }
 }
+
+#[cfg(test)]
+mod art_tests;
 
 #[cfg(test)]
 mod tests {

@@ -283,6 +283,9 @@ pub struct RawAlbum {
     pub song_count: Option<u32>,
     #[serde(deserialize_with = "saturating_secs")]
     pub duration: Option<Duration>,
+    /// The album's `getCoverArt` id; its songs fall back to it.
+    #[serde(deserialize_with = "id")]
+    pub cover_art: Option<String>,
     #[serde(deserialize_with = "list")]
     pub song: Vec<RawSong>,
 }
@@ -307,6 +310,9 @@ pub struct RawSong {
     pub disc_number: Option<u32>,
     #[serde(deserialize_with = "secs")]
     pub duration: Option<Duration>,
+    /// The song's `getCoverArt` id (Navidrome: `mf-…` or `al-…`).
+    #[serde(deserialize_with = "id")]
+    pub cover_art: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -431,6 +437,19 @@ impl RawAlbum {
             duration: self.duration,
         })
     }
+
+    /// The album's songs as tracks, in served order. A song without its
+    /// own `coverArt` takes the album's.
+    pub fn into_tracks(self) -> Vec<Track> {
+        let album_cover = valid_id(self.cover_art);
+        self.song
+            .into_iter()
+            .filter_map(|mut song| {
+                song.cover_art = valid_id(song.cover_art).or_else(|| album_cover.clone());
+                song.into_track()
+            })
+            .collect()
+    }
 }
 
 impl RawSong {
@@ -447,6 +466,7 @@ impl RawSong {
                 track_no: self.track,
                 disc_no: self.disc_number,
                 duration: self.duration,
+                cover_art: valid_id(self.cover_art),
             },
         ))
     }
