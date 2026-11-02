@@ -55,11 +55,11 @@ Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11
 1. Feasibility spike: which signals mpv can deliver over IPC (levels, frequency bands), at what rate and cost, and for streams as well as files. Ends with written findings and a recommendation. **(completed)**
 2. A visualizer in the now-playing area, built on what the spike shows to be feasible. A level meter at minimum; frequency bands if mpv can provide them without a second decoder. **(completed, reviewed: 7 bands plus an L/R meter, always-stereo output)**
 
-## M7 — Keybindings and quality of life (in progress)
+## M7 — Keybindings and quality of life (completed)
 Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md`. Play in context: Enter plays what you point at, the queue is temporary.
 - **Slice 1 (completed, reviewed):** new keymap (`h`/`l` and arrows navigate, `,` `.` seek, `<` `>` previous/next, `r`/`R`, `D`, `O`); Enter replaces the queue with the album, playlist or view and starts at the selected track; `s` plays shuffled (tracks, albums, playlists, artists, folders); playlist deletion asks y/n.
 - **Slice 2 (completed, reviewed):** "Shuffle all" on each source's home (Navidrome via `getRandomSongs`, 500 songs).
-- **Slice 3:** the visualizer spreads across the width with interpolated bars; album rows show the running time next to the year.
+- **Slice 3 (completed, reviewed):** the visualizer spreads across the width with interpolated bars; album rows show the running time next to the year.
 - Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
 ## M8 — Cover art (proposed)

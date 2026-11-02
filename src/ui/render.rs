@@ -38,6 +38,9 @@ pub const VISUALIZER_HEIGHT: u16 = 3;
 pub const VISUALIZER_MIN_SCREEN: (u16, u16) = (20, 16);
 /// Bands at their narrowest: one column each, one apart.
 const NARROW_BANDS_WIDTH: u16 = 13;
+/// From this visualizer width the bars spread across the area, more of
+/// them than there are bands ([`crate::visualizer::spread_bands`]).
+const WIDE_VISUALIZER: u16 = 42;
 /// The level meter is left out when it would be narrower than this.
 const MIN_METER_WIDTH: u16 = 6;
 const WIDEST_METER: u16 = 24;
@@ -349,11 +352,46 @@ fn local_row(
                 LocalView::Albums(_) => format!("{} — {}", album.name(), artist.name()),
                 _ => album.name().to_owned(),
             };
-            row_line(&left, Some(count(album.tracks().len(), "track")), width)
+            let tracks = Some(count(album.tracks().len(), "track"));
+            row_line(
+                &left,
+                album_detail(&left, tracks, album.duration(), width),
+                width,
+            )
         }
         LocalRow::Playlist(playlist) => {
             row_line(&playlist.name, Some(playlist_counts(playlist)), width)
         }
+    }
+}
+
+/// Columns an album row's name keeps before its length gives way.
+const MIN_NAME_WITH_LENGTH: usize = 20;
+
+/// The right-hand side of an album row with name `left` in a row `width`
+/// columns wide: `first · length` (`1959 · 46:12`, or `12 tracks ·
+/// 1:12:05` for a local album), or whichever of the two is known. When
+/// both are known but would leave the name fewer than
+/// [`MIN_NAME_WITH_LENGTH`] columns (or fewer than it needs), `first`
+/// wins and the length is left out.
+fn album_detail(
+    left: &str,
+    first: Option<String>,
+    length: Option<Duration>,
+    width: usize,
+) -> Option<String> {
+    let length = length.map(format_time);
+    let (first, length) = match (first, length) {
+        (Some(first), Some(length)) => (first, length),
+        (first, length) => return first.or(length),
+    };
+    let both = format!("{first} · {length}");
+    // At least one column for the name, as `row_line` requires.
+    let name = fit(left, MIN_NAME_WITH_LENGTH).width().max(1);
+    if both.width() + 1 + name <= width {
+        Some(both)
+    } else {
+        Some(first)
     }
 }
 
@@ -608,7 +646,13 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
                 (Some(artist), true) => format!("{} — {artist}", album.name),
                 _ => album.name.clone(),
             };
-            row_line(&left, album.year.map(|y| y.to_string()), width)
+            let detail = album_detail(
+                &left,
+                album.year.map(|y| y.to_string()),
+                album.duration,
+                width,
+            );
+            row_line(&left, detail, width)
         }
         Row::Song(track) => {
             let left = if style.song_artist {
@@ -988,15 +1032,19 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
         ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
     };
 
-    // Bands: three columns each when there is room for them and a meter.
-    let (band_width, gap) = if area.width >= 42 { (3, 1) } else { (1, 1) };
-    let count = bands.len() as u16;
-    let bands_width = count * (band_width + gap) - gap;
+    let Some(layout) = visualizer_layout(area.width) else {
+        return;
+    };
+    let values = if layout.spread {
+        crate::visualizer::spread_bands(&bands, layout.bars.len())
+    } else {
+        bands.to_vec()
+    };
     let band_style = Style::default().fg(Color::Cyan);
-    for (i, band) in bands.iter().enumerate() {
-        let x = area.x + i as u16 * (band_width + gap);
+    for (&(offset, bar_width), value) in layout.bars.iter().zip(&values) {
+        let x = area.x + offset;
         // A band the track cannot contain stays empty.
-        let Some(value) = band else { continue };
+        let Some(value) = value else { continue };
         let eighths = eighths(*value, area.height);
         for row in 0..area.height {
             let filled = eighths.saturating_sub(row * 8).min(8);
@@ -1005,19 +1053,20 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
             }
             let symbol = VERTICAL_EIGHTHS[usize::from(filled - 1)];
             let y = area.y + area.height - 1 - row;
-            for dx in 0..band_width {
+            for dx in 0..bar_width {
                 buffer[(x + dx, y)].set_char(symbol).set_style(band_style);
             }
         }
     }
 
     // Left/right meter on the bottom two rows, to the right of the bands.
-    let room = area.width.saturating_sub(bands_width + 2);
-    if room < MIN_METER_WIDTH || area.height < 2 {
+    let Some((offset, width)) = layout.meter else {
+        return;
+    };
+    if area.height < 2 {
         return;
     }
-    let width = room.min(WIDEST_METER);
-    let x = area.x + area.width - width;
+    let x = area.x + offset;
     let label_style = Style::default().fg(Color::DarkGray);
     let bar_style = Style::default().fg(Color::Green);
     for (row, (label, value)) in ["L", "R"].iter().zip(levels).enumerate() {
@@ -1035,6 +1084,72 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
                 .set_style(bar_style);
         }
     }
+}
+
+/// Where the visualizer's parts go in an area of some width. Offsets are
+/// columns from the area's left edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisualizerLayout {
+    /// Each bar's offset and width, left to right, one column apart.
+    bars: Vec<(u16, u16)>,
+    /// Whether the bars are spread over the bands (more bars than bands)
+    /// rather than one per band.
+    spread: bool,
+    /// The L/R meter's offset and width (label included), if it fits.
+    meter: Option<(u16, u16)>,
+}
+
+/// The visualizer's layout for an area `width` columns wide; `None` when
+/// too narrow for even one-column bands.
+///
+/// - Narrower than [`WIDE_VISUALIZER`]: one one-column bar per band, one
+///   apart, and the meter on the right when at least [`MIN_METER_WIDTH`]
+///   columns are left after a two-column gap (at most [`WIDEST_METER`]).
+/// - Wider: the meter takes what the old three-column bands left it (13
+///   columns at 42, growing to [`WIDEST_METER`]), and the bars fill the
+///   rest: about 2.5 columns each plus a one-column gap, at least one per
+///   band and at most [`crate::visualizer::MAX_BARS`], their widths
+///   differing by at most one column so they reach the meter's gap.
+fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
+    let bands = crate::playback::VISUALIZER_BANDS as u16;
+    if width < NARROW_BANDS_WIDTH {
+        return None;
+    }
+    if width < WIDE_VISUALIZER {
+        let room = width.saturating_sub(NARROW_BANDS_WIDTH + 2);
+        let meter = (room >= MIN_METER_WIDTH).then(|| {
+            let meter = room.min(WIDEST_METER);
+            (width - meter, meter)
+        });
+        return Some(VisualizerLayout {
+            bars: (0..bands).map(|i| (i * 2, 1)).collect(),
+            spread: false,
+            meter,
+        });
+    }
+    // Seven three-column bands and a gap used 29 columns.
+    let meter = (width - 29).min(WIDEST_METER);
+    let bars_width = width - meter - 2;
+    let max_bars = crate::visualizer::MAX_BARS as u16;
+    // In u32: a huge width must not overflow.
+    let count =
+        ((u32::from(bars_width) + 1) * 2 / 7).clamp(u32::from(bands), u32::from(max_bars)) as u16;
+    let columns = bars_width - (count - 1);
+    let (base, extra) = (columns / count, columns % count);
+    let mut bars = Vec::with_capacity(usize::from(count));
+    let mut offset = 0;
+    for i in 0..count {
+        // Spread the wider bars evenly.
+        let wider = (i + 1) * extra / count > i * extra / count;
+        let bar = base + u16::from(wider);
+        bars.push((offset, bar));
+        offset += bar + 1;
+    }
+    Some(VisualizerLayout {
+        bars,
+        spread: true,
+        meter: Some((width - meter, meter)),
+    })
 }
 
 /// Redraws only the visualizer: draws it into `last_frame` (a copy of the
@@ -1527,18 +1642,155 @@ mod tests {
         frame.bands[6] = None;
         frame.bands[0] = Some(0.1);
         let app = visualizer_app(frame, now);
-        let (terminal, view) = drawn(&app, 80, 24, now);
-        let area = view.visualizer_area.unwrap();
-        let rows = area_text(&terminal, area);
-        let column = |band: usize| -> String {
-            let x = band * 4;
-            rows.iter().map(|r| r.chars().nth(x).unwrap()).collect()
-        };
-        // Band 0 at 0.091 of 24 eighths: two eighths, bottom row only.
-        assert_eq!(column(0), "  ▂", "{rows:?}");
-        assert_eq!(column(3), "▆██", "{rows:?}");
-        assert_eq!(column(5), "   ", "{rows:?}");
-        assert_eq!(column(6), "   ", "{rows:?}");
+        for width in [40, 80] {
+            let (terminal, view) = drawn(&app, width, 24, now);
+            let area = view.visualizer_area.unwrap();
+            let layout = visualizer_layout(area.width).unwrap();
+            let rows = area_text(&terminal, area);
+            let column = |bar: usize| -> String {
+                let x = usize::from(layout.bars[bar].0);
+                rows.iter().map(|r| r.chars().nth(x).unwrap()).collect()
+            };
+            // Band 0 at 0.091 of 24 eighths: two eighths, bottom row only.
+            assert_eq!(column(0), "  ▂", "{width}: {rows:?}");
+            assert_eq!(column(layout.bars.len() - 1), "   ", "{width}: {rows:?}");
+            if !layout.spread {
+                assert_eq!(column(3), "▆██", "{rows:?}");
+                assert_eq!(column(5), "   ", "{rows:?}");
+                continue;
+            }
+            // Spread: full bars up to the 2500 Hz band, none past it.
+            let count = layout.bars.len();
+            let last = (0..count).rev().find(|&bar| column(bar) != "   ").unwrap();
+            assert_eq!(column(last - 1), "▆██", "{rows:?}");
+            let fraction = |hz: f32| (hz / 63.0).ln() / (16000.0f32 / 63.0).ln();
+            let at = |bar: usize| bar as f32 / (count - 1) as f32;
+            assert!(at(last) <= fraction(2500.0), "{rows:?}");
+            assert!(at(last + 1) > fraction(2500.0), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn visualizer_layout_at_several_widths() {
+        let bars = |width: u16| visualizer_layout(width).unwrap().bars;
+        // Too narrow for anything.
+        assert_eq!(visualizer_layout(0), None);
+        assert_eq!(visualizer_layout(12), None);
+        // Narrow: seven one-column bands as before; a meter once 6 columns
+        // are left after the gap.
+        for width in [13, 20, 21, 41] {
+            let layout = visualizer_layout(width).unwrap();
+            assert!(!layout.spread, "{width}");
+            assert_eq!(layout.bars, (0..7).map(|i| (i * 2, 1)).collect::<Vec<_>>());
+        }
+        assert_eq!(visualizer_layout(20).unwrap().meter, None);
+        assert_eq!(visualizer_layout(21).unwrap().meter, Some((15, 6)));
+        assert_eq!(visualizer_layout(41).unwrap().meter, Some((17, 24)));
+        // Wide: the bars spread across up to the meter's gap.
+        let expected = [
+            // (width, bars, meter width)
+            (42, 8, 13),
+            (52, 8, 23),
+            (53, 8, 24),
+            (76, 14, 24),
+            (116, 26, 24),
+            (196, 48, 24),
+            (500, 48, 24),
+            (u16::MAX, 48, 24),
+        ];
+        for (width, count, meter) in expected {
+            let layout = visualizer_layout(width).unwrap();
+            assert!(layout.spread, "{width}");
+            assert_eq!(layout.bars.len(), count, "{width}");
+            assert_eq!(layout.meter, Some((width - meter, meter)), "{width}");
+            let bars = &layout.bars;
+            // One column apart, no wider than the room left of the meter's
+            // two-column gap, which they reach.
+            assert_eq!(bars[0].0, 0);
+            for pair in bars.windows(2) {
+                assert_eq!(pair[1].0, pair[0].0 + pair[0].1 + 1, "{width}");
+            }
+            let end = bars.last().map(|&(x, w)| x + w).unwrap();
+            assert_eq!(end, width - meter - 2, "{width}");
+            // Widths differ by at most one column; 2–3 columns below the cap.
+            let narrowest = bars.iter().map(|b| b.1).min().unwrap();
+            let widest = bars.iter().map(|b| b.1).max().unwrap();
+            assert!(widest - narrowest <= 1, "{width}: {bars:?}");
+            if count < 48 {
+                assert!(narrowest >= 2 && widest <= 3, "{width}: {bars:?}");
+            }
+        }
+        assert_eq!(
+            bars(42),
+            [
+                (0, 2),
+                (3, 3),
+                (7, 2),
+                (10, 3),
+                (14, 2),
+                (17, 3),
+                (21, 2),
+                (24, 3)
+            ]
+        );
+    }
+
+    /// A reading with a shape: a peak at 400 Hz and nothing at 16 kHz.
+    fn shaped() -> crate::playback::VisualizerFrame {
+        crate::playback::VisualizerFrame {
+            levels: [1.0, 0.5],
+            bands: [
+                Some(0.2),
+                Some(0.5),
+                Some(1.0),
+                Some(0.6),
+                Some(0.3),
+                Some(0.1),
+                None,
+            ],
+        }
+    }
+
+    #[test]
+    fn visualizer_snapshots_at_narrow_medium_and_wide_widths() {
+        let now = Instant::now();
+        let app = visualizer_app(shaped(), now);
+        // Narrow (below 42 columns): seven one-column bands, as before.
+        // Medium: eight bars of 2–3 columns, a 13-column meter. Wide: the
+        // bars spread up to the meter; the 16 kHz band is missing, so
+        // nothing is drawn past 6.3 kHz.
+        let expected: [(u16, [&str; 3]); 3] = [
+            (
+                34,
+                [
+                    "    ▆                         ",
+                    "  ▃ █ ▅        L ███████████▉ ",
+                    "▄ █ █ █ ▇ ▂    R █████▉       ",
+                ],
+            ),
+            (
+                50,
+                [
+                    "       ▄▄ ▂▂▂                                 ",
+                    "   ▂▂▂ ██ ███ ▂▂             L █████████████▋ ",
+                    "▄▄ ███ ██ ███ ██ ▅▅▅         R ██████▉        ",
+                ],
+            ),
+            (
+                120,
+                [
+                    "                        ▄▄▄ ▆▆ ▅▅▅ ▃▃ ▁▁▁                                                                           ",
+                    "          ▁▁▁ ▃▃ ▅▅▅ ██ ███ ██ ███ ██ ███ ▆▆ ▄▄▄ ▂▂ ▁▁▁                                     L ████████████████████  ",
+                    "▄▄ ▆▆▆ ▇▇ ███ ██ ███ ██ ███ ██ ███ ██ ███ ██ ███ ██ ███ ▇▇ ▆▆▆ ▅▅ ▄▄▄ ▃▃                    R ██████████            ",
+                ],
+            ),
+        ];
+        for (width, rows) in expected {
+            let (terminal, view) = drawn(&app, width, 24, now);
+            let area = view.visualizer_area.unwrap();
+            assert_eq!(area.width, width - 4);
+            assert_eq!(area_text(&terminal, area), rows, "{width}");
+        }
     }
 
     #[test]
@@ -1578,34 +1830,40 @@ mod tests {
             }
         }
         let rows = area_text(&terminal, area);
+        // Bar 4 of 14 lies near the quieter 400 Hz band.
+        let layout = visualizer_layout(area.width).unwrap();
+        let x = usize::from(layout.bars[4].0);
         let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
-        let half: String = rows.iter().map(|r| r.chars().nth(8).unwrap()).collect();
+        let half: String = rows.iter().map(|r| r.chars().nth(x).unwrap()).collect();
         assert_ne!(full, half, "{rows:?}");
     }
 
     #[test]
     fn a_visualizer_only_redraw_matches_a_full_redraw() {
-        let now = Instant::now();
-        let later = now + Duration::from_millis(40);
-        let mut app = visualizer_app(loud(), now);
-        let (mut terminal, view) = drawn(&app, 80, 24, now);
-        let area = view.visualizer_area.unwrap();
-        let mut last = terminal.backend().buffer().clone();
-        let mut quiet = loud();
-        quiet.levels = [0.0, 0.0];
-        quiet.bands = [Some(0.0); crate::playback::VISUALIZER_BANDS];
-        let load = app.player().current_load().unwrap();
-        assert!(app.handle_visualizer(load, &quiet, later));
-        redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
-        let partial = terminal.backend().buffer().clone();
-        let (full, _) = drawn(&app, 80, 24, now);
-        assert_eq!(&partial, full.backend().buffer());
-        assert_eq!(&last, full.backend().buffer());
-        // A full draw after a partial one still works (buffers swapped).
-        terminal
-            .draw(|frame| draw(frame, &app, &mut ViewState::default(), now))
-            .unwrap();
-        assert_eq!(terminal.backend().buffer(), full.backend().buffer());
+        // Narrow, medium and wide layouts.
+        for width in [34, 80, 160] {
+            let now = Instant::now();
+            let later = now + Duration::from_millis(40);
+            let mut app = visualizer_app(shaped(), now);
+            let (mut terminal, view) = drawn(&app, width, 24, now);
+            let area = view.visualizer_area.unwrap();
+            let mut last = terminal.backend().buffer().clone();
+            let mut quiet = loud();
+            quiet.levels = [0.0, 0.0];
+            quiet.bands = [Some(0.0); crate::playback::VISUALIZER_BANDS];
+            let load = app.player().current_load().unwrap();
+            assert!(app.handle_visualizer(load, &quiet, later));
+            redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
+            let partial = terminal.backend().buffer().clone();
+            let (full, _) = drawn(&app, width, 24, now);
+            assert_eq!(&partial, full.backend().buffer(), "{width}");
+            assert_eq!(&last, full.backend().buffer(), "{width}");
+            // A full draw after a partial one still works (buffers swapped).
+            terminal
+                .draw(|frame| draw(frame, &app, &mut ViewState::default(), now))
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), full.backend().buffer());
+        }
     }
 
     #[test]
@@ -2148,6 +2406,79 @@ mod tests {
         assert_eq!(format_time(Duration::from_secs(3725)), "1:02:05");
     }
 
+    #[test]
+    fn album_details_join_year_and_length_and_the_year_wins_when_narrow() {
+        let mins = Some(Duration::from_secs(46 * 60 + 12));
+        let hours = Some(Duration::from_secs(3600 + 12 * 60 + 5));
+        let year = || Some("1959".to_owned());
+        let detail = |first, length, width| album_detail("Kind of Blue", first, length, width);
+        assert_eq!(detail(year(), mins, 80), Some("1959 · 46:12".into()));
+        assert_eq!(detail(year(), hours, 80), Some("1959 · 1:12:05".into()));
+        // Only what is known.
+        assert_eq!(detail(None, mins, 80), Some("46:12".into()));
+        assert_eq!(detail(year(), None, 80), Some("1959".into()));
+        assert_eq!(detail(None, None, 80), None);
+        // "Kind of Blue" (12) + a space + "1959 · 46:12" (12) = 25 columns.
+        assert_eq!(detail(year(), mins, 25), Some("1959 · 46:12".into()));
+        assert_eq!(detail(year(), mins, 24), Some("1959".into()));
+        // A long name keeps at least MIN_NAME_WITH_LENGTH columns.
+        let long = "A Love Supreme (Deluxe Edition, Remastered)";
+        let width = MIN_NAME_WITH_LENGTH + 1 + 12;
+        assert_eq!(
+            album_detail(long, year(), mins, width),
+            Some("1959 · 46:12".into())
+        );
+        assert_eq!(
+            album_detail(long, year(), mins, width - 1),
+            Some("1959".into())
+        );
+        // A hostile length never pushes the year out.
+        assert_eq!(detail(year(), Some(Duration::MAX), 40), Some("1959".into()));
+        // In a row: a short name is never cut for the length, and the
+        // year shows wherever it did before.
+        for width in 0..40 {
+            let line = row_line("Kind of Blue", detail(year(), mins, width), width);
+            let text = line.to_string();
+            assert!(line.width() <= width, "{width}: {text:?}");
+            if text.contains("46:12") {
+                assert!(
+                    text.starts_with("Kind of Blue ") && text.ends_with(" 1959 · 46:12"),
+                    "{width}: {text:?}"
+                );
+            }
+            let year_only = row_line("Kind of Blue", year(), width).to_string();
+            assert_eq!(text.contains("1959"), year_only.contains("1959"), "{width}");
+        }
+    }
+
+    #[test]
+    fn navidrome_album_rows_show_year_and_length() {
+        let style = RowStyle {
+            album_artist: false,
+            song_artist: false,
+        };
+        let mut album = Album {
+            id: "k".into(),
+            name: "Kind of Blue".into(),
+            artist: Some("Miles Davis".into()),
+            year: Some(1959),
+            song_count: Some(5),
+            duration: Some(Duration::from_secs(2772)),
+        };
+        let row = |album: &Album, width| remote_row(Row::Album(album), style, width).to_string();
+        assert_eq!(
+            row(&album, 40),
+            format!("Kind of Blue{}1959 · 46:12", " ".repeat(16))
+        );
+        assert_eq!(row(&album, 20), "Kind of Blue    1959");
+        album.duration = Some(Duration::from_secs(4325));
+        assert!(row(&album, 40).ends_with(" 1959 · 1:12:05"));
+        album.year = None;
+        assert!(row(&album, 40).ends_with(" 1:12:05"));
+        album.duration = None;
+        assert_eq!(row(&album, 40).trim_end(), "Kind of Blue");
+    }
+
     // ----- local search ------------------------------------------------
 
     fn search_local(app: &mut App, query: &str, now: Instant) {
@@ -2621,6 +2952,53 @@ mod tests {
         )
     }
 
+    #[test]
+    fn local_album_rows_show_a_length_only_when_every_track_has_one() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        let mut unknown = album_track("p/02.flac", "Two", "Band", "", "Partial");
+        unknown.duration = None;
+        let mut long = album_track("l/01.flac", "Suite", "Band", "", "Long");
+        long.duration = Some(Duration::from_secs(4325));
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                album_track("p/01.flac", "One", "Band", "", "Partial"),
+                unknown,
+                long,
+                album_track("w/01.flac", "A", "Band", "", "Whole"),
+                album_track("w/02.flac", "B", "Band", "", "Whole"),
+            ]),
+            now,
+        );
+        // Home → Albums.
+        local_press(
+            &mut app,
+            &[
+                Action::Down,
+                Action::Down,
+                Action::Down,
+                Action::Down,
+                Action::Activate,
+            ],
+            now,
+        );
+        let screen = render(&app, 100, 16, now);
+        assert!(screen.contains("› Albums (A–Z)"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let line = |text: &str| *lines.iter().find(|l| l.contains(text)).unwrap();
+        assert!(
+            line("Long — Band").contains(" 1 track · 1:12:05│"),
+            "{screen}"
+        );
+        assert!(
+            line("Whole — Band").contains(" 2 tracks · 3:00│"),
+            "{screen}"
+        );
+        // A track of unknown length: no total rather than a short one.
+        assert!(line("Partial — Band").contains(" 2 tracks│"), "{screen}");
+        assert!(!line("Partial — Band").contains('·'), "{screen}");
+    }
+
     fn local_press(app: &mut App, actions: &[Action], now: Instant) {
         for action in actions {
             app.handle_action(*action, now);
@@ -2731,7 +3109,10 @@ mod tests {
         let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
         assert!(at("Hits — Various Artists") < at("Kind of Blue — Miles Davis"));
         assert!(at("Kind of Blue — Miles Davis") < at("Unknown album — Unknown artist"));
-        assert!(lines[at("Kind of Blue")].contains("2 tracks"), "{screen}");
+        assert!(
+            lines[at("Kind of Blue")].contains("2 tracks · 3:00│"),
+            "{screen}"
+        );
         app.handle_action(Action::CycleSort, now);
         let screen = render(&app, 140, 16, now);
         assert!(

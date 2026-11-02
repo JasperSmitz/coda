@@ -237,7 +237,7 @@ async fn search3_parses_all_sections_with_bounded_counts() {
         .and(query_param("songCount", "50"))
         .respond_with(ok(json!({ "searchResult3": {
             "artist": [{ "id": "a", "name": "Blue" }],
-            "album": [{ "id": "b", "name": "Moon", "artist": "Blue" }, { "id": 7 }],
+            "album": [{ "id": "b", "name": "Moon", "artist": "Blue", "duration": 2772 }, { "id": 7 }],
             "song": [{ "id": "c", "title": "Blue Moon", "duration": 3.5 }, "garbage"],
         }})))
         .mount(&server)
@@ -246,6 +246,8 @@ async fn search3_parses_all_sections_with_bounded_counts() {
     assert_eq!(results.artists.len(), 1);
     assert_eq!(results.albums.len(), 2);
     assert_eq!(results.albums[1].id, "7");
+    assert_eq!(results.albums[0].duration, Some(Duration::from_secs(2772)));
+    assert_eq!(results.albums[1].duration, None);
     assert_eq!(results.tracks.len(), 1);
     assert_eq!(
         results.tracks[0].duration,
@@ -659,6 +661,8 @@ async fn album_list_sends_the_sort_size_and_offset() {
     assert_eq!(page.albums.len(), 2);
     assert_eq!(page.albums[0].name, "First");
     assert_eq!(page.albums[0].artist.as_deref(), Some("X"));
+    assert_eq!(page.albums[0].year, Some(1999));
+    assert_eq!(page.albums[0].duration, Some(Duration::from_secs(600)));
     assert_eq!(page.albums[1].name.chars().count(), MAX_METADATA_CHARS);
     assert_eq!(page.albums[1].song_count, Some(u32::MAX));
     assert_eq!(page.albums[1].duration, Some(Duration::MAX));

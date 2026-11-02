@@ -285,3 +285,18 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - an empty local library cancelling a pending Navidrome play;
   - test gaps around held and dropped adds, and decode failures.
 - **Open UX point:** Home opens with Shuffle all selected, so a habitual Enter on launch replaces the restored queue. Flagged to the owner.
+
+## M7 slice 3 — wide visualizer and album length (2026-11-02)
+- **Implemented:**
+  - **Visualizer:** at 42 columns or wider, the bars spread across the width, at most 48 bars, with the meter on the right. Between the 7 measured bands, the values follow a monotone cubic on a log-frequency axis (`spread_bands`/`band_curve`): it hits every band exactly and never overshoots. Bars beyond an unavailable band stay empty. Below 42 columns the layout is unchanged.
+  - **Album rows:**
+    - Navidrome shows `1959 · 46:12` from the album's `duration`, which was already parsed.
+    - Local shows `12 tracks · 46:12`, summed from the scan only when every track's length is known.
+    - The year (or count) wins when the name would get fewer than 20 columns.
+- **Tests:**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 667 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke: 41/41.
+  - The reviewer also fuzzed the curve (200k inputs) and checked the layout at every width up to `u16::MAX`.
+- **Review:** nothing blocking; fixed one doc inaccuracy.
+- **Not yet done:** no manual look in a real terminal; the appearance is pinned by buffer snapshots only.
