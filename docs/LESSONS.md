@@ -153,3 +153,9 @@ Each entry should state:
 - **Root cause:** supersede was implemented by moving the `in_flight` id, without aborting or reusing the older request.
 - **Rule:** a target that can be re-requested on every key press must either reuse the request already in flight or abort the superseded task. Pin it with a test that N presses leave at most one request outstanding.
 - **Where verified:** M7 slice 2 review follow-up; `repeated_shuffle_all_presses_share_the_request_in_flight`.
+
+### An mpv IPC reply does not order commands against events
+- **Context / symptom:** the M8 spike read mpv's choice of the next entry from socket order: a `playlist-clear` reply before `end-file` was taken to mean the clear ran first. 50 randomised trials agreed, but the inference does not hold in general.
+- **Root cause:** mpv's IPC client thread runs each command synchronously and drains the events queued meanwhile only afterwards (mpv 0.41 `input/ipc-unix.c`, `client_thread`). An event that happened before the command ran can therefore be written after its reply. Only "event, then reply" is conclusive: that command ran after the event.
+- **Rule:** never infer the order of mpv's decisions from the order of replies and events. Read the decision from the event that reports it (here the successor's `start-file`), and settle "nothing happened" with a query that is answered after the decision (`idle-active`, atomic with mpv's choice of the next entry in `loadfile.c` when no hooks are registered). Model the reordering in interleaving tests.
+- **Where verified:** M8 slice 2 implementation and review (mpv source); `mpv_answering_the_check_first_still_waits_for_the_start`, `the_entry_before_the_newest_append_stays_recognised` in `src/playback/mpv/state.rs`, `every_queue_edit_in_the_switch_window_is_corrected` in `tests/event_ordering.rs`.

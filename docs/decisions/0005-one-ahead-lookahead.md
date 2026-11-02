@@ -1,0 +1,21 @@
+# ADR 0005 — One-ahead lookahead for gapless playback
+
+- **Status:** Accepted for M8 (amends ADR 0002)
+- **Context:** With one mpv playlist entry, every track change is a `loadfile replace` after the previous track's `end-file`: about 40–70 ms of silence for local files, about 0.4 s for a stream with 0.3 s first-byte latency, and more on some outputs (M8 spike findings, `docs/plans/m8-gapless.md`). mpv plays its own playlist without a gap (sample-exact for WAV, FLAC and LAME MP3), and with `--prefetch-playlist=yes` it opens the next stream while the current one plays.
+- **Decision:**
+  - Coda's queue stays authoritative. The mpv backend holds at most the current track and a copy of the next one.
+  - The player announces the next entry (`SetNext { after, next }`, with a fresh `LoadId`) whenever it changes: the queue's next entry, the first under repeat all, or the current entry again under repeat one once it has really played (≥ 1 s).
+  - The backend sets it with `playlist-clear` (which keeps the playing entry) and `loadfile … append`, and never addresses entries by index. The append's reply maps the new entry to its `LoadId`. mpv is spawned with `--prefetch-playlist=yes`; `--gapless-audio` stays at `weak`.
+  - mpv chooses the successor itself when a track ends. A reply that arrives before `end-file` does not prove that its command ran first (mpv writes the events that happened meanwhile after the reply), so the backend takes the successor from the next `start-file` and asks `idle-active` to learn that mpv stopped. It reports `Advanced { from, to }`, and `Started { to }` only when `to` is heard (the first `time-pos` above zero).
+  - An advance to an entry that is no longer next (the queue changed in the last moments of a track) is corrected with a `loadfile replace` of the right track, so a removed track never plays on. This cuts up to the output buffer of the ending track and adds about 70 ms of silence, only when an edit lands in that window.
+  - If mpv answers a `loadfile` without an entry id, the lookahead is off for the session and loads work as before.
+- **Alternatives:**
+  - **Mirror the whole queue into mpv's playlist:** two-way synchronisation of every edit; rejected in ADR 0002 and still rejected.
+  - **Accept a stale successor** (the change takes effect one track later): simpler, but a track the user just removed would play.
+  - **`loop-file` for repeat one:** gapless, but sends no file events, which breaks per-play `LoadId`s, scrobbling each repeat and failure counting.
+  - **`--gapless-audio=yes`:** removes the ~70 ms gap at a sample-rate change, but resamples every later track to the first track's rate for the whole session.
+- **Consequences:**
+  - Consecutive tracks with the same sample rate join without a gap; a stream needs no data at the change when prefetch had time to fetch it.
+  - The player handles an advance it did not command, and the visible state (now-playing bar, visualizer) follows what is heard rather than the queue's current entry, which moves up to the output buffer earlier.
+  - The event-ordering tests model mpv's two-entry playlist and the reply/event reordering.
+  - A prefetched next stream that is then changed costs one wasted request to the server. Navidrome sees the next track's stream request early; scrobbling is unaffected.

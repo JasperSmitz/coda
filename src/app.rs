@@ -1209,7 +1209,9 @@ impl App {
         frame: &crate::playback::VisualizerFrame,
         now: Instant,
     ) -> bool {
-        let current = self.player.current_load() == Some(load)
+        // The load heard: during a gapless change, the previous track's
+        // readings are shown until the next track is heard.
+        let current = self.player.audible_load() == Some(load)
             && self.player.status() == PlaybackStatus::Playing;
         if !self.visualizer_shown() || !self.visualizer_drawable || !current {
             return false;
@@ -1242,11 +1244,17 @@ impl App {
             PlaybackEvent::Started { load } => Some(load),
             _ => None,
         };
+        // The end of a gapless change: the bars carry on with the new track
+        // instead of dropping to silence.
+        let handover = started.and_then(|load| Some((self.player.handover_from(load)?, load)));
         let position = match event {
             PlaybackEvent::Position(position) => Some(position),
             _ => None,
         };
         let commands = self.player.handle_event(event);
+        if let Some((from, to)) = handover {
+            self.meter.hand_over(from, to);
+        }
         if let Some(load) = started {
             self.listen_started(load);
         }
@@ -1398,8 +1406,14 @@ impl App {
     }
 
     /// Applies a finished settings request; a saved or removed account is
-    /// swapped in at once (see [`App::take_client_change`]).
-    pub fn handle_settings_response(&mut self, response: settings::Response, now: Instant) {
+    /// swapped in at once (see [`App::take_client_change`]). Returns the
+    /// backend commands a swap needs (the next track announced again with
+    /// the new client).
+    pub fn handle_settings_response(
+        &mut self,
+        response: settings::Response,
+        now: Instant,
+    ) -> Vec<PlaybackCommand> {
         let change = self.settings.handle_response(response);
         if self.settings.busy().is_none() {
             self.quit_armed = false;
@@ -1416,8 +1430,15 @@ impl App {
                 self.swap_client(None, false, now);
                 self.set_status("Disconnected from Navidrome", now);
             }
-            None => {}
+            None => return Vec::new(),
         }
+        // Stream URLs signed by the old client must not start playing: a
+        // remote next track is announced again, signed by the new one (or
+        // not at all without a client), and one mpv already opened but
+        // nobody hears yet is loaded again. That load is resolved with the
+        // new client, so it is not the `unscrobbled_load` of the swap.
+        let commands = self.player.client_changed();
+        self.dispatch(commands, now)
     }
 
     /// A client swap for the loop: ping the new client and replace the
@@ -1620,7 +1641,7 @@ impl App {
     // ----- helpers -----------------------------------------------------
 
     fn meter_load_is_stale(&self) -> bool {
-        !self.meter.is_empty() && self.meter.load() != self.player.current_load()
+        !self.meter.is_empty() && self.meter.load() != self.player.audible_load()
     }
 
     fn after_player_call(&mut self, now: Instant) {
@@ -3103,7 +3124,8 @@ async fn event_loop(
             },
             // Likewise.
             Some(response) = settings_rx.recv() => {
-                app.handle_settings_response(response, Instant::now());
+                let commands = app.handle_settings_response(response, Instant::now());
+                playback.send_all(commands);
                 dirty = true;
             },
             failure = next_once(&mut scrobble_failure) => {
@@ -3193,7 +3215,7 @@ mod tests {
     }
 
     fn stream_id(commands: &[PlaybackCommand]) -> String {
-        match commands {
+        match &without_next(commands)[..] {
             [
                 PlaybackCommand::Load {
                     target: PlaybackTarget::Stream(url),
@@ -3332,7 +3354,7 @@ mod tests {
     }
 
     fn load_path(commands: &[PlaybackCommand]) -> PathBuf {
-        match commands {
+        match &without_next(commands)[..] {
             [
                 PlaybackCommand::Load {
                     target: PlaybackTarget::File(path),
@@ -3344,7 +3366,7 @@ mod tests {
     }
 
     fn load_id(commands: &[PlaybackCommand]) -> LoadId {
-        match commands {
+        match &without_next(commands)[..] {
             [PlaybackCommand::Load { load, .. }] => *load,
             other => panic!("expected one Load, got {other:?}"),
         }
@@ -3361,10 +3383,21 @@ mod tests {
             .collect()
     }
 
+    /// The actions' backend commands, except the gapless lookahead's
+    /// `SetNext`, which the tests below that care about it check apart.
     fn press(app: &mut App, actions: &[Action], now: Instant) -> Vec<PlaybackCommand> {
         actions
             .iter()
-            .flat_map(|a| app.handle_action(*a, now))
+            .flat_map(|a| without_next(&app.handle_action(*a, now)))
+            .collect()
+    }
+
+    /// `commands` without `SetNext`.
+    fn without_next(commands: &[PlaybackCommand]) -> Vec<PlaybackCommand> {
+        commands
+            .iter()
+            .filter(|c| !matches!(c, PlaybackCommand::SetNext { .. }))
+            .cloned()
             .collect()
     }
 
@@ -6144,7 +6177,7 @@ mod tests {
     }
 
     fn started(app: &mut App, commands: &[PlaybackCommand], now: Instant) -> LoadId {
-        let [PlaybackCommand::Load { load, .. }] = commands else {
+        let [PlaybackCommand::Load { load, .. }] = &without_next(commands)[..] else {
             panic!("{commands:?}");
         };
         app.handle_playback_event(PlaybackEvent::Started { load: *load }, now);
@@ -6805,7 +6838,7 @@ mod tests {
     }
 
     fn stream_host(commands: &[PlaybackCommand]) -> String {
-        match commands {
+        match &without_next(commands)[..] {
             [
                 PlaybackCommand::Load {
                     target: PlaybackTarget::Stream(url),
@@ -6965,6 +6998,220 @@ mod tests {
         );
         assert_eq!(stream_host(&commands), "other.example");
         assert_eq!(stream_id(&commands), "r2");
+    }
+
+    /// The next track announced in `commands` (`Some(None)`: nothing next),
+    /// as `(host, song id)` for a stream or `("", path)` for a file.
+    fn announced_next(commands: &[PlaybackCommand]) -> Option<Option<(String, String)>> {
+        commands.iter().find_map(|c| match c {
+            PlaybackCommand::SetNext { next, .. } => {
+                Some(next.as_ref().map(|(_, target)| match target {
+                    PlaybackTarget::Stream(url) => {
+                        let url = url::Url::parse(url.expose()).unwrap();
+                        let id = url
+                            .query_pairs()
+                            .find(|(k, _)| k == "id")
+                            .map(|(_, v)| v.into_owned())
+                            .unwrap();
+                        (url.host_str().unwrap().to_owned(), id)
+                    }
+                    PlaybackTarget::File(path) => (String::new(), path.display().to_string()),
+                }))
+            }
+            _ => None,
+        })
+    }
+
+    fn next_load(commands: &[PlaybackCommand]) -> LoadId {
+        commands
+            .iter()
+            .find_map(|c| match c {
+                PlaybackCommand::SetNext {
+                    next: Some((load, _)),
+                    ..
+                } => Some(*load),
+                _ => None,
+            })
+            .expect("a next track announced")
+    }
+
+    #[test]
+    fn a_swap_announces_the_remote_next_track_signed_by_the_new_client() {
+        let (mut app, now) = scrobble_app(vec![remote("r1"), remote("r2")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = app.handle_action(Action::Activate, now);
+        let pair = |host: &str| Some(Some((host.to_owned(), "r2".to_owned())));
+        assert_eq!(announced_next(&commands), pair("h.example"));
+        let old_next = next_load(&commands);
+        let load = started(&mut app, &commands, now);
+
+        let id = settings_up_to_save(&mut app, now);
+        let commands = app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Ok(settings::Saved {
+                    client: other_client(),
+                    scrobble: true,
+                }),
+            },
+            now,
+        );
+        // The track playing keeps its stream; the next one is signed again.
+        assert!(without_next(&commands).is_empty(), "{commands:?}");
+        assert_eq!(announced_next(&commands), pair("other.example"));
+        let new_next = next_load(&commands);
+        assert!(new_next > old_next);
+
+        // mpv had already started the old stream: it is replaced with one
+        // signed by the new client, and never scrobbled.
+        let commands = app.handle_playback_event(
+            PlaybackEvent::Advanced {
+                from: load,
+                to: old_next,
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        assert_eq!(stream_id(&commands), "r2");
+        app.take_scrobble_requests();
+        app.handle_playback_event(PlaybackEvent::Started { load: old_next }, now);
+        assert!(app.take_scrobble_requests().is_empty());
+    }
+
+    #[test]
+    fn a_swap_while_the_next_stream_is_not_heard_yet_reloads_it() {
+        let (mut app, now) = scrobble_app(vec![remote("r1"), remote("r2")]);
+        app.set_settings_context(settings_context(None, coda_owned()));
+        let commands = app.handle_action(Action::Activate, now);
+        let old_r2 = next_load(&commands);
+        let load = started(&mut app, &commands, now);
+        // mpv went on to r2, opened with the old client; r1 is still heard.
+        app.handle_playback_event(
+            PlaybackEvent::Advanced {
+                from: load,
+                to: old_r2,
+            },
+            now,
+        );
+        let id = settings_up_to_save(&mut app, now);
+        let commands = app.handle_settings_response(
+            settings::Response::Saved {
+                id,
+                result: Ok(settings::Saved {
+                    client: other_client(),
+                    scrobble: true,
+                }),
+            },
+            now,
+        );
+        assert_eq!(stream_host(&commands), "other.example");
+        assert_eq!(stream_id(&commands), "r2");
+        let new_r2 = load_id(&commands);
+        app.take_scrobble_requests();
+        // The old copy's start is stale and never reported.
+        app.handle_playback_event(PlaybackEvent::Started { load: old_r2 }, now);
+        assert!(app.take_scrobble_requests().is_empty());
+        // The reload is the new server's play.
+        app.handle_playback_event(PlaybackEvent::Started { load: new_r2 }, now);
+        assert_eq!(app.take_scrobble_requests().len(), 1);
+    }
+
+    #[test]
+    fn a_gapless_advance_to_the_announced_stream_is_scrobbled_when_heard() {
+        let (mut app, now) = scrobble_app(vec![remote("r1"), remote("r2")]);
+        let commands = app.handle_action(Action::Activate, now);
+        let next = next_load(&commands);
+        let load = started(&mut app, &commands, now);
+        app.take_scrobble_requests();
+        let commands = app.handle_playback_event(
+            PlaybackEvent::Advanced {
+                from: load,
+                to: next,
+            },
+            now,
+        );
+        assert!(commands.is_empty(), "{commands:?}");
+        // Nothing reported until r2 is heard; r1 is still what plays.
+        assert!(app.take_scrobble_requests().is_empty());
+        assert_eq!(
+            app.player().playing_entry().unwrap().track.title,
+            "Remote r1"
+        );
+        app.handle_playback_event(PlaybackEvent::Started { load: next }, now);
+        let requests = app.take_scrobble_requests();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(
+            app.player().playing_entry().unwrap().track.title,
+            "Remote r2"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_clears_the_remote_next_track() {
+        let now = Instant::now();
+        let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
+        app.set_settings_context(settings_context(Some(ROOT), coda_owned()));
+        app.player.enqueue(track("a.flac"));
+        app.player.enqueue(remote("r2"));
+        app.focus = Focus::Queue;
+        let commands = app.handle_action(Action::Activate, now);
+        assert_eq!(
+            announced_next(&commands),
+            Some(Some(("h.example".to_owned(), "r2".to_owned())))
+        );
+        app.handle_action(Action::OpenSettings, now);
+        app.handle_settings_input(Input::Char('d'), now);
+        app.handle_settings_input(Input::Char('d'), now);
+        let requests = app.take_settings_requests();
+        let [settings::Request::Disconnect { id, .. }] = requests.as_slice() else {
+            panic!("expected a disconnect, got {requests:?}");
+        };
+        let commands = app.handle_settings_response(
+            settings::Response::Disconnected {
+                id: *id,
+                result: Ok(()),
+            },
+            now,
+        );
+        assert_eq!(announced_next(&commands), Some(None));
+    }
+
+    #[test]
+    fn the_bars_carry_on_across_a_gapless_change() {
+        let (mut app, now) = queued_app(&["A", "B"]);
+        press(&mut app, &[Action::ToggleVisualizer], now);
+        let commands = app.handle_action(Action::Activate, now);
+        let b = next_load(&commands);
+        let a = started(&mut app, &commands, now);
+        assert!(app.handle_visualizer(a, &reading(1.0), now));
+        app.handle_playback_event(PlaybackEvent::Advanced { from: a, to: b }, now);
+        // A's tail is still heard: its readings are shown, B's not yet.
+        assert_eq!(app.meter().load(), Some(a));
+        assert!(app.meter().levels()[0] > 0.0);
+        assert!(app.handle_visualizer(a, &reading(1.0), now));
+        assert!(!app.handle_visualizer(b, &reading(0.5), now));
+        // B is heard: the bars carry on as B's instead of dropping.
+        app.handle_playback_event(PlaybackEvent::Started { load: b }, now);
+        assert_eq!(app.meter().load(), Some(b));
+        assert!(app.meter().levels()[0] > 0.0);
+        assert!(app.handle_visualizer(b, &reading(0.5), now));
+        assert!(!app.handle_visualizer(a, &reading(1.0), now));
+    }
+
+    #[test]
+    fn queue_edits_announce_the_new_next_track() {
+        let (mut app, now) = queued_app(&["A", "B", "C"]);
+        let commands = app.handle_action(Action::Activate, now);
+        started(&mut app, &commands, now);
+        let file = |name: &str| Some(Some((String::new(), format!("/music/{name}.flac"))));
+        assert_eq!(announced_next(&commands), file("B"));
+        // `J` on B (selected below the current entry): C is next.
+        app.handle_action(Action::Down, now);
+        let commands = app.handle_action(Action::MoveEntryDown, now);
+        assert_eq!(announced_next(&commands), file("C"));
+        // `r`: repeat all; nothing changes while C is still next.
+        let commands = app.handle_action(Action::CycleRepeat, now);
+        assert_eq!(announced_next(&commands), None);
     }
 
     #[test]

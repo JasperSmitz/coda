@@ -300,3 +300,37 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - The reviewer also fuzzed the curve (200k inputs) and checked the layout at every width up to `u16::MAX`.
 - **Review:** nothing blocking; fixed one doc inaccuracy.
 - **Not yet done:** no manual look in a real terminal; the appearance is pinned by buffer snapshots only.
+
+## M8 slice 2 — gapless playback (2026-11-02)
+- **Implemented** (brief `docs/plans/m8-gapless.md`, ADR 0005 amending ADR 0002):
+  - **Lookahead:** the player announces the next entry (`SetNext { after, next }`, fresh `LoadId`) after every change, through `resolve::dispatch`; the backend holds it in mpv with `playlist-clear` + `loadfile … append`. mpv runs with `--prefetch-playlist=yes`; entry ids now come from the `loadfile` reply.
+  - **Advance:** mpv picks the successor itself. The backend reports `Advanced { from, to }` at the successor's `start-file` (asking `idle-active` to learn that mpv stopped), and `Started { to }` at the first `time-pos` above zero.
+  - **Correction:** an advance to an entry that is no longer next (a queue change in the last moments of a track) is replaced with a `loadfile replace` of the right one.
+  - **What is heard:** the now-playing bar, the queue's `▶`, the visualizer and scrobbling switch when the next track is heard; the visualizer hands its readings over between two aligners and never removes its graph at a change.
+  - **Other:** a client swap announces a remote next track again; a `loadfile` reply without an entry id turns the lookahead off for the session.
+- **Design note:** mpv's IPC thread runs a command synchronously and writes the events that happened meanwhile after its reply (mpv 0.41 `input/ipc-unix.c`), so a reply before `end-file` does not prove the command ran first. Hence the successor is read from `start-file`, not from the acknowledged playlist.
+- **Tests:**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 713 lib tests plus the integration suites, including 37 event-ordering tests (new: set-next replies around the end, queue edits taken in time, in the switch window and leaving mpv idle, user loads and stops racing an advance, failing and missing next tracks, instant files under every repeat mode, repeat one, collapsing).
+  - Ignored mpv tests on macOS (mpv 0.41): 30/30, five of them new. One run of four had `a_visualizer_graph_mpv_refuses_is_unavailable_and_playback_goes_on` fail its position check while a container build loaded the machine; 8 isolated reruns passed.
+  - Ignored tests in Debian (`rust:1-bookworm`, mpv 0.35.1, `cargo test -j 2 --all-targets -- --ignored`): 27/30. The new gapless tests all pass. The three failures use the default audio output, which the container lacks ("audio output initialization failed"); they fail the same way on the base commit.
+  - PTY smoke: the M7 script 41/41, and a new gapless run on CoreAudio 11/11.
+- **Review:** the reviewer accepted the `start-file` + `idle-active` deviation. Fixed:
+  - the current entry's mapping could be evicted after about 63 next-entry changes in one track; now unreachable appends are pruned and started or current entries are never evicted;
+  - `>` and `<` while the previous track is still heard now act on that track (`>` loads the track not heard yet);
+  - a set-next held back while the end of a track was being settled was never sent;
+  - a client swap during a gapless change to a remote track reloads it through the new client;
+  - mpv's `idle` event also ends the wait for a successor;
+  - an advance to an earlier copy of the same local entry is accepted without a cut; a load the driver rejected leaves nothing current;
+  - the real-mpv race test now forces a stale advance deterministically and records each path.
+- **Re-review:** all fixes confirmed. Fixed after it:
+  - a stale append left behind an accepted advance is now cleared;
+  - a reload after a client change keeps the pause.
+- **Final verification (architect):**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 727 lib tests, 38 event-ordering.
+  - Ignored mpv tests on macOS: 30/30.
+  - PTY smoke: M7 41/41, gapless 11/11.
+  - Debian container, mpv 0.35.1: 27/30. Every gapless test passes; the 3 failures need an audio device the container lacks, as on the base commit.
+- **Not yet done:**
+  - a manual listen to a segued album;
+  - the TUI on Linux;
+  - mpv 0.33.0, which isn't obtainable; 0.33.1 was tested in the spike.

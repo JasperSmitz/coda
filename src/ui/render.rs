@@ -870,7 +870,9 @@ fn draw_queue(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, fo
     let height = usize::from(block.inner(area).height);
     let offset = scroll_offset(view.queue_offset, app.queue_selected(), queue.len(), height);
     view.queue_offset = offset;
-    let current = queue.current();
+    // The entry heard, which during a gapless change is still the previous
+    // one for a moment.
+    let current = app.player().playing_entry().map(|e| e.id);
     let items: Vec<ListItem> = queue
         .entries()
         .iter()
@@ -941,7 +943,7 @@ fn draw_now_playing(frame: &mut Frame, app: &App, area: Rect, visualizer: bool) 
 
     let (label, color) = status_label(player.status());
     let label = format!("[{label}] ");
-    let entry = player.queue().current_entry();
+    let entry = player.playing_entry();
     let mut spans = vec![Span::styled(
         label.clone(),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -1027,7 +1029,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     let meter = app.meter();
     let live = player.status() == PlaybackStatus::Playing
         && meter.load().is_some()
-        && meter.load() == player.current_load();
+        && meter.load() == player.audible_load();
     let (levels, bands) = if live {
         (meter.levels(), meter.bands())
     } else {
@@ -1838,6 +1840,57 @@ mod tests {
         let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
         let half: String = rows.iter().map(|r| r.chars().nth(x).unwrap()).collect();
         assert_ne!(full, half, "{rows:?}");
+    }
+
+    #[test]
+    fn the_now_playing_bar_switches_when_the_next_track_is_heard() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                tagged("1.flac", "First Song", "Artist", 100),
+                tagged("2.flac", "Second Song", "Artist", 100),
+            ]),
+            now,
+        );
+        open_folders(&mut app, now);
+        let commands = app.handle_action(Action::Activate, now);
+        let (load, next) = match commands.as_slice() {
+            [
+                PlaybackCommand::Load { load, .. },
+                PlaybackCommand::SetNext {
+                    next: Some((next, _)),
+                    ..
+                },
+            ] => (*load, *next),
+            other => panic!("{other:?}"),
+        };
+        app.handle_playback_event(PlaybackEvent::Started { load }, now);
+        app.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(99)), now);
+        // mpv went on to the second song, which is not heard yet.
+        app.handle_playback_event(
+            PlaybackEvent::Advanced {
+                from: load,
+                to: next,
+            },
+            now,
+        );
+        let (terminal, _) = drawn(&app, 100, 24, now);
+        let text = buffer_text(&terminal);
+        let bar = text
+            .lines()
+            .find(|l| l.contains("[Playing]"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(bar.contains("First Song"), "{bar}");
+        assert!(text.contains("1:39 / 1:40"), "{text}");
+        assert!(text.contains("▶ Artist - First Song"), "{text}");
+        // It is heard.
+        app.handle_playback_event(PlaybackEvent::Started { load: next }, now);
+        let (terminal, _) = drawn(&app, 100, 24, now);
+        let text = buffer_text(&terminal);
+        let bar = text.lines().find(|l| l.contains("[Playing]")).unwrap();
+        assert!(bar.contains("Second Song"), "{bar}");
+        assert!(text.contains("▶ Artist - Second Song"), "{text}");
     }
 
     #[test]

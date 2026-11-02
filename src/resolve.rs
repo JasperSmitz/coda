@@ -39,20 +39,34 @@ pub fn resolve_source(
 }
 
 /// Converts one player command into a backend command. A load whose
-/// source cannot be resolved is returned as `Err((load, reason))`.
+/// source cannot be resolved is returned as `Err((load, reason))`. A next
+/// entry that cannot be resolved is simply not announced: the backend gets
+/// `SetNext` without one, and the entry's own load reports the problem
+/// when it is reached.
 pub fn resolve_command(
     command: PlayerCommand,
     navidrome: Option<&navidrome::Client>,
 ) -> Result<PlaybackCommand, (LoadId, String)> {
     match command.into_playback() {
         Ok(command) => Ok(command),
-        Err((load, source)) => match resolve_source(&source, navidrome) {
+        Err(PlayerCommand::Load { load, source }) => match resolve_source(&source, navidrome) {
             Ok(target) => Ok(PlaybackCommand::Load { load, target }),
             Err(reason) => {
                 tracing::info!(%load, %reason, "could not resolve track source");
                 Err((load, reason))
             }
         },
+        Err(PlayerCommand::SetNext { after, next }) => {
+            let next = next.and_then(|(load, source)| match resolve_source(&source, navidrome) {
+                Ok(target) => Some((load, target)),
+                Err(reason) => {
+                    tracing::info!(%load, %reason, "could not resolve the next track's source");
+                    None
+                }
+            });
+            Ok(PlaybackCommand::SetNext { after, next })
+        }
+        Err(other) => unreachable!("into_playback returns only loads and nexts: {other:?}"),
     }
 }
 
@@ -68,6 +82,11 @@ pub fn resolve_command(
 /// one pass ([`Player::skip_remote_entries`], status [`REMOTE_SKIPPED`]),
 /// or stops if there is none. This bounds the work done for a queue of
 /// thousands of remote entries.
+///
+/// Last, the player announces its next entry if that changed
+/// ([`Player::sync_next`]). Every batch of player commands, and every
+/// queue edit (dispatched with no commands), goes through here, which
+/// keeps the backend's gapless lookahead current.
 pub fn dispatch(
     player: &mut Player,
     navidrome: Option<&navidrome::Client>,
@@ -76,7 +95,8 @@ pub fn dispatch(
     let mut work: VecDeque<PlayerCommand> = commands.into();
     let mut out = Vec::new();
     let mut remote_failed = false;
-    while let Some(command) = work.pop_front() {
+    // Once the batch is done, the player's next entry (if it changed).
+    while let Some(command) = work.pop_front().or_else(|| player.sync_next()) {
         match resolve_command(command, navidrome) {
             Ok(command) => out.push(command),
             Err((load, reason)) => {
@@ -221,7 +241,11 @@ mod tests {
     }
 
     fn loaded_path(out: &[PlaybackCommand]) -> String {
-        match out {
+        let out: Vec<_> = out
+            .iter()
+            .filter(|c| !matches!(c, PlaybackCommand::SetNext { .. }))
+            .collect();
+        match &out[..] {
             [
                 PlaybackCommand::Load {
                     target: PlaybackTarget::File(path),
@@ -267,5 +291,54 @@ mod tests {
             [PlaybackCommand::Stop]
         );
         assert_eq!(player.current_load(), None);
+    }
+
+    #[test]
+    fn dispatch_announces_the_next_entry_resolved_like_a_load() {
+        let mut player = Player::new();
+        let first = player
+            .enqueue(Track::local("/m/a.flac".into(), TrackMetadata::default()))
+            .unwrap();
+        player.enqueue(Track::navidrome("s2".into(), TrackMetadata::default()));
+        let commands = player.play_entry(first);
+        let out = dispatch(&mut player, Some(&client()), commands);
+        let [
+            PlaybackCommand::Load { load, .. },
+            PlaybackCommand::SetNext {
+                after,
+                next: Some((next, PlaybackTarget::Stream(url))),
+            },
+        ] = out.as_slice()
+        else {
+            panic!("{out:?}");
+        };
+        assert_eq!(after, load);
+        assert!(next > load, "a fresh load id");
+        assert!(url.expose().contains("id=s2"));
+        // Nothing changed: nothing more to announce.
+        assert!(dispatch(&mut player, Some(&client()), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_next_entry_that_cannot_be_resolved_is_not_announced() {
+        let mut player = Player::new();
+        let first = player
+            .enqueue(Track::local("/m/a.flac".into(), TrackMetadata::default()))
+            .unwrap();
+        player.enqueue(Track::navidrome("s2".into(), TrackMetadata::default()));
+        let commands = player.play_entry(first);
+        let out = dispatch(&mut player, None, commands);
+        let [PlaybackCommand::Load { load, .. }, next] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        assert_eq!(
+            *next,
+            PlaybackCommand::SetNext {
+                after: *load,
+                next: None
+            }
+        );
+        // Nothing is reported: the entry's own load does that when reached.
+        assert!(player.take_messages().is_empty());
     }
 }

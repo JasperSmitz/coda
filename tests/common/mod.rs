@@ -67,3 +67,40 @@ pub fn write_tones(path: &Path, rate: u32, channels: u16, segments: &[(f64, u32)
     }
     std::fs::write(path, bytes).expect("write wav");
 }
+
+/// Writes a 16-bit PCM WAV at `rate` Hz with `channels` channels from
+/// interleaved `samples`.
+pub fn write_samples(path: &Path, rate: u32, channels: u16, samples: &[i16]) {
+    let data_len = (samples.len() * 2) as u32;
+    let block_align = channels * 2;
+    let mut bytes = Vec::with_capacity(44 + data_len as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(path, bytes).expect("write wav");
+}
+
+/// Seeded white noise at a quarter of full scale: `len` samples.
+pub fn noise(len: usize, seed: u64) -> Vec<i16> {
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 48) as i16) / 4
+        })
+        .collect()
+}

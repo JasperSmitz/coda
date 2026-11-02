@@ -62,15 +62,15 @@ Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md
 - **Slice 3 (completed, reviewed):** the visualizer spreads across the width with interpolated bars; album rows show the running time before the year.
 - Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
-## M8 — Gapless playback (in progress)
+## M8 — Gapless playback (completed, reviewed)
 Brief: `docs/plans/m8-gapless.md`.
 Consecutive tracks play without a pause, for local files and Navidrome streams.
-- **Approach ("one ahead"):** Coda keeps owning the queue (ADR 0002, to be amended by a new ADR) and keeps a copy of the next queue entry in mpv's playlist, so mpv's gapless audio and prefetching can move on by themselves.
-- **Slice 1, spike:**
+- **Approach ("one ahead"):** Coda keeps owning the queue (ADR 0002, amended by ADR 0005) and keeps a copy of the next queue entry in mpv's playlist, so mpv's gapless audio and prefetching can move on by themselves.
+- **Slice 1, spike (completed):** findings in the brief.
   - Measure today's gap (local and Navidrome).
   - Verify the approach on the minimum and current mpv versions: entry ids, events, a queue change just before a track ends.
   - Write down what the visualizer time code and scrobbling need at a seamless change.
-- **Slice 2:** the feature, briefed from the spike findings.
+- **Slice 2 (completed, reviewed):** the feature, briefed from the spike findings.
   - Every queue change updates mpv's next entry: remove, move, shuffle, play next, a context replace, and the repeat modes.
   - Track-change handling stays under the exhaustive event-ordering tests.
 - **Related:** this also lays the groundwork for endless play, which needs the next track known ahead of time.

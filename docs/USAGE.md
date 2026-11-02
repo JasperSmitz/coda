@@ -82,6 +82,11 @@ The keys:
   - **Local:** every track in a random order. With more than 10,000 tracks, a random 10,000. While the scan is still running, or after it failed, it uses the tracks scanned so far, and the status line says so.
   - **Navidrome:** 500 random songs from the server, a new set on every press. Pressing again while a set is loading waits for that set.
 - **Stereo:** Coda always plays in stereo. Mono is played on both channels, and mpv downmixes surround.
+- **Gapless playback:** the next track in the queue starts without a pause, also under repeat. Coda gives mpv a copy of the next track in advance, and mpv opens it (for Navidrome: starts downloading it) while the current one plays.
+  - **A change of sample rate** between two tracks (for example 44.1 to 48 kHz) still leaves a pause of about 70 ms while the audio output reopens. The tracks of an album normally share one rate.
+  - **AAC (`.m4a`)** joins can be off by about 20 ms; this comes from mpv and FFmpeg.
+  - **A queue change in the last moment of a track** (about the last quarter second, longer on Bluetooth) is corrected: the track you removed or replaced does not play, at the cost of a slightly cut ending and a short pause.
+  - **Navidrome** sees the next song's stream request early, once the current one has been fetched. A song you then skip costs one wasted request. Scrobbling is unaffected.
 - **The visualizer:**
   - It is off by default; `v` turns it on.
   - It shows frequency bands and a left/right level meter in the now-playing bar while a track plays.

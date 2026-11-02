@@ -77,6 +77,11 @@ pub fn mpv_args(socket: &Path, extra: &[&str]) -> Vec<OsString> {
         // channel layout, and with this, adding it never changes what is
         // heard. Mono plays as left = right; surround is downmixed.
         "--audio-channels=stereo".into(),
+        // Open the next playlist entry (Coda's lookahead) while the current
+        // one plays, so a stream's first-byte latency does not become a
+        // gap. Gapless audio stays at mpv's default, `weak`: `yes` would
+        // resample every later track to the first track's rate.
+        "--prefetch-playlist=yes".into(),
     ];
     args.extend(extra.iter().map(OsString::from));
     args.push(ipc);
@@ -324,6 +329,7 @@ mod tests {
                 "--network-timeout=15",
                 "--access-references=no",
                 "--audio-channels=stereo",
+                "--prefetch-playlist=yes",
                 "--input-ipc-server=/run/user/1000/coda-x/mpv.sock",
             ]
         );
