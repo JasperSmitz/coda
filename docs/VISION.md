@@ -19,4 +19,4 @@ Coda is a keyboard-first Rust TUI music player with a calm, compact interface. I
 5. **Small and understandable:** choose the simplest architecture that supports the current milestone.
 
 ## Not in the initial scope
-Lyrics, smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified. Gapless playback is proposed as M8 and cover art as M9; endless play and context-aware autoplay are noted for later.
+Lyrics, smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified. Cover art is M9 and a full-screen now-playing view is proposed as M10; endless play and context-aware autoplay are noted for later.

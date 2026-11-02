@@ -331,6 +331,8 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - PTY smoke: M7 41/41, gapless 11/11.
   - Debian container, mpv 0.35.1: 27/30. Every gapless test passes; the 3 failures need an audio device the container lacks, as on the base commit.
 - **Not yet done:**
-  - a manual listen to a segued album;
   - the TUI on Linux;
   - mpv 0.33.0, which isn't obtainable; 0.33.1 was tested in the spike.
+
+## M8 — owner check (2026-11-02)
+- The owner listened to two segued tracks on macOS: no audible join, and no hitch or lag in the visualizer or the UI.
