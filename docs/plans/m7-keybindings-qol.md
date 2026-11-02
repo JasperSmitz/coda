@@ -94,3 +94,11 @@ Enter **replaces the queue** and starts playing. There is no confirmation, by ow
   - interpolation hits the 7 real values at their positions, stays within neighbouring bounds, and handles `None` bands;
   - bar layout at several widths;
   - render snapshots at narrow, medium and wide widths.
+
+### Also in slice 3: album length (owner, 2026-11-02)
+Album rows show the album's total running time next to the release year, e.g. `1959 · 46:12`, or `1:12:05` for an hour or more.
+- **Navidrome:** use the album's `duration`, which `getAlbumList2`/`getArtist` already return and which the raw type already parses. Carry it into the domain `Album`.
+- **Local:** sum the album's track durations from the scan. If any track's duration is unknown, show no length rather than a short total.
+- **Missing values:** show only what is known (year, length, both or neither).
+- **Narrow rows:** the year wins when the row is too narrow for both.
+- **Tests:** formatting (under and over an hour), the unknown-duration rule, and the narrow-row truncation.

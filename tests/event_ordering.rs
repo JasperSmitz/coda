@@ -446,7 +446,7 @@ fn enter_on_library_track_during_playback() {
     sim.play(0);
     sim.complete_load(0, 1);
     let x = Track::local("/m/X.wav".into(), TrackMetadata::default());
-    let commands = sim.player.play_track_now(x);
+    let commands = sim.player.play_context(vec![x], 0);
     sim.commands(commands);
     sim.loadfile_ok(1, 2);
     sim.end_file(1, "eof");
@@ -460,7 +460,7 @@ fn enter_on_library_track_during_playback() {
         .iter()
         .map(|e| e.track.title.as_str())
         .collect();
-    assert_eq!(titles, ["A", "X", "B"]);
+    assert_eq!(titles, ["X"], "Enter replaced the queue");
     assert_eq!(sim.player.queue().current_entry().unwrap().track.title, "X");
     assert_eq!(sim.loads.len(), 2);
     assert_eq!(sim.advances, 0);

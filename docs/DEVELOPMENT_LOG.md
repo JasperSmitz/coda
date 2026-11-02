@@ -238,3 +238,33 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Bands show about 50–130 ms after the sound.
   - The Linux PulseAudio/PipeWire lead has not been measured acoustically.
   - The graph stays attached while hidden until the next track (about 3.5–6 % of a core).
+
+## M7 slice 1 — keymap and play in context (2026-11-02)
+- **Owner decisions:**
+  - Play in context; the queue is temporary.
+  - `h`/`l` and the arrow keys navigate, Enter plays, `s` plays shuffled.
+  - `,` `.` seek and `<` `>` go to the previous or next track.
+  - `r` repeat, `R` refresh, `O` settings.
+  - `D` removes an entry in one press; deleting a whole playlist asks y/n.
+  - Notes are in `docs/M7_QOL_Findings.md`; the brief is `docs/plans/m7-keybindings-qol.md`.
+- **Implemented:**
+  - `Player::play_context(tracks, start)` is the only way to replace the queue. When the context is longer than the cap, it keeps a window that contains the start track and drops from the front first.
+  - Enter in an album, playlist, folder or search results starts at the selected track, with the earlier tracks before it.
+  - `s` shuffles with the selected track first, using the seeded `Rng`. It works on tracks, albums, playlists, artists (local and Navidrome) and folders.
+  - An uncached Navidrome list becomes a single play request:
+    - a newer play replaces it;
+    - it is tagged with the client generation;
+    - it is cancelled by any local play, by Enter in the queue, and by `C C`.
+  - Adds are applied in key-press order. Adds pressed before Enter are dropped (with a note); adds pressed during a pending play wait for it and are released if it fails or is cancelled.
+  - The play request has a reserved fetch slot and borrows any free job slots, so at most 3 fetches run, within the 4-request semaphore.
+  - The help screen, README, ARCHITECTURE and every hint were updated; old keys are gone.
+- **Tests:**
+  - fmt, clippy (both variants) and `cargo test --all-targets` pass: 639 lib tests plus the integration suites.
+  - Ignored mpv tests: 25/25.
+  - PTY smoke against a fake Subsonic server: 30/30.
+- **Review:** one round, nothing blocking. Fixed:
+  - add/play ordering that depended on fetch arrival, including the same album being queued twice;
+  - a pending play surviving `C C`;
+  - Enter waiting behind superseded fetches;
+  - artist shuffle fetching albums one at a time (introduced by the slot fix);
+  - polish: unused queue API, the confirmation kind check, and the "Not deleted" status.

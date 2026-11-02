@@ -54,6 +54,8 @@ const SEARCH_PROMPT: &str = "Search: ";
 const SEARCH_HINT: &str = "Enter search · Esc cancel";
 /// Below the playlist name input.
 const PROMPT_HINT: &str = "Enter save · Esc cancel (empty name cancels)";
+/// Hint under a y/n question.
+const CONFIRM_HINT: &str = "y delete · any other key cancels";
 /// Widest the picker and prompt boxes get.
 const DIALOG_WIDTH: u16 = 60;
 
@@ -117,9 +119,9 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     let room = screen.width >= VISUALIZER_MIN_SCREEN.0 && screen.height >= VISUALIZER_MIN_SCREEN.1;
     let overlay = app.help_open()
         || app.settings_open()
-        || app
-            .browser()
-            .is_some_and(|b| b.picker().is_some() || b.prompt().is_some());
+        || app.browser().is_some_and(|b| {
+            b.picker().is_some() || b.prompt().is_some() || b.confirmation().is_some()
+        });
     view.visualizer_drawable = room && !overlay;
     let visualizer = app.visualizer_shown() && room;
     let now_playing_height = if visualizer {
@@ -160,6 +162,9 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         }
         if let Some((title, text)) = browser.prompt() {
             draw_prompt(frame, title, text, frame.area());
+        }
+        if let Some(question) = browser.confirmation() {
+            draw_confirmation(frame, &question, frame.area());
         }
     }
     if app.settings_open() {
@@ -487,7 +492,7 @@ fn draw_remote(
         Load::Loading(_) => message(frame, "Loading…", Style::default().fg(Color::Yellow)),
         Load::Failed(error) => message(
             frame,
-            &format!("Error: {error} (r to retry)"),
+            &format!("Error: {error} (R to retry)"),
             Style::default().fg(Color::Red),
         ),
         Load::Ready => {
@@ -515,7 +520,7 @@ fn draw_remote(
                     Style::default().fg(Color::Yellow),
                 )),
                 More::Failed(_) => Some(Line::styled(
-                    fit("Could not load more — r to retry", usize::from(body.width)),
+                    fit("Could not load more — R to retry", usize::from(body.width)),
                     Style::default().fg(Color::Red),
                 )),
             };
@@ -714,6 +719,24 @@ fn draw_prompt(frame: &mut Frame, title: &str, text: &str, area: Rect) {
             },
         );
     }
+}
+
+/// A y/n question in a box like the name prompt, without a cursor.
+fn draw_confirmation(frame: &mut Frame, question: &str, area: Rect) {
+    let popup = centered(area, DIALOG_WIDTH, 4);
+    frame.render_widget(Clear, popup);
+    let block = panel_block("Delete playlist".to_owned(), true, popup.width);
+    let body = block.inner(popup);
+    frame.render_widget(block, popup);
+    let width = usize::from(body.width);
+    let lines = vec![
+        Line::raw(fit(question, width)),
+        Line::styled(
+            fit(CONFIRM_HINT, width),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
 /// The one-line search input: the prompt and the end of the query (the
@@ -1622,9 +1645,12 @@ mod tests {
         assert!(screen.contains("Switch panel"), "{screen}");
         assert!(screen.contains("Ctrl-C"), "{screen}");
         for text in [
+            "Play in context / play entry",
+            "Play shuffled / queue: shuffle",
+            "Open / go up (Esc: leave results)",
             "Queue: remove / move down / up",
-            "Queue: select current / shuffle",
-            "Queue: clear / save as playlist",
+            "Queue: current / clear / save",
+            "Seek −5 s, +5 s / volume up, down",
             "Add to a Navidrome playlist",
             "Playlists: new / rename / delete",
             "Playlist: remove / move song",
@@ -2366,7 +2392,7 @@ mod tests {
         app.handle_navidrome_ping(Err(crate::navidrome::Error::Auth), now);
         let screen = render(&app, 100, 14, now);
         assert!(
-            screen.contains("Error: authentication failed (r to retry)"),
+            screen.contains("Error: authentication failed (R to retry)"),
             "{screen}"
         );
         assert!(screen.contains("Navidrome (not connected)"), "{screen}");
@@ -2511,7 +2537,7 @@ mod tests {
                 duration: None,
             }])),
         );
-        app.handle_action(Action::Activate, now);
+        app.handle_action(Action::Open, now);
         let songs = app.take_fetch_requests().remove(0);
         let mut no_duration = nav_track("r2", "No Length", "Remote", 0);
         no_duration.duration = None;
@@ -2526,6 +2552,11 @@ mod tests {
         app.handle_action(Action::Down, now);
         app.handle_action(Action::Enqueue, now);
         app.handle_action(Action::Up, now);
+        app.handle_action(Action::Enqueue, now);
+        // Play the remote song from the queue, keeping the local one.
+        app.handle_action(Action::SwitchFocus, now);
+        app.handle_action(Action::Down, now);
+        app.handle_action(Action::Down, now);
         let commands = app.handle_action(Action::Activate, now);
         let Some(PlaybackCommand::Load { load, .. }) = commands.first() else {
             panic!("{commands:?}");
@@ -2640,7 +2671,7 @@ mod tests {
         // A compilation names each track's artist.
         local_press(
             &mut app,
-            &[Action::Down, Action::Activate, Action::Activate],
+            &[Action::Down, Action::Activate, Action::Open],
             now,
         );
         let screen = render(&app, 140, 16, now);
@@ -2721,7 +2752,7 @@ mod tests {
         assert!(lines[all].contains("1 track│"), "{screen}");
         assert!(lines[road].contains("1 track, 3 missing"), "{screen}");
         // A playlist cut at the cap says so; its tracks show the artist.
-        app.handle_action(Action::Activate, now);
+        app.handle_action(Action::Open, now);
         let screen = render(&app, 140, 16, now);
         assert!(
             screen.contains("Local › Playlists › All good (cut: file too long)"),
@@ -2759,7 +2790,7 @@ mod tests {
             },
             now,
         );
-        app.handle_action(Action::Activate, now);
+        app.handle_action(Action::Open, now);
         let screen = render(&app, 100, 14, now);
         assert!(screen.contains("No tracks found (4 missing)"), "{screen}");
         app.handle_action(Action::Parent, now);
@@ -2903,7 +2934,7 @@ mod tests {
         assert_full_width(&screen, 100);
         assert_full_width(&render(&app, 30, 14, now), 30);
         // A playlist's songs show their artist.
-        press(&mut app, &[Action::Activate]);
+        press(&mut app, &[Action::Open]);
         let songs = app.take_fetch_requests().remove(0);
         answer(
             &mut app,
@@ -2979,7 +3010,7 @@ mod tests {
         draw_to(&mut terminal, &app, &mut view, now);
         let screen = buffer_text(&terminal);
         assert!(
-            screen.contains("Could not load more — r to retry"),
+            screen.contains("Could not load more — R to retry"),
             "{screen}"
         );
         assert!(!screen.contains("secret-host"), "{screen}");
@@ -3009,7 +3040,7 @@ mod tests {
                 access: Default::default(),
             }])),
         );
-        press(&mut app, &[Action::Activate]);
+        press(&mut app, &[Action::Open]);
         let songs = app.take_fetch_requests().remove(0);
         let tracks: Vec<Track> = (0..10_000)
             .map(|i| nav_track(&format!("s{i}"), &format!("Song {i:05}"), "x", 60))
@@ -3033,7 +3064,7 @@ mod tests {
     fn help_lists_play_next_and_sort() {
         let keys: Vec<&str> = help::BINDINGS.iter().map(|(k, _)| *k).collect();
         assert!(keys.contains(&"a / A"), "{keys:?}");
-        assert!(keys.contains(&"r / o"), "{keys:?}");
+        assert!(keys.contains(&"R / o"), "{keys:?}");
     }
 
     fn nav_playlist(id: &str, name: &str, owner: &str, songs: u32) -> crate::navidrome::Playlist {
@@ -3152,7 +3183,7 @@ mod tests {
             nav_playlist("p1", "Mine", "u", 2),
             nav_playlist("p2", "Theirs", "someone", 2),
         ]);
-        press(&mut app, &[Action::Activate]);
+        press(&mut app, &[Action::Open]);
         let request = app.take_fetch_requests().remove(0);
         let songs = |owner: &str| {
             Content::PlaylistSongs(crate::navidrome::PlaylistSongs {
@@ -3178,11 +3209,11 @@ mod tests {
         assert!(two < one, "{screen}");
         press(
             &mut app,
-            &[Action::Back, Action::Parent, Action::Down, Action::Activate],
+            &[Action::Back, Action::Parent, Action::Down, Action::Open],
         );
         let request = app.take_fetch_requests().remove(0);
         answer(&mut app, &request, Ok(songs("someone")));
-        press(&mut app, &[Action::RemoveFromPlaylist]);
+        press(&mut app, &[Action::Remove]);
         let screen = render(&app, 100, 24, now);
         assert!(
             screen.contains(crate::navidrome::browse::READ_ONLY_OTHER),

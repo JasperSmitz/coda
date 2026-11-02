@@ -57,9 +57,9 @@ Brief: `docs/plans/m6-visualizer.md`. Moved ahead of keybindings (owner, 2026-11
 
 ## M7 — Keybindings and quality of life (in progress)
 Brief: `docs/plans/m7-keybindings-qol.md`; owner notes: `docs/M7_QOL_Findings.md`. Play in context: Enter plays what you point at, the queue is temporary.
-- **Slice 1:** new keymap (`h`/`l` and arrows navigate, `,` `.` seek, `<` `>` previous/next, `r`/`R`, `D`, `O`); Enter replaces the queue with the album, playlist or view and starts at the selected track; `s` plays shuffled (tracks, albums, playlists, artists, folders); playlist deletion asks y/n.
+- **Slice 1 (completed, reviewed):** new keymap (`h`/`l` and arrows navigate, `,` `.` seek, `<` `>` previous/next, `r`/`R`, `D`, `O`); Enter replaces the queue with the album, playlist or view and starts at the selected track; `s` plays shuffled (tracks, albums, playlists, artists, folders); playlist deletion asks y/n.
 - **Slice 2:** "Shuffle all" on each source's home (Navidrome via `getRandomSongs`, 500 songs).
-- **Slice 3:** the visualizer spreads across the width with interpolated bars.
+- **Slice 3:** the visualizer spreads across the width with interpolated bars; album rows show the running time next to the year.
 - Later, not in M7: endless play and context-aware autoplay; configurable keybindings.
 
 ## M8 — Cover art (proposed)

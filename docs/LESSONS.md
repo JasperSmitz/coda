@@ -141,3 +141,9 @@ Each entry should state:
 - **Root cause:** the reply to `seek` only says the command was accepted. Whether a seek happens is reported by mpv's `seek` event, and its end by `playback-restart`.
 - **Rule:** never gate state on an expected `playback-restart` after sending a seek. Arm the gate on mpv's own `seek` event. On send, only invalidate what is already in flight. Give anything that waits for readings a timeout of its own: the bars fall after 300 ms without a reading.
 - **Where verified:** M6 slice 2 review follow-up; `only_mpvs_seek_event_holds_readings_back`, `a_seek_mpv_does_not_perform_does_not_freeze_the_readings`, `bars_fall_when_readings_stop`.
+
+### Order a replace against pending appends by key press, not by fetch arrival
+- **Context / symptom:** review of M7 slice 1. `a` on album X then Enter on album Y (both uncached): if X's data arrived first, X was appended and then wiped by Y's replace; if Y's arrived first, X survived. `a` X then Enter X queued X twice.
+- **Root cause:** the replace and the appends were each applied when their fetch completed, so network timing decided the result.
+- **Rule:** when a replace and appends can each complete asynchronously, define their order explicitly. The result must equal the result with everything cached. Drop appends that were requested before the replace; hold appends requested after it until it lands, and release them if it fails or is cancelled.
+- **Where verified:** M7 slice 1 review follow-up; `adds_pressed_before_a_play_are_dropped_by_it`, `adds_pressed_after_a_play_wait_for_it_even_when_their_data_comes_first`, `a_then_enter_on_the_same_album_queues_it_once`.

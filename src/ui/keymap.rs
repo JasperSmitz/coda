@@ -1,7 +1,9 @@
-//! Key → [`Action`] mapping (brief 3.10). Panel-specific keys only map in
-//! their panel; while the help overlay is open it swallows every key except
-//! the ones that close it, scroll it (`j`/`k`) and quit. While the search input is open, keys
-//! are text ([`map_input_key`]).
+//! Key → [`Action`] mapping (the M7 keymap, `docs/plans/m7-keybindings-qol.md`).
+//! Panel-specific keys only map in their panel; while the help overlay is
+//! open it swallows every key except the ones that close it, scroll it
+//! (`j`/`k`) and quit. While a text input is open, keys are text
+//! ([`map_input_key`]); while a y/n question is open, only `y` confirms
+//! ([`map_confirm_key`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -27,52 +29,73 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
             _ => None,
         };
     }
+    let library = focus == Focus::Library;
+    // `<`, `>`, `O` and the other shifted keys may arrive with SHIFT set;
+    // only the character counts.
     let action = match key.code {
         KeyCode::Char('j') | KeyCode::Down => Action::Down,
         KeyCode::Char('k') | KeyCode::Up => Action::Up,
         KeyCode::Enter => Action::Activate,
-        KeyCode::Char('h') | KeyCode::Backspace if focus == Focus::Library => Action::Parent,
-        KeyCode::Char('a') if focus == Focus::Library => Action::Enqueue,
-        KeyCode::Char('A') if focus == Focus::Library => Action::EnqueueNext,
-        KeyCode::Char('o') if focus == Focus::Library => Action::CycleSort,
-        KeyCode::Char('/') if focus == Focus::Library => Action::OpenSearch,
-        KeyCode::Esc if focus == Focus::Library => Action::Back,
-        KeyCode::Char('r') if focus == Focus::Library => Action::Refresh,
-        // Navidrome playlist editing (provisional keys; M6 decides).
-        KeyCode::Char('P') if focus == Focus::Library => Action::AddToPlaylist,
-        KeyCode::Char('N') if focus == Focus::Library => Action::NewPlaylist,
-        KeyCode::Char('e') if focus == Focus::Library => Action::RenamePlaylist,
-        KeyCode::Char('D') if focus == Focus::Library => Action::DeletePlaylist,
-        KeyCode::Char('d') if focus == Focus::Library => Action::RemoveFromPlaylist,
-        KeyCode::Char('w') if focus == Focus::Library => Action::SaveOrder,
+        KeyCode::Char('l') | KeyCode::Right if library => Action::Open,
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace if library => Action::Parent,
+        KeyCode::Char('a') if library => Action::Enqueue,
+        KeyCode::Char('A') if library => Action::EnqueueNext,
+        KeyCode::Char('s') if library => Action::PlayShuffled,
+        KeyCode::Char('s') => Action::ShuffleUpcoming,
+        KeyCode::Char('o') if library => Action::CycleSort,
+        KeyCode::Char('/') if library => Action::OpenSearch,
+        KeyCode::Esc if library => Action::Back,
+        KeyCode::Char('R') if library => Action::Refresh,
+        KeyCode::Char('P') if library => Action::AddToPlaylist,
+        KeyCode::Char('N') if library => Action::NewPlaylist,
+        KeyCode::Char('e') if library => Action::RenamePlaylist,
+        KeyCode::Char('w') if library => Action::SaveOrder,
         KeyCode::Char('1') => Action::SelectLocal,
         KeyCode::Char('2') => Action::SelectNavidrome,
-        KeyCode::Char('d') if focus == Focus::Queue => Action::Remove,
+        // Queue: the entry; library: a Navidrome playlist's song, or (in
+        // the Playlists list) the playlist.
+        KeyCode::Char('D') => Action::Remove,
         // In the queue: move the entry; in a Navidrome playlist: the song.
         KeyCode::Char('J') => Action::MoveEntryDown,
         KeyCode::Char('K') => Action::MoveEntryUp,
-        KeyCode::Char('C') if focus == Focus::Queue => Action::ClearQueue,
-        KeyCode::Char('g') if focus == Focus::Queue => Action::SelectCurrent,
-        KeyCode::Char('s') if focus == Focus::Queue => Action::ShuffleUpcoming,
-        KeyCode::Char('S') if focus == Focus::Queue => Action::SaveQueueAsPlaylist,
-        KeyCode::Char('R') => Action::CycleRepeat,
-        // Provisional; settled in M7.
+        KeyCode::Char('C') if !library => Action::ClearQueue,
+        KeyCode::Char('g') if !library => Action::SelectCurrent,
+        KeyCode::Char('S') if !library => Action::SaveQueueAsPlaylist,
+        KeyCode::Char('r') => Action::CycleRepeat,
         KeyCode::Char('v') => Action::ToggleVisualizer,
         KeyCode::Char(' ') => Action::TogglePause,
-        KeyCode::Char('n') => Action::Next,
-        KeyCode::Char('p') => Action::Previous,
-        KeyCode::Left => Action::SeekBackward,
-        KeyCode::Right => Action::SeekForward,
+        KeyCode::Char('>') => Action::Next,
+        KeyCode::Char('<') => Action::Previous,
+        KeyCode::Char(',') => Action::SeekBackward,
+        KeyCode::Char('.') => Action::SeekForward,
         KeyCode::Char('+') | KeyCode::Char('=') => Action::VolumeUp,
         KeyCode::Char('-') => Action::VolumeDown,
         KeyCode::Tab => Action::SwitchFocus,
         KeyCode::Char('?') => Action::ToggleHelp,
-        // Provisional; the final key is decided in M6.
-        KeyCode::Char(',') => Action::OpenSettings,
+        KeyCode::Char('O') => Action::OpenSettings,
         KeyCode::Char('q') => Action::Quit,
         _ => return None,
     };
     Some(action)
+}
+
+/// Keys while a y/n question is open: only `y` confirms (as
+/// [`Action::InputChar`]); Ctrl-C quits; every other key, including
+/// Enter, Esc and `n`, cancels ([`Action::InputCancel`]).
+pub fn map_confirm_key(key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') | KeyCode::Char('C') if ctrl => Action::Quit,
+        KeyCode::Char('y')
+            if !ctrl
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SUPER) =>
+        {
+            Action::InputChar('y')
+        }
+        _ => Action::InputCancel,
+    }
 }
 
 /// Keys while the search input is open: printable characters are text,
@@ -114,6 +137,10 @@ mod tests {
         map_key(k, Focus::Queue, false)
     }
 
+    fn shifted(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+
     #[test]
     fn shared_keys_map_the_same_in_both_panels() {
         let cases = [
@@ -123,10 +150,12 @@ mod tests {
             (key(KeyCode::Up), Action::Up),
             (key(KeyCode::Enter), Action::Activate),
             (ch(' '), Action::TogglePause),
-            (ch('n'), Action::Next),
-            (ch('p'), Action::Previous),
-            (key(KeyCode::Left), Action::SeekBackward),
-            (key(KeyCode::Right), Action::SeekForward),
+            (ch('>'), Action::Next),
+            (shifted('>'), Action::Next),
+            (ch('<'), Action::Previous),
+            (shifted('<'), Action::Previous),
+            (ch(','), Action::SeekBackward),
+            (ch('.'), Action::SeekForward),
             (ch('+'), Action::VolumeUp),
             (ch('='), Action::VolumeUp),
             (ch('-'), Action::VolumeDown),
@@ -135,9 +164,14 @@ mod tests {
             (ch('q'), Action::Quit),
             (ch('1'), Action::SelectLocal),
             (ch('2'), Action::SelectNavidrome),
-            (ch('R'), Action::CycleRepeat),
+            (ch('r'), Action::CycleRepeat),
             (ch('v'), Action::ToggleVisualizer),
-            (ch(','), Action::OpenSettings),
+            (ch('O'), Action::OpenSettings),
+            (shifted('O'), Action::OpenSettings),
+            (ch('D'), Action::Remove),
+            (shifted('D'), Action::Remove),
+            (ch('J'), Action::MoveEntryDown),
+            (ch('K'), Action::MoveEntryUp),
         ];
         for (k, action) in cases {
             assert_eq!(lib(k), Some(action), "library {k:?}");
@@ -147,24 +181,30 @@ mod tests {
 
     #[test]
     fn library_only_keys() {
-        assert_eq!(lib(ch('h')), Some(Action::Parent));
-        assert_eq!(lib(key(KeyCode::Backspace)), Some(Action::Parent));
-        assert_eq!(lib(ch('a')), Some(Action::Enqueue));
-        assert_eq!(lib(ch('/')), Some(Action::OpenSearch));
-        assert_eq!(lib(key(KeyCode::Esc)), Some(Action::Back));
-        assert_eq!(lib(ch('r')), Some(Action::Refresh));
-        assert_eq!(lib(ch('A')), Some(Action::EnqueueNext));
-        let shifted_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
-        assert_eq!(lib(shifted_a), Some(Action::EnqueueNext));
-        assert_eq!(lib(ch('o')), Some(Action::CycleSort));
-        assert_eq!(queue(ch('A')), None);
-        assert_eq!(queue(ch('o')), None);
-        assert_eq!(queue(ch('h')), None);
-        assert_eq!(queue(key(KeyCode::Backspace)), None);
-        assert_eq!(queue(ch('a')), None);
-        assert_eq!(queue(ch('/')), None);
-        assert_eq!(queue(key(KeyCode::Esc)), None);
-        assert_eq!(queue(ch('r')), None);
+        let cases = [
+            (ch('l'), Action::Open),
+            (key(KeyCode::Right), Action::Open),
+            (ch('h'), Action::Parent),
+            (key(KeyCode::Left), Action::Parent),
+            (key(KeyCode::Backspace), Action::Parent),
+            (ch('a'), Action::Enqueue),
+            (ch('A'), Action::EnqueueNext),
+            (shifted('A'), Action::EnqueueNext),
+            (ch('/'), Action::OpenSearch),
+            (key(KeyCode::Esc), Action::Back),
+            (ch('R'), Action::Refresh),
+            (shifted('R'), Action::Refresh),
+            (ch('o'), Action::CycleSort),
+            (ch('P'), Action::AddToPlaylist),
+            (shifted('P'), Action::AddToPlaylist),
+            (ch('N'), Action::NewPlaylist),
+            (ch('e'), Action::RenamePlaylist),
+            (ch('w'), Action::SaveOrder),
+        ];
+        for (k, action) in cases {
+            assert_eq!(lib(k), Some(action), "{k:?}");
+            assert_eq!(queue(k), None, "{k:?}");
+        }
     }
 
     #[test]
@@ -172,8 +212,8 @@ mod tests {
         let cases = [
             (ch('C'), Action::ClearQueue),
             (ch('g'), Action::SelectCurrent),
-            (ch('s'), Action::ShuffleUpcoming),
             (ch('S'), Action::SaveQueueAsPlaylist),
+            (shifted('S'), Action::SaveQueueAsPlaylist),
         ];
         for (k, action) in cases {
             assert_eq!(queue(k), Some(action), "{k:?}");
@@ -182,55 +222,52 @@ mod tests {
     }
 
     #[test]
-    fn playlist_editing_keys_are_free_in_their_panel() {
-        // `d`, `J` and `K` keep their queue meaning.
-        assert_eq!(queue(ch('d')), Some(Action::Remove));
-        assert_eq!(queue(ch('J')), Some(Action::MoveEntryDown));
-        assert_eq!(queue(ch('K')), Some(Action::MoveEntryUp));
-        let library = [
-            (ch('P'), Action::AddToPlaylist),
-            (ch('N'), Action::NewPlaylist),
-            (ch('e'), Action::RenamePlaylist),
-            (ch('D'), Action::DeletePlaylist),
-            (ch('d'), Action::RemoveFromPlaylist),
-            (ch('w'), Action::SaveOrder),
-            (ch('J'), Action::MoveEntryDown),
-            (ch('K'), Action::MoveEntryUp),
-        ];
-        for (k, action) in library {
-            assert_eq!(lib(k), Some(action), "{k:?}");
-        }
-        for k in [ch('P'), ch('N'), ch('e'), ch('D'), ch('w')] {
-            assert_eq!(queue(k), None, "{k:?}");
-        }
-        // Shifted letters as some terminals report them.
-        let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(lib(shifted('P')), Some(Action::AddToPlaylist));
-        assert_eq!(queue(shifted('S')), Some(Action::SaveQueueAsPlaylist));
-        // Lowercase neighbours are unchanged.
-        assert_eq!(lib(ch('n')), Some(Action::Next));
-        assert_eq!(lib(ch('p')), Some(Action::Previous));
+    fn s_plays_shuffled_in_the_library_and_shuffles_upcoming_in_the_queue() {
+        assert_eq!(lib(ch('s')), Some(Action::PlayShuffled));
         assert_eq!(queue(ch('s')), Some(Action::ShuffleUpcoming));
-        // In an input, all of them are text.
-        for c in ['P', 'N', 'e', 'D', 'd', 'w', 'S'] {
+    }
+
+    #[test]
+    fn old_bindings_are_gone() {
+        for focus in [Focus::Library, Focus::Queue] {
+            let map = |k| map_key(k, focus, false);
+            // `n`, `p` and lowercase `d` are unbound.
+            for c in ['n', 'p', 'd'] {
+                assert_eq!(map(ch(c)), None, "{focus:?} {c:?}");
+            }
+            // The arrows no longer seek.
+            for code in [KeyCode::Left, KeyCode::Right] {
+                let action = map(key(code));
+                assert!(
+                    !matches!(action, Some(Action::SeekBackward | Action::SeekForward)),
+                    "{focus:?} {code:?}: {action:?}"
+                );
+            }
+            // `,` seeks rather than opening settings; `R` is not repeat.
+            assert_ne!(map(ch(',')), Some(Action::OpenSettings));
+            assert_ne!(map(ch('R')), Some(Action::CycleRepeat));
+        }
+        // In the queue the arrows and `l` do nothing at all.
+        assert_eq!(queue(key(KeyCode::Left)), None);
+        assert_eq!(queue(key(KeyCode::Right)), None);
+        assert_eq!(queue(ch('l')), None);
+        assert_eq!(queue(ch('R')), None);
+    }
+
+    #[test]
+    fn editing_keys_are_text_in_an_input() {
+        for c in [
+            'P', 'N', 'e', 'D', 'd', 'w', 'S', 'J', 'K', 'C', 'g', 's', 'r', 'R', 'O', 'l',
+        ] {
+            assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
+        }
+        for c in ['<', '>', ',', '.'] {
             assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
         }
     }
 
     #[test]
-    fn new_keys_do_not_shadow_existing_ones() {
-        // Lowercase j/k still move the selection; `r` still refreshes and
-        // only in the library; `R` is repeat in both panels.
-        assert_eq!(queue(ch('j')), Some(Action::Down));
-        assert_eq!(queue(ch('k')), Some(Action::Up));
-        assert_eq!(lib(ch('r')), Some(Action::Refresh));
-        assert_eq!(lib(ch('R')), Some(Action::CycleRepeat));
-        assert_eq!(queue(ch('r')), None);
-        // Terminals may report uppercase letters with SHIFT set.
-        let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(queue(shifted('J')), Some(Action::MoveEntryDown));
-        assert_eq!(lib(shifted('R')), Some(Action::CycleRepeat));
-        // Ctrl-C still quits rather than clearing the queue.
+    fn ctrl_c_quits_rather_than_clearing_the_queue() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL);
         assert_eq!(queue(ctrl_c), Some(Action::Quit));
         let ctrl_shift_c = KeyEvent::new(
@@ -238,10 +275,28 @@ mod tests {
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
         assert_eq!(queue(ctrl_shift_c), Some(Action::Quit));
-        // In the search input, all of them are text.
-        for c in ['J', 'K', 'C', 'g', 's', 'R'] {
-            assert_eq!(map_input_key(ch(c)), Some(Action::InputChar(c)), "{c:?}");
+    }
+
+    #[test]
+    fn only_y_confirms_a_question() {
+        assert_eq!(map_confirm_key(ch('y')), Action::InputChar('y'));
+        for k in [
+            ch('Y'),
+            ch('n'),
+            ch('D'),
+            ch('q'),
+            key(KeyCode::Enter),
+            key(KeyCode::Esc),
+            key(KeyCode::Tab),
+            key(KeyCode::Left),
+            key(KeyCode::F(1)),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(map_confirm_key(k), Action::InputCancel, "{k:?}");
         }
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(map_confirm_key(ctrl_c), Action::Quit);
     }
 
     #[test]
@@ -258,16 +313,23 @@ mod tests {
         for help in [false, true] {
             for focus in [Focus::Library, Focus::Queue] {
                 assert_eq!(map_key(ctrl('c'), focus, help), Some(Action::Quit));
-                assert_eq!(map_key(ctrl('n'), focus, help), None);
+                assert_eq!(map_key(ctrl('s'), focus, help), None);
             }
         }
-        let alt = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT);
+        let alt = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
         assert_eq!(lib(alt), None);
     }
 
     #[test]
     fn unbound_keys_map_to_nothing() {
-        for k in [ch('x'), ch('Q'), key(KeyCode::F(1))] {
+        for k in [
+            ch('x'),
+            ch('Q'),
+            ch('n'),
+            ch('p'),
+            ch('d'),
+            key(KeyCode::F(1)),
+        ] {
             assert_eq!(lib(k), None, "{k:?}");
             assert_eq!(queue(k), None, "{k:?}");
         }
@@ -287,7 +349,12 @@ mod tests {
             for k in [
                 key(KeyCode::Enter),
                 ch(' '),
-                ch('n'),
+                ch('>'),
+                ch('<'),
+                ch(','),
+                ch('l'),
+                ch('O'),
+                ch('D'),
                 ch('a'),
                 ch('A'),
                 ch('o'),

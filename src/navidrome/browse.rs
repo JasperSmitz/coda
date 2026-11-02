@@ -19,15 +19,22 @@
 //! - Album lists ([`Resource::Albums`]) are paged, one sort order each;
 //!   see [`Paging`]. At most one page request per list is in flight, and
 //!   a page response is applied only if it is that request (same id and
-//!   offset) for the list as it is now; anything else is ignored. `r`
+//!   offset) for the list as it is now; anything else is ignored. `R`
 //!   while a later page is in flight waits for it, drops it and then
 //!   starts over at the first page. Albums already in a list are skipped,
 //!   and a full page that adds none ends it. The random order is a single
 //!   page and never cached: it is dropped when no view shows it, and
-//!   opening it or `r` reshuffles.
+//!   opening it or `R` reshuffles.
 //! - Enqueue jobs complete strictly in the order they were created (key
 //!   presses), whatever order their responses arrive in. A job whose data
 //!   failed to load is dropped with an error, in its turn.
+//! - A play request (Enter or `s` on a list not cached yet) is a single
+//!   slot beside the jobs: a newer one replaces it. Outcomes apply in key
+//!   press order, as if every list were cached: queue jobs pressed before
+//!   it are dropped when it is made (the replace would wipe them), and
+//!   queue jobs pressed after it are held until it is applied, failed or
+//!   cancelled. Its fetches have a reserved slot ([`MAX_PLAY_FETCHES`]) and
+//!   may borrow free job slots.
 //! - Jobs fetch lazily: at most [`MAX_JOB_FETCHES`] of their requests are
 //!   in flight at once, below [`MAX_CONCURRENT_FETCHES`], so `a` on an
 //!   artist with hundreds of albums never queues view fetches behind it.
@@ -79,7 +86,12 @@ pub const MAX_CONCURRENT_FETCHES: usize = 4;
 /// Upper bound on fetches in flight for enqueue jobs; the remaining
 /// capacity is kept for views.
 pub const MAX_JOB_FETCHES: usize = 2;
-const _: () = assert!(MAX_JOB_FETCHES < MAX_CONCURRENT_FETCHES);
+/// Requests in flight reserved for the latest play request, outside the
+/// job window, so Enter never waits behind enqueue jobs or a superseded
+/// play. The play may also borrow job slots that are free, so it fetches
+/// up to `MAX_PLAY_FETCHES + MAX_JOB_FETCHES` lists at once.
+pub const MAX_PLAY_FETCHES: usize = 1;
+const _: () = assert!(MAX_JOB_FETCHES + MAX_PLAY_FETCHES < MAX_CONCURRENT_FETCHES);
 /// Albums requested per page.
 pub const ALBUM_PAGE_SIZE: usize = MAX_ALBUM_LIST_SIZE;
 /// Upper bound on the albums held for one sort order; paging stops there.
@@ -116,6 +128,8 @@ pub const LAST_SONG: &str = "Cannot remove the last song; delete the playlist in
 pub const MODIFIED: &str = " (modified)";
 /// The first row of the playlist picker.
 pub const NEW_PLAYLIST_ROW: &str = "New playlist…";
+/// Status when the delete question is answered with anything but `y`.
+pub const NOT_DELETED: &str = "Not deleted";
 
 /// Why `username` may not edit a playlist with `access`. Another owner
 /// comes first: Navidrome also flags other users' playlists `readonly`.
@@ -373,7 +387,7 @@ pub enum More {
     Idle,
     /// The next page is being fetched.
     Loading,
-    /// The next page failed (short, URL-free text); `r` retries it.
+    /// The next page failed (short, URL-free text); `R` retries it.
     Failed(String),
 }
 
@@ -381,7 +395,7 @@ pub enum More {
 ///
 /// The list holds the pages `0..loaded` (by server offset). At most one
 /// page request of the list is in flight, `pending`, and a response is
-/// applied only if it matches it exactly. When the list starts over (`r`,
+/// applied only if it matches it exactly. When the list starts over (`R`,
 /// or random reopened or left) while a page is in flight, that request
 /// stays the one in flight but is marked `discard`: its answer is dropped
 /// and, if a view still awaits the list, the first page is requested
@@ -396,7 +410,7 @@ struct Paging {
     /// The pending request belongs to a list that has since started over.
     discard: bool,
     complete: bool,
-    /// A page after the first failed; nothing more loads until `r`.
+    /// A page after the first failed; nothing more loads until `R`.
     error: Option<String>,
     /// Ids of the albums in the list; a page's albums already in it are
     /// skipped.
@@ -451,9 +465,20 @@ impl Paging {
 #[derive(Debug, Clone)]
 enum JobTarget {
     Song(Box<Track>),
+    /// Tracks given as they are (local tracks held behind a play).
+    Tracks(Vec<Track>),
     /// The songs of an album or playlist.
     Songs(Resource),
     Artist(String),
+}
+
+/// What a play request plays.
+#[derive(Debug, Clone)]
+enum PlayTarget {
+    /// Songs the view shows, from `start`.
+    Shown { tracks: Vec<Track>, start: usize },
+    /// An album, playlist or artist, fetched if not cached.
+    Fetch(JobTarget),
 }
 
 /// Where an enqueue job's songs go.
@@ -475,6 +500,17 @@ struct Job {
     label: String,
     target: JobTarget,
     dest: Dest,
+    error: Option<String>,
+}
+
+/// The latest Enter or `s` on an album, playlist or artist whose songs
+/// were not cached: it replaces the queue once they are. See
+/// [`Browser::activate`].
+#[derive(Debug, Clone)]
+struct PlayJob {
+    label: String,
+    target: JobTarget,
+    shuffle: bool,
     error: Option<String>,
 }
 
@@ -538,6 +574,11 @@ enum PromptKind {
     Rename {
         playlist_id: String,
         old: String,
+    },
+    /// The y/n question before deleting a playlist; it takes no text.
+    Delete {
+        playlist_id: String,
+        name: String,
     },
 }
 
@@ -646,16 +687,21 @@ pub enum JobOutcome {
     /// A playlist edit was queued, or there was nothing to add to the
     /// playlist; `message` says which.
     Editing { message: String },
-}
-
-/// What Enter on the selected row asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Activated {
-    Nothing,
-    /// A view was opened.
-    Opened,
-    /// Play this song now.
-    Play(Track),
+    /// Replace the queue with `tracks` and play them (Enter or `s`): from
+    /// `start` (the selected song), else from the first; `shuffle`d with
+    /// the `start` song first. Only the latest play request produces one,
+    /// and only for the browser's own `generation`.
+    Play {
+        label: String,
+        tracks: Vec<Track>,
+        start: Option<usize>,
+        shuffle: bool,
+        generation: Generation,
+    },
+    /// The latest play request's data could not be fetched.
+    PlayFailed { label: String, error: String },
+    /// A play request dropped this many queue jobs pressed before it.
+    AddsDropped(usize),
 }
 
 #[derive(Debug, Default)]
@@ -669,6 +715,10 @@ pub struct Browser {
     /// In-flight requests started for enqueue jobs (at most
     /// [`MAX_JOB_FETCHES`]).
     job_fetches: HashSet<RequestId>,
+    /// In-flight requests started for the current play request (at most
+    /// [`MAX_PLAY_FETCHES`]). Forgotten when it ends: a superseded play's
+    /// fetches still answer, but no longer hold the slot.
+    play_fetches: HashSet<RequestId>,
     /// Paging state of each album list that has been opened.
     pages: HashMap<AlbumSort, Paging>,
     /// The album order last chosen; Home → Albums opens it.
@@ -678,6 +728,9 @@ pub struct Browser {
     next_id: u64,
     outbox: Vec<FetchRequest>,
     jobs: VecDeque<Job>,
+    /// The latest play request still waiting for its songs. A newer one
+    /// replaces it, and [`Browser::cancel_play`] drops it.
+    play: Option<PlayJob>,
     input: Option<LineInput>,
     /// The Navidrome user, to tell their own playlists from others'.
     username: String,
@@ -788,6 +841,11 @@ impl Browser {
         self.jobs.len()
     }
 
+    /// A play request is waiting for its songs.
+    pub fn play_pending(&self) -> bool {
+        self.play.is_some()
+    }
+
     /// The album order Home → Albums opens (the last one chosen).
     pub fn album_sort(&self) -> AlbumSort {
         self.album_sort
@@ -870,18 +928,18 @@ impl Browser {
         self.load_more_if_needed();
     }
 
-    /// Enter: opens the selected Home entry, playlist, artist or album, or
-    /// asks to play the selected song.
-    pub fn activate(&mut self) -> Activated {
+    /// `l` (and Enter on what it cannot play): opens the selected Home
+    /// entry, playlist, artist or album. Returns `false` (and does
+    /// nothing) on a song or a header.
+    pub fn open_selected(&mut self) -> bool {
         let Some(row) = self.selected_row() else {
-            return Activated::Nothing;
+            return false;
         };
         let (resource, title) = match row {
-            Row::Header(_) => return Activated::Nothing,
-            Row::Song(track) => return Activated::Play(track.clone()),
+            Row::Header(_) | Row::Song(_) => return false,
             Row::Home(HomeEntry::Albums) => {
                 self.open_albums(self.album_sort);
-                return Activated::Opened;
+                return true;
             }
             Row::Home(entry @ HomeEntry::Playlists) => {
                 (Resource::Playlists, entry.label().to_owned())
@@ -892,7 +950,158 @@ impl Browser {
             Row::Album(a) => (Resource::Album(a.id.clone()), a.name.clone()),
         };
         self.open_view(resource, title);
-        Activated::Opened
+        true
+    }
+
+    /// Enter: plays the selection in context, replacing the queue. A song
+    /// plays in the list the view shows (an album, a playlist in its shown
+    /// order, the songs of search results), from that song; an album or
+    /// playlist plays whole. A Home entry or artist opens instead (as
+    /// `l`). An album or playlist not cached yet is fetched like an
+    /// enqueue job's (see [`Browser::enqueue_selected`]) and plays when it
+    /// arrives, unless a newer play request replaced it first; enqueue
+    /// jobs are not affected.
+    pub fn activate(&mut self) -> Vec<JobOutcome> {
+        match self.play_target(false) {
+            Some((label, target)) => self.start_play(label, target, false),
+            None => {
+                self.open_selected();
+                Vec::new()
+            }
+        }
+    }
+
+    /// `s`: like [`Browser::activate`], shuffled (the selected song
+    /// first). On an artist it plays all of the artist's songs. Does
+    /// nothing on a Home entry.
+    pub fn play_shuffled(&mut self) -> Vec<JobOutcome> {
+        match self.play_target(true) {
+            Some((label, target)) => self.start_play(label, target, true),
+            None => Vec::new(),
+        }
+    }
+
+    /// Drops a play request still waiting for its songs (another entry
+    /// was played, or the queue was cleared) and releases the queue jobs
+    /// it held, against the queue as it is. Returns their outcomes. Its
+    /// fetches still complete and are cached.
+    pub fn cancel_play(&mut self) -> Vec<JobOutcome> {
+        if self.end_play().is_none() {
+            return Vec::new();
+        }
+        self.pump()
+    }
+
+    /// The queue was replaced outside the browser (a local play): drops a
+    /// waiting play request and the queue jobs not applied yet, which the
+    /// replace would have wiped. Returns how many jobs were dropped and
+    /// the outcomes of playlist jobs this unblocked.
+    pub fn queue_replaced(&mut self) -> (usize, Vec<JobOutcome>) {
+        self.end_play();
+        let dropped = self.drop_queue_jobs();
+        (dropped, self.pump())
+    }
+
+    /// Adds `tracks` (local, already known) at `placement` as a job, so it
+    /// keeps its turn behind a waiting play request and earlier jobs.
+    pub fn enqueue_tracks(
+        &mut self,
+        label: String,
+        tracks: Vec<Track>,
+        placement: Placement,
+    ) -> Vec<JobOutcome> {
+        self.push_job(label, JobTarget::Tracks(tracks), Dest::Queue(placement))
+    }
+
+    /// Ends the play request (if any) and frees its fetch slot.
+    fn end_play(&mut self) -> Option<PlayJob> {
+        self.play_fetches.clear();
+        self.play.take()
+    }
+
+    /// Removes the queue jobs not applied yet. Returns how many.
+    fn drop_queue_jobs(&mut self) -> usize {
+        let before = self.jobs.len();
+        self.jobs.retain(|j| !matches!(j.dest, Dest::Queue(_)));
+        let dropped = before - self.jobs.len();
+        if dropped > 0 {
+            tracing::debug!(dropped, "pending adds dropped by a queue replace");
+        }
+        dropped
+    }
+
+    /// What Enter (or `s`) on the selected row plays: the shown songs from
+    /// the selected one, or a list to fetch.
+    fn play_target(&self, shuffle: bool) -> Option<(String, PlayTarget)> {
+        let view = self.current()?;
+        let content = self.content(view)?;
+        Some(match content.row(view.selected)? {
+            Row::Header(_) | Row::Home(_) => return None,
+            Row::Artist(_) if !shuffle => return None,
+            Row::Song(track) => {
+                let (tracks, start) = match content {
+                    Content::Songs(songs) => (songs.clone(), view.selected),
+                    Content::PlaylistSongs(playlist) => (playlist.tracks.clone(), view.selected),
+                    // Songs are the last section of search results.
+                    Content::Search(results) => (
+                        results.tracks.clone(),
+                        view.selected
+                            .checked_sub(content.len() - results.tracks.len())?,
+                    ),
+                    _ => return None,
+                };
+                (track.display_name(), PlayTarget::Shown { tracks, start })
+            }
+            Row::Album(a) => (
+                a.name.clone(),
+                PlayTarget::Fetch(JobTarget::Songs(Resource::Album(a.id.clone()))),
+            ),
+            Row::Playlist(p) => (
+                p.name.clone(),
+                PlayTarget::Fetch(JobTarget::Songs(Resource::Playlist(p.id.clone()))),
+            ),
+            Row::Artist(a) => (
+                a.name.clone(),
+                PlayTarget::Fetch(JobTarget::Artist(a.id.clone())),
+            ),
+        })
+    }
+
+    /// Makes this the latest play request, replacing any still waiting,
+    /// and drops the queue jobs pressed before it.
+    fn start_play(&mut self, label: String, target: PlayTarget, shuffle: bool) -> Vec<JobOutcome> {
+        self.end_play();
+        let dropped = self.drop_queue_jobs();
+        let mut outcomes = Vec::new();
+        if dropped > 0 {
+            outcomes.push(JobOutcome::AddsDropped(dropped));
+        }
+        match target {
+            PlayTarget::Shown { tracks, start } => {
+                outcomes.push(JobOutcome::Play {
+                    label,
+                    tracks,
+                    start: Some(start),
+                    shuffle,
+                    generation: self.generation,
+                });
+                outcomes.extend(self.pump());
+            }
+            PlayTarget::Fetch(target) => {
+                self.play = Some(PlayJob {
+                    label: label.clone(),
+                    target,
+                    shuffle,
+                    error: None,
+                });
+                // Plays at once if everything is cached.
+                outcomes.extend(self.pump());
+                if self.play.is_some() {
+                    outcomes.push(JobOutcome::Fetching { label });
+                }
+            }
+        }
+        outcomes
     }
 
     /// Goes back to the previous view; Home stays.
@@ -917,7 +1126,7 @@ impl Browser {
         true
     }
 
-    /// `r`: refetches the shown view's list and replaces its cache entry.
+    /// `R`: refetches the shown view's list and replaces its cache entry.
     /// While a fetch for it is already running, that one is awaited
     /// instead. In an album list whose next page failed, retries that
     /// page; otherwise the list starts over at its first page.
@@ -1080,10 +1289,30 @@ impl Browser {
         id
     }
 
+    /// Job slots the play request has borrowed beyond its own.
+    fn borrowed_job_slots(&self) -> usize {
+        self.play_fetches.len().saturating_sub(MAX_PLAY_FETCHES)
+    }
+
+    /// Requests `resource` for the play request unless it is cached,
+    /// already in flight, or its slots (its own and the free job ones)
+    /// are busy.
+    fn request_for_play(&mut self, resource: Resource) {
+        let free_job_slots = MAX_JOB_FETCHES.saturating_sub(self.job_fetches.len());
+        if self.play_fetches.len() < MAX_PLAY_FETCHES + free_job_slots
+            && !self.cache.contains_key(&resource)
+            && !self.in_flight.contains_key(&resource)
+        {
+            let id = self.request(resource);
+            self.play_fetches.insert(id);
+        }
+    }
+
     /// Requests `resource` for an enqueue job unless it is cached, already
-    /// in flight, or the job window is full.
+    /// in flight, or the job window (with the slots the play request
+    /// borrowed) is full.
     fn request_for_job(&mut self, resource: Resource) {
-        if self.job_fetches.len() < MAX_JOB_FETCHES
+        if self.job_fetches.len() + self.borrowed_job_slots() < MAX_JOB_FETCHES
             && !self.cache.contains_key(&resource)
             && !self.in_flight.contains_key(&resource)
         {
@@ -1187,9 +1416,15 @@ impl Browser {
         });
         let mut outcomes = self.pump();
         if let Some(job) = self.jobs.back() {
+            let held_by = self
+                .play
+                .as_ref()
+                .filter(|_| matches!(job.dest, Dest::Queue(_)))
+                .map(|p| p.label.clone());
             let waiting = if self.missing(&job.target).is_empty() {
-                // Its own data is ready: it only waits for the front job.
-                let after = self.jobs.front().map(|j| j.label.clone());
+                // Its own data is ready: it only waits for the play
+                // request or the front job.
+                let after = held_by.or_else(|| self.jobs.front().map(|j| j.label.clone()));
                 JobOutcome::Queued {
                     label,
                     after: after.unwrap_or_default(),
@@ -1205,7 +1440,7 @@ impl Browser {
     /// Lists a job still needs, in order.
     fn missing(&self, target: &JobTarget) -> Vec<Resource> {
         match target {
-            JobTarget::Song(_) => Vec::new(),
+            JobTarget::Song(_) | JobTarget::Tracks(_) => Vec::new(),
             JobTarget::Songs(resource) => {
                 if self.cache.contains_key(resource) {
                     Vec::new()
@@ -1233,6 +1468,7 @@ impl Browser {
         };
         match target {
             JobTarget::Song(track) => Some(vec![(**track).clone()]),
+            JobTarget::Tracks(tracks) => Some(tracks.clone()),
             JobTarget::Songs(resource) => songs(resource),
             JobTarget::Artist(id) => match self.cache.get(&Resource::Artist(id.clone()))? {
                 Content::Albums(albums) => {
@@ -1251,7 +1487,39 @@ impl Browser {
     /// failed), then requests whatever the remaining jobs still need.
     fn pump(&mut self) -> Vec<JobOutcome> {
         let mut outcomes = Vec::new();
+        // The play request does not wait for enqueue jobs, nor they for it.
+        let ready = self.play.as_ref().and_then(|play| match &play.error {
+            Some(error) => Some(Err(error.clone())),
+            None => self.tracks(&play.target).map(Ok),
+        });
+        if let Some(ready) = ready
+            && let Some(play) = self.end_play()
+        {
+            outcomes.push(match ready {
+                Err(error) => JobOutcome::PlayFailed {
+                    label: play.label,
+                    error,
+                },
+                Ok(tracks) => {
+                    let note = match &play.target {
+                        JobTarget::Songs(resource) => self.truncation_note(resource),
+                        _ => String::new(),
+                    };
+                    JobOutcome::Play {
+                        label: format!("{}{note}", play.label),
+                        tracks,
+                        start: None,
+                        shuffle: play.shuffle,
+                        generation: self.generation,
+                    }
+                }
+            });
+        }
         while let Some(job) = self.jobs.front() {
+            // Pressed after the play request: they wait for it.
+            if self.play.is_some() && matches!(job.dest, Dest::Queue(_)) {
+                break;
+            }
             let ready = if let Some(error) = &job.error {
                 Err(error.clone())
             } else if let Some(tracks) = self.tracks(&job.target) {
@@ -1284,6 +1552,17 @@ impl Browser {
                 }
             }
         }
+        // The play request's lists in its own slot: it is what the user
+        // waits for.
+        let play_missing: Vec<Resource> = self
+            .play
+            .iter()
+            .filter(|p| p.error.is_none())
+            .flat_map(|p| self.missing(&p.target))
+            .collect();
+        for resource in play_missing {
+            self.request_for_play(resource);
+        }
         let missing: Vec<Resource> = self
             .jobs
             .iter()
@@ -1308,16 +1587,17 @@ impl Browser {
         self.picker.as_ref()
     }
 
-    /// The name prompt, while open: its title and text.
+    /// The name prompt, while open: its title and text. A y/n question
+    /// is not a name prompt; see [`Browser::confirmation`].
     pub fn prompt(&self) -> Option<(&'static str, &str)> {
-        self.prompt.as_ref().map(|prompt| {
-            let title = match prompt.kind {
-                PromptKind::NewPlaylist { .. } => "New playlist",
-                PromptKind::SaveQueue { .. } => "Save queue as playlist",
-                PromptKind::Rename { .. } => "Rename playlist",
-            };
-            (title, prompt.input.as_str())
-        })
+        let prompt = self.prompt.as_ref()?;
+        let title = match prompt.kind {
+            PromptKind::NewPlaylist { .. } => "New playlist",
+            PromptKind::SaveQueue { .. } => "Save queue as playlist",
+            PromptKind::Rename { .. } => "Rename playlist",
+            PromptKind::Delete { .. } => return None,
+        };
+        Some((title, prompt.input.as_str()))
     }
 
     /// Edits waiting or running.
@@ -1594,20 +1874,52 @@ impl Browser {
         Ok(())
     }
 
-    /// The playlist `D` would delete: `(id, name)`. `Err` with the reason
-    /// (empty when not in the Playlists list).
-    pub fn deletion(&self) -> Result<(String, String), &'static str> {
-        self.selected_own_playlist().map(|p| (p.id, p.name))
+    /// `D` in the Playlists list: asks whether to delete the selected
+    /// playlist ([`Browser::confirmation`]). `Err` with the reason (empty
+    /// when not in the list) if it cannot be deleted.
+    pub fn open_delete(&mut self) -> Result<(), &'static str> {
+        let playlist = self.selected_own_playlist()?;
+        self.prompt = Some(Prompt::new(
+            PromptKind::Delete {
+                playlist_id: playlist.id,
+                name: playlist.name,
+            },
+            "",
+        ));
+        Ok(())
     }
 
-    /// Deletes the playlist `id` (named `name`). Returns `true` once the
-    /// edit is queued.
-    pub fn delete_playlist(&mut self, id: String, name: String) -> bool {
-        if self.draft_for(&id).is_some() {
+    /// The y/n question while one is open, e.g. `Delete playlist 'Road
+    /// trip'? y/n`.
+    pub fn confirmation(&self) -> Option<String> {
+        match &self.prompt.as_ref()?.kind {
+            PromptKind::Delete { name, .. } => Some(format!("Delete playlist '{name}'? y/n")),
+            _ => None,
+        }
+    }
+
+    /// Closes the y/n question; `yes` deletes the playlist. Returns the
+    /// status message: the delete queued, or [`NOT_DELETED`]. `None` if no
+    /// question was open.
+    pub fn answer_confirmation(&mut self, yes: bool) -> Option<String> {
+        if !matches!(
+            self.prompt.as_ref().map(|p| &p.kind),
+            Some(PromptKind::Delete { .. })
+        ) {
+            return None;
+        }
+        let PromptKind::Delete { playlist_id, name } = self.prompt.take()?.kind else {
+            return None;
+        };
+        if !yes {
+            return Some(NOT_DELETED.to_owned());
+        }
+        if self.draft_for(&playlist_id).is_some() {
             self.draft = None;
         }
-        self.queue_edit(EditOp::Delete { playlist_id: id }, name, String::new());
-        true
+        let message = format!("Deleting {name}…");
+        self.queue_edit(EditOp::Delete { playlist_id }, name, String::new());
+        Some(message)
     }
 
     pub fn prompt_char(&mut self, c: char) {
@@ -1677,6 +1989,8 @@ impl Browser {
                 );
                 message
             }
+            // Answered with `answer_confirmation`, never submitted.
+            PromptKind::Delete { .. } => return Vec::new(),
             PromptKind::Rename { playlist_id, old } => {
                 // An untouched prefill is unchanged, even if it had to be
                 // cut to fit the input.
@@ -1718,7 +2032,7 @@ impl Browser {
         Ok((id.clone(), songs))
     }
 
-    /// The entry `d` would remove: the selected song of the shown
+    /// The entry `D` would remove: the selected song of the shown
     /// playlist. `Err` with the reason (empty when not in a playlist).
     pub fn removal(&self) -> Result<Removal, &'static str> {
         let (playlist_id, songs) = self.editable_songs()?;
@@ -1977,6 +2291,7 @@ impl Browser {
             self.in_flight.remove(&resource);
         }
         self.job_fetches.remove(&id);
+        self.play_fetches.remove(&id);
         if superseded {
             tracing::debug!(id = id.0, "superseded response ignored");
             return self.pump();
@@ -1995,6 +2310,12 @@ impl Browser {
             Err(error) => {
                 let text = error.to_string();
                 if !self.in_flight.contains_key(&resource) {
+                    let play_failed = self.play.as_ref().is_some_and(|play| {
+                        play.error.is_none() && self.missing(&play.target).contains(&resource)
+                    });
+                    if let Some(play) = self.play.as_mut().filter(|_| play_failed) {
+                        play.error = Some(text.clone());
+                    }
                     let jobs = std::mem::take(&mut self.jobs);
                     self.jobs = jobs
                         .into_iter()
@@ -2293,7 +2614,7 @@ mod tests {
         for _ in 0..pos {
             b.move_selection(1);
         }
-        assert_eq!(b.activate(), Activated::Opened);
+        assert!(b.open_selected());
     }
 
     fn ok(browser: &mut Browser, request: &FetchRequest, content: Content) -> Vec<JobOutcome> {
@@ -2363,9 +2684,9 @@ mod tests {
         assert_eq!(requests[0].resource, Resource::Artists);
         ok(&mut b, &requests[0], Content::Artists(vec![artist("1")]));
         // Open, go up, reopen while still loading: one request.
-        b.activate();
+        b.open_selected();
         b.go_up();
-        b.activate();
+        b.open_selected();
         let requests = b.take_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(b.current().unwrap().load, Load::Loading(requests[0].id));
@@ -2429,7 +2750,7 @@ mod tests {
         open_home(&mut b, HomeEntry::Artists);
         // Loading: moving does nothing and nothing is selected.
         b.move_selection(1);
-        assert_eq!(b.activate(), Activated::Nothing);
+        assert!(!b.open_selected());
         assert!(b.enqueue_selected(Placement::End).is_empty());
         b.open_search();
         b.input_char('q');
@@ -2474,7 +2795,7 @@ mod tests {
         assert_eq!(b.job_fetches_in_flight(), MAX_JOB_FETCHES);
         // A view opened now gets its own request at once, with free permits.
         b.move_selection(1);
-        b.activate();
+        b.open_selected();
         let view = b.take_requests();
         assert_eq!(view.len(), 1);
         assert_eq!(view[0].resource, Resource::Artist("other".into()));
@@ -2488,6 +2809,108 @@ mod tests {
         ok(&mut b, &view[0], Content::Albums(Vec::new()));
         assert!(b.take_requests().is_empty());
         assert_eq!(b.job_fetches_in_flight(), MAX_JOB_FETCHES);
+    }
+
+    #[test]
+    fn a_play_request_fetches_in_its_own_slot_even_with_the_job_window_busy() {
+        let mut b = Browser::new();
+        open_home(&mut b, HomeEntry::Artists);
+        let root = b.take_requests().remove(0);
+        ok(
+            &mut b,
+            &root,
+            Content::Artists(vec![artist("big"), artist("other")]),
+        );
+        b.enqueue_selected(Placement::End);
+        let albums = b.take_requests().remove(0);
+        let many: Vec<Album> = (0..5).map(|i| album(&format!("al{i}"))).collect();
+        ok(&mut b, &albums, Content::Albums(many));
+        let first = b.take_requests();
+        assert_eq!(first.len(), MAX_JOB_FETCHES);
+        assert_eq!(b.job_fetches_in_flight(), MAX_JOB_FETCHES);
+        // `s` on the other artist: the earlier add is dropped, and the
+        // play's fetch goes out at once although the job window is full.
+        b.move_selection(1);
+        let outcomes = b.play_shuffled();
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [JobOutcome::AddsDropped(1), JobOutcome::Fetching { label }]
+                    if label == "Artist other"
+            ),
+            "{outcomes:?}"
+        );
+        assert_eq!(b.pending_jobs(), 0);
+        let play = b.take_requests();
+        assert_eq!(play.len(), 1);
+        assert_eq!(play[0].resource, Resource::Artist("other".into()));
+        // A newer play does not wait behind the superseded one's fetch.
+        b.move_selection(-1);
+        b.play_shuffled();
+        // (Its artist is cached; al0 and al1 are already in flight.)
+        let newer = b.take_requests();
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].resource, Resource::Album("al2".into()));
+        // Everything in flight stays within the overall limit.
+        assert!(b.job_fetches_in_flight() + 2 <= MAX_CONCURRENT_FETCHES);
+        // The superseded answer is cached, plays nothing and frees nothing
+        // for the new play (its slot was never counted).
+        assert!(ok(&mut b, &play[0], Content::Albums(Vec::new())).is_empty());
+        assert!(b.take_requests().is_empty());
+        // A job slot freed (its job was dropped): the play borrows it.
+        assert!(ok(&mut b, &first[0], Content::Songs(vec![song("s0")])).is_empty());
+        let borrowed = b.take_requests();
+        assert_eq!(borrowed.len(), 1);
+        assert_eq!(borrowed[0].resource, Resource::Album("al3".into()));
+        // Play and jobs together stay within their combined window, below
+        // the overall limit: a view can always get a request.
+        assert_eq!(
+            b.job_fetches_in_flight() + b.play_fetches.len(),
+            MAX_JOB_FETCHES + MAX_PLAY_FETCHES
+        );
+        assert!(b.job_fetches_in_flight() + b.play_fetches.len() < MAX_CONCURRENT_FETCHES);
+        // Cancelling drops the request; nothing is left waiting.
+        assert!(b.cancel_play().is_empty());
+        assert!(!b.play_pending());
+    }
+
+    #[test]
+    fn enter_on_a_cached_album_plays_at_once_and_on_a_song_from_it() {
+        let mut b = Browser::with_generation(Generation(4));
+        open_home(&mut b, HomeEntry::Artists);
+        let root = b.take_requests().remove(0);
+        ok(&mut b, &root, Content::Artists(vec![artist("a")]));
+        assert!(b.activate().is_empty(), "Enter opens an artist");
+        let albums = b.take_requests().remove(0);
+        ok(&mut b, &albums, Content::Albums(vec![album("x")]));
+        assert!(b.open_selected());
+        let songs = b.take_requests().remove(0);
+        ok(&mut b, &songs, Content::Songs(vec![song("s1"), song("s2")]));
+        b.move_selection(1);
+        let outcomes = b.activate();
+        assert_eq!(
+            outcomes,
+            [JobOutcome::Play {
+                label: song("s2").display_name(),
+                tracks: vec![song("s1"), song("s2")],
+                start: Some(1),
+                shuffle: false,
+                generation: Generation(4),
+            }]
+        );
+        b.go_up();
+        let outcomes = b.activate();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [JobOutcome::Play { start: None, shuffle: false, tracks, .. }] if tracks.len() == 2
+        ));
+        assert!(b.take_requests().is_empty());
+        assert!(!b.play_pending());
+        // `s` on Home does nothing; Enter opens.
+        b.go_up();
+        b.go_up();
+        assert!(b.play_shuffled().is_empty());
+        assert_eq!(b.stack().len(), 1);
     }
 
     #[test]
@@ -2650,20 +3073,26 @@ mod tests {
                 ..
             }
         ));
-        // Enter opens it from the cache; Enter on a song plays it.
-        assert_eq!(b.activate(), Activated::Opened);
+        // `l` opens it from the cache; Enter on a song plays the playlist from it.
+        assert!(b.open_selected());
         assert!(b.take_requests().is_empty());
         assert_eq!(b.current().unwrap().title, "Playlist p1");
         b.move_selection(1);
         b.move_selection(1);
-        assert_eq!(b.activate(), Activated::Play(song("s1")));
+        assert!(!b.open_selected(), "a song does not open");
+        let outcomes = b.activate();
+        let [JobOutcome::Play { tracks, start, .. }] = outcomes.as_slice() else {
+            panic!("{outcomes:?}");
+        };
+        assert_eq!(*start, Some(2));
+        assert_eq!(tracks[2], song("s1"));
         // `a` on a song of the playlist appends it.
         let outcomes = b.enqueue_selected(Placement::End);
         assert_eq!(titles(&outcomes), ["s1"]);
         // The second playlist is fetched when opened.
         b.go_up();
         b.move_selection(1);
-        b.activate();
+        b.open_selected();
         assert_eq!(one(&mut b).resource, Resource::Playlist("p2".into()));
     }
 
@@ -2934,7 +3363,7 @@ mod tests {
         assert_eq!(random.resource, page_request(AlbumSort::Random, 0));
         ok(&mut b, &random, page(0, 2));
         // Into an album and back: still the same list.
-        b.activate();
+        b.open_selected();
         b.take_requests();
         b.go_up();
         assert_eq!(albums_len(&b), 2);
@@ -3064,7 +3493,7 @@ mod tests {
                 placement: Placement::End,
             }]
         );
-        b.activate();
+        b.open_selected();
         let view = b.current().unwrap();
         assert_eq!(b.title(view), "Playlist p1 (first 10,000 of 12,345)");
         assert_eq!(b.current_content().unwrap().len(), 2);
