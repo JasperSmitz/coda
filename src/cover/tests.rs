@@ -92,6 +92,24 @@ fn jpeg_png_and_webp_decode_to_square_covers() {
 }
 
 #[test]
+fn covers_decode_at_the_large_size_within_the_same_limits() {
+    let image = decode_at(&jpeg(1500, 1200), LARGE_COVER_SIZE).unwrap();
+    assert_eq!(
+        (image.width(), image.height()),
+        (LARGE_COVER_SIZE, LARGE_COVER_SIZE)
+    );
+    // A source smaller than the size is kept as it is.
+    let image = decode_at(&png(600, 600), LARGE_COVER_SIZE).unwrap();
+    assert_eq!(image.width(), 600);
+    assert_eq!(
+        decode_at(&png(MAX_DIMENSION + 1, 1), LARGE_COVER_SIZE),
+        Err(DecodeError::TooLarge)
+    );
+    assert_eq!(CoverSize::Small.pixels(), COVER_SIZE);
+    assert_eq!(CoverSize::Large.pixels(), LARGE_COVER_SIZE);
+}
+
+#[test]
 fn hostile_images_are_refused_without_allocating() {
     assert_eq!(decode(b"not an image"), Err(DecodeError::NotAnImage));
     assert_eq!(decode(&[]), Err(DecodeError::NotAnImage));
@@ -240,6 +258,7 @@ fn answer(request: &CoverRequest, outcome: Outcome) -> CoverResponse {
         id: request.id,
         generation: request.generation,
         key: request.key.clone(),
+        size: request.size,
         outcome,
     }
 }
@@ -278,6 +297,166 @@ fn the_cover_follows_the_track_and_shows_only_its_own_result() {
     covers.follow(None);
     assert!(covers.image().is_none());
     assert!(!covers.reserve());
+}
+
+fn small_art(shade: u8) -> Arc<CoverImage> {
+    Arc::new(solid(COVER_SIZE, COVER_SIZE, [shade, 1, 2]))
+}
+
+fn large_art(shade: u8) -> Arc<CoverImage> {
+    Arc::new(solid(LARGE_COVER_SIZE, LARGE_COVER_SIZE, [shade, 1, 2]))
+}
+
+/// Covers with the large variant wanted, showing `track`'s small cover.
+fn screen_showing(track: &Track, shade: u8) -> Covers {
+    let mut covers = Covers::new(true);
+    covers.set_large(true);
+    covers.follow(Some(track));
+    let [small] = covers.take_requests().try_into().unwrap();
+    assert_eq!(small.size, CoverSize::Small, "the small one first");
+    assert!(covers.handle(answer(&small, Outcome::Art(small_art(shade)))));
+    covers
+}
+
+#[test]
+fn the_large_cover_is_asked_for_after_the_small_one_and_replaces_it() {
+    let a = remote_track("s1", Some("al-1"));
+    let mut covers = screen_showing(&a, 1);
+    // Meanwhile the small one shows, enlarged by the painter.
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+    let [large] = covers.take_requests().try_into().unwrap();
+    assert_eq!(large.size, CoverSize::Large);
+    assert_eq!(large.key, CoverKey::Navidrome("al-1".into()));
+    // Asked once.
+    assert!(covers.take_requests().is_empty());
+    assert!(covers.handle(answer(&large, Outcome::Art(large_art(1)))));
+    assert_eq!(covers.large_image().unwrap().width(), LARGE_COVER_SIZE);
+    // The bar keeps the small one.
+    assert_eq!(covers.image().unwrap().width(), COVER_SIZE);
+    assert!(covers.take_requests().is_empty());
+}
+
+#[test]
+fn large_covers_are_loaded_only_while_wanted() {
+    let a = local_track("/m/a.flac");
+    let mut covers = Covers::new(true);
+    covers.follow(Some(&a));
+    let [small] = covers.take_requests().try_into().unwrap();
+    covers.handle(answer(&small, Outcome::Art(small_art(1))));
+    assert!(covers.take_requests().is_empty(), "the screen is closed");
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+    covers.set_large(true);
+    let [large] = covers.take_requests().try_into().unwrap();
+    // Closed before it answered: forgotten, its answer ignored.
+    covers.set_large(false);
+    assert!(!covers.handle(answer(&large, Outcome::Art(large_art(1)))));
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+    // Opened again: asked again.
+    covers.set_large(true);
+    assert_eq!(covers.take_requests().len(), 1);
+}
+
+#[test]
+fn no_large_cover_is_asked_for_a_small_source_or_while_the_small_loads() {
+    let a = local_track("/m/a.flac");
+    let mut covers = Covers::new(true);
+    covers.set_large(true);
+    covers.follow(Some(&a));
+    let [small] = covers.take_requests().try_into().unwrap();
+    assert!(covers.take_requests().is_empty(), "the small one loads");
+    // A 2 px source: the small cover is all there is.
+    covers.handle(answer(&small, art()));
+    assert!(covers.take_requests().is_empty());
+    assert_eq!(covers.large_image().unwrap().width(), 2);
+}
+
+#[test]
+fn a_large_cover_that_fails_falls_back_to_the_small_one_until_the_track_changes() {
+    let a = local_track("/m/a.flac");
+    let b = local_track("/m/b.flac");
+    let mut covers = screen_showing(&a, 1);
+    let [large] = covers.take_requests().try_into().unwrap();
+    assert!(!covers.handle(answer(&large, Outcome::Failed)));
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+    assert!(covers.take_requests().is_empty(), "not asked again at once");
+    // Another track, then back: asked again.
+    covers.follow(Some(&b));
+    let [small_b] = covers.take_requests().try_into().unwrap();
+    covers.handle(answer(&small_b, Outcome::NoArt));
+    covers.follow(Some(&a));
+    let [again] = covers.take_requests().try_into().unwrap();
+    assert_eq!(again.size, CoverSize::Large, "the small one is remembered");
+    // No art at the large size: the small one stays.
+    assert!(!covers.handle(answer(&again, Outcome::NoArt)));
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+}
+
+#[test]
+fn tracks_with_the_same_picture_share_the_large_cover() {
+    // Two tracks of an album: different keys, the same small pixels.
+    let a = local_track("/m/album/1.flac");
+    let b = local_track("/m/album/2.flac");
+    let mut covers = screen_showing(&a, 1);
+    let [large] = covers.take_requests().try_into().unwrap();
+    covers.handle(answer(&large, Outcome::Art(large_art(1))));
+    covers.follow(Some(&b));
+    let [small_b] = covers.take_requests().try_into().unwrap();
+    // While B's loads, A's large cover lingers (never a blank).
+    assert_eq!(covers.large_image().unwrap().width(), LARGE_COVER_SIZE);
+    covers.handle(answer(&small_b, Outcome::Art(small_art(1))));
+    assert_eq!(covers.large_image().unwrap().width(), LARGE_COVER_SIZE);
+    assert!(covers.take_requests().is_empty(), "nothing more to load");
+}
+
+#[test]
+fn only_a_couple_of_large_covers_are_kept() {
+    let mut covers = Covers::new(true);
+    covers.set_large(true);
+    let tracks: Vec<Track> = (0..3)
+        .map(|i| local_track(&format!("/m/{i}.flac")))
+        .collect();
+    for (i, track) in tracks.iter().enumerate() {
+        covers.follow(Some(track));
+        let [small] = covers.take_requests().try_into().unwrap();
+        covers.handle(answer(&small, Outcome::Art(small_art(i as u8))));
+        let [large] = covers.take_requests().try_into().unwrap();
+        covers.handle(answer(&large, Outcome::Art(large_art(i as u8))));
+    }
+    assert_eq!(LARGE_MEMORY_ENTRIES, 2);
+    let large_shown = |covers: &mut Covers, track: &Track| {
+        covers.follow(Some(track));
+        let asked = covers.take_requests();
+        (covers.large_image().unwrap().width(), asked.len())
+    };
+    assert_eq!(large_shown(&mut covers, &tracks[1]), (LARGE_COVER_SIZE, 0));
+    // The oldest was dropped: its small cover shows and the large is asked
+    // for again.
+    assert_eq!(large_shown(&mut covers, &tracks[0]), (COVER_SIZE, 1));
+}
+
+#[test]
+fn a_track_change_drops_the_large_load_running() {
+    let a = local_track("/m/a.flac");
+    let b = local_track("/m/b.flac");
+    let mut covers = screen_showing(&a, 1);
+    let [large] = covers.take_requests().try_into().unwrap();
+    covers.follow(Some(&b));
+    let [small_b] = covers.take_requests().try_into().unwrap();
+    assert_eq!(small_b.size, CoverSize::Small);
+    // A's large cover arriving late is not kept for B.
+    assert!(!covers.handle(answer(&large, Outcome::Art(large_art(1)))));
+    covers.handle(answer(&small_b, Outcome::Art(small_art(2))));
+    assert_eq!(covers.large_image().unwrap().width(), COVER_SIZE);
+}
+
+#[test]
+fn large_navidrome_results_from_another_client_are_dropped() {
+    let a = remote_track("s1", Some("al-1"));
+    let mut covers = screen_showing(&a, 1);
+    let [large] = covers.take_requests().try_into().unwrap();
+    covers.client_changed(Generation(1));
+    assert!(!covers.handle(answer(&large, Outcome::Art(large_art(1)))));
+    assert!(covers.large_image().is_none_or(|i| i.width() == COVER_SIZE));
 }
 
 #[test]
@@ -732,6 +911,60 @@ fn the_cache_evicts_least_recently_used_at_the_cap() {
     assert!(cache.dir().join("4.jpg").exists());
 }
 
+#[test]
+fn local_covers_load_at_the_large_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let song = dir.path().join("song.wav");
+    write_wav(&song);
+    fs::write(dir.path().join("cover.jpg"), jpeg(1200, 1200)).unwrap();
+    assert_eq!(local::load(&song).unwrap().width(), COVER_SIZE);
+    assert_eq!(
+        local::load_at(&song, LARGE_COVER_SIZE).unwrap().width(),
+        LARGE_COVER_SIZE
+    );
+}
+
+#[test]
+fn large_covers_have_their_own_cache_beside_the_small_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let covers = dir.path().join("covers");
+    let small = DiskCache::with_limits(covers.clone(), 1, 1);
+    let large = DiskCache::large(cache::large_dir(&covers));
+    assert_eq!(large.dir(), covers.join("large"));
+    assert_eq!(
+        (small.size(), large.size()),
+        (CoverSize::Small, CoverSize::Large)
+    );
+    let name = DiskCache::name("https://h/", "u", "c");
+    large
+        .put(
+            &name,
+            &solid(LARGE_COVER_SIZE, LARGE_COVER_SIZE, [9, 99, 199]),
+        )
+        .unwrap();
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(large.dir()), 0o700);
+    // Read back at the large size.
+    assert_eq!(large.get(&name).unwrap().width(), LARGE_COVER_SIZE);
+    // The small cache, trimmed to nothing on every write, never touches
+    // the large folder.
+    small.put(&name, &solid(8, 8, [1, 2, 3])).unwrap();
+    assert!(large.dir().join(&name).exists());
+    assert_eq!(small.get(&name).map(|i| i.width()), None, "trimmed");
+    // A large entry may be bigger than a small one, up to its own limit.
+    let path = large.dir().join(&name);
+    fs::write(&path, vec![0u8; cache::MAX_ENTRY_BYTES as usize + 1]).unwrap();
+    assert!(large.get(&name).is_none(), "not an image: removed");
+    let mut big = jpeg(64, 64);
+    big.resize(cache::MAX_ENTRY_BYTES as usize + 1, 0);
+    fs::write(&path, &big).unwrap();
+    assert_eq!(large.get(&name).map(|i| i.width()), Some(64));
+    big.resize(cache::MAX_LARGE_ENTRY_BYTES as usize + 1, 0);
+    fs::write(&path, &big).unwrap();
+    assert!(large.get(&name).is_none());
+    assert!(!path.exists());
+}
+
 // ----- loading --------------------------------------------------------
 
 #[tokio::test]
@@ -745,6 +978,7 @@ async fn a_local_load_answers_with_the_cover() {
         id: CoverRequestId(3),
         generation: Generation(0),
         key: CoverKey::Local(song),
+        size: CoverSize::Small,
     };
     spawn_load(request.clone(), None, None, &tx).await.unwrap();
     let response = rx.recv().await.unwrap();
@@ -766,6 +1000,7 @@ async fn an_aborted_load_still_answers() {
         id: CoverRequestId(9),
         generation: Generation(0),
         key: CoverKey::Local("/nonexistent/x.flac".into()),
+        size: CoverSize::Small,
     };
     let task = spawn_load(request, None, None, &tx);
     // Aborted before its first poll.

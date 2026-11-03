@@ -551,8 +551,30 @@ fn placeholders_carry_row_and_column_and_are_one_cell_wide() {
     assert_eq!(chars, [PLACEHOLDER, DIACRITICS[2], DIACRITICS[5]]);
     assert_eq!(cell.width(), 1);
     assert_eq!(placeholder(0, 0).unwrap().width(), 1);
-    assert!(placeholder(32, 0).is_none() && placeholder(0, 32).is_none());
+    // Every row and column the table covers, and nothing past it.
+    let last = DIACRITICS.len() as u16 - 1;
+    let corner = placeholder(last, last).unwrap();
+    assert_eq!(corner.width(), 1);
+    assert!(corner.ends_with('\u{1D244}'));
+    assert!(placeholder(last + 1, 0).is_none() && placeholder(0, last + 1).is_none());
     assert_eq!(id_colour(0x12_3456), Color::Rgb(0x12, 0x34, 0x56));
+}
+
+#[test]
+fn the_diacritics_are_kittys_whole_table() {
+    // `rowcolumn-diacritics.txt`: 297 entries from U+0305 to U+1D244, in
+    // code point order, each a combining mark (zero width).
+    assert_eq!(DIACRITICS.len(), 297);
+    assert_eq!(DIACRITICS[0], '\u{305}');
+    assert_eq!(DIACRITICS[1], '\u{30D}');
+    assert_eq!(DIACRITICS[31], '\u{484}');
+    assert_eq!(DIACRITICS[32], '\u{485}');
+    assert_eq!(DIACRITICS[295], '\u{1D243}');
+    assert_eq!(DIACRITICS[296], '\u{1D244}');
+    assert!(DIACRITICS.windows(2).all(|pair| pair[0] < pair[1]));
+    for c in DIACRITICS {
+        assert_eq!(unicode_width::UnicodeWidthChar::width(c), Some(0), "{c:?}");
+    }
 }
 
 #[test]
@@ -573,6 +595,7 @@ fn columns_make_a_square_on_screen() {
 fn frame(image: &Arc<CoverImage>, cols: u16, rows: u16) -> Option<ArtFrame> {
     Some(ArtFrame {
         image: image.clone(),
+        picture: (image.fingerprint(), false),
         cols,
         rows,
     })
@@ -597,7 +620,8 @@ fn the_painter_sends_each_cover_once_and_deletes_the_old_one() {
     painter.prepare(frame(&a, 9, 4));
     let first = commands(&painter.take_output());
     assert!(
-        first[0].starts_with("a=T,U=1,q=2,f=24,i=655360,s=144,v=136,c=9,r=4"),
+        // 144 × 136 px of area, but a 64 px picture: sent at 64 × 60.
+        first[0].starts_with("a=T,U=1,q=2,f=24,i=655360,s=64,v=60,c=9,r=4"),
         "{first:?}"
     );
     // The same frame again: nothing to send.
@@ -615,7 +639,7 @@ fn the_painter_sends_each_cover_once_and_deletes_the_old_one() {
     painter.prepare(frame(&b, 11, 5));
     let resized = commands(&painter.take_output());
     assert_eq!(resized[0], "a=d,d=I,i=655361,q=2");
-    assert!(resized[1].contains("s=176,v=170,c=11,r=5"), "{resized:?}");
+    assert!(resized[1].contains("s=32,v=30,c=11,r=5"), "{resized:?}");
     // The art hides: just the delete.
     painter.prepare(None);
     assert_eq!(commands(&painter.take_output()), ["a=d,d=I,i=655362,q=2"]);
@@ -728,4 +752,68 @@ fn half_blocks_use_the_palette_without_truecolor() {
     painter.draw(&mut buf, Rect::new(0, 0, 2, 1));
     assert_eq!(buf[(0, 0)].fg, Color::Indexed(196));
     assert_eq!(buf[(0, 0)].bg, Color::Indexed(21));
+}
+
+#[test]
+fn transmissions_are_the_areas_pixel_size_up_to_the_cap() {
+    // The bar's art in Ghostty at 2x.
+    let big = LARGE_SOURCE;
+    assert_eq!(transmit_size(9, 4, (16, 34), big), (144, 136));
+    // A Now playing cover on a 50-row Ghostty window (9 × 19 cells).
+    assert_eq!(transmit_size(63, 30, (9, 19), big), (567, 570));
+    // A full-screen 5K window at 2x: scaled to the cap, same shape.
+    assert_eq!(
+        transmit_size(120, 60, (18, 38), big),
+        (970, MAX_TRANSMIT_PIXELS)
+    );
+    assert_eq!(
+        transmit_size(300, 1, (512, 512), big),
+        (MAX_TRANSMIT_PIXELS, 3)
+    );
+    assert_eq!(transmit_size(0, 0, (9, 19), big), (1, 1));
+}
+
+const LARGE_SOURCE: u32 = 1024;
+
+#[test]
+fn transmissions_never_have_more_pixels_than_the_picture() {
+    // The bar's 256 px cover enlarged on the screen: sent at 256 a side,
+    // in the area's shape; the terminal scales it.
+    assert_eq!(transmit_size(63, 30, (9, 19), 256), (254, 256));
+    assert_eq!(
+        transmit_size(9, 4, (16, 34), 256),
+        (144, 136),
+        "smaller area"
+    );
+    let mut painter = ArtPainter::new(Graphics::Kitty { cell: (9, 19) }, 1);
+    painter.prepare(frame(&Arc::new(gradient(256, 256)), 63, 30));
+    let bytes = painter.take_output();
+    assert!(commands(&bytes)[0].contains("s=254,v=256,c=63,r=30"));
+    assert!(bytes.len() < 254 * 256 * 4 + 2_000, "{}", bytes.len());
+}
+
+#[test]
+fn one_screen_sized_transmission_costs_about_a_megabyte_and_a_quarter() {
+    // What a Now playing cover sends, once per picture and size: RGB as
+    // base64 (4 bytes per 3) in 4096-byte chunks of 14 bytes' framing.
+    let mut painter = ArtPainter::new(Graphics::Kitty { cell: (9, 19) }, 1);
+    let image = Arc::new(gradient(1024, 1024));
+    painter.prepare(frame(&image, 63, 30));
+    let bytes = painter.take_output();
+    let payload = (567 * 570 * 3_usize).div_ceil(3) * 4;
+    assert_eq!(payload, 1_292_760);
+    let chunks = payload.div_ceil(KITTY_CHUNK);
+    assert_eq!(chunks, 316);
+    assert!(bytes.len() > payload && bytes.len() < payload + chunks * 16 + 64);
+    assert!(commands(&bytes)[0].contains("s=567,v=570,c=63,r=30"));
+    // At the cap: 1024 × 1024 is 4 MiB of base64.
+    let mut painter = ArtPainter::new(Graphics::Kitty { cell: (18, 38) }, 1);
+    painter.prepare(frame(&image, 57, 27));
+    let bytes = painter.take_output();
+    assert!(
+        commands(&bytes)[0].contains("s=1024,v=1024,"),
+        "{:?}",
+        commands(&bytes)[0]
+    );
+    assert!(bytes.len() < 4 * 1024 * 1024 + 20_000);
 }

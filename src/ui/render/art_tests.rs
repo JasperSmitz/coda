@@ -16,7 +16,7 @@ use crate::cover::{CoverImage, CoverResponse, Outcome};
 use crate::library::scan::ScanEvent;
 use crate::model::{Track, TrackMetadata};
 use crate::playback::{PlaybackCommand, PlaybackEvent};
-use crate::ui::cover::{Graphics, PLACEHOLDER};
+use crate::ui::cover::{Graphics, PLACEHOLDER, RESIZE_SETTLE};
 
 const GHOSTTY: Graphics = Graphics::Kitty { cell: (16, 34) };
 
@@ -189,6 +189,7 @@ fn answer(app: &mut App, requests: Vec<crate::cover::CoverRequest>, outcome: Out
             id: request.id,
             generation: request.generation,
             key: request.key,
+            size: request.size,
             outcome: outcome.clone(),
         });
     }
@@ -354,7 +355,8 @@ fn kitty_art_is_sent_once_before_its_placeholders() {
     let bytes = capture.take();
     let commands = kitty_commands(&bytes);
     assert!(
-        commands[0].starts_with("a=T,U=1,q=2,f=24,i=655360,s=144,v=136,c=9,r=4"),
+        // The 8 px cover: never more pixels than the picture has.
+        commands[0].starts_with("a=T,U=1,q=2,f=24,i=655360,s=8,v=7,c=9,r=4"),
         "{commands:?}"
     );
     assert!(commands.iter().all(|c| c.contains("q=2")), "never answered");
@@ -633,4 +635,294 @@ fn half_block_art_writes_no_escape_sequences() {
     assert!(kitty_commands(&bytes).is_empty());
     assert_eq!(placeholders_in(&bytes), 0);
     assert!(String::from_utf8_lossy(&bytes).matches('▀').count() >= 8 * 4);
+}
+
+// ----- the Now playing screen -------------------------------------------
+
+fn big_cover(side: u32) -> Arc<CoverImage> {
+    Arc::new(CoverImage::new(side, side, [9, 140, 70].repeat((side * side) as usize)).unwrap())
+}
+
+const MIN_COLUMN_FOR_TEST: u16 = crate::ui::now_playing::MIN_COLUMN;
+
+/// The Kitty commands that start something (a transmission's first chunk
+/// or a delete), without the chunks that continue a transmission.
+fn heads(bytes: &[u8]) -> Vec<String> {
+    kitty_commands(bytes)
+        .into_iter()
+        .filter(|c| c.starts_with("a="))
+        .collect()
+}
+
+/// The `s=`, `v=`, `c=` and `r=` of a transmission.
+fn sizes(command: &str) -> Vec<String> {
+    command
+        .split(',')
+        .filter(|kv| ["s=", "v=", "c=", "r="].iter().any(|k| kv.starts_with(k)))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn opening_and_closing_the_screen_sends_the_cover_again_at_each_size() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    // Large enough not to limit the pixels sent (the app is not told that
+    // a large cover is useful, so none is asked for).
+    answer_cover(&mut app, Outcome::Art(big_cover(1024)));
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(100, 30);
+    full(&mut terminal, &mut app, &mut view, now);
+    let bar = kitty_commands(&capture.take());
+    assert_eq!(sizes(&bar[0]), ["s=144", "v=136", "c=9", "r=4"]);
+    // Open: the bar's image is deleted and the cover sent at the screen's
+    // size, at once.
+    app.handle_action(Action::ToggleNowPlaying, now);
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    let screen = kitty_commands(&bytes);
+    assert_eq!(screen[0], "a=d,d=I,i=655360,q=2");
+    assert!(screen[1].starts_with("a=T,U=1,q=2,f=24,i=655361,"));
+    // Side by side: 55 % of 29 rows, 15 rows of 34 px, 32 columns of 16.
+    assert_eq!(sizes(&screen[1]), ["s=512", "v=510", "c=32", "r=15"]);
+    assert_eq!(placeholders_in(&bytes), 32 * 15);
+    // Nothing changed: nothing sent.
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    assert!(kitty_commands(&bytes).is_empty());
+    assert_eq!(placeholders_in(&bytes), 0);
+    // Closed: back to the bar's size, the screen's image deleted.
+    app.handle_action(Action::ToggleNowPlaying, now);
+    full(&mut terminal, &mut app, &mut view, now);
+    let back = kitty_commands(&capture.take());
+    assert_eq!(back[0], "a=d,d=I,i=655361,q=2");
+    assert_eq!(sizes(&back[1]), ["s=144", "v=136", "c=9", "r=4"]);
+}
+
+#[test]
+fn the_large_cover_replaces_the_small_one_once() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let small = app.take_cover_requests();
+    assert_eq!(small[0].size, crate::cover::CoverSize::Small);
+    answer(&mut app, small, Outcome::Art(big_cover(256)));
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(100, 30);
+    // The small cover shows meanwhile, never a blank: sent at its own
+    // 256 px, in the area's shape.
+    full(&mut terminal, &mut app, &mut view, now);
+    let first = kitty_commands(&capture.take());
+    let sent: Vec<&String> = first.iter().filter(|c| c.starts_with("a=T")).collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sizes(sent[0]), ["s=256", "v=255", "c=32", "r=15"]);
+    // The frame found it worth a large cover (512 px of area, Kitty), as
+    // the loop then tells the app.
+    assert!(view.large_cover_useful);
+    app.set_large_cover_useful(view.large_cover_useful);
+    let large = app.take_cover_requests();
+    assert_eq!(large[0].size, crate::cover::CoverSize::Large);
+    answer(&mut app, large, Outcome::Art(big_cover(1024)));
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    let change = kitty_commands(&bytes);
+    assert_eq!(change[0], "a=d,d=I,i=655360,q=2");
+    assert!(change[1].starts_with("a=T,U=1,q=2,f=24,i=655361,"));
+    // Same cells; no more after that.
+    assert_eq!(sizes(&change[1]), ["s=512", "v=510", "c=32", "r=15"]);
+    full(&mut terminal, &mut app, &mut view, now);
+    assert!(kitty_commands(&capture.take()).is_empty());
+}
+
+#[test]
+fn no_large_cover_is_useful_with_half_blocks_or_a_small_area() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(big_cover(256)));
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut half = view(Graphics::HalfBlocks);
+    let (mut terminal, _) = terminal(100, 30);
+    full(&mut terminal, &mut app, &mut half, now);
+    assert!(!half.large_cover_useful);
+    // Kitty, but the cover takes at most 256 px: 7 rows of 34 px (55 %
+    // of 14 rows).
+    let mut kitty = view(GHOSTTY);
+    let (mut terminal, _) = self::terminal(100, 15);
+    full(&mut terminal, &mut app, &mut kitty, now);
+    assert!(!kitty.large_cover_useful);
+    let (mut terminal, _) = self::terminal(100, 16);
+    full(&mut terminal, &mut app, &mut kitty, now);
+    assert!(kitty.large_cover_useful, "8 rows: 272 px");
+    // Closed: never.
+    app.handle_action(Action::ToggleNowPlaying, now);
+    full(&mut terminal, &mut app, &mut kitty, now);
+    assert!(!kitty.large_cover_useful);
+}
+
+#[test]
+fn a_resize_sends_the_screen_cover_again_once_the_size_settles() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(big_cover(1024)));
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(100, 30);
+    full(&mut terminal, &mut app, &mut view, now);
+    capture.take();
+    let resize = |terminal: &mut CaptureTerminal, width, height| {
+        terminal.backend_mut().size = Size::new(width, height);
+        terminal
+            .resize(Rect::new(0, 0, width, height))
+            .expect("the test backend resizes");
+    };
+    // A drag: two sizes in quick succession. The old image goes at once,
+    // the area stays blank, and nothing is sent yet.
+    resize(&mut terminal, 110, 35);
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    assert_eq!(kitty_commands(&bytes), ["a=d,d=I,i=655360,q=2"]);
+    assert_eq!(placeholders_in(&bytes), 0);
+    assert!(view.art.as_ref().unwrap().waiting());
+    let later = now + Duration::from_millis(100);
+    resize(&mut terminal, 120, 40);
+    full(&mut terminal, &mut app, &mut view, later);
+    assert!(kitty_commands(&capture.take()).is_empty());
+    // Still within the settle time of the last change: still nothing.
+    let settling = later + RESIZE_SETTLE - Duration::from_millis(1);
+    full(&mut terminal, &mut app, &mut view, settling);
+    assert!(kitty_commands(&capture.take()).is_empty());
+    // Held still (the tick draws again): sent once, at the new size.
+    let settled = later + RESIZE_SETTLE;
+    full(&mut terminal, &mut app, &mut view, settled);
+    let bytes = capture.take();
+    let commands = heads(&bytes);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    // Side by side: 55 % of 39 rows, 21 × 34 px by 45 × 16 px.
+    assert_eq!(sizes(&commands[0]), ["s=720", "v=714", "c=45", "r=21"]);
+    assert_eq!(placeholders_in(&bytes), 45 * 21);
+    full(&mut terminal, &mut app, &mut view, settled);
+    assert!(kitty_commands(&capture.take()).is_empty());
+}
+
+#[test]
+fn opening_the_screen_or_a_new_track_during_a_resize_wait_only_for_a_new_size() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(big_cover(1024)));
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(100, 30);
+    full(&mut terminal, &mut app, &mut view, now);
+    capture.take();
+    // A resize that leaves the bar's art the same size: nothing to wait for.
+    terminal.backend_mut().size = Size::new(120, 30);
+    terminal.resize(Rect::new(0, 0, 120, 30)).unwrap();
+    full(&mut terminal, &mut app, &mut view, now);
+    assert!(kitty_commands(&capture.take()).is_empty());
+    assert!(!view.art.as_ref().unwrap().waiting());
+    // Opening the screen right after it is a new size during the settle
+    // time; once settled it is sent.
+    app.handle_action(Action::ToggleNowPlaying, now);
+    full(&mut terminal, &mut app, &mut view, now + RESIZE_SETTLE);
+    let commands = heads(&capture.take());
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    // Without a resize, opening and closing are immediate.
+    let later = now + Duration::from_secs(1);
+    app.handle_action(Action::ToggleNowPlaying, now);
+    full(&mut terminal, &mut app, &mut view, later);
+    let commands = kitty_commands(&capture.take());
+    assert!(commands[1].starts_with("a=T"), "{commands:?}");
+}
+
+#[test]
+fn help_over_the_screen_covers_the_cover_without_a_new_transmission() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(cover(1)));
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(140, 40);
+    full(&mut terminal, &mut app, &mut view, now);
+    capture.take();
+    app.handle_action(Action::ToggleHelp, now);
+    let buffer = draw_full(&mut terminal, &app, &mut view, now)
+        .unwrap()
+        .buffer
+        .clone();
+    assert!(kitty_commands(&capture.take()).is_empty());
+    // The help box (52 wide, centred) holds no placeholder.
+    let help = Rect::new((140 - 52) / 2, 8, 52, 24);
+    for y in help.y..help.bottom() {
+        for x in help.x..help.right() {
+            assert!(
+                !buffer[(x, y)].symbol().starts_with(PLACEHOLDER),
+                "({x}, {y})"
+            );
+        }
+    }
+    // Some of the cover still shows beside it.
+    let shown = (0..40)
+        .flat_map(|y| (0..140).map(move |x| (x, y)))
+        .filter(|&(x, y)| buffer[(x, y)].symbol().starts_with(PLACEHOLDER))
+        .count();
+    assert!(shown > 0 && shown < 64 * 30, "{shown}");
+}
+
+#[test]
+fn visualizer_only_redraws_on_the_screen_write_no_image_bytes() {
+    let now = Instant::now();
+    let (mut app, load, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(cover(1)));
+    app.handle_action(Action::ToggleVisualizer, now);
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(100, 30);
+    let completed = draw_full(&mut terminal, &app, &mut view, now).unwrap();
+    let mut last = completed.buffer.clone();
+    assert!(placeholders_in(&capture.take()) > 0);
+    let area = view.visualizer_area.expect("the screen's visualizer");
+    assert!(
+        area.height >= 3 && area.width >= MIN_COLUMN_FOR_TEST,
+        "{area:?}"
+    );
+    for i in 0..30 {
+        let level = (i % 10) as f32 / 10.0;
+        let frame = crate::playback::VisualizerFrame {
+            levels: [level, level],
+            bands: [Some(level); crate::playback::VISUALIZER_BANDS],
+        };
+        app.handle_visualizer(load, &frame, now + Duration::from_millis(33 * i));
+        redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
+    }
+    let bytes = capture.take();
+    assert!(!bytes.is_empty(), "the bars moved");
+    assert!(kitty_commands(&bytes).is_empty());
+    assert_eq!(placeholders_in(&bytes), 0);
+}
+
+#[test]
+fn a_resize_from_side_by_side_to_stacked_is_debounced_too() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(big_cover(1024)));
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(120, 40);
+    full(&mut terminal, &mut app, &mut view, now);
+    let first = heads(&capture.take());
+    assert_eq!(sizes(&first[0]), ["s=720", "v=714", "c=45", "r=21"]);
+    // Narrowed to 60 columns: no room beside the cover, so stacked.
+    terminal.backend_mut().size = Size::new(60, 40);
+    terminal.resize(Rect::new(0, 0, 60, 40)).unwrap();
+    let screen = Rect::new(0, 0, 60, 39);
+    let layout = crate::ui::now_playing::layout_for(screen, &app, view.art.as_ref());
+    assert!(!layout.side_by_side);
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    assert_eq!(heads(&bytes), ["a=d,d=I,i=655360,q=2"], "deleted, not sent");
+    assert_eq!(placeholders_in(&bytes), 0);
+    full(&mut terminal, &mut app, &mut view, now + RESIZE_SETTLE);
+    let sent = heads(&capture.take());
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let cover = layout.cover.unwrap();
+    assert!(sent[0].contains(&format!("c={},r={}", cover.width, cover.height)));
 }

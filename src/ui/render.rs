@@ -1,7 +1,8 @@
 //! Draws the [`App`] with Ratatui: Library and Queue panels, the
-//! now-playing bar (with the cover art and the visualizer when shown), the status line, the help overlay, the playlist
-//! picker and name prompt, and the Settings overlay
-//! (`crate::ui::settings`).
+//! now-playing bar (with the cover art and the visualizer when shown), or
+//! instead of those the Now playing screen (`crate::ui::now_playing`), the
+//! status line, the help overlay, the playlist picker and name prompt, and
+//! the Settings overlay (`crate::ui::settings`).
 //!
 //! Untrusted names (tags, file names, server responses, the search input)
 //! are sanitised and truncated by display width, so control characters and
@@ -26,8 +27,8 @@ use crate::library::{Library, LocalPlaylist};
 use crate::model::Track;
 use crate::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
 use crate::player::{PlaybackStatus, RepeatMode};
-use crate::ui::cover::{ArtFrame, ArtPainter};
-use crate::ui::{help, settings};
+use crate::ui::cover::{ArtFrame, ArtPainter, Graphics, RESIZE_SETTLE, area_pixels};
+use crate::ui::{help, now_playing, settings};
 
 /// Below this width only the focused panel is shown.
 pub const NARROW_WIDTH: u16 = 60;
@@ -65,6 +66,11 @@ const SEARCH_HINT: &str = "Enter search · Esc cancel";
 const PROMPT_HINT: &str = "Enter save · Esc cancel (empty name cancels)";
 /// Hint under a y/n question.
 const CONFIRM_HINT: &str = "y delete · any other key cancels";
+/// The progress line's played part, in the bar and on the Now playing
+/// screen.
+pub const TIMELINE_PLAYED: Style = Style::new().fg(Color::Cyan);
+/// The progress line's remaining part.
+pub const TIMELINE_LEFT: Style = Style::new().fg(Color::DarkGray);
 /// Widest the picker and prompt boxes get.
 const DIALOG_WIDTH: u16 = 60;
 
@@ -91,6 +97,14 @@ pub struct ViewState {
     pub visualizer_drawable: bool,
     /// Draws cover art; `None` when cover art is off.
     pub art: Option<ArtPainter>,
+    /// The terminal's size at the last full draw, and when it last
+    /// changed (for the Kitty resize debounce).
+    last_size: Option<(u16, u16)>,
+    resized_at: Option<Instant>,
+    /// The last full draw showed the Now playing screen's cover with Kitty
+    /// graphics in an area of more than [`crate::cover::COVER_SIZE`]
+    /// pixels: only then is a large cover worth loading.
+    pub large_cover_useful: bool,
 }
 
 /// Where the art goes in the now-playing bar: `cols` × `rows` cells at the
@@ -109,7 +123,7 @@ pub struct ArtLayout {
 /// [`ART_BAR_HEIGHT`]).
 pub fn art_layout(screen: Rect, app: &App, painter: Option<&ArtPainter>) -> Option<ArtLayout> {
     let painter = painter?;
-    if !app.covers().reserve() || app.player().playing_entry().is_none() {
+    if app.now_playing_open() || !app.covers().reserve() || app.player().playing_entry().is_none() {
         return None;
     }
     if screen.width < NARROW_WIDTH || screen.height < VISUALIZER_MIN_SCREEN.1 {
@@ -128,11 +142,17 @@ pub fn art_layout(screen: Rect, app: &App, painter: Option<&ArtPainter>) -> Opti
 }
 
 /// What the art area shows on a `screen`: the cover heard, where
-/// [`art_layout`] puts it.
+/// [`art_layout`] puts it, or on the Now playing screen where
+/// [`now_playing::layout_for`] does.
 pub fn art_frame(screen: Rect, app: &App, painter: &ArtPainter) -> Option<ArtFrame> {
+    if app.now_playing_open() {
+        return now_playing::art_frame(main_area(screen), app, painter);
+    }
     let layout = art_layout(screen, app, Some(painter))?;
+    let (image, picture) = app.covers().picture()?;
     Some(ArtFrame {
-        image: app.covers().image()?.clone(),
+        image: image.clone(),
+        picture,
         cols: layout.cols,
         rows: layout.rows,
     })
@@ -140,7 +160,11 @@ pub fn art_frame(screen: Rect, app: &App, painter: &ArtPainter) -> Option<ArtFra
 
 /// A full frame: the art's terminal output first (a Kitty image's delete
 /// and transmission, sent apart from the cells so no overlay can lose
-/// it), then the frame itself.
+/// it), then the frame itself. Within [`RESIZE_SETTLE`] of a change of
+/// the terminal's size, a Kitty image whose area changed waits (blank);
+/// the loop's tick draws again and sends it once the size holds still.
+/// Also notes whether a large cover would show better than the small one
+/// ([`ViewState::large_cover_useful`]).
 pub fn draw_full<'a, B>(
     terminal: &'a mut ratatui::Terminal<B>,
     app: &App,
@@ -150,10 +174,26 @@ pub fn draw_full<'a, B>(
 where
     B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write,
 {
+    view.large_cover_useful = false;
     if let Some(painter) = view.art.as_mut() {
         let size = terminal.size()?;
-        let screen = Rect::new(0, 0, size.width, size.height);
-        painter.prepare(art_frame(screen, app, painter));
+        let size = (size.width, size.height);
+        if view.last_size.is_some_and(|last| last != size) {
+            view.resized_at = Some(now);
+        }
+        view.last_size = Some(size);
+        let resizing = view
+            .resized_at
+            .is_some_and(|at| now.saturating_duration_since(at) < RESIZE_SETTLE);
+        let screen = Rect::new(0, 0, size.0, size.1);
+        if let (true, Graphics::Kitty { cell }) = (app.now_playing_open(), painter.graphics()) {
+            let cover = now_playing::layout_for(main_area(screen), app, Some(painter)).cover;
+            view.large_cover_useful = cover.is_some_and(|cover| {
+                let (width, height) = area_pixels(cover.width, cover.height, cell);
+                width.max(height) > crate::cover::COVER_SIZE
+            });
+        }
+        painter.prepare_at(art_frame(screen, app, painter), resizing);
         let output = painter.take_output();
         if !output.is_empty() {
             terminal.backend_mut().write_all(&output)?;
@@ -194,14 +234,37 @@ fn note_row_built() {
     ROWS_BUILT.with(|n| n.set(n.get() + 1));
 }
 
+/// The screen above the status line: the Now playing screen's area.
+fn main_area(screen: Rect) -> Rect {
+    Rect {
+        height: screen.height.saturating_sub(1),
+        ..screen
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     let screen = frame.area();
-    let room = screen.width >= VISUALIZER_MIN_SCREEN.0 && screen.height >= VISUALIZER_MIN_SCREEN.1;
     let overlay = app.help_open()
         || app.settings_open()
         || app.browser().is_some_and(|b| {
             b.picker().is_some() || b.prompt().is_some() || b.confirmation().is_some()
         });
+    if app.now_playing_open() {
+        let area = main_area(screen);
+        view.visualizer_drawable =
+            now_playing::visualizer_room(area, app, view.art.as_ref()) && !overlay;
+        let visualizer_area = now_playing::draw(frame, app, view.art.as_ref(), area, now);
+        view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
+        let status = Rect {
+            y: screen.y + area.height,
+            height: screen.height - area.height,
+            ..screen
+        };
+        draw_status(frame, app, status, now);
+        draw_overlays(frame, app, view);
+        return;
+    }
+    let room = screen.width >= VISUALIZER_MIN_SCREEN.0 && screen.height >= VISUALIZER_MIN_SCREEN.1;
     view.visualizer_drawable = room && !overlay;
     let visualizer = app.visualizer_shown() && room;
     let art = art_layout(screen, app, view.art.as_ref());
@@ -240,6 +303,12 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
     // hide; while one is open the visualizer waits for full redraws.
     view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
     draw_status(frame, app, status, now);
+    draw_overlays(frame, app, view);
+}
+
+/// Help, the playlist picker, the name prompt, the y/n question and
+/// Settings, over whatever is below.
+fn draw_overlays(frame: &mut Frame, app: &App, view: &mut ViewState) {
     if app.help_open() {
         view.help_max_scroll = help::draw(frame, frame.area(), app.help_scroll());
     }
@@ -1137,8 +1206,8 @@ fn draw_now_playing(
         LineGauge::default()
             .ratio(ratio)
             .label(time)
-            .filled_style(Style::default().fg(Color::Cyan))
-            .unfilled_style(Style::default().fg(Color::DarkGray)),
+            .filled_style(TIMELINE_PLAYED)
+            .unfilled_style(TIMELINE_LEFT),
         gauge_area,
     );
     frame.render_widget(Paragraph::new(volume), volume_area);
@@ -1153,7 +1222,8 @@ fn draw_now_playing(
 /// Shape carries all the meaning (block characters), so it reads the same
 /// without colour (`NO_COLOR`) and with 16 colours. Silent unless the
 /// current track is playing. Too narrow for even one-column bands, it
-/// draws nothing.
+/// draws nothing. On the Now playing screen it is dim grey and has no
+/// level meter, just the bars across the whole area.
 pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     Clear.render(area, buffer);
     if area.width < NARROW_BANDS_WIDTH || area.height == 0 {
@@ -1170,7 +1240,9 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
         ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
     };
 
-    let Some(layout) = visualizer_layout(area.width) else {
+    // On the Now playing screen: the bars only, no level meter, dim grey.
+    let calm = app.now_playing_open();
+    let Some(layout) = visualizer_layout(area.width, !calm) else {
         return;
     };
     let values = if layout.spread {
@@ -1178,7 +1250,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     } else {
         bands.to_vec()
     };
-    let band_style = Style::default().fg(Color::Cyan);
+    let band_style = Style::default().fg(if calm { Color::DarkGray } else { Color::Cyan });
     for (&(offset, bar_width), value) in layout.bars.iter().zip(&values) {
         let x = area.x + offset;
         // A band the track cannot contain stays empty.
@@ -1248,10 +1320,14 @@ struct VisualizerLayout {
 ///   rest: about 2.5 columns each plus a one-column gap, at least one per
 ///   band and at most [`crate::visualizer::MAX_BARS`], their widths
 ///   differing by at most one column so they reach the meter's gap.
-fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
+fn visualizer_layout(width: u16, meter: bool) -> Option<VisualizerLayout> {
     let bands = crate::playback::VISUALIZER_BANDS as u16;
     if width < NARROW_BANDS_WIDTH {
         return None;
+    }
+    if !meter {
+        // Bars only (the Now playing screen): spread over the whole width.
+        return Some(spread_bars(width));
     }
     if width < WIDE_VISUALIZER {
         let room = width.saturating_sub(NARROW_BANDS_WIDTH + 2);
@@ -1267,7 +1343,18 @@ fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
     }
     // Seven three-column bands and a gap used 29 columns.
     let meter = (width - 29).min(WIDEST_METER);
-    let bars_width = width - meter - 2;
+    Some(VisualizerLayout {
+        meter: Some((width - meter, meter)),
+        ..spread_bars(width - meter - 2)
+    })
+}
+
+/// Bars spread over `bars_width` columns: about 2.5 columns each plus a
+/// one-column gap, at least one per band and at most
+/// [`crate::visualizer::MAX_BARS`], their widths differing by at most
+/// one column so they fill it exactly.
+fn spread_bars(bars_width: u16) -> VisualizerLayout {
+    let bands = crate::playback::VISUALIZER_BANDS as u16;
     let max_bars = crate::visualizer::MAX_BARS as u16;
     // In u32: a huge width must not overflow.
     let count =
@@ -1283,11 +1370,11 @@ fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
         bars.push((offset, bar));
         offset += bar + 1;
     }
-    Some(VisualizerLayout {
+    VisualizerLayout {
         bars,
         spread: true,
-        meter: Some((width - meter, meter)),
-    })
+        meter: None,
+    }
 }
 
 /// Redraws only the visualizer: draws it into `last_frame` (a copy of the
@@ -1786,7 +1873,7 @@ mod tests {
         for width in [40, 80] {
             let (terminal, view) = drawn(&app, width, 24, now);
             let area = view.visualizer_area.unwrap();
-            let layout = visualizer_layout(area.width).unwrap();
+            let layout = visualizer_layout(area.width, true).unwrap();
             let rows = area_text(&terminal, area);
             let column = |bar: usize| -> String {
                 let x = usize::from(layout.bars[bar].0);
@@ -1813,20 +1900,20 @@ mod tests {
 
     #[test]
     fn visualizer_layout_at_several_widths() {
-        let bars = |width: u16| visualizer_layout(width).unwrap().bars;
+        let bars = |width: u16| visualizer_layout(width, true).unwrap().bars;
         // Too narrow for anything.
-        assert_eq!(visualizer_layout(0), None);
-        assert_eq!(visualizer_layout(12), None);
+        assert_eq!(visualizer_layout(0, true), None);
+        assert_eq!(visualizer_layout(12, true), None);
         // Narrow: seven one-column bands as before; a meter once 6 columns
         // are left after the gap.
         for width in [13, 20, 21, 41] {
-            let layout = visualizer_layout(width).unwrap();
+            let layout = visualizer_layout(width, true).unwrap();
             assert!(!layout.spread, "{width}");
             assert_eq!(layout.bars, (0..7).map(|i| (i * 2, 1)).collect::<Vec<_>>());
         }
-        assert_eq!(visualizer_layout(20).unwrap().meter, None);
-        assert_eq!(visualizer_layout(21).unwrap().meter, Some((15, 6)));
-        assert_eq!(visualizer_layout(41).unwrap().meter, Some((17, 24)));
+        assert_eq!(visualizer_layout(20, true).unwrap().meter, None);
+        assert_eq!(visualizer_layout(21, true).unwrap().meter, Some((15, 6)));
+        assert_eq!(visualizer_layout(41, true).unwrap().meter, Some((17, 24)));
         // Wide: the bars spread across up to the meter's gap.
         let expected = [
             // (width, bars, meter width)
@@ -1840,7 +1927,7 @@ mod tests {
             (u16::MAX, 48, 24),
         ];
         for (width, count, meter) in expected {
-            let layout = visualizer_layout(width).unwrap();
+            let layout = visualizer_layout(width, true).unwrap();
             assert!(layout.spread, "{width}");
             assert_eq!(layout.bars.len(), count, "{width}");
             assert_eq!(layout.meter, Some((width - meter, meter)), "{width}");
@@ -1972,7 +2059,7 @@ mod tests {
         }
         let rows = area_text(&terminal, area);
         // Bar 4 of 14 lies near the quieter 400 Hz band.
-        let layout = visualizer_layout(area.width).unwrap();
+        let layout = visualizer_layout(area.width, true).unwrap();
         let x = usize::from(layout.bars[4].0);
         let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
         let half: String = rows.iter().map(|r| r.chars().nth(x).unwrap()).collect();

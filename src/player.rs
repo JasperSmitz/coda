@@ -306,6 +306,23 @@ impl Player {
             .or_else(|| self.queue.current_entry())
     }
 
+    /// The entry that will play after the one heard
+    /// ([`Self::playing_entry`]): the next in the queue, or with repeat all
+    /// the first after the last. `None` with repeat one (the same track
+    /// plays again), at the end of the queue, and when nothing plays.
+    pub fn up_next(&self) -> Option<&QueueEntry> {
+        let playing = self.playing_entry()?;
+        let next = match self.repeat {
+            RepeatMode::One => return None,
+            RepeatMode::Off => self.queue.id_after(playing.id)?,
+            RepeatMode::All => self
+                .queue
+                .id_after(playing.id)
+                .or_else(|| self.queue.first())?,
+        };
+        self.queue.get(next)
+    }
+
     /// If `Started { load }` would end a gapless change, the load heard
     /// until then.
     pub fn handover_from(&self, load: LoadId) -> Option<LoadId> {

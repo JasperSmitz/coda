@@ -17,6 +17,7 @@ A keyboard-first terminal music player for your local files and a personal [Navi
 - **Session:** the queue, volume, repeat mode and visualizer are restored at the next launch.
 - **Visualizer:** an optional spectrum and level meter, in step with what you hear.
 - **Cover art:** the cover of the track you hear, in the now-playing bar: a real image in Ghostty and Kitty, colour blocks in other terminals. From the file's tags or its folder, or from Navidrome (cached on disk). See [Cover art](docs/USAGE.md#cover-art).
+- **Now playing screen:** `f` swaps the lists for the cover with the title, the timeline and the visualizer beside it (or below it in narrow windows). See [Now playing screen](docs/USAGE.md#now-playing-screen).
 - **Privacy:** logs never contain passwords, tokens, stream URLs, file paths or track titles.
 
 ## Requirements
@@ -78,7 +79,8 @@ Press `?` in Coda for the full list.
 | `+` `-` | volume |
 | `r` | repeat: off, all, one |
 | `v` | visualizer |
-| `1` `2` | local / Navidrome library |
+| `f` | Now playing screen (`f` or `Esc` goes back) |
+| `1` `2` | local / Navidrome library (from the Now playing screen too) |
 | `Tab` | switch between library and queue |
 | `O` / `?` / `q` | settings / help / quit |
 
@@ -105,7 +107,7 @@ scrobble = true            # report plays to Navidrome (default)
 # password = "..."                                    # only if the file is chmod 600
 
 [ui]
-cover_art = true           # the cover in the now-playing bar (default); false turns it off
+cover_art = true           # cover art in the bar and on the Now playing screen (default); false turns it off
 ```
 
 `CODA_NAVIDROME_URL`, `CODA_NAVIDROME_USER` and `CODA_NAVIDROME_PASSWORD` override the file.
@@ -116,7 +118,7 @@ cover_art = true           # the cover in the now-playing bar (default); false t
 |---|---|
 | Session (queue, volume, repeat, visualizer) | `$XDG_STATE_HOME/coda/state.json` |
 | Log | `$XDG_STATE_HOME/coda/coda.log` |
-| Navidrome covers (at most about 50 MB; safe to delete) | `$XDG_CACHE_HOME/coda/covers/` |
+| Navidrome covers (about 100 MB at most: 50 MB for the bar's, 50 MB for the Now playing screen's in `large/`; safe to delete) | `$XDG_CACHE_HOME/coda/covers/` |
 
 `XDG_STATE_HOME` defaults to `~/.local/state`, `XDG_CACHE_HOME` to `~/.cache`. Set `CODA_LOG=debug` for more detail in the log.
 

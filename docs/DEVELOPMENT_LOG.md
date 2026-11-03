@@ -382,3 +382,63 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - Ignored tests: mpv 30/30, and cover exit paths 4/4.
   - PTY smoke: M7 41/41, gapless 11/11.
 - **Open:** the owner's on-screen checks in Ghostty, Alacritty, Terminal.app and tmux.
+
+## 2026-11-03 — M10: Now playing screen (reviewed)
+- **Delivered:** `f` swaps the panels and bar for a listening screen. It shows album · artist (dim), a large centred cover, the title (bold), a wide muted visualizer and a bounded timeline. `f`/`Esc` go back; the global keys work, list keys do nothing; `1`/`2` return to the library first.
+- **Extras only when relevant:**
+  - Next up shows in the last 20 s, or for 4 s after a key or fetch changes what comes next. It is hidden for repeat one, at the end of the queue, and when the next is the track heard.
+  - Volume shows for 2 s after `+`/`-`.
+  - `⟳`/`⟳1` show only while repeat is on.
+  - The timeline is dim unless playing or loading.
+- **Large cover:**
+  - `CoverSize::Large` (1024 px), with Navidrome `getCoverArt size=1024` and a second 50 MB LRU cache in `covers/large/`.
+  - It is asked only after the small cover, only with Kitty graphics and an art area over 256 px, and is aborted as soon as it is unwanted. The enlarged small cover shows meanwhile.
+  - Large covers are kept by the small cover's fingerprint, so album tracks share one.
+- **Kitty:**
+  - The full 297-entry diacritics table, diffed against Kitty's.
+  - Transmissions are capped at 1024 px and at the picture's own resolution.
+  - A re-send after a terminal resize waits for the size to settle (150 ms, driven by the tick), with the area blank meanwhile.
+  - Picture identity comes from cached fingerprints, so nothing is hashed on the loop.
+- **Owner decisions:** the visualizer stays muted grey on the screen, a pause when opening is fine, no `o=z` compression (it measured only about a third smaller on photos).
+- **Review findings, all fixed:**
+  - the cover was squashed at the 297-column limit (LESSONS entry);
+  - every resize step re-sent 1–4 MB;
+  - Stopped looked like Playing;
+  - large covers were fetched for half blocks;
+  - large loads were not aborted on a coverless track or a stop;
+  - doc and drop-order mismatches;
+  - Next up named the same track on repeat all with one entry.
+  - An unused getter was removed.
+- **Verified by the architect:**
+  - fmt, both clippy variants and build pass.
+  - `cargo test --all-targets`: 997 pass.
+  - `--ignored`: 34/34 (mpv 0.41).
+  - pty smoke: M10 52/52, M7 41/41, gapless 11/11. These use scripted Kitty replies; no GUI terminal was launched.
+- **Not yet done:** the owner's on-screen check in Ghostty and Alacritty.
+
+## 2026-11-03 — M10 layout revision (reviewed)
+- **Owner's first look:**
+  - `⟳1` drew as one glyph; it is now `⟳ 1`.
+  - The screen's visualizer is bars only, without the L/R meter.
+  - Album · artist moved under the title.
+  - New primary layout: side by side. The cover is on the left at up to 55 % of the height; a left-aligned column (30–64 wide) holds the title, album · artist, the timeline (cyan, as in the bar), the bars and Next up. The block is centred.
+  - Stacked is the fallback.
+- **Architect's decision:** the cover shrinks to as little as 35 % of the height before the screen stacks, keeping the calmer layout longer. A 60×40 split pane still stacks.
+- **Review findings, fixed:**
+  - Narrow visualizers (under 42 columns) drew only 13 columns of bars; they now fill the width.
+  - Visualizer drawability was computed from the stacked layout, so mpv readings were requested for bars that side by side left out. It now comes from the same layout (LESSONS entry).
+  - Docs and nits: thresholds stated in terminal rows; dead meter branch removed; a narrow column drops the repeat mark before squeezing the bar.
+- **Process slip:** a `git commit -a` for a brief change swept in the developer's in-progress code. It was re-split before pushing; docs are now committed with explicit paths.
+- **Verified by the architect:**
+  - fmt, both clippy variants and build pass.
+  - `cargo test --all-targets`: 1005 pass.
+  - `--ignored`: 34/34.
+  - pty smoke: M10 57/57, M7 41/41, gapless 11/11.
+
+## 2026-11-03 — M10: extras move to the album row
+- **Owner's request:** side by side, the extras no longer shorten the timeline. `⟳`/`⟳ 1` and `Vol N%` sit right-aligned on the album · artist row, above the end of the full-width timeline. Album · artist is cut with `…` before them (at least 16 columns kept); in a narrow column the repeat mark goes first, then the volume. Stacked is unchanged.
+- **Review:** checked by the architect (a small diff), not sent to the reviewer.
+- **Verified:**
+  - fmt, both clippy variants and build pass.
+  - 1008 tests pass; `--ignored` 34/34.
+  - pty smoke: M10 60/60, M7 41/41, gapless 11/11.

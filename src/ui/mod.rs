@@ -6,6 +6,7 @@
 pub mod cover;
 pub mod help;
 pub mod keymap;
+pub mod now_playing;
 pub mod onboarding;
 pub mod render;
 pub mod settings;

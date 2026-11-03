@@ -12,7 +12,7 @@ use lofty::picture::PictureType;
 use lofty::prelude::TaggedFileExt;
 use lofty::probe::Probe;
 
-use super::{CoverImage, MAX_IMAGE_BYTES, decode};
+use super::{COVER_SIZE, CoverImage, MAX_IMAGE_BYTES, decode_at};
 
 /// Folder image names, best first (compared case-insensitively).
 pub const FOLDER_NAMES: [&str; 4] = ["cover", "folder", "front", "album"];
@@ -27,20 +27,27 @@ pub const MAX_EMBEDDED_SCAN_BYTES: u64 = 256 * 1024 * 1024;
 /// A folder with more entries is searched only this far.
 const MAX_FOLDER_ENTRIES: usize = 10_000;
 
-/// The cover of the audio file at `path`, if it has one that decodes.
+/// The cover of the audio file at `path`, if it has one that decodes, at
+/// most [`COVER_SIZE`] pixels a side.
 pub fn load(path: &Path) -> Option<CoverImage> {
-    embedded(path).or_else(|| folder_image(path))
+    load_at(path, COVER_SIZE)
+}
+
+/// Like [`load`], at most `size` pixels a side (within the same decode
+/// limits).
+pub fn load_at(path: &Path, size: u32) -> Option<CoverImage> {
+    embedded(path, size).or_else(|| folder_image(path, size))
 }
 
 /// The embedded front cover (else the first picture), decoded. A panic in
 /// the tag parser (untrusted file) counts as no picture.
-fn embedded(path: &Path) -> Option<CoverImage> {
+fn embedded(path: &Path, size: u32) -> Option<CoverImage> {
     if fs::metadata(path).ok()?.len() > MAX_EMBEDDED_SCAN_BYTES {
         tracing::debug!("file too large to read embedded art; trying its folder");
         return None;
     }
     let bytes = std::panic::catch_unwind(|| embedded_bytes(path)).ok()??;
-    match decode(&bytes) {
+    match decode_at(&bytes, size) {
         Ok(image) => Some(image),
         Err(error) => {
             tracing::debug!(%error, "embedded cover did not decode");
@@ -69,13 +76,13 @@ fn embedded_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// The best-named image file next to `path` that decodes.
-fn folder_image(path: &Path) -> Option<CoverImage> {
+fn folder_image(path: &Path, size: u32) -> Option<CoverImage> {
     let dir = path.parent()?;
     for candidate in folder_candidates(dir) {
         let Some(bytes) = read_small_file(&candidate) else {
             continue;
         };
-        match decode(&bytes) {
+        match decode_at(&bytes, size) {
             Ok(image) => return Some(image),
             Err(error) => tracing::debug!(%error, "folder cover did not decode"),
         }

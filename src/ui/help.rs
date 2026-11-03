@@ -27,7 +27,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("r / v", "Repeat (off/all/one) / visualizer"),
     ("Space  < / >", "Pause / previous / next"),
     (", .  + -", "Seek −5 s, +5 s / volume up, down"),
-    ("Tab", "Switch panel"),
+    ("Tab / f", "Switch panel / Now playing screen"),
     ("O", "Settings (Navidrome)"),
     ("?  Esc", "Close help"),
     ("q  Ctrl-C", "Quit"),

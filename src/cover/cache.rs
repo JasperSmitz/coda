@@ -1,13 +1,16 @@
-//! The disk cache of Navidrome covers: `$XDG_CACHE_HOME/coda/covers`
-//! (default `~/.cache/coda/covers`), mode 0700, created when the first
-//! cover is stored (so a local-only setup never has one).
+//! The disk caches of Navidrome covers: `$XDG_CACHE_HOME/coda/covers`
+//! (default `~/.cache/coda/covers`) for the now-playing bar's covers, and
+//! `covers/large` for the Now playing screen's ([`large_dir`]), each mode
+//! 0700, created when its first cover is stored (so a local-only setup
+//! never has one), and each with its own size cap.
 //!
 //! - **Names** are an md5 hex digest of the server's base URL, the
 //!   username and the `coverArt` id, plus `.jpg`: never a token, salt or
 //!   URL. (Not a security boundary; just a stable key without secrets.)
-//! - **Contents:** the decoded cover ([`super::COVER_SIZE`] pixels at
-//!   most) as a JPEG, written to a temp file in the folder and renamed
-//!   into place, so a reader never sees half a file.
+//! - **Contents:** the decoded cover (at most [`super::COVER_SIZE`] or
+//!   [`super::LARGE_COVER_SIZE`] pixels, by the cache's [`CoverSize`]) as
+//!   a JPEG, written to a temp file in the folder and renamed into place,
+//!   so a reader never sees half a file.
 //! - **Least recently used** by modification time, with no index: a hit
 //!   touches the file; when a write takes the folder over the cap, the
 //!   oldest files go until it is under the low mark. The folder scan is
@@ -27,7 +30,7 @@ use std::time::SystemTime;
 use image::ExtendedColorType;
 use image::codecs::jpeg::JpegEncoder;
 
-use super::{CoverImage, decode};
+use super::{CoverImage, CoverSize, decode_at};
 
 /// The cache is trimmed when a write takes it over this many bytes...
 pub const CAP_BYTES: u64 = 50 * 1024 * 1024;
@@ -35,10 +38,20 @@ pub const CAP_BYTES: u64 = 50 * 1024 * 1024;
 pub const LOW_BYTES: u64 = 45 * 1024 * 1024;
 /// A cached file larger than this is broken (a 256 px JPEG is 10–40 KB).
 pub const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+/// A large cached file larger than this is broken: a 1024 px JPEG at
+/// quality 85 measured 65–216 KB for real covers and photos, and about
+/// 1.5 MB for pure noise, the worst case.
+pub const MAX_LARGE_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
 /// At most this many folder entries are looked at when trimming.
 const MAX_SCAN: usize = 20_000;
 const JPEG_QUALITY: u8 = 85;
 const TEMP_PREFIX: &str = ".cover.";
+
+/// The large covers' folder inside the cache folder `dir`. The small
+/// cache's trimming skips it (it only counts files).
+pub fn large_dir(dir: &Path) -> PathBuf {
+    dir.join("large")
+}
 
 /// `$XDG_CACHE_HOME/coda/covers`, else `~/.cache/coda/covers`. Relative or
 /// empty values are ignored; `None` without either.
@@ -51,26 +64,48 @@ pub fn cache_dir(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> Op
 #[derive(Debug)]
 pub struct DiskCache {
     dir: PathBuf,
+    /// The covers it holds.
+    size: CoverSize,
     cap: u64,
     low: u64,
+    /// Larger files are broken.
+    max_entry: u64,
     /// The folder has been created (or checked) with mode 0700.
     ready: std::sync::atomic::AtomicBool,
 }
 
 impl DiskCache {
-    /// A cache in `dir`, which is not touched until a cover is stored.
+    /// A cache of small covers in `dir`, which is not touched until a
+    /// cover is stored.
     pub fn new(dir: PathBuf) -> Self {
         Self::with_limits(dir, CAP_BYTES, LOW_BYTES)
+    }
+
+    /// A cache of large covers in `dir` (see [`large_dir`]), with the same
+    /// cap as the small one.
+    pub fn large(dir: PathBuf) -> Self {
+        Self {
+            size: CoverSize::Large,
+            max_entry: MAX_LARGE_ENTRY_BYTES,
+            ..Self::new(dir)
+        }
     }
 
     /// Like [`DiskCache::new`], trimming from over `cap` bytes to `low`.
     pub fn with_limits(dir: PathBuf, cap: u64, low: u64) -> Self {
         Self {
             dir,
+            size: CoverSize::Small,
             cap,
             low,
+            max_entry: MAX_ENTRY_BYTES,
             ready: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// The covers it holds.
+    pub fn size(&self) -> CoverSize {
+        self.size
     }
 
     /// Creates the folder (and missing parents) with mode 0700, and sets
@@ -119,11 +154,13 @@ impl DiskCache {
             Ok(metadata) => metadata,
             Err(_) => return None,
         };
-        if !metadata.is_file() || metadata.len() > MAX_ENTRY_BYTES {
+        if !metadata.is_file() || metadata.len() > self.max_entry {
             self.discard(&path);
             return None;
         }
-        let image = fs::read(&path).ok().and_then(|bytes| decode(&bytes).ok());
+        let image = fs::read(&path)
+            .ok()
+            .and_then(|bytes| decode_at(&bytes, self.size.pixels()).ok());
         match image {
             Some(image) => {
                 if let Ok(file) = OpenOptions::new().write(true).open(&path) {
