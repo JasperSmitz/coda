@@ -11,6 +11,8 @@
 //!   source: `password`, `password_command` or `password_keychain` (the OS
 //!   credential store, ADR 0004).
 //! - At least one source (music directory or Navidrome) is required.
+//! - `[ui]`: `cover_art` (default `true`) shows the cover of the track
+//!   heard in the now-playing bar.
 //!
 //! Error messages name files, fields and variables, never their values.
 
@@ -121,6 +123,8 @@ pub struct Config {
     /// Canonicalized, absolute music directory, if one is configured.
     pub music_dir: Option<PathBuf>,
     pub navidrome: Option<NavidromeConfig>,
+    /// `[ui] cover_art`: show cover art (default `true`).
+    pub cover_art: bool,
 }
 
 /// A complete Navidrome configuration. `Debug` hides every value.
@@ -290,6 +294,14 @@ impl ConfigError {
 struct FileConfig {
     music_dir: Option<String>,
     navidrome: Option<FileNavidrome>,
+    ui: Option<FileUi>,
+}
+
+/// `[ui]`: display preferences.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileUi {
+    cover_art: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -368,6 +380,7 @@ impl Config {
         };
         let config_path = location.map(|(path, _)| path);
         let file = file.unwrap_or_default();
+        let cover_art = file.ui.as_ref().and_then(|ui| ui.cover_art).unwrap_or(true);
 
         let navidrome = merge_navidrome(file.navidrome, env, config_path.as_deref())?;
 
@@ -388,6 +401,7 @@ impl Config {
         Ok(Self {
             music_dir,
             navidrome,
+            cover_art,
         })
     }
 }
@@ -991,6 +1005,31 @@ mod tests {
         assert_eq!(expose(&nd.password), "hunter2");
         assert!(!format!("{nd:?}").contains("hunter2"));
         assert!(!format!("{nd:?}").contains("example"));
+    }
+
+    #[test]
+    fn cover_art_defaults_to_on_and_can_be_turned_off() {
+        let f = Fixture::new();
+        f.write(NAVIDROME, 0o600);
+        assert!(f.load(cli(None)).unwrap().cover_art);
+        f.write(&format!("{NAVIDROME}\n[ui]\n"), 0o600);
+        assert!(f.load(cli(None)).unwrap().cover_art);
+        f.write(&format!("{NAVIDROME}\n[ui]\ncover_art = false\n"), 0o600);
+        assert!(!f.load(cli(None)).unwrap().cover_art);
+        f.write(&format!("{NAVIDROME}\n[ui]\ncover_art = true\n"), 0o600);
+        assert!(f.load(cli(None)).unwrap().cover_art);
+        // Not a boolean, or an unknown key in `[ui]`: errors naming the line.
+        for bad in ["cover_art = \"no\"", "cover = false"] {
+            f.write(&format!("{NAVIDROME}\n[ui]\n{bad}\n"), 0o600);
+            let err = f.load(cli(None)).unwrap_err();
+            assert!(matches!(err, ConfigError::ConfigParse { .. }), "{err:?}");
+        }
+        // `[ui]` alone is not a source.
+        f.write("[ui]\ncover_art = false\n", 0o600);
+        assert!(matches!(
+            f.load(cli(None)).unwrap_err(),
+            ConfigError::NoSource { .. }
+        ));
     }
 
     #[test]

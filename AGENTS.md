@@ -51,6 +51,7 @@ Once a Cargo package exists, use the relevant checks:
 - `cargo build`
 - Tests that need mpv are `#[ignore]`d; run `cargo test --all-targets -- --ignored` when mpv is installed.
 - Manual smoke checks where practical: local playback, controls, missing files, empty library, terminal restoration.
+- Agents run TUI and terminal probes only under a pty they own (stdin/stdout/stderr on it, scripted replies, hard timeout). Never launch terminal emulators or other GUI apps on the owner's desktop (`open -a`, `open -na`, `osascript`, `.command` files) and never write to `/dev/tty`; checks that need a real terminal are handed to the owner as a script to run (see LESSONS).
 Report commands actually run; never claim a check passed without running it. When unavailable, state why.
 
 ## Scope and documentation discipline

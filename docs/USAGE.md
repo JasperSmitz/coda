@@ -60,7 +60,7 @@ The keys:
 
 ## The config file and its backups
 - **Backups:** a file with settings is kept as `config.toml.bak.<time>` before it is replaced. This doesn't happen when the file is exactly as Coda wrote it, so repeated saves do not pile up backups.
-- **What carries over:** only `scrobble`, and a kept `[navidrome]`.
+- **What carries over:** only `scrobble`, `[ui]`, and a kept `[navidrome]`.
 - **A plaintext password in the backup:** if the old file held a plaintext `password`, the backup still contains it. Delete the backup once you no longer need it.
 - **Permissions:** Coda writes the config with mode 0600 and its folder with mode 0700.
 
@@ -93,6 +93,29 @@ The keys:
   - It needs a terminal of at least 20x16.
   - From 42 columns wide, the bars spread across the width.
 - **The session file:** the queue, volume, repeat mode and visualizer setting are saved in `state.json` and restored at the next launch.
+
+## Cover art
+The cover of the track you hear is shown at the left of the now-playing bar. It changes when the next track is heard, so with gapless playback it switches at the join, not when the next track is opened. While the next track's cover loads, the previous one stays (at most a second), so the tracks of an album show their cover without a blink.
+
+- **Where it comes from:**
+  - **Local tracks:** the front cover embedded in the file (else its first picture), else an image in the track's folder named `cover`, `folder`, `front` or `album` with `.jpg`, `.jpeg` or `.png` (any case, in that order of preference).
+  - **Navidrome tracks:** the server's cover for the song (or its album), asked for at 256 pixels. Navidrome's grey placeholder for songs without art is not shown.
+  - Nothing is downloaded from anywhere else.
+- **How it looks:**
+  - **Ghostty and Kitty:** a real image. Coda asks the terminal once at startup (it answers in well under a millisecond; Coda waits at most one second) and clears the screen afterwards.
+  - **Every other terminal** (Alacritty, Terminal.app, WezTerm, iTerm2, and anything inside tmux or screen): a mosaic of coloured half blocks, two pixels per cell. These terminals are not asked anything. Inside tmux Coda never changes tmux settings.
+  - **Colours:** half blocks use 24-bit colour when `COLORTERM` is `truecolor` or `24bit` (Alacritty and Terminal.app set it), else the nearest of the 256 standard colours.
+- **The layout:** with art, the now-playing bar grows from 4 to 6 rows (title, artist · album, progress). With the visualizer on, the art sits beside it in the bar's existing 7 rows. A track without a cover keeps the usual bar.
+- **When it hides:** on screens narrower than 60 columns or lower than 16 rows, and when nothing is playing. Help, Settings and the other boxes are drawn over it; the image never shows through them.
+- **Loading** never holds up keys, playback or the visualizer: covers are read and decoded in the background, and a cover that arrives after you moved on is not shown. Images larger than 4096 pixels a side, or files over 16 MB (4 MB from Navidrome), are ignored.
+- **The cache:** Navidrome covers are kept, resized to 256 pixels, in `$XDG_CACHE_HOME/coda/covers` (default `~/.cache/coda/covers`, a private folder). The cache holds at most about 50 MB; the least recently shown covers are removed first. File names are hashes: they contain no server address, username or token. You can delete the folder at any time. The folder is only created when the first Navidrome cover is stored. Local covers are only kept in memory (the last 16). Embedded covers are not read from files over 256 MB; their folder image is used instead.
+- **Turning it off:** put this in the config file. The bar is then exactly as without cover art, and the terminal is not asked anything.
+
+  ```toml
+  [ui]
+  cover_art = false
+  ```
+- **If the image looks wrong** (for example after changing the font size in Ghostty), restart Coda; it measures the cell size once at startup.
 
 ## Local library
 - **The home menu:** Shuffle all, Playlists, Folders, Artists and Albums.

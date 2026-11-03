@@ -331,6 +331,54 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - PTY smoke: M7 41/41, gapless 11/11.
   - Debian container, mpv 0.35.1: 27/30. Every gapless test passes; the 3 failures need an audio device the container lacks, as on the base commit.
 - **Not yet done:**
-  - a manual listen to a segued album;
   - the TUI on Linux;
   - mpv 0.33.0, which isn't obtainable; 0.33.1 was tested in the spike.
+
+## M8 — owner check (2026-11-02)
+- The owner listened to two segued tracks on macOS: no audible join, and no hitch or lag in the visualizer or the UI.
+
+## 2026-11-02 — M9 slice 2: cover art (reviewed)
+- **Delivered:** the cover of the track heard at the left of the now-playing bar, following `Player::playing_entry` (it switches at a gapless join).
+  - Ghostty and Kitty get a Kitty graphics image (Unicode placeholders; transmitted once per cover, apart from the cells; deleted on change, hide, exit and in the panic hook).
+  - Every other terminal gets half blocks, without being queried.
+  - Local covers come from the tags (front cover) or a folder image. Navidrome covers come from `getCoverArt?size=256`, with a 50 MB LRU disk cache in `$XDG_CACHE_HOME/coda/covers`.
+  - `coverArt` is parsed on songs and albums and kept in the session file (optional; older files fall back to the song id).
+  - `[ui] cover_art = false` turns it all off (exactly the old layout, no query, no cache), and the config writer keeps `[ui]`.
+- **Modules:** `cover` (decode with limits, `Covers` state, loader), `cover::local`, `cover::cache`, `ui::cover` (detection, `LateReplyFilter`, Kitty encoder, placeholders, half blocks, `ArtPainter`). New dependency: `image` =0.25.10 with `jpeg`, `png` and `webp` only.
+- **Decisions in the implementation:**
+  - Detection clears the screen with `Terminal::resize` rather than `clear`, which would ask for the cursor position (a CPR round trip).
+  - A Kitty reply that arrives after the 1 s deadline is filtered out of the keys (`LateReplyFilter`, one `Alt-_` … `Alt-\` bracket, 30 s), so a late reply never becomes keys.
+  - The transmitted image is resized to exactly the art area's pixels, so it fills its cells however the terminal scales.
+  - A non-square cover is cropped to its centre.
+  - One cover load at a time: a new request aborts the previous one.
+  - `TERM_PROGRAM=ghostty` and `KITTY_WINDOW_ID` count only with a generic `xterm*` `TERM`, because terminals started from Ghostty or Kitty inherit them.
+- **Tests:**
+  - fmt, both clippy variants and build pass.
+  - `cargo test --all-targets` passes: 788 lib tests, 6 cover wiremock tests, 8 cover PTY tests and the existing suites.
+  - Ignored tests: mpv backend 30/30; cover PTY exit paths 4/4 (`q`, SIGTERM and SIGHUP delete the image before the terminal is restored, half blocks in a plain terminal, `cover_art = false` writes nothing).
+  - PTY smoke: M7 41/41, gapless 11/11.
+- **Checked in real Ghostty 1.4** (no screenshots possible here):
+  - Coda's detection answered Kitty with 16×34 px cells in 0.3 ms.
+  - Ghostty answered `OK` to Coda's exact transmission when replies were enabled, and each placeholder took one cell.
+  - The real binary sent a 144×136 transmission for a 9×4 cell area.
+- **Not yet done:** seeing the image on screen in Ghostty, and Alacritty, Terminal.app and tmux by hand (the owner's checklist).
+- **Review follow-up (same day):**
+  - Detection reads a started reply up to 3 s.
+  - The late-reply filter handles `Esc` + `_` starts, requires `Gi=31;`, and lets a user's `Alt-_` through without eating later keys. It ends at a 1 s pause, and drops a cut-off `CSI` tail.
+  - Decodes run one at a time, through a view of the crop.
+  - Embedded art is skipped above 256 MiB.
+  - `had_art` is kept across a client swap.
+  - Identical pixels are not re-sent.
+  - The cache folder is created lazily.
+  - Half blocks use the 256-colour palette without `COLORTERM`.
+  - LESSONS entry on the lone `ESC`.
+  - Re-verified: fmt, both clippy variants and build pass. 796 lib tests and 12 cover PTY tests pass. Ignored tests: mpv 30/30, cover exit paths 4/4. Smoke: M7 41/41, gapless 11/11.
+  - At a track change, the previous cover stays until the new result arrives (at most 1 s; "no art" removes it), so album tracks do not blank. Identical pixels are not re-sent.
+- **Review follow-ups (architect's summary):**
+  - Fixed: detection replies straddling the deadline (finish a started reply up to 3 s; a stricter, time-limited filter); decode memory (a view instead of a crop copy, one decode at a time); embedded art skipped in files over 256 MiB; the bar collapsing on a client swap; half-block colour depth; a lazy cache folder.
+  - The previous cover is kept until the next one is ready (at most 1 s), so album tracks don't blank.
+- **Final verification (architect):**
+  - fmt, both clippy variants and `cargo test --all-targets` pass: 799 lib tests plus the integration suites.
+  - Ignored tests: mpv 30/30, and cover exit paths 4/4.
+  - PTY smoke: M7 41/41, gapless 11/11.
+- **Open:** the owner's on-screen checks in Ghostty, Alacritty, Terminal.app and tmux.

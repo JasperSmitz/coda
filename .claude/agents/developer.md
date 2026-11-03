@@ -13,6 +13,8 @@ Implement the smallest cohesive vertical slice. Separate music domain/playback s
 
 Verify third-party crate APIs against the downloaded sources under `~/.cargo/registry/src` rather than memory.
 
+Never launch terminal emulators or other GUI apps (`open -a`, `open -na`, `osascript`, `.command` files) and never write to `/dev/tty`: TUI code and terminal probes run only under a pty you own, with scripted replies and a hard timeout. Checks that need a real terminal go back to the architect as a script for the owner to run.
+
 Run relevant formatting, linting, tests, and build checks, including the `#[ignore]`d mpv tests when mpv is installed. Never say checks passed unless they ran. Do not commit/push, modify project agent policy, or make unrelated changes.
 
 Report: files changed; behavior delivered; verification commands and outcomes; known limitations; design decisions needing architect input. Do not silently expand scope.

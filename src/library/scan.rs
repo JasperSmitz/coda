@@ -291,6 +291,7 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
         track_no: tag.track(),
         disc_no: tag.disk(),
         duration,
+        cover_art: None,
     }
 }
 

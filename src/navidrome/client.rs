@@ -51,6 +51,10 @@ pub const MAX_GET_URL_BYTES: usize = 8 * 1024;
 /// reverse proxy may not (nginx's default `client_max_body_size` is 1 MB);
 /// 10,000 Navidrome song ids take about 300 KB.
 pub const MAX_POST_BODY_BYTES: usize = 512 * 1024;
+/// Upper bound on a `getCoverArt` body. Coda asks for
+/// [`crate::cover::COVER_SIZE`] pixels, typically 10–40 KB; Navidrome sends
+/// a smaller original unchanged, in whatever format it has.
+pub const MAX_COVER_BYTES: usize = 4 * 1024 * 1024;
 pub const SEARCH_ARTIST_COUNT: u32 = 20;
 pub const SEARCH_ALBUM_COUNT: u32 = 20;
 pub const SEARCH_SONG_COUNT: u32 = 50;
@@ -219,6 +223,26 @@ impl Error {
     }
 }
 
+/// The body of a `getCoverArt` reply that is an image.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CoverBytes {
+    /// JPEG, PNG or WebP, by its first bytes ([`crate::cover::sniff`]).
+    pub bytes: Vec<u8>,
+    /// The reply said `Cache-Control: no-store`. Navidrome sends that with
+    /// its placeholder picture for items without art (and with art it
+    /// is still preparing), so it is never cached or shown.
+    pub no_store: bool,
+}
+
+impl std::fmt::Debug for CoverBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoverBytes")
+            .field("len", &self.bytes.len())
+            .field("no_store", &self.no_store)
+            .finish()
+    }
+}
+
 /// How playlist writes are sent; see [`Client::transport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
@@ -336,11 +360,7 @@ impl Client {
             .await?
             .album
             .ok_or_else(|| Error::Decode("getAlbum: missing album".into()))?;
-        Ok(album
-            .song
-            .into_iter()
-            .filter_map(api::RawSong::into_track)
-            .collect())
+        Ok(album.into_tracks())
     }
 
     /// One page of albums in `sort` order (`getAlbumList2`), starting at
@@ -625,6 +645,49 @@ impl Client {
             .map(drop)
     }
 
+    /// `getCoverArt` for `cover_id`, scaled by the server to at most `size`
+    /// pixels. The reply is classified by its first bytes, never by its
+    /// `Content-Type`: an image (JPEG, PNG or WebP) is returned; a
+    /// Subsonic error body is [`Error::Server`] (70: no such art) or
+    /// [`Error::Auth`]; anything else is [`Error::Decode`]. The body is
+    /// capped at [`MAX_COVER_BYTES`] while it streams. Like every request,
+    /// the signed URL is never logged.
+    pub async fn cover_art(&self, cover_id: &str, size: u32) -> Result<CoverBytes, Error> {
+        const ENDPOINT: &str = "getCoverArt";
+        let size = size.to_string();
+        let url = self.signed_url(ENDPOINT, &[("id", cover_id), ("size", size.as_str())])?;
+        tracing::debug!(endpoint = ENDPOINT, "navidrome request");
+        let mut response = self.http.get(url).send().await.map_err(Error::network)?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(Error::Redirect(status.as_u16()));
+        }
+        if !status.is_success() {
+            return Err(Error::Http(status.as_u16()));
+        }
+        let no_store = response
+            .headers()
+            .get_all(reqwest::header::CACHE_CONTROL)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"));
+        let body = read_capped(&mut response, MAX_COVER_BYTES).await?;
+        if crate::cover::sniff(&body).is_some() {
+            return Ok(CoverBytes {
+                bytes: body,
+                no_store,
+            });
+        }
+        // Not an image: a Subsonic error (Navidrome answers HTTP 200), or
+        // something else entirely.
+        match api::parse::<api::EmptyReply>(&body) {
+            Ok(reply) => check_status(ENDPOINT, reply)
+                .and_then(|_| Err(Error::Decode(format!("{ENDPOINT}: not an image")))),
+            Err(_) => Err(Error::Decode(format!("{ENDPOINT}: not an image"))),
+        }
+    }
+
     /// A freshly signed stream URL for `song_id`. Pure apart from the salt.
     /// No transcoding parameters are sent (server defaults apply).
     pub fn stream_url(&self, song_id: &str) -> Result<StreamUrl, Error> {
@@ -748,19 +811,7 @@ impl Client {
             tracing::debug!(endpoint, status = status.as_u16(), "navidrome HTTP error");
             return Err(Error::Http(status.as_u16()));
         }
-        if response
-            .content_length()
-            .is_some_and(|len| len > max_body as u64)
-        {
-            return Err(Error::TooLarge);
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(Error::network)? {
-            if body.len() + chunk.len() > max_body {
-                return Err(Error::TooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = read_capped(&mut response, max_body).await?;
         let response: R = api::parse(&body).map_err(|e| {
             Error::Decode(format!(
                 "{endpoint}: {:?} error at line {} column {}",
@@ -771,6 +822,26 @@ impl Client {
         })?;
         check_status(endpoint, response)
     }
+}
+
+/// Reads a response body of at most `max_body` bytes, in chunks: a larger
+/// body (announced or streamed) is [`Error::TooLarge`] without being read
+/// further.
+async fn read_capped(response: &mut reqwest::Response, max_body: usize) -> Result<Vec<u8>, Error> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_body as u64)
+    {
+        return Err(Error::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(Error::network)? {
+        if body.len() + chunk.len() > max_body {
+            return Err(Error::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn check_status<R: api::Reply>(endpoint: &str, mut response: R) -> Result<R, Error> {

@@ -12,8 +12,8 @@
 //! file (rename semantics); nothing is written through it, and its target
 //! is left as it was.
 //!
-//! Setup decides every setting the file can hold except `scrobble`, which
-//! is kept, and `[navidrome]` as a whole when setup keeps it
+//! Setup decides every setting the file can hold except `scrobble` and
+//! `[ui]`, which are kept, and `[navidrome]` as a whole when setup keeps it
 //! ([`NavidromeSection::Keep`]): its keys are then written back by value.
 //! The in-app settings keep `music_dir` the same way. Replacing the file
 //! therefore loses only comments and the
@@ -73,6 +73,14 @@ const HEADER: &str = "# Coda configuration, written by Coda's setup.\n\
 struct Existing {
     music_dir: Option<String>,
     navidrome: Option<ExistingNavidrome>,
+    ui: Option<ExistingUi>,
+}
+
+/// `[ui]`, kept as it is by every write.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExistingUi {
+    cover_art: Option<bool>,
 }
 
 /// What happens to `music_dir`.
@@ -141,8 +149,8 @@ fn write_sections(
     };
     let keep = *navidrome == NavidromeSection::Keep;
     let keep_music_dir = *music_dir == MusicDirSection::Keep;
-    let (kept_music_dir, parsed) = match existing.as_deref().map(toml::from_str::<Existing>) {
-        Some(Ok(existing)) => (existing.music_dir, existing.navidrome),
+    let (kept_music_dir, parsed, ui) = match existing.as_deref().map(toml::from_str::<Existing>) {
+        Some(Ok(existing)) => (existing.music_dir, existing.navidrome, existing.ui),
         // Never drop a setting that was meant to be kept. The parser's
         // message is not passed on: it can quote the file.
         Some(Err(_)) if keep => {
@@ -157,7 +165,7 @@ fn write_sections(
                 "the current settings could not be read",
             ));
         }
-        Some(Err(_)) | None => (None, None),
+        Some(Err(_)) | None => (None, None, None),
     };
     let music_dir = match music_dir {
         MusicDirSection::Set(dir) => dir.clone(),
@@ -180,7 +188,12 @@ fn write_sections(
 
     let parsed = parsed.unwrap_or_default();
     let scrobble = parsed.scrobble.unwrap_or(true);
-    let text = render(music_dir.as_deref(), navidrome, parsed);
+    let text = render(
+        music_dir.as_deref(),
+        navidrome,
+        parsed,
+        ui.unwrap_or_default(),
+    );
     let file_name = path.file_name().map_or_else(
         || "config.toml".into(),
         |n| n.to_string_lossy().into_owned(),
@@ -258,7 +271,12 @@ fn is_codas_own(text: &str) -> bool {
         }
         _ => return false,
     };
-    render(existing.music_dir.as_deref(), &section, navidrome) == text
+    render(
+        existing.music_dir.as_deref(),
+        &section,
+        navidrome,
+        existing.ui.unwrap_or_default(),
+    ) == text
 }
 
 /// Hard-links `path` to `<path>.bak.<secs>` (adding `.1`, `.2`, … if that
@@ -292,6 +310,7 @@ fn render(
     music_dir: Option<&str>,
     navidrome: &NavidromeSection,
     existing: ExistingNavidrome,
+    ui: ExistingUi,
 ) -> String {
     let mut out = String::from(HEADER);
     if let Some(dir) = music_dir {
@@ -333,6 +352,9 @@ fn render(
     if !section.is_empty() {
         out.push_str("\n[navidrome]\n");
         out.push_str(&section);
+    }
+    if let Some(cover_art) = ui.cover_art {
+        out.push_str(&format!("\n[ui]\ncover_art = {cover_art}\n"));
     }
     out
 }
@@ -728,6 +750,40 @@ mod tests {
         let config = f.load();
         assert!(config.navidrome.is_none());
         assert!(config.music_dir.is_some());
+    }
+
+    #[test]
+    fn every_write_keeps_the_ui_settings() {
+        let f = Fixture::new();
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        let music = f.dir.path().join("m");
+        fs::create_dir(&music).unwrap();
+        let old = format!(
+            "music_dir = {}\n\n[ui]\ncover_art = false\n",
+            toml_string(music.to_str().unwrap())
+        );
+        fs::write(f.path(), &old).unwrap();
+        // The in-app settings.
+        let section = NavidromeSection::Write(navidrome("https://h.example", "me"));
+        write_navidrome(&f.path(), &section).unwrap();
+        let text = fs::read_to_string(f.path()).unwrap();
+        assert!(text.ends_with("\n[ui]\ncover_art = false\n"), "{text}");
+        assert!(!f.load().cover_art);
+        // What Coda wrote is still its own: no backup next time.
+        assert!(!needs_backup(&text), "{text}");
+        // Setup.
+        let config = SetupConfig {
+            music_dir: Some(music.to_str().unwrap().into()),
+            navidrome: NavidromeSection::Remove,
+        };
+        write(&f.path(), &config).unwrap();
+        assert!(!f.load().cover_art);
+        // Without `[ui]`, none is written.
+        fs::write(f.path(), "").unwrap();
+        write(&f.path(), &config).unwrap();
+        let text = fs::read_to_string(f.path()).unwrap();
+        assert!(!text.contains("[ui]"), "{text}");
+        assert!(f.load().cover_art);
     }
 
     #[test]

@@ -295,6 +295,11 @@ struct EntryFile {
     disc_no: Option<u32>,
     #[serde(default)]
     duration_ms: Option<u64>,
+    /// Navidrome's `coverArt` id. Added after version 1 shipped, like
+    /// `album_artist`. A Navidrome entry without it (an older file) falls
+    /// back to its song id, which Navidrome also serves art for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cover_art: Option<String>,
 }
 
 impl From<RepeatMode> for RepeatFile {
@@ -336,6 +341,7 @@ impl EntryFile {
             duration_ms: track
                 .duration
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            cover_art: track.cover_art.clone(),
         })
     }
 
@@ -350,6 +356,7 @@ impl EntryFile {
             track_no: self.track_no,
             disc_no: self.disc_no,
             duration: self.duration_ms.map(Duration::from_millis),
+            cover_art: None,
         };
         match self.source {
             SourceFile::Local(path) => {
@@ -359,13 +366,30 @@ impl EntryFile {
                 valid.then(|| Track::local(PathBuf::from(path), metadata))
             }
             SourceFile::Navidrome(id) => {
-                let valid = !id.is_empty()
-                    && id.chars().count() <= MAX_METADATA_CHARS
-                    && !id.chars().any(char::is_control);
-                valid.then(|| Track::navidrome(id, metadata))
+                let valid = valid_id(&id);
+                // An invalid cover id is dropped (no art), not the entry.
+                let cover_art = match self.cover_art {
+                    Some(cover) => Some(cover).filter(|c| valid_id(c)),
+                    None => Some(id.clone()),
+                };
+                valid.then(|| {
+                    Track::navidrome(
+                        id,
+                        TrackMetadata {
+                            cover_art,
+                            ..metadata
+                        },
+                    )
+                })
             }
         }
     }
+}
+
+/// A usable Navidrome id (song or cover): non-empty, capped, no control
+/// characters.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().count() <= MAX_METADATA_CHARS && !id.chars().any(char::is_control)
 }
 
 fn encode(session: &Session) -> serde_json::Result<Vec<u8>> {
@@ -582,6 +606,7 @@ mod tests {
                 track_no: Some(3),
                 disc_no: Some(1),
                 duration: Some(Duration::from_millis(183_250)),
+                cover_art: None,
             },
         )
     }
@@ -597,6 +622,7 @@ mod tests {
                     "song-42".into(),
                     TrackMetadata {
                         title: Some("Remote".into()),
+                        cover_art: Some("al-7_ab12".into()),
                         ..TrackMetadata::default()
                     },
                 ),
@@ -664,6 +690,46 @@ mod tests {
             session.tracks[0].album_artist.as_ref().unwrap().len(),
             MAX_METADATA_CHARS
         );
+    }
+
+    #[test]
+    fn the_cover_id_is_optional_within_version_1() {
+        // A version 1 file written before `cover_art` existed: Navidrome
+        // entries fall back to their song id, local ones have none.
+        let old = br#"{"version":1,"volume":50,"repeat":"off","current":1,
+            "queue":[{"source":{"local":"/music/a.flac"},"title":"A"},
+            {"source":{"navidrome":"song-9"},"title":"B"}]}"#;
+        let (session, skipped) = decode(old).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(session.current, Some(1));
+        assert_eq!(session.tracks[0].cover_art, None);
+        assert_eq!(session.tracks[1].cover_art.as_deref(), Some("song-9"));
+        // Kept through a round trip, and the file stays version 1; a
+        // local track writes none.
+        let json = String::from_utf8(encode(&sample()).unwrap()).unwrap();
+        assert!(json.contains(r#""cover_art":"al-7_ab12""#), "{json}");
+        assert_eq!(json.matches("cover_art").count(), 1, "{json}");
+        assert!(json.contains(r#""version":1"#), "{json}");
+        assert_eq!(decode(json.as_bytes()).unwrap().0, sample());
+        // An unusable cover id is dropped, not the entry; another type is
+        // a malformed entry, like any other field.
+        let bad = format!(
+            r#"{{"version":1,"volume":50,"repeat":"off","current":null,
+            "queue":[{{"source":{{"navidrome":"s1"}},"cover_art":""}},
+            {{"source":{{"navidrome":"s2"}},"cover_art":"a\u0007b"}},
+            {{"source":{{"navidrome":"s3"}},"cover_art":"{}"}}]}}"#,
+            "x".repeat(MAX_METADATA_CHARS + 1)
+        );
+        let (session, skipped) = decode(bad.as_bytes()).unwrap();
+        assert_eq!(skipped, 0);
+        assert!(session.tracks.iter().all(|t| t.cover_art.is_none()));
+        // Saved without one, the field is left out, so the next load falls
+        // back to the song id (Navidrome sets `coverArt` on every song, so
+        // this only affects other servers, where no art shows either way).
+        let json = encode(&session).unwrap();
+        assert!(!String::from_utf8_lossy(&json).contains("cover_art"));
+        let (again, _) = decode(&json).unwrap();
+        assert_eq!(again.tracks[0].cover_art.as_deref(), Some("s1"));
     }
 
     #[test]
