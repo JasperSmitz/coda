@@ -99,3 +99,20 @@
 - **The checks in AGENTS.md:** fmt, both clippy variants, tests, `--ignored` with mpv.
 - **pty smoke runs**, extended for `f`, with scripted replies and a hard timeout. **Never open a terminal emulator or any GUI app, never write to `/dev/tty`** (AGENTS.md, LESSONS).
 - **On-screen checks** are listed for the owner to run in Ghostty and Alacritty. The developer does not do them.
+
+## Revision after the owner's first look (2026-11-03, approved: "Go ahead!")
+- **Bug:** `⟳1` is drawn as one glyph, because fonts draw `⟳` wider than its one cell. Show `⟳ 1`.
+- **Visualizer:** no L/R meter on this screen, only the bars. The bar's visualizer is unchanged.
+- **Side-by-side layout (primary):**
+  - **Cover:** on the left, at most about 55 % of the screen height. It is not meant to fill the screen ("can feel a bit imposing").
+  - **Text column:** to the right of the cover, a few columns' gap, left-aligned. From top to bottom:
+    - the title (bold);
+    - album · artist (dim);
+    - a blank line;
+    - the timeline, with `⟳` and `Vol` at its end;
+    - the visualizer bars, the same width as the timeline;
+    - Next up (dim), when shown.
+  - The column is vertically centred against the cover.
+  - The cover and the column form one block, centred on the screen.
+  - The timeline's filled part is in the theme's green (`Color::Green`); the remainder is dim.
+- **Stacked layout (fallback):** used when side by side doesn't fit (narrow or tall windows). Album · artist moves under the title.
