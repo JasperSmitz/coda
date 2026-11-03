@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -84,7 +84,7 @@ const MIN_CENTRED_TIMELINE: u16 = 24;
 /// Stacked text rows: the title, album · artist, a blank row, the
 /// timeline and Next up.
 const TEXT_ROWS: u16 = 5;
-const DIM: Style = Style::new().fg(Color::DarkGray);
+const DIM: Style = crate::ui::render::DIM_TEXT;
 
 /// Where each part of the screen goes; a part without room (or without
 /// anything to show) is `None`.

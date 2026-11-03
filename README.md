@@ -2,7 +2,7 @@
 
 A keyboard-first terminal music player for your local files and a personal [Navidrome](https://www.navidrome.org) (Subsonic/OpenSubsonic) server, with one queue for both. Written in Rust; playback through [mpv](https://mpv.io).
 
-**Status:** alpha, for personal use. Milestones M1–M7 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Status:** 1.0. Milestones M1–M10 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Features
 - **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks. "Shuffle all" plays your whole library.
@@ -22,7 +22,7 @@ A keyboard-first terminal music player for your local files and a personal [Navi
 
 ## Requirements
 - Linux or macOS (Windows is not supported)
-- Rust (stable), to build
+- Rust 1.89 or newer, to build from source
 - [mpv](https://mpv.io) 0.33 or newer, on `PATH`
 - To store a Navidrome password on Linux: a running Secret Service (GNOME Keyring or KWallet). Building needs no D-Bus headers or OpenSSL.
 
@@ -35,6 +35,22 @@ brew install mpv          # macOS (Homebrew)
 # Build and install Coda (puts `coda` in ~/.cargo/bin)
 cargo install --path .
 ```
+
+### Install a release
+Each [GitHub release](https://github.com/JasperSmitz/coda/releases) has a `coda-<version>-<target>.tar.gz` for Linux (`x86_64`, `aarch64`) and macOS (`aarch64-apple-darwin` for Apple silicon, `x86_64-apple-darwin` for Intel), with a `.sha256` beside it. mpv is still needed.
+
+```sh
+v=1.0.0 t=aarch64-apple-darwin   # pick your version and target
+curl -LO https://github.com/JasperSmitz/coda/releases/download/v$v/coda-$v-$t.tar.gz
+curl -LO https://github.com/JasperSmitz/coda/releases/download/v$v/coda-$v-$t.tar.gz.sha256
+shasum -a 256 -c coda-$v-$t.tar.gz.sha256
+tar -xzf coda-$v-$t.tar.gz
+mkdir -p ~/.local/bin && install -m 755 coda-$v-$t/coda ~/.local/bin/   # or any folder on PATH
+```
+
+**macOS:** the binaries are not signed or notarised. If macOS refuses to open `coda` after a browser download, remove the quarantine flag once: `xattr -d com.apple.quarantine ~/.local/bin/coda`.
+
+**Linux:** the binaries are built on Ubuntu 24.04 (glibc 2.39). If one does not start on an older system, build from source.
 
 ## Getting started
 
@@ -128,6 +144,7 @@ cover_art = true           # cover art in the bar and on the Now playing screen 
 - [`docs/USAGE.md`](docs/USAGE.md): the details of setup, settings, the keychain, playlist editing (including how Navidrome-hidden entries are handled), the local playlist rules, and limits.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how Coda is built.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): what's done and what's next.
+- [`CHANGELOG.md`](CHANGELOG.md): what changed in each release; [`docs/RELEASING.md`](docs/RELEASING.md): how to make one.
 
 ## License
 MIT

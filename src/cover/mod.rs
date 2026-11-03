@@ -429,10 +429,6 @@ impl Covers {
         }
     }
 
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// The cover to show: the track heard's, once loaded; meanwhile, for
     /// at most [`LINGER`] after a track change, the previous track's (so
     /// the tracks of an album do not blank at each change; the new cover

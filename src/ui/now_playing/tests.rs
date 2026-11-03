@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 
 use super::*;
 use crate::app::{Action, Focus};
@@ -777,7 +778,11 @@ fn side_by_side_the_extras_sit_on_the_album_row_and_the_timeline_keeps_its_width
     view.art = Some(painter(HALF));
     let buffer = render(&app, &mut view, 120, 36, now);
     assert_eq!(buffer[(rect.right() - 1, rect.y)].symbol(), "%");
-    assert_eq!(buffer[(rect.right() - 1, rect.y)].fg, Color::DarkGray);
+    assert!(
+        buffer[(rect.right() - 1, rect.y)]
+            .modifier
+            .contains(Modifier::DIM)
+    );
     assert_eq!(buffer[(rect.right() - 12, rect.y)].symbol(), "⟳");
 }
 

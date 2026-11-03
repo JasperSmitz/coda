@@ -276,10 +276,6 @@ impl MpvProcess {
         self.child.id()
     }
 
-    pub fn socket_dir(&self) -> Option<&Path> {
-        self.socket_dir.as_ref().map(SocketDir::path)
-    }
-
     /// Waits for the child to exit. Cancel safe.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
         self.child.wait().await

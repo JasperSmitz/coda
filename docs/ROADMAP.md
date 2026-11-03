@@ -75,18 +75,36 @@ Consecutive tracks play without a pause, for local files and Navidrome streams.
   - Track-change handling stays under the exhaustive event-ordering tests.
 - **Related:** this also lays the groundwork for endless play, which needs the next track known ahead of time.
 
-## M9 — Cover art (completed, reviewed; owner's on-screen check pending)
+## M9 — Cover art (completed, reviewed; checked by the owner 2026-11-03)
 Brief: `docs/plans/m9-cover-art.md`.
 - The cover of the track you hear, in the now-playing bar: a real image with the Kitty graphics protocol (Ghostty, Kitty), half-block characters elsewhere (Alacritty, Terminal.app, WezTerm, iTerm2, tmux).
 - Sources: Navidrome `getCoverArt` (size-capped disk cache) and local embedded art or folder images.
 - **Slice 1, spike (completed):** findings in the brief.
 - **Slice 2 (completed, reviewed):** the feature, as recommended by the spike.
+- **Owner's check (2026-11-03):** seen in Ghostty (image) and macOS Terminal.app (half blocks, as intended).
 
-## M10 — Now playing screen (completed, reviewed; owner's on-screen check pending)
+## M10 — Now playing screen (completed, reviewed; checked by the owner 2026-11-03)
 Brief: `docs/plans/m10-now-playing.md`. A display mode for when the queue is set and you just want to listen (owner, 2026-11-02): a toggle that swaps the panels for a large cover, a larger visualizer and the essential track info, without the text you don't need. Builds on M9.
 - `f` opens and closes it; the global keys keep working, the list keys do nothing there.
 - A large cover (1024 px, cached apart), Next up near the end of a track and after a change, a passing volume, a repeat mark.
-- Owner's on-screen check in Ghostty and Alacritty pending.
+- **Owner's check (2026-11-03):** seen in Ghostty and macOS Terminal.app.
+
+## 1.0 — First release (in progress)
+Brief: `docs/plans/release-1.0.md`. Version 1.0.0 covers M1–M10; what it contains is in `CHANGELOG.md`.
+- The owner has used it on macOS (Ghostty, Terminal.app) through M10, on Linux through M8, and with their own Navidrome server.
+- CI (`.github/workflows/ci.yml`) checks every pull request and push to `main` on Linux and macOS, including the mpv tests on Linux.
+- Pushing a `vX.Y.Z` tag builds Linux and macOS binaries and publishes a GitHub release (`.github/workflows/release.yml`; steps in `docs/RELEASING.md`).
+- Not in 1.0: endless play and autoplay, Homebrew and crates.io, signed or notarised macOS binaries.
+
+### After 1.0
+- Endless play and autoplay.
+- Split `src/app.rs` (move its inline tests to `src/app/tests.rs` first).
+- Narrow `pub` to `pub(crate)` for items that are not API (see `docs/LESSONS.md`).
+- Move `setup::Reply` and `ping` to a neutral module.
+- A test that compares the help overlay with the keymap table.
+- An in-repo pty test for the Now playing screen (today a script outside the repository).
+- `take_edit_requests` returning `Option`.
+- A `debug_assert` for `swap_client` dropping commands.
 
 ## Postponed indefinitely
 - **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.

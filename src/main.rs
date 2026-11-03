@@ -274,7 +274,7 @@ fn init_logging() {
     let file = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::File::create(&path));
+        .and_then(|()| open_log_file(&path));
     let Ok(file) = file else {
         return;
     };
@@ -282,6 +282,19 @@ fn init_logging() {
     let _ = tracing_subscriber::registry()
         .with(log_layer(&spec, file))
         .try_init();
+}
+
+/// Creates (or truncates) the log file, readable by the owner only: even
+/// without library content the log names the server's behaviour.
+/// The mode applies when the file is created; an older, wider file keeps its mode.
+fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
 }
 
 /// HTTP/TLS crates that log server hostnames and addresses below `warn`
@@ -331,6 +344,18 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_log_file_is_created_private_and_truncated() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coda.log");
+        drop(super::open_log_file(&path).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::write(&path, "old").unwrap();
+        drop(super::open_log_file(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
     use super::*;
     use std::sync::{Arc, Mutex};
 

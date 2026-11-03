@@ -442,3 +442,35 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - fmt, both clippy variants and build pass.
   - 1008 tests pass; `--ignored` 34/34.
   - pty smoke: M10 60/60, M7 41/41, gapless 11/11.
+
+## 2026-11-03 — Release 1.0 preparation (reviewed)
+- **Owner's checks:**
+  - M9/M10 in Ghostty and Terminal.app (half blocks there, "cute and works");
+  - Linux through M8, "works perfectly";
+  - daily use with their Navidrome server.
+- **Version and docs:** 1.0.0 with `rust-version = 1.89` (the highest `rust_version` in the dependency graph: lofty 0.25, uuid 1.29). README status and install-from-release; `CHANGELOG.md`; `docs/RELEASING.md`; ROADMAP "1.0" and "After 1.0".
+- **Theme colours:** secondary text uses `Modifier::DIM` (`DIM_TEXT`) instead of DarkGray. The focused row is cyan reversed, with no hard-coded black. The muted visualizer, the timeline remainder and unfocused borders stay DarkGray.
+- **CI** (`.github/workflows/ci.yml`):
+  - fmt;
+  - clippy (both), test and build on Ubuntu and macOS;
+  - an MSRV check (1.89);
+  - mpv `--ignored` tests on Ubuntu with PulseAudio's null sink.
+  - Actions are pinned by SHA, with `contents: read`.
+- **Release** (`.github/workflows/release.yml`): on a `vX.Y.Z` tag:
+  - checks the tag against `Cargo.toml` and the CHANGELOG section;
+  - builds Linux x86_64 and aarch64 natively, macOS arm64, and x86_64 cross-built on arm64;
+  - packages tar.gz files with `.sha256`;
+  - runs `gh release create`, with `contents: write` on the publish job only.
+- **Full-codebase review:** nothing blocking. Fixed:
+  - stale ARCHITECTURE lines;
+  - dead code (`Player::quit`/`Shutdown`, `Covers::enabled`, `album_order`, `socket_dir`) and a duplicated message;
+  - stale doc comments and key names;
+  - the log created 0600;
+  - the panic hook logs only static messages (a `String` payload could quote a title).
+  - LESSONS entry: an all-`pub` library hides dead code. Larger items are listed under "After 1.0".
+- **Verified by the architect:**
+  - fmt, both clippy variants (`--locked`) and build pass.
+  - 1010 tests pass; `--ignored` 34/34.
+  - pty smoke: M10 60/60, M7 41/41, gapless 11/11.
+  - `coda --version` prints 1.0.0.
+  - Workflows: actionlint clean and step dry runs (by the developer). Not yet run on GitHub.

@@ -71,6 +71,9 @@ const CONFIRM_HINT: &str = "y delete · any other key cancels";
 pub const TIMELINE_PLAYED: Style = Style::new().fg(Color::Cyan);
 /// The progress line's remaining part.
 pub const TIMELINE_LEFT: Style = Style::new().fg(Color::DarkGray);
+/// Secondary text: the default foreground, dimmed. Unlike bright black it
+/// stays readable in every terminal theme.
+pub const DIM_TEXT: Style = Style::new().add_modifier(Modifier::DIM);
 /// Widest the picker and prompt boxes get.
 const DIALOG_WIDTH: u16 = 60;
 
@@ -346,7 +349,9 @@ fn panel_block(title: String, focused: bool, width: u16) -> Block<'static> {
 
 fn list_widget<'a>(items: Vec<ListItem<'a>>, block: Block<'a>, focused: bool) -> List<'a> {
     let highlight = if focused {
-        Style::default().bg(Color::Cyan).fg(Color::Black)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::REVERSED)
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
@@ -428,10 +433,7 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
             },
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
-        let line = Line::styled(
-            fit(&message, usize::from(body.width)),
-            Style::default().fg(Color::DarkGray),
-        );
+        let line = Line::styled(fit(&message, usize::from(body.width)), DIM_TEXT);
         frame.render_widget(Paragraph::new(line), body);
         return;
     }
@@ -590,7 +592,7 @@ fn draw_local_search(
     if tracks.is_empty() {
         let line = Line::styled(
             fit("No matches (h or Esc to go back)", usize::from(area.width)),
-            Style::default().fg(Color::DarkGray),
+            DIM_TEXT,
         );
         frame.render_widget(Paragraph::new(line), area);
         return;
@@ -705,7 +707,7 @@ fn draw_remote(
                     Resource::Search(_) => "No results",
                     Resource::Playlists => "No playlists",
                 };
-                message(frame, text, Style::default().fg(Color::DarkGray));
+                message(frame, text, DIM_TEXT);
                 return;
             }
             let footer = match browser.more(current) {
@@ -840,10 +842,16 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 /// Builds only the visible rows.
 fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
     let note = match picker.load() {
-        Load::Loading(_) => Some(("Loading your playlists…".to_owned(), Color::Yellow)),
-        Load::Failed(error) => Some((format!("Could not load playlists: {error}"), Color::Red)),
+        Load::Loading(_) => Some((
+            "Loading your playlists…".to_owned(),
+            Style::new().fg(Color::Yellow),
+        )),
+        Load::Failed(error) => Some((
+            format!("Could not load playlists: {error}"),
+            Style::new().fg(Color::Red),
+        )),
         Load::Ready if picker.choices().is_empty() => {
-            Some(("No playlists of your own yet".to_owned(), Color::DarkGray))
+            Some(("No playlists of your own yet".to_owned(), DIM_TEXT))
         }
         Load::Ready => None,
     };
@@ -855,15 +863,12 @@ fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
     let block = panel_block(title, true, popup.width);
     let mut body = block.inner(popup);
     frame.render_widget(block, popup);
-    if let Some((text, color)) = note
+    if let Some((text, note_style)) = note
         && body.height > 1
     {
         let [list, footer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(body);
-        let line = Line::styled(
-            fit(&text, usize::from(footer.width)),
-            Style::default().fg(color),
-        );
+        let line = Line::styled(fit(&text, usize::from(footer.width)), note_style);
         frame.render_widget(Paragraph::new(line), footer);
         body = list;
     }
@@ -907,10 +912,7 @@ fn draw_prompt(frame: &mut Frame, title: &str, text: &str, area: Rect) {
     let x = body.x + (cursor_x as u16).min(body.width - 1);
     frame.set_cursor_position((x, body.y));
     if body.height > 1 {
-        let hint = Line::styled(
-            fit(PROMPT_HINT, usize::from(body.width)),
-            Style::default().fg(Color::DarkGray),
-        );
+        let hint = Line::styled(fit(PROMPT_HINT, usize::from(body.width)), DIM_TEXT);
         frame.render_widget(
             Paragraph::new(hint),
             Rect {
@@ -932,10 +934,7 @@ fn draw_confirmation(frame: &mut Frame, question: &str, area: Rect) {
     let width = usize::from(body.width);
     let lines = vec![
         Line::raw(fit(question, width)),
-        Line::styled(
-            fit(CONFIRM_HINT, width),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Line::styled(fit(CONFIRM_HINT, width), DIM_TEXT),
     ];
     frame.render_widget(Paragraph::new(lines), body);
 }
@@ -954,10 +953,7 @@ fn draw_search_input(frame: &mut Frame, query: &str, area: Rect) {
     let spare = usize::from(area.width).saturating_sub(cursor_x + 1);
     if spare >= SEARCH_HINT.width() + 2 {
         spans.push(Span::raw(" ".repeat(spare - SEARCH_HINT.width())));
-        spans.push(Span::styled(
-            SEARCH_HINT,
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(SEARCH_HINT, DIM_TEXT));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     if area.width > 0 && area.height > 0 {
@@ -1068,13 +1064,13 @@ fn queue_right(track: &Track) -> Option<String> {
     })
 }
 
-fn status_label(status: PlaybackStatus) -> (&'static str, Color) {
+fn status_label(status: PlaybackStatus) -> (&'static str, Style) {
     match status {
-        PlaybackStatus::Stopped => ("Stopped", Color::DarkGray),
-        PlaybackStatus::Loading => ("Loading", Color::Yellow),
-        PlaybackStatus::Playing => ("Playing", Color::Green),
-        PlaybackStatus::Paused => ("Paused", Color::Yellow),
-        PlaybackStatus::Unavailable => ("Unavailable", Color::Red),
+        PlaybackStatus::Stopped => ("Stopped", DIM_TEXT),
+        PlaybackStatus::Loading => ("Loading", Style::new().fg(Color::Yellow)),
+        PlaybackStatus::Playing => ("Playing", Style::new().fg(Color::Green)),
+        PlaybackStatus::Paused => ("Paused", Style::new().fg(Color::Yellow)),
+        PlaybackStatus::Unavailable => ("Unavailable", Style::new().fg(Color::Red)),
     }
 }
 
@@ -1128,12 +1124,12 @@ fn draw_now_playing(
         None => (info, None, progress),
     };
 
-    let (label, color) = status_label(player.status());
+    let (label, status_style) = status_label(player.status());
     let label = format!("[{label}] ");
     let entry = player.playing_entry();
     let mut spans = vec![Span::styled(
         label.clone(),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        status_style.add_modifier(Modifier::BOLD),
     )];
     let mut room = usize::from(info.width).saturating_sub(label.width());
     if entry.is_some_and(|e| e.track.is_remote()) {
@@ -1169,10 +1165,7 @@ fn draw_now_playing(
                 }
             }
         }
-        None => spans.push(Span::styled(
-            fit("Nothing playing", room),
-            Style::default().fg(Color::DarkGray),
-        )),
+        None => spans.push(Span::styled(fit("Nothing playing", room), DIM_TEXT)),
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), info);
 
@@ -1277,7 +1270,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
         return;
     }
     let x = area.x + offset;
-    let label_style = Style::default().fg(Color::DarkGray);
+    let label_style = DIM_TEXT;
     let bar_style = Style::default().fg(Color::Green);
     for (row, (label, value)) in ["L", "R"].iter().zip(levels).enumerate() {
         let y = area.y + area.height - 2 + row as u16;
@@ -1426,10 +1419,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
         (None, None) => Span::raw(""),
     };
     frame.render_widget(Paragraph::new(left), left_area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(right, Style::default().fg(Color::DarkGray))),
-        right_area,
-    );
+    frame.render_widget(Paragraph::new(Span::styled(right, DIM_TEXT)), right_area);
 }
 
 /// `left` truncated, with `right` right-aligned, within `width` columns.
@@ -1446,7 +1436,7 @@ fn row_line(left: &str, right: Option<String>, width: usize) -> Line<'static> {
     Line::from(vec![
         Span::raw(left),
         Span::raw(" ".repeat(pad)),
-        Span::styled(right, Style::default().fg(Color::DarkGray)),
+        Span::styled(right, DIM_TEXT),
     ])
 }
 

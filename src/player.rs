@@ -118,7 +118,6 @@ pub enum PlayerCommand {
     SeekRelative(f64),
     SeekAbsolute(f64),
     SetVolume(u8),
-    Shutdown,
 }
 
 impl PlayerCommand {
@@ -134,7 +133,6 @@ impl PlayerCommand {
             Self::SeekRelative(seconds) => PlaybackCommand::SeekRelative(seconds),
             Self::SeekAbsolute(seconds) => PlaybackCommand::SeekAbsolute(seconds),
             Self::SetVolume(volume) => PlaybackCommand::SetVolume(volume),
-            Self::Shutdown => PlaybackCommand::Shutdown,
         })
     }
 }
@@ -682,7 +680,8 @@ impl Player {
         }
         tracing::info!(%load, skipped, "remote entries skipped: Navidrome is not configured");
         self.messages.push(format!(
-            "Navidrome is not configured; skipped {skipped} remote track{}",
+            "{} {skipped} remote track{}",
+            crate::resolve::REMOTE_SKIPPED,
             if skipped == 1 { "" } else { "s" }
         ));
         self.failures_in_a_row += skipped;
@@ -700,13 +699,6 @@ impl Player {
             return self.stop();
         }
         self.load_entry(target)
-    }
-
-    /// Quit: forget the current load first so its end-file is stale, then
-    /// shut the backend down.
-    pub fn quit(&mut self) -> Vec<PlayerCommand> {
-        self.clear_load();
-        vec![PlayerCommand::Shutdown]
     }
 
     // ----- gapless lookahead ------------------------------------------------
@@ -1227,12 +1219,6 @@ mod tests {
         assert_eq!(p.current_load(), None);
         assert!(p.handle_event(ended(l1, EndReason::Stopped)).is_empty());
         assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
-
-        let (mut p, ids) = player_with(&["A", "B"]);
-        let l1 = start(&mut p, ids[0]);
-        assert_eq!(p.quit(), [PlayerCommand::Shutdown]);
-        assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
-        assert_eq!(p.queue().current(), Some(ids[0]));
     }
 
     #[test]
@@ -1292,13 +1278,13 @@ mod tests {
         let (load, _) = load_of(&p.play_entry(ids[0]));
         assert_eq!(p.status(), PlaybackStatus::Loading);
         assert!(p.seek_relative(5.0).is_empty());
-        // `p` at the first entry while loading: nothing to restart.
+        // `<` at the first entry while loading: nothing to restart.
         assert!(p.play_previous().is_empty());
         assert_eq!(p.queue().current(), Some(ids[0]));
         p.handle_event(PlaybackEvent::Started { load });
         assert_eq!(p.seek_relative(5.0), [PlayerCommand::SeekRelative(5.0)]);
         assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
-        // `p` while loading a later entry still goes back.
+        // `<` while loading a later entry still goes back.
         load_of(&p.play_next());
         let (_, path) = load_of(&p.play_previous());
         assert_eq!(path, PathBuf::from("/m/A.flac"));
@@ -1643,7 +1629,6 @@ mod tests {
                 PlaybackCommand::SeekAbsolute(0.0),
             ),
             (PlayerCommand::SetVolume(40), PlaybackCommand::SetVolume(40)),
-            (PlayerCommand::Shutdown, PlaybackCommand::Shutdown),
         ];
         for (player, playback) in cases {
             assert_eq!(player.into_playback(), Ok(playback));
@@ -1762,7 +1747,7 @@ mod tests {
         // The replaced load's end is stale.
         assert!(p.handle_event(ended(old, EndReason::Eof)).is_empty());
         assert_eq!(titles(&p), ["X", "Y*", "Z"]);
-        // `p` walks back through the context.
+        // `<` walks back through the context.
         let (_, path) = load_of(&p.play_previous());
         assert_eq!(path, PathBuf::from("/m/X.flac"));
         // Old entry ids are gone.
@@ -1892,7 +1877,7 @@ mod tests {
         assert!(p.handle_event(ended(l1, EndReason::Eof)).is_empty());
         assert!(p.handle_event(ended(l1, EndReason::Stopped)).is_empty());
         assert_eq!(p.current_load(), Some(l2));
-        // `n` and `p` behave as usual.
+        // `>` and `<` behave as usual.
         let (_, path) = load_of(&p.play_next());
         assert_eq!(path, PathBuf::from("/m/B.flac"));
         assert!(p.play_next().is_empty());
@@ -1925,7 +1910,7 @@ mod tests {
         start(&mut p, ids[1]);
         let (_, path) = load_of(&p.play_next());
         assert_eq!(path, PathBuf::from("/m/A.flac"));
-        // `p` at the first entry still restarts rather than wrapping.
+        // `<` at the first entry still restarts rather than wrapping.
         let load = p.current_load().unwrap();
         p.handle_event(PlaybackEvent::Started { load });
         assert_eq!(p.play_previous(), [PlayerCommand::SeekAbsolute(0.0)]);
@@ -2178,7 +2163,7 @@ mod tests {
         let _ = l1;
     }
 
-    // ----- suspect ends, `d` under repeat, abandoning, queue cap ------------
+    // ----- suspect ends, `D` under repeat, abandoning, queue cap ------------
 
     /// Every load starts and immediately reaches EOF, reporting at most
     /// `position`. Returns the number of loads before playback ended.
