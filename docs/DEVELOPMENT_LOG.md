@@ -434,3 +434,11 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - `cargo test --all-targets`: 1005 pass.
   - `--ignored`: 34/34.
   - pty smoke: M10 57/57, M7 41/41, gapless 11/11.
+
+## 2026-11-03 — M10: extras move to the album row
+- **Owner's request:** side by side, the extras no longer shorten the timeline. `⟳`/`⟳ 1` and `Vol N%` sit right-aligned on the album · artist row, above the end of the full-width timeline. Album · artist is cut with `…` before them (at least 16 columns kept); in a narrow column the repeat mark goes first, then the volume. Stacked is unchanged.
+- **Review:** checked by the architect (a small diff), not sent to the reviewer.
+- **Verified:**
+  - fmt, both clippy variants and build pass.
+  - 1008 tests pass; `--ignored` 34/34.
+  - pty smoke: M10 60/60, M7 41/41, gapless 11/11.

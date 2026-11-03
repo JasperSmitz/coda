@@ -3,11 +3,12 @@
 //!
 //! - **Side by side** (when it fits): a square cover on the left, about
 //!   55 % of the height (35–55 %), and beside it a left-aligned column,
-//!   centred against the cover: the title in bold, album · artist (dim), a
-//!   blank row, the timeline with the repeat mark and a passing volume at
-//!   its end, the visualizer's bars as wide as the column, and a dim Next
-//!   up line when it is due ([`crate::now_playing`]). Cover and column
-//!   form one block, centred on the screen.
+//!   centred against the cover: the title in bold, album · artist (dim)
+//!   with the repeat mark and a passing volume right-aligned on its row, a
+//!   blank row, the timeline and the visualizer's bars, both as wide as
+//!   the column, and a dim Next up line when it is due
+//!   ([`crate::now_playing`]). Cover and column form one block, centred
+//!   on the screen.
 //! - **Stacked** (narrow or tall windows, or no cover): the cover, the
 //!   title with album · artist under it, the visualizer, the timeline and
 //!   Next up, each centred.
@@ -69,6 +70,9 @@ pub const MAX_VISUALIZER_ROWS_ALONE: u16 = 16;
 pub const MAX_TIMELINE_WIDTH: u16 = 64;
 /// Below this width the bar is left out and the timeline is just times.
 const MIN_BAR: u16 = 4;
+/// Side by side: album · artist keeps at least this many columns (or all
+/// it needs, if less) beside the extras on its row.
+const MIN_HEADER: u16 = 16;
 /// Columns kept free left and right of the screen's content.
 const SIDE: u16 = 2;
 /// Stacked: room kept on both sides of a wide timeline for the extras
@@ -392,8 +396,12 @@ pub fn draw(
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        let header = fit(&header, usize::from(rect.width));
-        frame.render_widget(place(Line::styled(header, DIM)), rect);
+        if layout.side_by_side {
+            draw_column_header(frame, app, rect, &header, now);
+        } else {
+            let header = fit(&header, usize::from(rect.width));
+            frame.render_widget(place(Line::styled(header, DIM)), rect);
+        }
     }
     if let (Some(rect), Some(painter)) = (layout.cover, painter) {
         painter.draw(frame.buffer_mut(), rect);
@@ -413,7 +421,7 @@ pub fn draw(
     }
     if let Some(rect) = layout.timeline {
         if layout.side_by_side {
-            draw_column_timeline(frame, app, rect, now);
+            draw_column_timeline(frame, app, rect);
         } else {
             draw_timeline(
                 frame,
@@ -472,17 +480,6 @@ fn join_extras(repeat: Option<String>, volume: Option<String>) -> String {
         .join("  ")
 }
 
-/// Columns the elapsed time and the duration take with their spaces.
-fn times_width(app: &App) -> u16 {
-    let player = app.player();
-    let duration = player
-        .duration()
-        .or_else(|| player.playing_entry().and_then(|e| e.track.duration));
-    let elapsed = format_time(player.position().unwrap_or_default());
-    let total = duration.map_or_else(|| "--:--".to_owned(), format_time);
-    (elapsed.width() + total.width() + 2) as u16
-}
-
 /// The styles of the timeline's text, played part and remainder: as the
 /// bar's progress line (cyan and dim grey); all dim unless playing or
 /// loading (paused, stopped after a restart or at the end of the queue,
@@ -533,49 +530,50 @@ fn timeline_line(app: &App, width: u16) -> Line<'static> {
     ])
 }
 
-/// Side by side: the timeline left-aligned in the column's `row`, with
-/// the extras at its end (the bar shortens to make room for them; without
-/// them it is exactly as wide as the visualizer below).
-fn draw_column_timeline(frame: &mut Frame, app: &App, row: Rect, now: Instant) {
-    // In a narrow column with a long track, the repeat mark goes before
-    // the bar would, then the volume.
+/// Side by side: the timeline across the whole column `row`, as wide as
+/// the bars below it, whatever the extras do.
+fn draw_column_timeline(frame: &mut Frame, app: &App, row: Rect) {
+    let line = timeline_line(app, row.width);
+    let width = (line.width() as u16).min(row.width);
+    frame.render_widget(line, Rect { width, ..row });
+}
+
+/// Side by side: album · artist left-aligned in the column's `row`, and
+/// the extras (repeat mark, passing volume) right-aligned on the same row,
+/// above the end of the timeline. Album · artist is cut with `…` to keep
+/// two columns before the extras; when both do not fit (album · artist
+/// keeping at least [`MIN_HEADER`] columns, or all it has if less), the
+/// repeat mark goes first, then the volume.
+fn draw_column_header(frame: &mut Frame, app: &App, row: Rect, header: &str, now: Instant) {
     let (repeat, volume) = extra_parts(app, now);
-    let needed = times_width(app) + MIN_BAR;
-    let beside_of = |extras: &str| {
-        if extras.is_empty() {
-            0
-        } else {
-            (extras.width() as u16 + 2).min(row.width)
-        }
-    };
+    let header_needs = (header.width() as u16).min(MIN_HEADER);
     let extras = [
         join_extras(repeat, volume.clone()),
         join_extras(None, volume),
         String::new(),
     ]
     .into_iter()
-    .find(|extras| row.width.saturating_sub(beside_of(extras)) >= needed)
+    .find(|extras| {
+        let width = extras.width() as u16;
+        extras.is_empty()
+            || (header_needs == 0 && width <= row.width)
+            || width + 2 + header_needs <= row.width
+    })
     .unwrap_or_default();
-    let beside = beside_of(&extras);
-    let width = row.width - beside;
-    let line = timeline_line(app, width);
-    let line_width = (line.width() as u16).min(width);
-    frame.render_widget(
-        line,
-        Rect {
-            width: line_width,
-            ..row
-        },
-    );
-    if beside > 0 {
-        let start = row.x + line_width + 2;
-        let room = (row.x + row.width).saturating_sub(start);
-        let extras = fit(&extras, usize::from(room));
+    let extras_width = extras.width() as u16;
+    let room = if extras.is_empty() {
+        row.width
+    } else {
+        row.width.saturating_sub(extras_width + 2)
+    };
+    let header = fit(header, usize::from(room));
+    frame.render_widget(Line::styled(header, DIM), Rect { width: room, ..row });
+    if !extras.is_empty() {
         frame.render_widget(
             Span::styled(extras, DIM),
             Rect {
-                x: start.min(row.x + row.width),
-                width: room,
+                x: row.right() - extras_width,
+                width: extras_width,
                 ..row
             },
         );

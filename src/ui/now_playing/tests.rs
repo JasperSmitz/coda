@@ -733,34 +733,122 @@ fn the_visualizer_is_drawable_only_where_the_layout_draws_it() {
     assert!(view.visualizer_drawable);
 }
 
-#[test]
-fn a_narrow_column_drops_the_repeat_mark_before_the_bar() {
-    let now = Instant::now();
-    let long = Track::local(
-        "/music/long.flac".into(),
-        TrackMetadata {
-            title: Some("Long".into()),
-            duration: Some(Duration::from_secs(3723)),
-            ..TrackMetadata::default()
-        },
-    );
-    let (mut app, _) = playing(vec![long], now);
-    answer_covers(&mut app, cover(256));
+/// The column (side by side, half blocks) at `width` × 36 for `app`:
+/// the text from the column's left edge on the album and timeline rows.
+fn column_rows(app: &App, width: u16, now: Instant) -> (String, String, Rect) {
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    let buffer = render(app, &mut view, width, 36, now);
+    let layout = layout_for(Rect::new(0, 0, width, 35), app, view.art.as_ref());
+    assert!(layout.side_by_side);
+    let text = |rect: Rect| -> String {
+        (rect.x..rect.right())
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect()
+    };
+    let header = layout.header.unwrap();
+    (text(header), text(layout.timeline.unwrap()), header)
+}
+
+fn with_extras(app: &mut App, volume: u8, now: Instant) {
+    // Repeat one, and the volume just changed.
     app.handle_action(Action::CycleRepeat, now);
     app.handle_action(Action::CycleRepeat, now);
     app.handle_action(Action::VolumeUp, now);
-    app.handle_playback_event(PlaybackEvent::Volume(55), now);
+    app.handle_playback_event(PlaybackEvent::Volume(volume), now);
+}
+
+#[test]
+fn side_by_side_the_extras_sit_on_the_album_row_and_the_timeline_keeps_its_width() {
+    let now = Instant::now();
+    let (mut app, _) = two_tracks(now);
+    answer_covers(&mut app, cover(256));
+    let (header, timeline, _) = column_rows(&app, 120, now);
+    assert_eq!(header.trim_end(), "Album · Artist");
+    assert!(timeline.starts_with("0:00 ─") && timeline.ends_with(" 1:40"));
+    assert_eq!(timeline.width(), 64, "the whole column");
+    with_extras(&mut app, 55, now);
+    let (header, with, rect) = column_rows(&app, 120, now);
+    assert_eq!(with, timeline, "the timeline does not move");
+    // Right-aligned to the column's edge, above the end of the timeline.
+    assert!(header.starts_with("Album · Artist"));
+    assert!(header.ends_with("  ⟳ 1  Vol 55%"), "{header:?}");
     let mut view = ViewState::default();
     view.art = Some(painter(HALF));
-    // 76x36: a 30-column column; `⟳ 1  Vol 55%` would leave the bar no room.
-    let lines = lines(&render(&app, &mut view, 76, 36, now));
-    let (_, line) = line_with(&lines, "1:02:03");
-    assert!(line.contains("─") && line.contains("Vol 55%"), "{line}");
-    assert!(!line.contains('⟳'), "{line}");
-    // In a 64-column column both fit.
-    let lines = self::lines(&render(&app, &mut view, 120, 36, now));
-    let (_, line) = line_with(&lines, "1:02:03");
-    assert!(line.contains("1:02:03  ⟳ 1  Vol 55%"), "{line}");
+    let buffer = render(&app, &mut view, 120, 36, now);
+    assert_eq!(buffer[(rect.right() - 1, rect.y)].symbol(), "%");
+    assert_eq!(buffer[(rect.right() - 1, rect.y)].fg, Color::DarkGray);
+    assert_eq!(buffer[(rect.right() - 12, rect.y)].symbol(), "⟳");
+}
+
+#[test]
+fn a_long_album_row_is_cut_before_the_extras() {
+    let now = Instant::now();
+    let (mut app, _) = playing(
+        vec![track(
+            "1.flac",
+            "T",
+            Some(&"Artist ".repeat(10)),
+            Some(&"Album ".repeat(10)),
+        )],
+        now,
+    );
+    answer_covers(&mut app, cover(256));
+    // No extras: the whole column.
+    let (header, ..) = column_rows(&app, 120, now);
+    assert_eq!(header.width(), 64);
+    assert!(header.ends_with('…'));
+    with_extras(&mut app, 55, now);
+    let (header, ..) = column_rows(&app, 120, now);
+    assert!(header.ends_with("…  ⟳ 1  Vol 55%"), "{header:?}");
+}
+
+#[test]
+fn a_narrow_column_drops_the_repeat_mark_then_the_volume() {
+    let now = Instant::now();
+    let long = |volume| {
+        let (mut app, _) = playing(
+            vec![track(
+                "1.flac",
+                "T",
+                Some("Some Artist"),
+                Some("A Long Album"),
+            )],
+            now,
+        );
+        answer_covers(&mut app, cover(256));
+        with_extras(&mut app, volume, now);
+        app
+    };
+    // 76x36: a 30-column column. `⟳ 1  Vol 55%` and 16 columns of album
+    // · artist just fit.
+    let (header, timeline, rect) = column_rows(&long(55), 76, now);
+    assert_eq!(rect.width, 30);
+    assert!(header.ends_with("…  ⟳ 1  Vol 55%"), "{header:?}");
+    assert_eq!(timeline.width(), 30);
+    // `Vol 100%` is one wider: the repeat mark goes.
+    let (header, ..) = column_rows(&long(100), 76, now);
+    assert!(
+        header.ends_with("  Vol 100%") && !header.contains('⟳'),
+        "{header:?}"
+    );
+    // A short album · artist keeps everything.
+    let (mut app, _) = playing(vec![track("1.flac", "T", Some("Ar"), Some("Al"))], now);
+    answer_covers(&mut app, cover(256));
+    with_extras(&mut app, 100, now);
+    let (header, ..) = column_rows(&app, 76, now);
+    assert!(header.starts_with("Al · Ar") && header.ends_with("⟳ 1  Vol 100%"));
+}
+
+#[test]
+fn without_album_or_artist_the_extras_still_show() {
+    let now = Instant::now();
+    let (mut app, _) = playing(vec![track("1.flac", "T", None, None)], now);
+    answer_covers(&mut app, cover(256));
+    with_extras(&mut app, 55, now);
+    let (header, ..) = column_rows(&app, 120, now);
+    assert_eq!(header.trim_start(), "⟳ 1  Vol 55%");
+    assert_eq!(header.width(), 64);
 }
 
 #[test]
@@ -783,10 +871,12 @@ fn sketches_of_both_layouts() {
     // As the report shows them: half blocks at 120x36; Kitty with 16 × 34
     // px cells at 80x30 (placeholder cells shown as `#`).
     let now = Instant::now();
-    let app = loud_screen(now);
+    let mut app = loud_screen(now);
+    with_extras(&mut app, 55, now);
     let mut view = ViewState::default();
     view.art = Some(painter(HALF));
     let wide = lines(&render(&app, &mut view, 120, 36, now));
+    assert!(wide[11].ends_with("⟳ 1  Vol 55%       "), "{:?}", wide[11]);
     let mut kitty = ViewState::default();
     kitty.art = Some(ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 1));
     let small: Vec<String> = lines(&render(&app, &mut kitty, 80, 30, now))
