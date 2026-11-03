@@ -66,6 +66,11 @@ const SEARCH_HINT: &str = "Enter search · Esc cancel";
 const PROMPT_HINT: &str = "Enter save · Esc cancel (empty name cancels)";
 /// Hint under a y/n question.
 const CONFIRM_HINT: &str = "y delete · any other key cancels";
+/// The progress line's played part, in the bar and on the Now playing
+/// screen.
+pub const TIMELINE_PLAYED: Style = Style::new().fg(Color::Cyan);
+/// The progress line's remaining part.
+pub const TIMELINE_LEFT: Style = Style::new().fg(Color::DarkGray);
 /// Widest the picker and prompt boxes get.
 const DIALOG_WIDTH: u16 = 60;
 
@@ -246,7 +251,8 @@ pub fn draw(frame: &mut Frame, app: &App, view: &mut ViewState, now: Instant) {
         });
     if app.now_playing_open() {
         let area = main_area(screen);
-        view.visualizer_drawable = now_playing::visualizer_room(area) && !overlay;
+        view.visualizer_drawable =
+            now_playing::visualizer_room(area, app, view.art.as_ref()) && !overlay;
         let visualizer_area = now_playing::draw(frame, app, view.art.as_ref(), area, now);
         view.visualizer_area = visualizer_area.filter(|_| !overlay && !app.input_open());
         let status = Rect {
@@ -1200,8 +1206,8 @@ fn draw_now_playing(
         LineGauge::default()
             .ratio(ratio)
             .label(time)
-            .filled_style(Style::default().fg(Color::Cyan))
-            .unfilled_style(Style::default().fg(Color::DarkGray)),
+            .filled_style(TIMELINE_PLAYED)
+            .unfilled_style(TIMELINE_LEFT),
         gauge_area,
     );
     frame.render_widget(Paragraph::new(volume), volume_area);
@@ -1216,7 +1222,8 @@ fn draw_now_playing(
 /// Shape carries all the meaning (block characters), so it reads the same
 /// without colour (`NO_COLOR`) and with 16 colours. Silent unless the
 /// current track is playing. Too narrow for even one-column bands, it
-/// draws nothing. On the Now playing screen it is dim grey throughout.
+/// draws nothing. On the Now playing screen it is dim grey and has no
+/// level meter, just the bars across the whole area.
 pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     Clear.render(area, buffer);
     if area.width < NARROW_BANDS_WIDTH || area.height == 0 {
@@ -1233,7 +1240,9 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
         ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
     };
 
-    let Some(layout) = visualizer_layout(area.width) else {
+    // On the Now playing screen: the bars only, no level meter, dim grey.
+    let calm = app.now_playing_open();
+    let Some(layout) = visualizer_layout(area.width, !calm) else {
         return;
     };
     let values = if layout.spread {
@@ -1241,7 +1250,6 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     } else {
         bands.to_vec()
     };
-    let calm = app.now_playing_open();
     let band_style = Style::default().fg(if calm { Color::DarkGray } else { Color::Cyan });
     for (&(offset, bar_width), value) in layout.bars.iter().zip(&values) {
         let x = area.x + offset;
@@ -1270,7 +1278,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     }
     let x = area.x + offset;
     let label_style = Style::default().fg(Color::DarkGray);
-    let bar_style = Style::default().fg(if calm { Color::DarkGray } else { Color::Green });
+    let bar_style = Style::default().fg(Color::Green);
     for (row, (label, value)) in ["L", "R"].iter().zip(levels).enumerate() {
         let y = area.y + area.height - 2 + row as u16;
         buffer.set_string(x, y, label, label_style);
@@ -1312,10 +1320,14 @@ struct VisualizerLayout {
 ///   rest: about 2.5 columns each plus a one-column gap, at least one per
 ///   band and at most [`crate::visualizer::MAX_BARS`], their widths
 ///   differing by at most one column so they reach the meter's gap.
-fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
+fn visualizer_layout(width: u16, meter: bool) -> Option<VisualizerLayout> {
     let bands = crate::playback::VISUALIZER_BANDS as u16;
     if width < NARROW_BANDS_WIDTH {
         return None;
+    }
+    if !meter {
+        // Bars only (the Now playing screen): spread over the whole width.
+        return Some(spread_bars(width));
     }
     if width < WIDE_VISUALIZER {
         let room = width.saturating_sub(NARROW_BANDS_WIDTH + 2);
@@ -1331,7 +1343,18 @@ fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
     }
     // Seven three-column bands and a gap used 29 columns.
     let meter = (width - 29).min(WIDEST_METER);
-    let bars_width = width - meter - 2;
+    Some(VisualizerLayout {
+        meter: Some((width - meter, meter)),
+        ..spread_bars(width - meter - 2)
+    })
+}
+
+/// Bars spread over `bars_width` columns: about 2.5 columns each plus a
+/// one-column gap, at least one per band and at most
+/// [`crate::visualizer::MAX_BARS`], their widths differing by at most
+/// one column so they fill it exactly.
+fn spread_bars(bars_width: u16) -> VisualizerLayout {
+    let bands = crate::playback::VISUALIZER_BANDS as u16;
     let max_bars = crate::visualizer::MAX_BARS as u16;
     // In u32: a huge width must not overflow.
     let count =
@@ -1347,11 +1370,11 @@ fn visualizer_layout(width: u16) -> Option<VisualizerLayout> {
         bars.push((offset, bar));
         offset += bar + 1;
     }
-    Some(VisualizerLayout {
+    VisualizerLayout {
         bars,
         spread: true,
-        meter: Some((width - meter, meter)),
-    })
+        meter: None,
+    }
 }
 
 /// Redraws only the visualizer: draws it into `last_frame` (a copy of the
@@ -1850,7 +1873,7 @@ mod tests {
         for width in [40, 80] {
             let (terminal, view) = drawn(&app, width, 24, now);
             let area = view.visualizer_area.unwrap();
-            let layout = visualizer_layout(area.width).unwrap();
+            let layout = visualizer_layout(area.width, true).unwrap();
             let rows = area_text(&terminal, area);
             let column = |bar: usize| -> String {
                 let x = usize::from(layout.bars[bar].0);
@@ -1877,20 +1900,20 @@ mod tests {
 
     #[test]
     fn visualizer_layout_at_several_widths() {
-        let bars = |width: u16| visualizer_layout(width).unwrap().bars;
+        let bars = |width: u16| visualizer_layout(width, true).unwrap().bars;
         // Too narrow for anything.
-        assert_eq!(visualizer_layout(0), None);
-        assert_eq!(visualizer_layout(12), None);
+        assert_eq!(visualizer_layout(0, true), None);
+        assert_eq!(visualizer_layout(12, true), None);
         // Narrow: seven one-column bands as before; a meter once 6 columns
         // are left after the gap.
         for width in [13, 20, 21, 41] {
-            let layout = visualizer_layout(width).unwrap();
+            let layout = visualizer_layout(width, true).unwrap();
             assert!(!layout.spread, "{width}");
             assert_eq!(layout.bars, (0..7).map(|i| (i * 2, 1)).collect::<Vec<_>>());
         }
-        assert_eq!(visualizer_layout(20).unwrap().meter, None);
-        assert_eq!(visualizer_layout(21).unwrap().meter, Some((15, 6)));
-        assert_eq!(visualizer_layout(41).unwrap().meter, Some((17, 24)));
+        assert_eq!(visualizer_layout(20, true).unwrap().meter, None);
+        assert_eq!(visualizer_layout(21, true).unwrap().meter, Some((15, 6)));
+        assert_eq!(visualizer_layout(41, true).unwrap().meter, Some((17, 24)));
         // Wide: the bars spread across up to the meter's gap.
         let expected = [
             // (width, bars, meter width)
@@ -1904,7 +1927,7 @@ mod tests {
             (u16::MAX, 48, 24),
         ];
         for (width, count, meter) in expected {
-            let layout = visualizer_layout(width).unwrap();
+            let layout = visualizer_layout(width, true).unwrap();
             assert!(layout.spread, "{width}");
             assert_eq!(layout.bars.len(), count, "{width}");
             assert_eq!(layout.meter, Some((width - meter, meter)), "{width}");
@@ -2036,7 +2059,7 @@ mod tests {
         }
         let rows = area_text(&terminal, area);
         // Bar 4 of 14 lies near the quieter 400 Hz band.
-        let layout = visualizer_layout(area.width).unwrap();
+        let layout = visualizer_layout(area.width, true).unwrap();
         let x = usize::from(layout.bars[4].0);
         let full: String = rows.iter().map(|r| r.chars().next().unwrap()).collect();
         let half: String = rows.iter().map(|r| r.chars().nth(x).unwrap()).collect();

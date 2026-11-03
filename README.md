@@ -17,7 +17,7 @@ A keyboard-first terminal music player for your local files and a personal [Navi
 - **Session:** the queue, volume, repeat mode and visualizer are restored at the next launch.
 - **Visualizer:** an optional spectrum and level meter, in step with what you hear.
 - **Cover art:** the cover of the track you hear, in the now-playing bar: a real image in Ghostty and Kitty, colour blocks in other terminals. From the file's tags or its folder, or from Navidrome (cached on disk). See [Cover art](docs/USAGE.md#cover-art).
-- **Now playing screen:** `f` swaps the lists for a large cover, the title, a larger visualizer and the timeline. See [Now playing screen](docs/USAGE.md#now-playing-screen).
+- **Now playing screen:** `f` swaps the lists for the cover with the title, the timeline and the visualizer beside it (or below it in narrow windows). See [Now playing screen](docs/USAGE.md#now-playing-screen).
 - **Privacy:** logs never contain passwords, tokens, stream URLs, file paths or track titles.
 
 ## Requirements

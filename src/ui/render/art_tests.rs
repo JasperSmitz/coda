@@ -643,6 +643,8 @@ fn big_cover(side: u32) -> Arc<CoverImage> {
     Arc::new(CoverImage::new(side, side, [9, 140, 70].repeat((side * side) as usize)).unwrap())
 }
 
+const MIN_COLUMN_FOR_TEST: u16 = crate::ui::now_playing::MIN_COLUMN;
+
 /// The Kitty commands that start something (a transmission's first chunk
 /// or a delete), without the chunks that continue a transmission.
 fn heads(bytes: &[u8]) -> Vec<String> {
@@ -681,9 +683,9 @@ fn opening_and_closing_the_screen_sends_the_cover_again_at_each_size() {
     let screen = kitty_commands(&bytes);
     assert_eq!(screen[0], "a=d,d=I,i=655360,q=2");
     assert!(screen[1].starts_with("a=T,U=1,q=2,f=24,i=655361,"));
-    // 29 rows: margins, 7 text rows; the cover 20 rows of 34 px.
-    assert_eq!(sizes(&screen[1]), ["s=688", "v=680", "c=43", "r=20"]);
-    assert_eq!(placeholders_in(&bytes), 43 * 20);
+    // Side by side: 55 % of 29 rows, 15 rows of 34 px, 32 columns of 16.
+    assert_eq!(sizes(&screen[1]), ["s=512", "v=510", "c=32", "r=15"]);
+    assert_eq!(placeholders_in(&bytes), 32 * 15);
     // Nothing changed: nothing sent.
     full(&mut terminal, &mut app, &mut view, now);
     let bytes = capture.take();
@@ -713,8 +715,8 @@ fn the_large_cover_replaces_the_small_one_once() {
     let first = kitty_commands(&capture.take());
     let sent: Vec<&String> = first.iter().filter(|c| c.starts_with("a=T")).collect();
     assert_eq!(sent.len(), 1);
-    assert_eq!(sizes(sent[0]), ["s=256", "v=253", "c=43", "r=20"]);
-    // The frame found it worth a large cover (688 px of area, Kitty), as
+    assert_eq!(sizes(sent[0]), ["s=256", "v=255", "c=32", "r=15"]);
+    // The frame found it worth a large cover (512 px of area, Kitty), as
     // the loop then tells the app.
     assert!(view.large_cover_useful);
     app.set_large_cover_useful(view.large_cover_useful);
@@ -727,7 +729,7 @@ fn the_large_cover_replaces_the_small_one_once() {
     assert_eq!(change[0], "a=d,d=I,i=655360,q=2");
     assert!(change[1].starts_with("a=T,U=1,q=2,f=24,i=655361,"));
     // Same cells; no more after that.
-    assert_eq!(sizes(&change[1]), ["s=688", "v=680", "c=43", "r=20"]);
+    assert_eq!(sizes(&change[1]), ["s=512", "v=510", "c=32", "r=15"]);
     full(&mut terminal, &mut app, &mut view, now);
     assert!(kitty_commands(&capture.take()).is_empty());
 }
@@ -742,12 +744,13 @@ fn no_large_cover_is_useful_with_half_blocks_or_a_small_area() {
     let (mut terminal, _) = terminal(100, 30);
     full(&mut terminal, &mut app, &mut half, now);
     assert!(!half.large_cover_useful);
-    // Kitty, but the cover takes at most 256 px: 7 rows of 34 px.
+    // Kitty, but the cover takes at most 256 px: 7 rows of 34 px (55 %
+    // of 14 rows).
     let mut kitty = view(GHOSTTY);
-    let (mut terminal, _) = self::terminal(100, 17);
+    let (mut terminal, _) = self::terminal(100, 15);
     full(&mut terminal, &mut app, &mut kitty, now);
     assert!(!kitty.large_cover_useful);
-    let (mut terminal, _) = self::terminal(100, 18);
+    let (mut terminal, _) = self::terminal(100, 16);
     full(&mut terminal, &mut app, &mut kitty, now);
     assert!(kitty.large_cover_useful, "8 rows: 272 px");
     // Closed: never.
@@ -794,9 +797,9 @@ fn a_resize_sends_the_screen_cover_again_once_the_size_settles() {
     let bytes = capture.take();
     let commands = heads(&bytes);
     assert_eq!(commands.len(), 1, "{commands:?}");
-    // 64 × 30 cells of 16 × 34 px: just at the 1024 px cap.
-    assert_eq!(sizes(&commands[0]), ["s=1024", "v=1020", "c=64", "r=30"]);
-    assert_eq!(placeholders_in(&bytes), 64 * 30);
+    // Side by side: 55 % of 39 rows, 21 × 34 px by 45 × 16 px.
+    assert_eq!(sizes(&commands[0]), ["s=720", "v=714", "c=45", "r=21"]);
+    assert_eq!(placeholders_in(&bytes), 45 * 21);
     full(&mut terminal, &mut app, &mut view, settled);
     assert!(kitty_commands(&capture.take()).is_empty());
 }
@@ -877,7 +880,10 @@ fn visualizer_only_redraws_on_the_screen_write_no_image_bytes() {
     let mut last = completed.buffer.clone();
     assert!(placeholders_in(&capture.take()) > 0);
     let area = view.visualizer_area.expect("the screen's visualizer");
-    assert!(area.height >= 3 && area.width > 60, "{area:?}");
+    assert!(
+        area.height >= 3 && area.width >= MIN_COLUMN_FOR_TEST,
+        "{area:?}"
+    );
     for i in 0..30 {
         let level = (i % 10) as f32 / 10.0;
         let frame = crate::playback::VisualizerFrame {
@@ -891,4 +897,32 @@ fn visualizer_only_redraws_on_the_screen_write_no_image_bytes() {
     assert!(!bytes.is_empty(), "the bars moved");
     assert!(kitty_commands(&bytes).is_empty());
     assert_eq!(placeholders_in(&bytes), 0);
+}
+
+#[test]
+fn a_resize_from_side_by_side_to_stacked_is_debounced_too() {
+    let now = Instant::now();
+    let (mut app, _, _) = playing(now);
+    answer_cover(&mut app, Outcome::Art(big_cover(1024)));
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = view(GHOSTTY);
+    let (mut terminal, capture) = terminal(120, 40);
+    full(&mut terminal, &mut app, &mut view, now);
+    let first = heads(&capture.take());
+    assert_eq!(sizes(&first[0]), ["s=720", "v=714", "c=45", "r=21"]);
+    // Narrowed to 60 columns: no room beside the cover, so stacked.
+    terminal.backend_mut().size = Size::new(60, 40);
+    terminal.resize(Rect::new(0, 0, 60, 40)).unwrap();
+    let screen = Rect::new(0, 0, 60, 39);
+    let layout = crate::ui::now_playing::layout_for(screen, &app, view.art.as_ref());
+    assert!(!layout.side_by_side);
+    full(&mut terminal, &mut app, &mut view, now);
+    let bytes = capture.take();
+    assert_eq!(heads(&bytes), ["a=d,d=I,i=655360,q=2"], "deleted, not sent");
+    assert_eq!(placeholders_in(&bytes), 0);
+    full(&mut terminal, &mut app, &mut view, now + RESIZE_SETTLE);
+    let sent = heads(&capture.take());
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let cover = layout.cover.unwrap();
+    assert!(sent[0].contains(&format!("c={},r={}", cover.width, cover.height)));
 }

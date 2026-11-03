@@ -184,3 +184,9 @@ Each entry should state:
 - **Root cause:** `ArtPainter::columns` clamps its result to the 297 placeholder diacritics. `largest_fitting` searched for the most rows whose `columns()` fit the width, and the clamped value always fit, so every row count passed.
 - **Rule:** when searching for the largest input whose size fits, compare against the unclamped size (`ArtPainter::square_columns`) and apply the hard limit to the bound instead. Test at the limit, not only below it.
 - **Where verified:** M10 review probe; `a_cover_at_the_diacritics_limit_stays_square` in `src/ui/now_playing/tests.rs`.
+
+### Compute the same room once, from the same inputs
+- **Context / symptom:** review of the M10 layout revision. At 80×14 with a cover, the side-by-side layout left the visualizer out next to the small cover, but the frame still counted the visualizer as drawable, so `SetVisualizer(true)` kept mpv sending readings that nothing drew.
+- **Root cause:** whether the visualizer was drawable came from a second, simpler copy of the layout (the stacked layout without a cover), written before the side-by-side layout existed. The copy and the layout that draws disagreed as soon as that layout was added.
+- **Rule:** when the same room is computed in two places (here "visualizer drawable" and the layout that draws it), derive both from one function with the same inputs (the same painter and cover decision). A simpler second copy goes wrong as soon as a new layout is added.
+- **Where verified:** M10 layout review; `visualizer_room` built on `cover_for` and `screen_layout` in `src/ui/now_playing.rs`, `the_visualizer_is_drawable_only_where_the_layout_draws_it` in `src/ui/now_playing/tests.rs`.

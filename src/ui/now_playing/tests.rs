@@ -32,42 +32,101 @@ fn rows(rect: Option<Rect>) -> Option<(u16, u16)> {
 // ----- layout ---------------------------------------------------------
 
 #[test]
-fn at_80x24_the_cover_visualizer_and_text_share_the_height() {
-    // 80x24 less the status row.
+fn side_by_side_at_120x36_the_cover_and_column_form_a_centred_block() {
+    // 120x36 less the status row; half blocks.
     let half = painter(HALF);
-    let layout = screen_layout(area(80, 23), Some(&half), true);
-    assert_eq!(rows(layout.header), Some((1, 1)));
-    assert_eq!(layout.cover, Some(Rect::new(31, 3, 18, 9)), "centred");
-    assert_eq!(
-        rows(layout.title),
-        Some((13, 1)),
-        "a blank row on each side"
-    );
-    let visualizer = layout.visualizer.unwrap();
-    assert_eq!((visualizer.y, visualizer.height), (15, 4));
-    assert_eq!((visualizer.x, visualizer.width), (8, 64), "side margins");
-    assert_eq!(rows(layout.timeline), Some((20, 1)));
-    assert_eq!(rows(layout.next), Some((21, 1)));
-    assert_eq!(layout.title.unwrap().x, 2);
-    assert_eq!(layout.title.unwrap().width, 76);
+    let layout = screen_layout(area(120, 35), Some(&half), true);
+    assert!(layout.side_by_side);
+    // 55 % of 35 rows; square in half blocks: 19 rows, 38 columns.
+    assert_eq!(layout.cover, Some(Rect::new(7, 8, 38, 19)));
+    // The column: 4 columns on, 64 wide, centred against the cover.
+    let column = |rect: Option<Rect>| rect.map(|r| (r.x, r.y, r.width, r.height));
+    assert_eq!(column(layout.title), Some((49, 10, 64, 1)));
+    assert_eq!(column(layout.header), Some((49, 11, 64, 1)));
+    assert_eq!(column(layout.timeline), Some((49, 13, 64, 1)));
+    assert_eq!(column(layout.visualizer), Some((49, 15, 64, 8)));
+    assert_eq!(column(layout.next), Some((49, 24, 64, 1)));
+    // The block (7..113) is centred in 120 columns.
+    assert_eq!(7 + 38 + COLUMN_GAP + 64 + 7, 120);
+    // Without the visualizer the column is shorter, still centred.
+    let layout = screen_layout(area(120, 35), Some(&half), false);
+    assert_eq!(layout.visualizer, None);
+    assert_eq!(rows(layout.title), Some((14, 1)));
+    assert_eq!(rows(layout.next), Some((19, 1)));
 }
 
 #[test]
-fn the_cover_grows_with_the_screen_and_the_visualizer_up_to_ten_rows() {
+fn side_by_side_shrinks_the_cover_before_stacking() {
+    let half = painter(HALF);
+    // 35 rows: a 19-row cover (55 %) and 38 columns, so 2 + 38 + 4 + 30
+    // + 2 = 76 columns hold it at full size.
+    let layout = |width| screen_layout(area(width, 35), Some(&half), true);
+    let cover = |width| layout(width).cover.map(|c| (c.width, c.height));
+    assert!(layout(76).side_by_side);
+    assert_eq!(cover(76), Some((38, 19)));
+    assert_eq!(layout(76).title.unwrap().width, MIN_COLUMN);
+    // Narrower: the cover shrinks so the column keeps 30 columns...
+    assert!(layout(75).side_by_side);
+    assert_eq!(cover(75), Some((36, 18)));
+    assert_eq!(
+        layout(75).title.unwrap().width,
+        31,
+        "half blocks: even widths"
+    );
+    // ...down to 35 % of the height (12 rows), with the bars beside it.
+    assert!(layout(62).side_by_side);
+    assert_eq!(cover(62), Some((24, 12)));
+    assert_eq!(layout(62).visualizer.map(|v| v.height), Some(5));
+    // Then it is stacked.
+    assert!(!layout(61).side_by_side, "narrower: stacked");
+    assert!(layout(61).cover.is_some());
+    // The column stops growing at 64.
+    assert_eq!(layout(400).title.unwrap().width, MAX_COLUMN);
+    // Kitty in a 50-row Ghostty window (9 × 19 px cells).
     let kitty = painter(GHOSTTY);
-    // A 50-row Ghostty window: a fifth for the visualizer, the rest to
-    // the cover, square-looking (9 × 19 px cells).
     let layout = screen_layout(area(160, 49), Some(&kitty), true);
-    assert_eq!(layout.visualizer.unwrap().height, 9);
-    assert_eq!(layout.cover.unwrap().height, 49 - 2 - 8 - 9);
-    assert_eq!(layout.cover.unwrap().width, 63);
-    let layout = screen_layout(area(200, 80), Some(&kitty), true);
-    assert_eq!(layout.visualizer.unwrap().height, MAX_VISUALIZER_ROWS);
-    assert_eq!(layout.cover.unwrap().height, 80 - 2 - 8 - 10);
-    // Placeholders run out at 297 rows and columns.
-    let layout = screen_layout(area(2000, 1000), Some(&kitty), false);
-    assert!(layout.cover.unwrap().height <= DIACRITICS.len() as u16);
-    assert!(layout.cover.unwrap().width <= DIACRITICS.len() as u16);
+    assert!(layout.side_by_side);
+    assert_eq!(layout.cover.map(|c| (c.width, c.height)), Some((55, 26)));
+    assert_eq!(
+        layout.visualizer.unwrap().height,
+        MAX_COLUMN_VISUALIZER_ROWS
+    );
+    assert_eq!(
+        layout.visualizer.unwrap().width,
+        layout.timeline.unwrap().width
+    );
+    // 80x30 with 16 × 34 px cells: a 15-row cover beside a 40-column
+    // column.
+    let kitty = ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 1);
+    let layout = screen_layout(area(80, 29), Some(&kitty), true);
+    assert!(layout.side_by_side);
+    assert_eq!(layout.cover.map(|c| (c.width, c.height)), Some((32, 15)));
+    assert_eq!(layout.title.unwrap().width, 40);
+    assert_eq!(layout.visualizer.map(|v| v.height), Some(8));
+}
+
+#[test]
+fn tall_narrow_and_low_windows_are_stacked() {
+    let half = painter(HALF);
+    // 60x40: a 21-row cover would need 80 columns beside its column.
+    let layout = screen_layout(area(60, 39), Some(&half), true);
+    assert!(!layout.side_by_side);
+    assert_eq!(layout.cover, Some(Rect::new(7, 1, 46, 23)));
+    assert_eq!(rows(layout.title), Some((25, 1)));
+    assert_eq!(rows(layout.header), Some((26, 1)), "under the title");
+    assert_eq!(rows(layout.visualizer), Some((28, 7)));
+    assert_eq!(rows(layout.timeline), Some((36, 1)));
+    assert_eq!(rows(layout.next), Some((37, 1)));
+    // Wide but low: 55 % of 14 rows is a 7-row cover, beside a column
+    // without the visualizer (it needs 7 + 3 rows).
+    let layout = screen_layout(area(200, 14), Some(&half), true);
+    assert!(layout.side_by_side);
+    assert_eq!(layout.cover.unwrap().height, 7);
+    assert_eq!(layout.visualizer, None);
+    // 10 rows: under 6 for the cover side by side; stacked, the text alone.
+    let layout = screen_layout(area(200, 10), Some(&half), true);
+    assert!(!layout.side_by_side);
+    assert_eq!((layout.cover, layout.visualizer), (None, None));
 }
 
 #[test]
@@ -76,13 +135,18 @@ fn a_cover_at_the_diacritics_limit_stays_square() {
     // columns of square cover; the rows are cut so the columns fit.
     let kitty = ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 1);
     let layout = screen_layout(area(300, 1000), Some(&kitty), true);
+    assert!(!layout.side_by_side);
     let cover = layout.cover.unwrap();
     assert!(cover.width <= DIACRITICS.len() as u16);
     assert_eq!((cover.width, cover.height), (295, 139));
     // Square on screen: width and height in pixels within a cell.
     let (width, height) = (u32::from(cover.width) * 16, u32::from(cover.height) * 34);
     assert!(width.abs_diff(height) <= 16, "{width} × {height}");
-    // Just below the limit, and with half blocks.
+    // Side by side at the limit too.
+    let layout = screen_layout(area(2000, 1000), Some(&kitty), true);
+    assert!(layout.side_by_side);
+    assert_eq!(layout.cover.map(|c| (c.width, c.height)), Some((295, 139)));
+    // And with half blocks.
     let half = painter(HALF);
     let layout = screen_layout(area(300, 1000), Some(&half), false);
     let cover = layout.cover.unwrap();
@@ -91,16 +155,17 @@ fn a_cover_at_the_diacritics_limit_stays_square() {
 }
 
 #[test]
-fn without_the_visualizer_the_cover_takes_its_room() {
+fn stacked_without_the_visualizer_the_cover_takes_its_room() {
     let half = painter(HALF);
-    let layout = screen_layout(area(80, 23), Some(&half), false);
+    let layout = screen_layout(area(40, 23), Some(&half), false);
+    assert!(!layout.side_by_side);
     assert_eq!(layout.visualizer, None);
-    assert_eq!(layout.cover.map(|c| (c.width, c.height)), Some((28, 14)));
+    assert_eq!(layout.cover.map(|c| (c.width, c.height)), Some((30, 15)));
     assert_eq!(rows(layout.timeline), Some((20, 1)));
 }
 
 #[test]
-fn a_narrow_screen_narrows_the_cover() {
+fn a_narrow_stacked_screen_narrows_the_cover() {
     let kitty = painter(GHOSTTY);
     let layout = screen_layout(area(30, 40), Some(&kitty), true);
     let cover = layout.cover.unwrap();
@@ -111,45 +176,45 @@ fn a_narrow_screen_narrows_the_cover() {
 #[test]
 fn without_a_cover_the_visualizer_takes_its_room_and_the_text_is_centred() {
     let layout = screen_layout(area(80, 23), None, true);
+    assert!(!layout.side_by_side);
     assert_eq!(layout.cover, None);
     let visualizer = layout.visualizer.unwrap();
     assert_eq!(visualizer.height, 7);
-    // 14 rows in all, centred in 23.
-    assert_eq!(rows(layout.header), Some((4, 1)));
-    assert_eq!(rows(layout.title), Some((6, 1)));
+    // 13 rows in all, centred in 23.
+    assert_eq!(rows(layout.title), Some((5, 1)));
+    assert_eq!(rows(layout.header), Some((6, 1)));
     assert_eq!(visualizer.y, 8);
     assert_eq!(rows(layout.timeline), Some((16, 1)));
     assert_eq!(rows(layout.next), Some((17, 1)));
     // Without either: just the text, centred.
     let layout = screen_layout(area(80, 23), None, false);
-    assert_eq!(rows(layout.header), Some((8, 1)));
-    assert_eq!(rows(layout.title), Some((10, 1)));
+    assert_eq!(rows(layout.title), Some((9, 1)));
+    assert_eq!(rows(layout.header), Some((10, 1)));
     assert_eq!(rows(layout.timeline), Some((12, 1)));
     assert_eq!(rows(layout.next), Some((13, 1)));
 }
 
 #[test]
-fn small_screens_drop_the_cover_first_then_the_visualizer() {
+fn small_stacked_screens_drop_the_cover_first_then_the_visualizer() {
     let half = painter(HALF);
+    // 40 columns: never wide enough for side by side.
     let parts = |height| {
-        let layout = screen_layout(area(80, height), Some(&half), true);
+        let layout = screen_layout(area(40, height), Some(&half), true);
+        assert!(!layout.side_by_side);
         (
             layout.cover.map(|c| c.height),
             layout.visualizer.map(|v| v.height),
         )
     };
-    assert_eq!(parts(23), (Some(9), Some(4)));
-    assert_eq!(parts(20), (Some(6), Some(4)));
-    // The smallest cover with the visualizer: 2 margins, 8 text rows, 6
-    // and 3.
-    assert_eq!(parts(19), (Some(6), Some(3)));
-    assert_eq!(parts(18), (None, Some(6)), "the cover goes first");
-    assert_eq!(parts(12), (None, Some(MIN_VISUALIZER_ROWS)));
-    assert_eq!(parts(11), (None, None), "then the visualizer");
+    assert_eq!(parts(23), (Some(10), Some(4)));
+    assert_eq!(parts(18), (Some(6), Some(3)));
+    assert_eq!(parts(17), (None, Some(5)), "the cover goes first");
+    assert_eq!(parts(11), (None, Some(MIN_VISUALIZER_ROWS)));
+    assert_eq!(parts(10), (None, None), "then the visualizer");
     // Without the visualizer the cover keeps a smaller screen.
-    let layout = screen_layout(area(80, 15), Some(&half), false);
+    let layout = screen_layout(area(40, 14), Some(&half), false);
     assert_eq!(layout.cover.map(|c| c.height), Some(6));
-    let layout = screen_layout(area(80, 14), Some(&half), false);
+    let layout = screen_layout(area(40, 13), Some(&half), false);
     assert_eq!(layout.cover, None);
     // Too narrow for the visualizer.
     let layout = screen_layout(area(VISUALIZER_MIN_SCREEN.0 - 1, 23), None, true);
@@ -159,28 +224,37 @@ fn small_screens_drop_the_cover_first_then_the_visualizer() {
 #[test]
 fn the_text_and_timeline_always_fit() {
     let half = painter(HALF);
-    for height in 0..=12 {
-        for width in [1, 8, 20, 80] {
-            let layout = screen_layout(area(width, height), Some(&half), true);
-            let parts = [layout.header, layout.title, layout.timeline, layout.next];
-            for part in parts.into_iter().flatten() {
-                assert!(
-                    part.bottom() <= height && part.right() <= width,
-                    "{width}x{height}"
-                );
-            }
-            if height >= 2 {
-                assert!(layout.title.is_some() && layout.timeline.is_some());
-            }
-            if height >= 4 {
-                assert!(parts.iter().all(Option::is_some), "{width}x{height}");
+    for height in 0..=40 {
+        for width in [1, 8, 20, 40, 80, 120] {
+            for visualizer in [false, true] {
+                let layout = screen_layout(area(width, height), Some(&half), visualizer);
+                let parts = [
+                    layout.header,
+                    layout.title,
+                    layout.timeline,
+                    layout.next,
+                    layout.cover,
+                    layout.visualizer,
+                ];
+                for part in parts.into_iter().flatten() {
+                    assert!(
+                        part.bottom() <= height && part.right() <= width,
+                        "{width}x{height} {part:?}"
+                    );
+                }
+                if height >= 2 {
+                    assert!(layout.title.is_some() && layout.timeline.is_some());
+                }
+                if height >= 4 {
+                    assert!(parts[..4].iter().all(Option::is_some), "{width}x{height}");
+                }
             }
         }
     }
-    // Lower than the text with its blank rows: no blank rows, in order.
-    let layout = screen_layout(area(80, 5), None, true);
-    assert_eq!(rows(layout.header), Some((0, 1)));
-    assert_eq!(rows(layout.title), Some((1, 1)));
+    // Lower than the text with its blank row: no blank row, in order.
+    let layout = screen_layout(area(80, 4), None, true);
+    assert_eq!(rows(layout.title), Some((0, 1)));
+    assert_eq!(rows(layout.header), Some((1, 1)));
     assert_eq!(rows(layout.timeline), Some((2, 1)));
     assert_eq!(rows(layout.next), Some((3, 1)));
     let layout = screen_layout(area(80, 2), None, true);
@@ -308,28 +382,33 @@ fn the_screen_shows_the_track_in_place_of_the_panels() {
     let text = lines.join("\n");
     assert!(!text.contains("Now Playing"), "no bar: {text}");
     assert!(!text.contains("Queue"), "no panels: {text}");
-    let (header, line) = line_with(&lines, "Album · Artist");
-    assert_eq!(header, 1);
-    assert_eq!(line.trim().width(), "Album · Artist".width());
-    assert_eq!(style_at(&buffer, header, "Album"), DIM);
-    // The cover in half blocks, then the title, bold, with blank rows.
-    assert!(lines[3].contains("▀▀▀▀"), "{text}");
+    // Side by side: a 12-row cover (55 % of 23) at the left of a centred
+    // block, a 48-column text column 4 columns to its right.
+    for line in &lines[5..17] {
+        let cover: String = line.chars().skip(2).take(24).collect();
+        assert_eq!(cover, "▀".repeat(24), "{text}");
+    }
+    assert!(lines[4].trim().is_empty() && lines[17].trim().is_empty());
+    let column = |row: usize| lines[row].chars().skip(30).collect::<String>();
     let (title, _) = line_with(&lines, "First");
-    // The visualizer is off: the cover takes its 14 rows.
-    assert!(lines[16].contains("▀▀▀▀"), "{text}");
-    assert_eq!(title, 18);
-    assert!(lines[17].trim().is_empty() && lines[19].trim().is_empty());
+    assert_eq!(title, 8);
+    assert!(column(8).starts_with("First"), "left-aligned: {text}");
     assert!(
         style_at(&buffer, title, "First")
             .add_modifier
             .contains(Modifier::BOLD)
     );
-    // The timeline, centred and bounded.
-    let (timeline, line) = line_with(&lines, "0:00 ");
-    assert_eq!(timeline, 20);
-    assert!(line.contains(" 1:40"));
-    assert!(line.contains('─'));
-    assert!(line.trim().width() <= usize::from(MAX_TIMELINE_WIDTH));
+    let (header, _) = line_with(&lines, "Album · Artist");
+    assert_eq!(header, 9, "under the title");
+    assert!(column(9).starts_with("Album · Artist"));
+    assert_eq!(style_at(&buffer, header, "Album"), DIM);
+    assert!(column(10).trim().is_empty());
+    // The timeline fills the column.
+    let (timeline, _) = line_with(&lines, "0:00 ");
+    assert_eq!(timeline, 11);
+    assert!(column(11).starts_with("0:00 ─"));
+    assert_eq!(column(11).trim_end().width(), 48);
+    assert!(column(11).trim_end().ends_with(" 1:40"));
     // The status row is still there.
     assert!(lines[23].contains("Playing Artist - First"), "{text}");
     // Nothing about the next track yet (50 s from the end of 1:40).
@@ -452,8 +531,8 @@ fn the_volume_and_repeat_sit_dim_beside_the_timeline() {
     // Repeat one.
     app.handle_action(Action::CycleRepeat, now);
     let lines = self::lines(&render(&app, &mut ViewState::default(), 100, 24, gone));
-    assert!(line_with(&lines, "1:40").1.contains("⟳1"));
-    assert_eq!("⟳1".width(), 2);
+    assert!(line_with(&lines, "1:40").1.contains("1:40  ⟳ 1"));
+    assert_eq!("⟳ 1".width(), 3);
 }
 
 #[test]
@@ -554,6 +633,190 @@ fn the_visualizer_is_wide_tall_dim_and_redrawn_on_its_own() {
     assert!(!view.visualizer_drawable);
 }
 
+/// Two tracks playing on the screen with a cover and the visualizer on,
+/// every band at full level.
+fn loud_screen(now: Instant) -> App {
+    let (mut app, load) = two_tracks(now);
+    answer_covers(&mut app, cover(256));
+    app.handle_action(Action::ToggleVisualizer, now);
+    let frame = crate::playback::VisualizerFrame {
+        levels: [1.0, 1.0],
+        bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+    };
+    assert!(app.handle_visualizer(load, &frame, now));
+    app
+}
+
+#[test]
+fn the_screens_visualizer_is_bars_only_as_wide_as_the_timeline() {
+    let now = Instant::now();
+    let app = loud_screen(now);
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    let buffer = render(&app, &mut view, 120, 36, now);
+    let area = view.visualizer_area.expect("drawn");
+    let layout = layout_for(Rect::new(0, 0, 120, 35), &app, view.art.as_ref());
+    assert!(layout.side_by_side);
+    assert_eq!(Some(area), layout.visualizer);
+    assert_eq!((area.x, area.width), (49, 64));
+    assert_eq!(area.width, layout.timeline.unwrap().width);
+    // Full bars from the left edge to the right edge, no L/R meter.
+    let bottom = area.bottom() - 1;
+    let row: String = (area.x..area.right())
+        .map(|x| buffer[(x, bottom)].symbol())
+        .collect();
+    assert!(row.starts_with('█') && row.ends_with('█'), "{row}");
+    assert!(!row.contains('L') && !row.contains('R') && !row.contains('▏'));
+    assert_eq!(buffer[(area.x, bottom)].fg, Color::DarkGray);
+    // A visualizer-only redraw covers exactly that area and matches.
+    let mut last = buffer.clone();
+    crate::ui::render::draw_visualizer(&mut last, &app, area);
+    assert_eq!(last, buffer);
+}
+
+/// Draws `app` at `width` × `height` with half blocks and checks the
+/// visualizer's full bars run from its left edge to its right edge.
+fn assert_bars_fill(app: &App, width: u16, height: u16, side_by_side: bool, now: Instant) -> Rect {
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    let buffer = render(app, &mut view, width, height, now);
+    let screen = Rect::new(0, 0, width, height - 1);
+    assert_eq!(
+        layout_for(screen, app, view.art.as_ref()).side_by_side,
+        side_by_side,
+        "{width}x{height}"
+    );
+    let area = view.visualizer_area.expect("drawn");
+    let bottom = area.bottom() - 1;
+    let row: String = (area.x..area.right())
+        .map(|x| buffer[(x, bottom)].symbol())
+        .collect();
+    assert!(
+        row.starts_with('█') && row.ends_with('█'),
+        "{width}x{height}: {row:?}"
+    );
+    area
+}
+
+#[test]
+fn narrow_visualizers_still_fill_their_width() {
+    let now = Instant::now();
+    let app = loud_screen(now);
+    // Side by side with 30- and 41-column text columns.
+    assert_eq!(assert_bars_fill(&app, 76, 36, true, now).width, 30);
+    assert_eq!(assert_bars_fill(&app, 87, 36, true, now).width, 41);
+    // A 40-column stacked screen.
+    let area = assert_bars_fill(&app, 40, 30, false, now);
+    assert!(area.width < 42, "{area:?}");
+}
+
+#[test]
+fn the_visualizer_is_drawable_only_where_the_layout_draws_it() {
+    let now = Instant::now();
+    let (mut app, _) = two_tracks(now);
+    answer_covers(&mut app, cover(256));
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    // 80x14: side by side with a 7-row cover, too low for the bars.
+    render(&app, &mut view, 80, 14, now);
+    let screen = Rect::new(0, 0, 80, 13);
+    let layout = screen_layout(screen, view.art.as_ref(), true);
+    assert!(layout.side_by_side && layout.visualizer.is_none());
+    assert!(!view.visualizer_drawable);
+    // Without a cover the same window stacks and has room.
+    render(&app, &mut ViewState::default(), 80, 14, now);
+    let mut plain = ViewState::default();
+    render(&app, &mut plain, 80, 14, now);
+    assert!(plain.visualizer_drawable);
+    // With a taller window the bars fit beside the cover.
+    render(&app, &mut view, 80, 24, now);
+    assert!(view.visualizer_drawable);
+}
+
+#[test]
+fn a_narrow_column_drops_the_repeat_mark_before_the_bar() {
+    let now = Instant::now();
+    let long = Track::local(
+        "/music/long.flac".into(),
+        TrackMetadata {
+            title: Some("Long".into()),
+            duration: Some(Duration::from_secs(3723)),
+            ..TrackMetadata::default()
+        },
+    );
+    let (mut app, _) = playing(vec![long], now);
+    answer_covers(&mut app, cover(256));
+    app.handle_action(Action::CycleRepeat, now);
+    app.handle_action(Action::CycleRepeat, now);
+    app.handle_action(Action::VolumeUp, now);
+    app.handle_playback_event(PlaybackEvent::Volume(55), now);
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    // 76x36: a 30-column column; `⟳ 1  Vol 55%` would leave the bar no room.
+    let lines = lines(&render(&app, &mut view, 76, 36, now));
+    let (_, line) = line_with(&lines, "1:02:03");
+    assert!(line.contains("─") && line.contains("Vol 55%"), "{line}");
+    assert!(!line.contains('⟳'), "{line}");
+    // In a 64-column column both fit.
+    let lines = self::lines(&render(&app, &mut view, 120, 36, now));
+    let (_, line) = line_with(&lines, "1:02:03");
+    assert!(line.contains("1:02:03  ⟳ 1  Vol 55%"), "{line}");
+}
+
+#[test]
+fn the_bars_visualizer_keeps_its_meter() {
+    let now = Instant::now();
+    let mut app = loud_screen(now);
+    app.handle_action(Action::ToggleNowPlaying, now);
+    let mut view = ViewState::default();
+    let buffer = render(&app, &mut view, 120, 36, now);
+    let area = view.visualizer_area.expect("drawn in the bar");
+    let text: String = (area.y..area.bottom())
+        .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+        .map(|p| buffer[p].symbol().to_owned())
+        .collect();
+    assert!(text.contains('L') && text.contains('R'));
+}
+
+#[test]
+fn sketches_of_both_layouts() {
+    // As the report shows them: half blocks at 120x36; Kitty with 16 × 34
+    // px cells at 80x30 (placeholder cells shown as `#`).
+    let now = Instant::now();
+    let app = loud_screen(now);
+    let mut view = ViewState::default();
+    view.art = Some(painter(HALF));
+    let wide = lines(&render(&app, &mut view, 120, 36, now));
+    let mut kitty = ViewState::default();
+    kitty.art = Some(ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 1));
+    let small: Vec<String> = lines(&render(&app, &mut kitty, 80, 30, now))
+        .into_iter()
+        .map(|line| {
+            line.chars()
+                .map(|c| {
+                    if c == crate::ui::cover::PLACEHOLDER {
+                        '#'
+                    } else {
+                        c
+                    }
+                })
+                .filter(|c| unicode_width::UnicodeWidthChar::width(*c) != Some(0))
+                .collect()
+        })
+        .collect();
+    if std::env::var_os("CODA_PRINT_SKETCH").is_some() {
+        eprintln!("{}\n\n{}", wide.join("\n"), small.join("\n"));
+    }
+    assert!(wide[10].contains("First") && wide[11].contains("Album · Artist"));
+    let (title, line) = line_with(&small, "First");
+    assert!(
+        line.starts_with(&format!("{}{}", " ".repeat(2), "#".repeat(32))),
+        "{line}"
+    );
+    assert!(small[title + 1].contains("Album · Artist"));
+    assert_eq!(small[title].find("First"), small[title + 1].find("Album"));
+}
+
 #[test]
 fn the_screen_cover_is_the_large_one_once_it_has_loaded() {
     let now = Instant::now();
@@ -573,8 +836,8 @@ fn the_screen_cover_is_the_large_one_once_it_has_loaded() {
     });
     let frame = crate::ui::render::art_frame(screen, &app, &painter).unwrap();
     assert_eq!(frame.image.width(), 256);
-    // The visualizer is off: the cover takes its room.
-    assert_eq!((frame.cols, frame.rows), (84, 40));
+    // Side by side: 55 % of 49 rows.
+    assert_eq!((frame.cols, frame.rows), (55, 26));
     // Then the large one, once a frame found it useful.
     app.set_large_cover_useful(true);
     answer_covers(&mut app, cover(1024));

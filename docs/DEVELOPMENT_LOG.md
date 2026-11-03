@@ -415,3 +415,22 @@ Concise record of accepted slices, for resuming work. Newest last. Details live 
   - `--ignored`: 34/34 (mpv 0.41).
   - pty smoke: M10 52/52, M7 41/41, gapless 11/11. These use scripted Kitty replies; no GUI terminal was launched.
 - **Not yet done:** the owner's on-screen check in Ghostty and Alacritty.
+
+## 2026-11-03 — M10 layout revision (reviewed)
+- **Owner's first look:**
+  - `⟳1` drew as one glyph; it is now `⟳ 1`.
+  - The screen's visualizer is bars only, without the L/R meter.
+  - Album · artist moved under the title.
+  - New primary layout: side by side. The cover is on the left at up to 55 % of the height; a left-aligned column (30–64 wide) holds the title, album · artist, the timeline (cyan, as in the bar), the bars and Next up. The block is centred.
+  - Stacked is the fallback.
+- **Architect's decision:** the cover shrinks to as little as 35 % of the height before the screen stacks, keeping the calmer layout longer. A 60×40 split pane still stacks.
+- **Review findings, fixed:**
+  - Narrow visualizers (under 42 columns) drew only 13 columns of bars; they now fill the width.
+  - Visualizer drawability was computed from the stacked layout, so mpv readings were requested for bars that side by side left out. It now comes from the same layout (LESSONS entry).
+  - Docs and nits: thresholds stated in terminal rows; dead meter branch removed; a narrow column drops the repeat mark before squeezing the bar.
+- **Process slip:** a `git commit -a` for a brief change swept in the developer's in-progress code. It was re-split before pushing; docs are now committed with explicit paths.
+- **Verified by the architect:**
+  - fmt, both clippy variants and build pass.
+  - `cargo test --all-targets`: 1005 pass.
+  - `--ignored`: 34/34.
+  - pty smoke: M10 57/57, M7 41/41, gapless 11/11.
