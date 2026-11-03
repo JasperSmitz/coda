@@ -82,8 +82,8 @@ Brief: `docs/plans/m9-cover-art.md`.
 - **Slice 1, spike (completed):** findings in the brief.
 - **Slice 2 (completed, reviewed):** the feature, as recommended by the spike.
 
-## M10 — Now playing screen (proposed)
-A display mode for when the queue is set and you just want to listen (owner, 2026-11-02): a toggle that swaps the panels for a large cover, a larger visualizer and the essential track info, without the text you don't need. Builds on M9.
+## M10 — Now playing screen (in progress)
+Brief: `docs/plans/m10-now-playing.md`. A display mode for when the queue is set and you just want to listen (owner, 2026-11-02): a toggle that swaps the panels for a large cover, a larger visualizer and the essential track info, without the text you don't need. Builds on M9.
 
 ## Postponed indefinitely
 - **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.
