@@ -114,5 +114,5 @@
     - Next up (dim), when shown.
   - The column is vertically centred against the cover.
   - The cover and the column form one block, centred on the screen.
-  - The timeline's filled part is in the theme's green (`Color::Green`); the remainder is dim.
+  - The timeline's filled part uses the bar's timeline colours (`Cyan` filled, `DarkGray` remainder). The owner's sketch used green only for illustration.
 - **Stacked layout (fallback):** used when side by side doesn't fit (narrow or tall windows). Album · artist moves under the title.
