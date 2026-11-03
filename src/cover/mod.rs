@@ -1,7 +1,8 @@
 //! Cover art for the track heard, without any terminal code.
 //!
 //! - **Images** ([`CoverImage`]) are plain RGB pixels, square, at most
-//!   [`COVER_SIZE`] pixels a side. [`decode`] makes them from untrusted
+//!   [`COVER_SIZE`] pixels a side for the now-playing bar, or
+//!   [`LARGE_COVER_SIZE`] for the Now playing screen ([`CoverSize`]). [`decode`] makes them from untrusted
 //!   bytes (JPEG, PNG or WebP, recognised by their first bytes) within
 //!   byte and pixel limits, so a decompression bomb is refused before it
 //!   is allocated. Decoding runs on blocking threads, never on the loop.
@@ -12,7 +13,10 @@
 //!   `playing_entry`). It asks for one cover at a time, remembers a few
 //!   recent results in memory, and drops results for a track no longer
 //!   heard (they are only remembered) and Navidrome results from before
-//!   a client swap (by [`Generation`]).
+//!   a client swap (by [`Generation`]). While the Now playing screen is
+//!   open ([`Covers::set_large`]) it also loads the large variant of the
+//!   cover shown, after the small one, and keeps the last
+//!   [`LARGE_MEMORY_ENTRIES`] of those.
 //!
 //! Nothing here logs a path, URL, title or cover id.
 
@@ -34,9 +38,13 @@ use crate::model::{Track, TrackSource};
 use crate::navidrome::{self, browse::Generation};
 use crate::setup::Reply;
 
-/// The largest side of a decoded cover, in pixels. Also the `size` asked
-/// of `getCoverArt`, and the size of cached files.
+/// The largest side of a decoded cover for the now-playing bar, in
+/// pixels. Also the `size` asked of `getCoverArt`, and the size of cached
+/// files.
 pub const COVER_SIZE: u32 = 256;
+/// The largest side of the Now playing screen's cover (the large
+/// variant), in pixels; cached apart from the small ones.
+pub const LARGE_COVER_SIZE: u32 = 1024;
 /// Images wider or taller than this are refused before decoding.
 pub const MAX_DIMENSION: u32 = 4096;
 /// Upper bound on what one decode may allocate (the output image counts).
@@ -48,6 +56,28 @@ pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const LINGER: Duration = Duration::from_secs(1);
 /// Recent results kept in memory (found or not): about 3 MB of pixels.
 pub const MEMORY_ENTRIES: usize = 16;
+/// Large covers kept in memory: about 3 MB of pixels each.
+pub const LARGE_MEMORY_ENTRIES: usize = 2;
+
+/// Which variant of a cover to load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CoverSize {
+    /// For the now-playing bar: [`COVER_SIZE`].
+    #[default]
+    Small,
+    /// For the Now playing screen: [`LARGE_COVER_SIZE`].
+    Large,
+}
+
+impl CoverSize {
+    /// The largest side, in pixels.
+    pub fn pixels(self) -> u32 {
+        match self {
+            Self::Small => COVER_SIZE,
+            Self::Large => LARGE_COVER_SIZE,
+        }
+    }
+}
 
 /// A decoded cover: `width` × `height` RGB pixels, row by row.
 #[derive(Clone, PartialEq, Eq)]
@@ -82,6 +112,15 @@ impl CoverImage {
     /// The pixels, three bytes each, row by row.
     pub fn rgb(&self) -> &[u8] {
         &self.rgb
+    }
+
+    /// A hash of the size and pixels, to notice an identical picture that
+    /// came as another image (say, every track of an album).
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (self.width, self.height, &self.rgb).hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The pixel at (`x`, `y`), clamped to the image.
@@ -186,14 +225,20 @@ pub enum DecodeError {
 }
 
 /// Decodes untrusted image bytes into a square cover of at most
-/// [`COVER_SIZE`] pixels (the centre of a non-square image). Refuses more
+/// [`COVER_SIZE`] pixels; see [`decode_at`].
+pub fn decode(bytes: &[u8]) -> Result<CoverImage, DecodeError> {
+    decode_at(bytes, COVER_SIZE)
+}
+
+/// Decodes untrusted image bytes into a square cover of at most `size`
+/// pixels (the centre of a non-square image). Refuses more
 /// than [`MAX_IMAGE_BYTES`] and sides over [`MAX_DIMENSION`] before
 /// decoding; [`MAX_DECODE_ALLOC`] bounds what the decoder allocates, the
 /// output image included, which is checked before it is allocated. At
 /// most one decode runs at a time ([`DECODE_GATE`]), so loads that were
 /// superseded (their blocking work still finishes) cannot stack decodes.
 /// Blocking.
-pub fn decode(bytes: &[u8]) -> Result<CoverImage, DecodeError> {
+pub fn decode_at(bytes: &[u8], size: u32) -> Result<CoverImage, DecodeError> {
     if bytes.len() > MAX_IMAGE_BYTES {
         return Err(DecodeError::TooLarge);
     }
@@ -211,7 +256,7 @@ pub fn decode(bytes: &[u8]) -> Result<CoverImage, DecodeError> {
         image::ImageError::Limits(_) => DecodeError::TooLarge,
         _ => DecodeError::Malformed,
     })?;
-    square(image, COVER_SIZE).ok_or(DecodeError::Malformed)
+    square(image, size.max(1)).ok_or(DecodeError::Malformed)
 }
 
 /// Serialises [`decode`].
@@ -291,6 +336,7 @@ pub struct CoverRequest {
     /// The client generation a Navidrome cover is fetched with.
     pub generation: Generation,
     pub key: CoverKey,
+    pub size: CoverSize,
 }
 
 /// How loading a cover went.
@@ -310,7 +356,22 @@ pub struct CoverResponse {
     pub id: CoverRequestId,
     pub generation: Generation,
     pub key: CoverKey,
+    pub size: CoverSize,
     pub outcome: Outcome,
+}
+
+/// A loaded cover and its [`CoverImage::fingerprint`].
+#[derive(Debug, Clone)]
+struct Art {
+    image: Arc<CoverImage>,
+    fingerprint: u64,
+}
+
+impl Art {
+    fn new(image: Arc<CoverImage>) -> Self {
+        let fingerprint = image.fingerprint();
+        Self { image, fingerprint }
+    }
 }
 
 /// The cover state; see the module docs.
@@ -321,17 +382,28 @@ pub struct Covers {
     /// The audible track's cover.
     wanted: Option<CoverKey>,
     /// The wanted cover, once loaded.
-    shown: Option<Arc<CoverImage>>,
+    shown: Option<Art>,
     /// The previous track's cover, kept on screen while the wanted one
     /// loads (from when), for at most [`LINGER`].
-    lingering: Option<(Arc<CoverImage>, Instant)>,
+    lingering: Option<(Art, Instant)>,
     /// The request for the wanted cover, while it runs.
     loading: Option<CoverRequestId>,
     /// The last settled cover was an image: while the next one loads,
     /// [`Covers::reserve`] keeps its place so the bar does not jump.
     had_art: bool,
     /// Recent results, newest last.
-    memory: VecDeque<(CoverKey, Option<Arc<CoverImage>>)>,
+    memory: VecDeque<(CoverKey, Option<Art>)>,
+    /// Large covers are wanted (the Now playing screen is open).
+    large_wanted: bool,
+    /// Recent large covers by the fingerprint of the small cover they
+    /// enlarge, newest last. Keyed by the picture rather than the track,
+    /// so the tracks of an album share one.
+    large: VecDeque<(u64, Arc<CoverImage>)>,
+    /// The large load running, and the fingerprint it is for.
+    large_loading: Option<(CoverRequestId, u64)>,
+    /// The fingerprint whose large load found nothing or failed: not
+    /// asked again until the track changes or the screen opens again.
+    large_settled: Option<u64>,
     next_id: u64,
     requests: Vec<CoverRequest>,
 }
@@ -348,6 +420,10 @@ impl Covers {
             loading: None,
             had_art: false,
             memory: VecDeque::new(),
+            large_wanted: false,
+            large: VecDeque::new(),
+            large_loading: None,
+            large_settled: None,
             next_id: 0,
             requests: Vec::new(),
         }
@@ -362,15 +438,67 @@ impl Covers {
     /// the tracks of an album do not blank at each change; the new cover
     /// replaces it as soon as its result arrives, and "no art" removes it).
     pub fn image(&self) -> Option<&Arc<CoverImage>> {
+        self.art().map(|art| &art.image)
+    }
+
+    fn art(&self) -> Option<&Art> {
         self.shown
             .as_ref()
-            .or(self.lingering.as_ref().map(|(image, _)| image))
+            .or(self.lingering.as_ref().map(|(art, _)| art))
+    }
+
+    /// The cover for the Now playing screen: the large variant of
+    /// [`Covers::image`] once it has loaded, else the small one (shown
+    /// enlarged meanwhile, never a blank).
+    pub fn large_image(&self) -> Option<&Arc<CoverImage>> {
+        self.large_picture().map(|(image, _)| image)
+    }
+
+    /// [`Covers::image`] and a name for its picture: the fingerprint of the
+    /// small cover, and `false`. Equal names mean equal pixels, without
+    /// hashing on the loop.
+    pub fn picture(&self) -> Option<(&Arc<CoverImage>, (u64, bool))> {
+        self.art().map(|art| (&art.image, (art.fingerprint, false)))
+    }
+
+    /// [`Covers::large_image`] and a name for its picture: the small
+    /// cover's fingerprint, and whether it is the large variant.
+    pub fn large_picture(&self) -> Option<(&Arc<CoverImage>, (u64, bool))> {
+        let art = self.art()?;
+        Some(
+            self.large
+                .iter()
+                .find(|(fingerprint, _)| *fingerprint == art.fingerprint)
+                .map_or((&art.image, (art.fingerprint, false)), |(_, image)| {
+                    (image, (art.fingerprint, true))
+                }),
+        )
+    }
+
+    /// The large load the state is waiting for, if any; any other large
+    /// load running is unwanted and may be aborted.
+    pub fn large_request(&self) -> Option<CoverRequestId> {
+        self.large_loading.map(|(id, _)| id)
     }
 
     /// Whether to keep room for art: a cover is shown, or one is loading
     /// right after a track that had one.
     pub fn reserve(&self) -> bool {
         self.image().is_some() || (self.loading.is_some() && self.had_art)
+    }
+
+    /// The Now playing screen opened (`true`) or closed. Large covers are
+    /// loaded only while it is open; closing it forgets the large load
+    /// running (the loop aborts it), opening it again asks again for one
+    /// that failed.
+    pub fn set_large(&mut self, wanted: bool) {
+        if wanted && !self.large_wanted {
+            self.large_settled = None;
+        }
+        if !wanted {
+            self.large_loading = None;
+        }
+        self.large_wanted = wanted;
     }
 
     /// Removes a lingering cover once [`LINGER`] has passed (the loop's
@@ -412,10 +540,12 @@ impl Covers {
         let previous = self
             .shown
             .take()
-            .map(|image| (image, Instant::now()))
+            .map(|art| (art, Instant::now()))
             .or(self.lingering.take());
         self.wanted = key;
         self.loading = None;
+        self.large_loading = None;
+        self.large_settled = None;
         let Some(key) = self.wanted.clone() else {
             self.had_art = false;
             return;
@@ -426,19 +556,61 @@ impl Covers {
             return;
         }
         self.lingering = previous;
-        let id = CoverRequestId(self.next_id);
-        self.next_id += 1;
+        let id = self.next_request_id();
         self.loading = Some(id);
         self.requests.push(CoverRequest {
             id,
             generation: self.generation,
             key,
+            size: CoverSize::Small,
         });
     }
 
-    /// Requests for the loop to run. Each supersedes the one before.
+    fn next_request_id(&mut self) -> CoverRequestId {
+        let id = CoverRequestId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Requests for the loop to run. Each supersedes the one before. While
+    /// large covers are wanted, the large variant of the cover shown is
+    /// asked for once its small one has loaded (not while that loads, so
+    /// it never displaces it), unless it is in memory, the small one is
+    /// already as large as its source, or it found nothing before.
     pub fn take_requests(&mut self) -> Vec<CoverRequest> {
+        self.ask_large();
         std::mem::take(&mut self.requests)
+    }
+
+    fn ask_large(&mut self) {
+        if !self.enabled
+            || !self.large_wanted
+            || self.loading.is_some()
+            || self.large_loading.is_some()
+        {
+            return;
+        }
+        let (Some(key), Some(art)) = (&self.wanted, &self.shown) else {
+            return;
+        };
+        let fingerprint = art.fingerprint;
+        // A small cover under `COVER_SIZE` is its whole source already.
+        let enlargeable = art.image.width() >= COVER_SIZE && art.image.height() >= COVER_SIZE;
+        if !enlargeable
+            || self.large_settled == Some(fingerprint)
+            || self.large.iter().any(|(f, _)| *f == fingerprint)
+        {
+            return;
+        }
+        let key = key.clone();
+        let id = self.next_request_id();
+        self.large_loading = Some((id, fingerprint));
+        self.requests.push(CoverRequest {
+            id,
+            generation: self.generation,
+            key,
+            size: CoverSize::Large,
+        });
     }
 
     /// A load finished. Navidrome results of another client generation are
@@ -449,8 +621,11 @@ impl Covers {
         if response.key.is_remote() && response.generation != self.generation {
             return false;
         }
+        if response.size == CoverSize::Large {
+            return self.handle_large(response);
+        }
         let result = match response.outcome {
-            Outcome::Art(image) => Some(Some(image)),
+            Outcome::Art(image) => Some(Some(Art::new(image))),
             Outcome::NoArt => Some(None),
             Outcome::Failed => None,
         };
@@ -467,33 +642,61 @@ impl Covers {
         true
     }
 
+    /// A large load finished: kept (and shown, if its picture is) only if
+    /// it answers the large request running.
+    fn handle_large(&mut self, response: CoverResponse) -> bool {
+        let Some((id, fingerprint)) = self.large_loading else {
+            return false;
+        };
+        if id != response.id {
+            return false;
+        }
+        self.large_loading = None;
+        match response.outcome {
+            Outcome::Art(image) => {
+                self.large.retain(|(f, _)| *f != fingerprint);
+                self.large.push_back((fingerprint, image));
+                while self.large.len() > LARGE_MEMORY_ENTRIES {
+                    self.large.pop_front();
+                }
+                self.art().is_some_and(|art| art.fingerprint == fingerprint)
+            }
+            Outcome::NoArt | Outcome::Failed => {
+                self.large_settled = Some(fingerprint);
+                false
+            }
+        }
+    }
+
     /// The Navidrome client changed (or went away): remembered Navidrome
     /// covers are forgotten, and a Navidrome cover being shown or loaded
     /// is asked again of the new client at the next [`Covers::follow`].
+    /// Large covers stay remembered: they are kept by their picture.
     pub fn client_changed(&mut self, generation: Generation) {
         self.generation = generation;
         self.memory.retain(|(key, _)| !key.is_remote());
         if self.wanted.as_ref().is_some_and(CoverKey::is_remote) {
             self.had_art = self.reserve();
             self.wanted = None;
-            if let Some(image) = self.shown.take() {
-                self.lingering = Some((image, Instant::now()));
+            if let Some(art) = self.shown.take() {
+                self.lingering = Some((art, Instant::now()));
             }
             self.loading = None;
+            self.large_loading = None;
         }
     }
 
-    fn recall(&mut self, key: &CoverKey) -> Option<Option<Arc<CoverImage>>> {
+    fn recall(&mut self, key: &CoverKey) -> Option<Option<Art>> {
         let index = self.memory.iter().position(|(k, _)| k == key)?;
         let entry = self.memory.remove(index)?;
-        let image = entry.1.clone();
+        let art = entry.1.clone();
         self.memory.push_back(entry);
-        Some(image)
+        Some(art)
     }
 
-    fn remember(&mut self, key: CoverKey, image: Option<Arc<CoverImage>>) {
+    fn remember(&mut self, key: CoverKey, art: Option<Art>) {
         self.memory.retain(|(k, _)| *k != key);
-        self.memory.push_back((key, image));
+        self.memory.push_back((key, art));
         while self.memory.len() > MEMORY_ENTRIES {
             self.memory.pop_front();
         }
@@ -502,19 +705,22 @@ impl Covers {
 
 /// Loads `request` on a Tokio task (decoding and file I/O on blocking
 /// threads); the response arrives on `responses` exactly once, also if
-/// the task is aborted or panics ([`Outcome::Failed`]). A Navidrome cover
-/// needs `client` (without one there is no art) and is looked up in, and
-/// saved to, `cache` when there is one.
+/// the task is aborted or panics ([`Outcome::Failed`]). The cover is
+/// decoded at the request's [`CoverSize`]. A Navidrome cover needs
+/// `client` (without one there is no art) and is looked up in, and saved
+/// to, `cache` when there is one (the cache for that size).
 pub fn spawn_load(
     request: CoverRequest,
     client: Option<navidrome::Client>,
     cache: Option<Arc<cache::DiskCache>>,
     responses: &mpsc::UnboundedSender<CoverResponse>,
 ) -> JoinHandle<()> {
+    let size = request.size;
     let answer = move |key: CoverKey, outcome| CoverResponse {
         id: request.id,
         generation: request.generation,
         key,
+        size,
         outcome,
     };
     let reply = Reply::new(responses, answer(request.key.clone(), Outcome::Failed));
@@ -522,14 +728,15 @@ pub fn spawn_load(
         let outcome = match &request.key {
             CoverKey::Local(path) => {
                 let path = path.clone();
-                match tokio::task::spawn_blocking(move || local::load(&path)).await {
+                let pixels = size.pixels();
+                match tokio::task::spawn_blocking(move || local::load_at(&path, pixels)).await {
                     Ok(Some(image)) => Outcome::Art(Arc::new(image)),
                     Ok(None) => Outcome::NoArt,
                     Err(_) => Outcome::Failed,
                 }
             }
             CoverKey::Navidrome(id) => match client {
-                Some(client) => remote(&client, cache, id).await,
+                Some(client) => remote(&client, cache, id, size).await,
                 None => Outcome::NoArt,
             },
         };
@@ -537,13 +744,16 @@ pub fn spawn_load(
     })
 }
 
-/// A Navidrome cover: from the disk cache, else fetched (and cached
-/// unless the server said `no-store`).
+/// A Navidrome cover at `size`: from the disk cache, else fetched (and
+/// cached unless the server said `no-store`).
 async fn remote(
     client: &navidrome::Client,
     cache: Option<Arc<cache::DiskCache>>,
     cover_id: &str,
+    size: CoverSize,
 ) -> Outcome {
+    // A cache of the other size would hand back the wrong size.
+    let cache = cache.filter(|cache| cache.size() == size);
     let name = cache::DiskCache::name(client.base_url().as_str(), client.username(), cover_id);
     if let Some(cache) = cache.clone() {
         let name = name.clone();
@@ -551,7 +761,7 @@ async fn remote(
             return Outcome::Art(Arc::new(image));
         }
     }
-    let bytes = match client.cover_art(cover_id, COVER_SIZE).await {
+    let bytes = match client.cover_art(cover_id, size.pixels()).await {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::debug!(detail = %error.detail(), "cover art fetch failed");
@@ -569,7 +779,7 @@ async fn remote(
         return Outcome::NoArt;
     }
     let decoded = tokio::task::spawn_blocking(move || {
-        let image = decode(&bytes.bytes)?;
+        let image = decode_at(&bytes.bytes, size.pixels())?;
         if let Some(cache) = cache
             && let Err(error) = cache.put(&name, &image)
         {

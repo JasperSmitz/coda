@@ -108,14 +108,38 @@ The cover of the track you hear is shown at the left of the now-playing bar. It 
 - **The layout:** with art, the now-playing bar grows from 4 to 6 rows (title, artist · album, progress). With the visualizer on, the art sits beside it in the bar's existing 7 rows. A track without a cover keeps the usual bar.
 - **When it hides:** on screens narrower than 60 columns or lower than 16 rows, and when nothing is playing. Help, Settings and the other boxes are drawn over it; the image never shows through them.
 - **Loading** never holds up keys, playback or the visualizer: covers are read and decoded in the background, and a cover that arrives after you moved on is not shown. Images larger than 4096 pixels a side, or files over 16 MB (4 MB from Navidrome), are ignored.
-- **The cache:** Navidrome covers are kept, resized to 256 pixels, in `$XDG_CACHE_HOME/coda/covers` (default `~/.cache/coda/covers`, a private folder). The cache holds at most about 50 MB; the least recently shown covers are removed first. File names are hashes: they contain no server address, username or token. You can delete the folder at any time. The folder is only created when the first Navidrome cover is stored. Local covers are only kept in memory (the last 16). Embedded covers are not read from files over 256 MB; their folder image is used instead.
-- **Turning it off:** put this in the config file. The bar is then exactly as without cover art, and the terminal is not asked anything.
+- **The cache:** Navidrome covers are kept, resized to 256 pixels, in `$XDG_CACHE_HOME/coda/covers` (default `~/.cache/coda/covers`, a private folder), and the Now playing screen's larger covers in its `large` folder. Each holds at most about 50 MB, so about 100 MB in all; the least recently shown covers are removed first. File names are hashes: they contain no server address, username or token. You can delete the folder at any time. The folder is only created when the first Navidrome cover is stored. Local covers are only kept in memory (the last 16). Embedded covers are not read from files over 256 MB; their folder image is used instead.
+- **Turning it off:** put this in the config file. The bar is then exactly as without cover art, the Now playing screen has no cover, and the terminal is not asked anything.
 
   ```toml
   [ui]
   cover_art = false
   ```
 - **If the image looks wrong** (for example after changing the font size in Ghostty), restart Coda; it measures the cell size once at startup.
+
+## Now playing screen
+`f` swaps the library, the queue and the now-playing bar for a calm view of the track you hear. Coda always starts in the library.
+
+- **Top to bottom:** album · artist, a large cover, the title in bold, the visualizer (when `v` has it on), and the timeline. Only the cover, the title and the timeline are in colour; the rest is dim grey. The timeline is dim too while nothing moves: paused, or stopped (say, after a restart, before you press Space).
+- **Extras show only when they say something:**
+  - **Next up** names the track that will actually play next (with repeat all, the first one after the last). It shows in the last 20 seconds of a track (so throughout a shorter one), and for about 4 seconds after a queue change, a skip, a new play or `r` changes what comes next. With repeat one, at the end of the queue, or when the next track is the same one (repeat all with a single track), it never shows.
+  - **The volume** shows beside the timeline for about 2 seconds after `+` or `-`.
+  - **Repeat** is a small `⟳` (all) or `⟳1` (one) beside the timeline while it is on.
+- **The cover:** in Ghostty and Kitty, when the cover takes more than 256 pixels on screen, a larger one is asked for at about 1000 pixels (1024) while the screen is open: from Navidrome (and cached apart from the bar's covers), or decoded again from the local file or folder image. Until it arrives, the bar's cover is shown enlarged. With half blocks the bar's cover is enough, and nothing more is loaded. The image is sent at the size it takes on screen, but never with more pixels than the picture has (at most 1024 a side), once per picture and size: opening and closing the screen and a new track send it at once; after resizing the window it is sent once the size has held still for a moment (about 150–400 ms; the cover is blank meanwhile).
+- **Smaller windows:** the cover goes first (it needs at least 6 rows), then the visualizer (at least 3); the text and the timeline always fit. Without a cover the visualizer takes its room.
+- **Nothing playing:** a dim "Nothing playing" in the middle.
+- **The status line** at the bottom still shows messages and errors.
+
+The keys on the screen:
+
+| Key | What it does |
+|---|---|
+| `f` / `Esc` | back to the library and queue |
+| `Space` `<` `>` `,` `.` `+` `-` `r` `v` | as everywhere: pause, previous / next, seek, volume, repeat, visualizer |
+| `?` / `O` / `q` | help / settings / quit (`Esc` closes help first) |
+| `1` `2` | back to the library, showing local / Navidrome |
+
+The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing on the screen.
 
 ## Local library
 - **The home menu:** Shuffle all, Playlists, Folders, Artists and Albums.

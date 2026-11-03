@@ -282,6 +282,7 @@ fn panic_child() {
     let mut painter = ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 0x0B_0000);
     let image = CoverImage::new(4, 4, vec![200; 48]).unwrap();
     painter.prepare(Some(ArtFrame {
+        picture: (image.fingerprint(), false),
         image: Arc::new(image),
         cols: 9,
         rows: 4,

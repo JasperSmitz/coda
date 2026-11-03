@@ -6,8 +6,11 @@
 use std::error::Error as _;
 use std::sync::Arc;
 
-use coda_player::cover::cache::DiskCache;
-use coda_player::cover::{COVER_SIZE, CoverKey, CoverRequest, CoverRequestId, Outcome, spawn_load};
+use coda_player::cover::cache::{DiskCache, large_dir};
+use coda_player::cover::{
+    COVER_SIZE, CoverKey, CoverRequest, CoverRequestId, CoverSize, LARGE_COVER_SIZE, Outcome,
+    spawn_load,
+};
 use coda_player::navidrome::browse::Generation;
 use coda_player::navidrome::client::{MAX_COVER_BYTES, parse_base_url};
 use coda_player::navidrome::{Client, Error, Password};
@@ -297,11 +300,16 @@ async fn responses_are_classified_by_their_bytes() {
 }
 
 async fn load(client: &Client, cache: &Arc<DiskCache>, id: &str) -> Outcome {
+    load_at(client, cache, id, CoverSize::Small).await
+}
+
+async fn load_at(client: &Client, cache: &Arc<DiskCache>, id: &str, size: CoverSize) -> Outcome {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let request = CoverRequest {
         id: CoverRequestId(1),
         generation: Generation(0),
         key: CoverKey::Navidrome(id.into()),
+        size,
     };
     spawn_load(request, Some(client.clone()), Some(cache.clone()), &tx)
         .await
@@ -409,4 +417,59 @@ async fn an_unreachable_server_is_a_failure_to_retry_not_no_art() {
     ));
     let error = client.cover_art("al-1", 256).await.unwrap_err();
     assert_secret_free(&error);
+}
+
+#[tokio::test]
+async fn large_covers_are_asked_at_their_size_and_cached_apart() {
+    let (server, client) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let covers = dir.path().join("covers");
+    let small = Arc::new(DiskCache::new(covers.clone()));
+    let large = Arc::new(DiskCache::large(large_dir(&covers)));
+    Mock::given(method("GET"))
+        .and(path("/rest/getCoverArt"))
+        .and(query_param("id", "al-1"))
+        .and(query_param("size", "256"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jpeg(1200)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getCoverArt"))
+        .and(query_param("id", "al-1"))
+        .and(query_param("size", "1024"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jpeg(1200)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let Outcome::Art(image) = load(&client, &small, "al-1").await else {
+        panic!("small art expected");
+    };
+    assert_eq!(image.width(), COVER_SIZE);
+    let Outcome::Art(image) = load_at(&client, &large, "al-1", CoverSize::Large).await else {
+        panic!("large art expected");
+    };
+    assert_eq!(image.width(), LARGE_COVER_SIZE);
+    // Each in its own folder, under the same secret-free name.
+    let name = DiskCache::name(client.base_url().as_str(), USER, "al-1");
+    assert!(covers.join(&name).is_file());
+    assert!(covers.join("large").join(&name).is_file());
+    // Both come from the disk the second time (the small mock expects one
+    // request, the large one two: see below).
+    let Outcome::Art(image) = load_at(&client, &large, "al-1", CoverSize::Large).await else {
+        panic!("cached large art expected");
+    };
+    assert_eq!(image.width(), LARGE_COVER_SIZE);
+    assert!(matches!(
+        load(&client, &small, "al-1").await,
+        Outcome::Art(_)
+    ));
+    // Handed the small cache by mistake, a large load does not answer
+    // from it (nor store into it): it asks the server, the large mock's
+    // second request.
+    let Outcome::Art(image) = load_at(&client, &small, "al-1", CoverSize::Large).await else {
+        panic!("art expected");
+    };
+    assert_eq!(image.width(), LARGE_COVER_SIZE);
+    assert_eq!(small.get(&name).unwrap().width(), COVER_SIZE);
 }

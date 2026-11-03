@@ -3,7 +3,8 @@
 //! open it swallows every key except the ones that close it, scroll it
 //! (`j`/`k`) and quit. While a text input is open, keys are text
 //! ([`map_input_key`]); while a y/n question is open, only `y` confirms
-//! ([`map_confirm_key`]).
+//! ([`map_confirm_key`]). On the Now playing screen only the global keys
+//! map ([`map_now_playing_key`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -63,6 +64,7 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('S') if !library => Action::SaveQueueAsPlaylist,
         KeyCode::Char('r') => Action::CycleRepeat,
         KeyCode::Char('v') => Action::ToggleVisualizer,
+        KeyCode::Char('f') => Action::ToggleNowPlaying,
         KeyCode::Char(' ') => Action::TogglePause,
         KeyCode::Char('>') => Action::Next,
         KeyCode::Char('<') => Action::Previous,
@@ -77,6 +79,22 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         _ => return None,
     };
     Some(action)
+}
+
+/// Keys on the Now playing screen (help closed): `f` and Esc go back to
+/// the library; the global keys (playback, repeat, visualizer, help,
+/// settings, the source keys, quit) work as anywhere; keys for the lists
+/// (`j` `k`, Enter, `a`, `D`, `/`, Tab, …) do nothing.
+pub fn map_now_playing_key(key: KeyEvent) -> Option<Action> {
+    if key.code == KeyCode::Esc
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return Some(Action::ToggleNowPlaying);
+    }
+    // The focus does not matter for the keys kept.
+    map_key(key, Focus::Library, false).filter(|action| action.works_on_now_playing())
 }
 
 /// Keys while a y/n question is open: only `y` confirms (as
@@ -166,6 +184,7 @@ mod tests {
             (ch('2'), Action::SelectNavidrome),
             (ch('r'), Action::CycleRepeat),
             (ch('v'), Action::ToggleVisualizer),
+            (ch('f'), Action::ToggleNowPlaying),
             (ch('O'), Action::OpenSettings),
             (shifted('O'), Action::OpenSettings),
             (ch('D'), Action::Remove),
@@ -376,6 +395,70 @@ mod tests {
             ] {
                 assert_eq!(help(k), None, "{focus:?} {k:?}");
             }
+        }
+    }
+
+    #[test]
+    fn the_now_playing_screen_keeps_only_the_global_keys() {
+        let screen = map_now_playing_key;
+        let kept = [
+            (ch('f'), Action::ToggleNowPlaying),
+            (key(KeyCode::Esc), Action::ToggleNowPlaying),
+            (ch(' '), Action::TogglePause),
+            (ch('<'), Action::Previous),
+            (shifted('>'), Action::Next),
+            (ch(','), Action::SeekBackward),
+            (ch('.'), Action::SeekForward),
+            (ch('+'), Action::VolumeUp),
+            (ch('='), Action::VolumeUp),
+            (ch('-'), Action::VolumeDown),
+            (ch('r'), Action::CycleRepeat),
+            (ch('v'), Action::ToggleVisualizer),
+            (ch('?'), Action::ToggleHelp),
+            (shifted('O'), Action::OpenSettings),
+            (ch('q'), Action::Quit),
+            (ch('1'), Action::SelectLocal),
+            (ch('2'), Action::SelectNavidrome),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Action::Quit,
+            ),
+        ];
+        for (k, action) in kept {
+            assert_eq!(screen(k), Some(action), "{k:?}");
+        }
+        for k in [
+            ch('j'),
+            ch('k'),
+            key(KeyCode::Up),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            ch('l'),
+            ch('h'),
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            key(KeyCode::Backspace),
+            ch('a'),
+            ch('A'),
+            ch('s'),
+            ch('o'),
+            ch('/'),
+            ch('R'),
+            ch('P'),
+            ch('N'),
+            ch('e'),
+            ch('w'),
+            ch('D'),
+            ch('J'),
+            ch('K'),
+            ch('C'),
+            ch('g'),
+            ch('S'),
+            key(KeyCode::Tab),
+            ch('x'),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT),
+        ] {
+            assert_eq!(screen(k), None, "{k:?}");
         }
     }
 

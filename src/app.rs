@@ -63,7 +63,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::cover::{self, CoverRequest, CoverResponse, Covers, cache::DiskCache};
+use crate::cover::{self, CoverRequest, CoverResponse, CoverSize, Covers, cache::DiskCache};
 use crate::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
 use crate::library::scan::{self, ScanEvent};
 use crate::library::search::{self, SearchResults};
@@ -79,6 +79,7 @@ use crate::navidrome::browse::{
 };
 use crate::navidrome::edit::{EditId, EditRequest, EditResponse};
 use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use crate::now_playing::NowPlaying;
 use crate::onboarding::Input;
 use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
@@ -238,6 +239,8 @@ pub enum Action {
     SaveOrder,
     /// `v`: show or hide the visualizer.
     ToggleVisualizer,
+    /// `f`: open or close the Now playing screen (also Esc on it).
+    ToggleNowPlaying,
     Quit,
 }
 
@@ -265,6 +268,32 @@ impl Action {
                 | Self::SaveOrder
                 | Self::MoveEntryUp
                 | Self::MoveEntryDown
+        )
+    }
+
+    /// Actions that work on the Now playing screen: playback, repeat,
+    /// the visualizer, help, settings, quitting, the source keys (which
+    /// go back to the library first) and closing the screen. The rest
+    /// act on a list that is not shown there.
+    pub fn works_on_now_playing(self) -> bool {
+        matches!(
+            self,
+            Self::TogglePause
+                | Self::Next
+                | Self::Previous
+                | Self::SeekBackward
+                | Self::SeekForward
+                | Self::VolumeUp
+                | Self::VolumeDown
+                | Self::CycleRepeat
+                | Self::ToggleVisualizer
+                | Self::ToggleHelp
+                | Self::CloseHelp
+                | Self::OpenSettings
+                | Self::SelectLocal
+                | Self::SelectNavidrome
+                | Self::ToggleNowPlaying
+                | Self::Quit
         )
     }
 }
@@ -422,6 +451,11 @@ pub struct App {
     settings_revision: u64,
     /// The cover of the track heard (off unless [`App::set_cover_art`]).
     covers: Covers,
+    /// The Now playing screen (`f`) and its transient extras.
+    now_playing: NowPlaying,
+    /// The last frame said a large cover would show better than the small
+    /// one (Kitty graphics, a large enough area).
+    large_cover_useful: bool,
 }
 
 impl App {
@@ -495,6 +529,8 @@ impl App {
             meter: Meter::default(),
             settings_revision: 0,
             covers: Covers::new(false),
+            now_playing: NowPlaying::default(),
+            large_cover_useful: false,
         }
     }
 
@@ -503,6 +539,39 @@ impl App {
     pub fn set_cover_art(&mut self, enabled: bool) {
         self.covers = Covers::new(enabled);
         self.covers.client_changed(self.generation);
+        self.covers
+            .set_large(self.now_playing.is_open() && self.large_cover_useful);
+    }
+
+    /// Whether the last frame's Now playing cover would show a large
+    /// cover better than the small one (only with Kitty graphics, in an
+    /// area larger than the small cover). Large covers are loaded only
+    /// then. The loop passes this after every full draw.
+    pub fn set_large_cover_useful(&mut self, useful: bool) {
+        self.large_cover_useful = useful;
+        self.covers
+            .set_large(self.now_playing.is_open() && self.large_cover_useful);
+    }
+
+    /// Whether the Now playing screen is shown instead of the panels.
+    pub fn now_playing_open(&self) -> bool {
+        self.now_playing.is_open()
+    }
+
+    /// The Now playing screen's state, for rendering.
+    pub fn now_playing(&self) -> &NowPlaying {
+        &self.now_playing
+    }
+
+    /// Notices changes of what plays next, for the Now playing screen's
+    /// Next up. The loop calls this before every frame.
+    pub fn follow_now_playing(&mut self, now: Instant) {
+        self.now_playing.follow(&self.player, now);
+    }
+
+    fn set_now_playing(&mut self, open: bool) {
+        self.now_playing.set_open(open);
+        self.covers.set_large(open && self.large_cover_useful);
     }
 
     /// The cover state, for rendering.
@@ -828,6 +897,7 @@ impl App {
 
     /// Applies a user action and returns the commands to send.
     pub fn handle_action(&mut self, action: Action, now: Instant) -> Vec<PlaybackCommand> {
+        self.now_playing.user_acted();
         if self.settings.is_open() {
             // The loop sends settings keys to `handle_settings_input`.
             if action == Action::Quit {
@@ -928,6 +998,10 @@ impl App {
                 Action::Quit => self.request_quit(now),
                 _ => {}
             }
+            return Vec::new();
+        }
+        if self.now_playing.is_open() && !action.works_on_now_playing() {
+            // Nothing to act on: the lists are not shown.
             return Vec::new();
         }
         // Any other action cancels a pending `C`, `D` or `w`.
@@ -1036,6 +1110,7 @@ impl App {
                 Vec::new()
             }
             Action::SelectLocal => {
+                self.set_now_playing(false);
                 self.source = Source::Local;
                 self.focus = Focus::Library;
                 Vec::new()
@@ -1045,6 +1120,7 @@ impl App {
                     browser.ensure_started();
                 }
                 // Without Navidrome the panel offers to connect.
+                self.set_now_playing(false);
                 self.source = Source::Navidrome;
                 self.focus = Focus::Library;
                 Vec::new()
@@ -1159,8 +1235,14 @@ impl App {
             Action::Previous => self.player.play_previous(),
             Action::SeekBackward => self.player.seek_relative(-SEEK_STEP),
             Action::SeekForward => self.player.seek_relative(SEEK_STEP),
-            Action::VolumeUp => self.player.volume_up(),
-            Action::VolumeDown => self.player.volume_down(),
+            Action::VolumeUp => {
+                self.now_playing.volume_changed(now);
+                self.player.volume_up()
+            }
+            Action::VolumeDown => {
+                self.now_playing.volume_changed(now);
+                self.player.volume_down()
+            }
             Action::SwitchFocus => {
                 self.focus = match self.focus {
                     Focus::Library => Focus::Queue,
@@ -1180,6 +1262,10 @@ impl App {
             }
             Action::ToggleVisualizer => {
                 backend.extend(self.toggle_visualizer(now));
+                Vec::new()
+            }
+            Action::ToggleNowPlaying => {
+                self.set_now_playing(!self.now_playing.is_open());
                 Vec::new()
             }
             Action::Quit => {
@@ -1586,6 +1672,9 @@ impl App {
             self.connection = Connection::Connected;
         }
         let outcomes = browser.handle_response(response);
+        // A play or add that waited for this data was the user's doing:
+        // what it changes next shows on the Now playing screen.
+        self.now_playing.user_acted();
         let commands = self.apply_job_outcomes(outcomes, now);
         self.dispatch(commands, now)
     }
@@ -1656,7 +1745,7 @@ impl App {
     /// Also lets the visualizer's bars fall when readings stopped coming
     /// while playing (a stall: buffering, or a seek mpv did not perform).
     pub fn tick(&mut self, now: Instant) -> bool {
-        let faded = self.meter.fade(now) | self.covers.expire(now);
+        let faded = self.meter.fade(now) | self.covers.expire(now) | self.now_playing.expire(now);
         if self.status.as_ref().is_some_and(|s| now >= s.expires_at) {
             self.status = None;
             return true;
@@ -2452,10 +2541,13 @@ pub async fn run(
         }),
         late_replies: LateReplyFilter::new(detection.and_then(|d| d.late), Instant::now()),
         // Its folder is created only when a Navidrome cover is stored.
-        cache: covers
+        caches: covers
             .cache_dir
             .filter(|_| covers.enabled)
-            .map(|dir| Arc::new(DiskCache::new(dir))),
+            .map(|dir| CoverCaches {
+                large: Arc::new(DiskCache::large(cover::cache::large_dir(&dir))),
+                small: Arc::new(DiskCache::new(dir)),
+            }),
     };
     // Never dropped implicitly: if a panic unwinds out of the loop after
     // the terminal hung up, `Terminal::drop` would `eprintln!` on the dead
@@ -2768,7 +2860,15 @@ struct CoverSetup {
     /// `None`: cover art is off.
     painter: Option<ArtPainter>,
     late_replies: LateReplyFilter,
-    cache: Option<Arc<DiskCache>>,
+    caches: Option<CoverCaches>,
+}
+
+/// The disk caches of Navidrome covers, one per [`CoverSize`], each with
+/// its own cap.
+#[derive(Clone)]
+struct CoverCaches {
+    small: Arc<DiskCache>,
+    large: Arc<DiskCache>,
 }
 
 /// Runs cover loads, one at a time: a new request aborts the one before
@@ -2776,8 +2876,8 @@ struct CoverSetup {
 /// tracks, or a client change, never leaves loads running that nobody
 /// will see.
 struct CoverLoader {
-    cache: Option<Arc<DiskCache>>,
-    running: Option<JoinHandle<()>>,
+    caches: Option<CoverCaches>,
+    running: Option<(JoinHandle<()>, CoverSize, cover::CoverRequestId)>,
 }
 
 impl CoverLoader {
@@ -2789,17 +2889,30 @@ impl CoverLoader {
     ) {
         for request in requests {
             self.abort();
-            self.running = Some(cover::spawn_load(
-                request,
-                client.cloned(),
-                self.cache.clone(),
-                responses,
-            ));
+            let (size, id) = (request.size, request.id);
+            let cache = self.caches.as_ref().map(|caches| match size {
+                CoverSize::Small => caches.small.clone(),
+                CoverSize::Large => caches.large.clone(),
+            });
+            let task = cover::spawn_load(request, client.cloned(), cache, responses);
+            self.running = Some((task, size, id));
+        }
+    }
+
+    /// Aborts the large load running unless it is `wanted`, the one the
+    /// cover state waits for ([`Covers::large_request`]): the screen
+    /// closed, the track changed (to one with or without a cover),
+    /// playback stopped or the client changed.
+    fn drop_large_unless(&mut self, wanted: Option<cover::CoverRequestId>) {
+        if let Some((_, CoverSize::Large, id)) = &self.running
+            && Some(*id) != wanted
+        {
+            self.abort();
         }
     }
 
     fn abort(&mut self) {
-        if let Some(task) = self.running.take() {
+        if let Some((task, ..)) = self.running.take() {
             task.abort();
         }
     }
@@ -3129,7 +3242,7 @@ async fn event_loop(
     view.art = art.painter;
     let mut late_replies = art.late_replies;
     let mut covers = CoverLoader {
-        cache: art.cache,
+        caches: art.caches,
         running: None,
     };
     let (cover_tx, mut cover_rx) = mpsc::unbounded_channel();
@@ -3167,6 +3280,10 @@ async fn event_loop(
         }
         fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
         covers.spawn(app.take_cover_requests(), app.navidrome_client(), &cover_tx);
+        // After the requests: following the track may have dropped a
+        // large load, which is then aborted here.
+        covers.drop_large_unless(app.covers().large_request());
+        app.follow_now_playing(Instant::now());
         writers.edits.pump(app, &edit_tx);
         for request in app.take_scrobble_requests() {
             if let Some(scrobbler) = &scrobbler {
@@ -3182,6 +3299,7 @@ async fn event_loop(
             }
             app.clamp_help_scroll(view.help_max_scroll);
             app.set_remote_rows(view.remote_rows);
+            app.set_large_cover_useful(view.large_cover_useful);
             // A larger screen may want the next page of a list at once;
             // draw again right away so "Loading more…" shows.
             let requests = app.take_fetch_requests();
@@ -3214,6 +3332,8 @@ async fn event_loop(
                         Some(keymap::map_confirm_key(key))
                     } else if app.input_open() {
                         keymap::map_input_key(key)
+                    } else if app.now_playing_open() && !app.help_open() {
+                        keymap::map_now_playing_key(key)
                     } else {
                         keymap::map_key(key, app.focus(), app.help_open())
                     };
@@ -6842,7 +6962,7 @@ mod tests {
         let mut app = App::new("/music".into());
         app.set_cover_art(true);
         let mut loader = CoverLoader {
-            cache: None,
+            caches: None,
             running: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -6883,7 +7003,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(loader.running.as_ref().is_some_and(|t| !t.is_finished()));
+        assert!(loader.running.as_ref().is_some_and(|t| !t.0.is_finished()));
         loader.abort();
         let last = rx.recv().await.unwrap();
         assert_eq!(last.id, ids[2]);
@@ -6891,6 +7011,117 @@ mod tests {
         assert!(app.handle_cover_response(last));
         assert!(app.covers().image().is_none());
         assert!(app.take_cover_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_large_load_no_longer_wanted_is_aborted() {
+        // A server that accepts connections and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = navidrome::Client::new(
+            navidrome::client::parse_base_url(&format!("http://{address}")).unwrap(),
+            "u".into(),
+            navidrome::Password::new("p".into()),
+        )
+        .unwrap();
+        let now = Instant::now();
+        let with_cover = Track::navidrome(
+            "a".into(),
+            TrackMetadata {
+                cover_art: Some("al-a".into()),
+                ..TrackMetadata::default()
+            },
+        );
+        let without_cover = Track::navidrome("b".into(), TrackMetadata::default());
+        // How the large cover stops being wanted.
+        let close = |app: &mut App| {
+            app.handle_action(Action::ToggleNowPlaying, now);
+        };
+        let coverless_track = |app: &mut App| app.covers.follow(Some(&without_cover));
+        let stop = |app: &mut App| app.covers.follow(None);
+        let not_useful = |app: &mut App| app.set_large_cover_useful(false);
+        let ways: [&dyn Fn(&mut App); 4] = [&close, &coverless_track, &stop, &not_useful];
+        for (way, unwant) in ways.into_iter().enumerate() {
+            let mut app = App::new("/music".into());
+            app.set_cover_art(true);
+            app.handle_action(Action::ToggleNowPlaying, now);
+            // The first frame found a large cover worth loading (Kitty).
+            app.set_large_cover_useful(true);
+            let mut loader = CoverLoader {
+                caches: None,
+                running: None,
+            };
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            app.covers.follow(Some(&with_cover));
+            let small = app.covers.take_requests();
+            assert_eq!(small.len(), 1);
+            let image = cover::CoverImage::new(256, 256, vec![7; 256 * 256 * 3]).unwrap();
+            app.handle_cover_response(CoverResponse {
+                id: small[0].id,
+                generation: small[0].generation,
+                key: small[0].key.clone(),
+                size: small[0].size,
+                outcome: cover::Outcome::Art(Arc::new(image)),
+            });
+            let large = app.covers.take_requests();
+            assert_eq!(large.len(), 1, "{way}");
+            assert_eq!(large[0].size, CoverSize::Large);
+            loader.spawn(large.clone(), Some(&client), &tx);
+            // Still wanted: it keeps running.
+            loader.drop_large_unless(app.covers().large_request());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                    .await
+                    .is_err()
+            );
+            // No longer wanted: aborted at the next turn of the loop, and
+            // its answer is ignored.
+            unwant(&mut app);
+            loader.drop_large_unless(app.covers().large_request());
+            assert!(loader.running.is_none(), "{way}");
+            let answer = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("an aborted load answers at once")
+                .unwrap();
+            assert_eq!((answer.id, answer.size), (large[0].id, CoverSize::Large));
+            assert!(!app.handle_cover_response(answer));
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_useful_area_no_large_cover_is_asked() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.set_cover_art(true);
+        app.handle_action(Action::ToggleNowPlaying, now);
+        // Half blocks, or a small area: the frame says no.
+        app.set_large_cover_useful(false);
+        let track = Track::navidrome(
+            "a".into(),
+            TrackMetadata {
+                cover_art: Some("al-a".into()),
+                ..TrackMetadata::default()
+            },
+        );
+        app.covers.follow(Some(&track));
+        let small = app.covers.take_requests();
+        let image = cover::CoverImage::new(256, 256, vec![7; 256 * 256 * 3]).unwrap();
+        app.handle_cover_response(CoverResponse {
+            id: small[0].id,
+            generation: small[0].generation,
+            key: small[0].key.clone(),
+            size: small[0].size,
+            outcome: cover::Outcome::Art(Arc::new(image)),
+        });
+        assert!(app.covers.take_requests().is_empty());
+        app.set_large_cover_useful(true);
+        assert_eq!(app.covers.take_requests().len(), 1);
     }
 
     #[tokio::test]

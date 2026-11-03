@@ -178,3 +178,9 @@ Each entry should state:
 - **Root cause:** crossterm 0.29 (`event/sys/unix/parse.rs`, `parse_event`) reports an `ESC` with no more input available as `KeyCode::Esc`, and the next read's bytes as plain characters. Any key-level filter sees a different key sequence depending on how the terminal's reply was split into reads.
 - **Rule:** finish reading a reply that has started rather than filter it afterwards: once any reply byte has arrived, extend the read to a hard cap. A filter for what still arrives late must accept `Esc` + `c` as well as `Alt-c`, match the reply's exact prefix before swallowing (and let other keys through), end on a short quiet period, and also cover a cut-off `CSI` tail. Test with a PTY that splits the reply at the `ESC`, inside DA1, and after detection gave up.
 - **Where verified:** M9 slice 2 review probe (`split.py`); `a_late_reply_whose_escape_came_alone_never_reaches_the_keys`, `a_deadline_inside_da1_waits_for_the_rest`, `the_tail_of_da1_after_detection_gave_up_never_reaches_the_keys`, `a_users_alt_underscore_is_not_followed_by_lost_keys` in `tests/cover_terminal.rs`.
+
+### A size helper that clamps to a hard limit misleads a search for the largest fit
+- **Context / symptom:** review of M10. On a 300×1000 terminal with 16×34 px cells, the Now playing screen's Kitty cover came out as 297 columns by 279 rows, a squashed picture instead of a square.
+- **Root cause:** `ArtPainter::columns` clamps its result to the 297 placeholder diacritics. `largest_fitting` searched for the most rows whose `columns()` fit the width, and the clamped value always fit, so every row count passed.
+- **Rule:** when searching for the largest input whose size fits, compare against the unclamped size (`ArtPainter::square_columns`) and apply the hard limit to the bound instead. Test at the limit, not only below it.
+- **Where verified:** M10 review probe; `a_cover_at_the_diacritics_limit_stays_square` in `src/ui/now_playing/tests.rs`.
