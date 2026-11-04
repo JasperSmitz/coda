@@ -190,3 +190,9 @@ Each entry should state:
 - **Root cause:** whether the visualizer was drawable came from a second, simpler copy of the layout (the stacked layout without a cover), written before the side-by-side layout existed. The copy and the layout that draws disagreed as soon as that layout was added.
 - **Rule:** when the same room is computed in two places (here "visualizer drawable" and the layout that draws it), derive both from one function with the same inputs (the same painter and cover decision). A simpler second copy goes wrong as soon as a new layout is added.
 - **Where verified:** M10 layout review; `visualizer_room` built on `cover_for` and `screen_layout` in `src/ui/now_playing.rs`, `the_visualizer_is_drawable_only_where_the_layout_draws_it` in `src/ui/now_playing/tests.rs`.
+
+### `pub` everywhere switches off the dead-code lint
+- **Context / symptom:** the pre-1.0 review found production-dead items (`Player::quit`, `Covers::enabled`, `LocalBrowser::album_order`, `MpvProcess::socket_dir`, `PlayerCommand::Shutdown`) that rustc had never flagged.
+- **Root cause:** in a library crate where everything is `pub`, rustc's dead-code lint is effectively off: a `pub` item might be used by someone else. The items showed up only after making them `pub(crate)` in a scratch copy.
+- **Rule:** prefer `pub(crate)` for items that are not API, or run that scratch-copy check periodically before a release.
+- **Where verified:** pre-1.0 full-codebase review; the five items above were removed.

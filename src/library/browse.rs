@@ -164,11 +164,6 @@ impl LocalBrowser {
         }
     }
 
-    /// The album order Home → Albums opens (the last one chosen).
-    pub fn album_order(&self) -> AlbumOrder {
-        self.album_order
-    }
-
     /// Number of rows in the shown view.
     pub fn len(&self, library: &Library) -> usize {
         view_len(library, self.current())

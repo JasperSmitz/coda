@@ -620,7 +620,7 @@ mod tests {
             q.insert_next(t("Y"));
             assert_eq!(titles(&q), expected, "{name}");
         }
-        // Going back: A B* X(anchor), then `p`.
+        // Going back: A B* X(anchor), then `<`.
         let mut q = Queue::new();
         q.append(t("A"));
         let b = q.append(t("B"));

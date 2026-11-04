@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(l.listened(), secs(17));
         l.on_position(secs(22), false, duration);
         assert_eq!(l.listened(), secs(17));
-        // Arrow-key seeks (5 s) never count, so seeking through a track
+        // Seeks with `,` and `.` (5 s) never count, so seeking through a track
         // cannot submit it.
         let mut l = listen();
         let mut at = Duration::ZERO;

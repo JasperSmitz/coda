@@ -33,7 +33,8 @@
 //! scrobbler ([`App::take_client_change`]). Queued remote tracks resolve
 //! against whatever client is current at their next load.
 //!
-//! The session (queue, current entry, volume, repeat mode) is restored at
+//! The session (queue, current entry, volume, repeat mode, visualizer on or
+//! off) is restored at
 //! startup ([`App::restore_session`]) and saved by the loop: [`App`] only
 //! reports that a save is due ([`App::take_due_save`], debounced by
 //! [`SAVE_DEBOUNCE`]) and hands over a snapshot; the loop writes it on a
@@ -99,7 +100,7 @@ pub const TICK: Duration = Duration::from_millis(250);
 pub const STATUS_TTL: Duration = Duration::from_secs(5);
 /// Upper bound on waiting for the playback backend at quit.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-/// Seek step for the arrow keys, in seconds.
+/// Seek step for `,` and `.`, in seconds.
 pub const SEEK_STEP: f64 = 5.0;
 /// The session is saved this long after the last change to it.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -192,22 +193,24 @@ pub enum Action {
     Back,
     /// Library: refetch the shown Navidrome view.
     Refresh,
-    /// Search input: a typed character.
+    /// A typed character in a text input (a search, the playlist-name
+    /// prompt), or `y` answering the y/n question.
     InputChar(char),
     InputBackspace,
-    /// Search input: Enter.
+    /// Text input: Enter.
     InputSubmit,
-    /// Search input: Esc.
+    /// Text input: Esc; also any key but `y` on the y/n question.
     InputCancel,
     /// `D`. Queue: remove the selected entry. Navidrome playlist: remove
     /// the selected song. Playlists list: ask whether to delete the
     /// selected playlist.
     Remove,
     /// Queue: move the selected entry up (`K`); the selection follows it.
+    /// Also moves a song in an editable Navidrome playlist.
     MoveEntryUp,
     /// Queue: move the selected entry down (`J`).
     MoveEntryDown,
-    /// Queue: remove every entry (`C`).
+    /// Queue: remove every entry (`C C`: a second press confirms).
     ClearQueue,
     /// Queue: select the current entry (`g`).
     SelectCurrent,
@@ -1741,7 +1744,8 @@ impl App {
     }
 
     /// Drops the status message once it has expired. Returns `true` if
-    /// anything visible changed.
+    /// anything visible changed (the loop redraws on every tick anyway;
+    /// the flag is for tests).
     /// Also lets the visualizer's bars fall when readings stopped coming
     /// while playing (a stall: buffering, or a seek mpv did not perform).
     pub fn tick(&mut self, now: Instant) -> bool {
@@ -2814,13 +2818,19 @@ pub fn install_panic_hook(previous: PanicHook) {
     }));
 }
 
-fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
-    let payload = info.payload();
+/// What the log may say about a panic payload. Only a `&'static str`
+/// (a literal message, written by the programmer) is kept: a `String`
+/// comes from `format!` and can carry library content (slicing panics
+/// quote the string), which the log never records.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> &'static str {
+    payload_message(info.payload())
+}
+
+fn payload_message(payload: &(dyn std::any::Any + Send)) -> &'static str {
     payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "non-string panic payload".into())
+        .downcast_ref::<&'static str>()
+        .copied()
+        .unwrap_or("panic (message withheld)")
 }
 
 /// Terminating signals that quit gracefully. In raw mode Ctrl-C arrives as
@@ -3460,6 +3470,18 @@ mod tests {
     use crate::playback::LoadId;
     use crate::playback::{EndReason, PlaybackTarget};
 
+    #[test]
+    fn only_a_literal_panic_message_reaches_the_log() {
+        let literal: Box<dyn std::any::Any + Send> = Box::new("index out of range");
+        assert_eq!(payload_message(&*literal), "index out of range");
+        // `format!` payloads can quote a title or a path.
+        let formatted: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("byte index in Secret Title"));
+        assert_eq!(payload_message(&*formatted), "panic (message withheld)");
+        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(payload_message(&*other), "panic (message withheld)");
+    }
+
     const ROOT: &str = "/music";
 
     fn track(rel: &str) -> Track {
@@ -3901,7 +3923,7 @@ mod tests {
         assert_eq!(queue_titles(&app), ["1", "2"]);
         assert_eq!(app.queue_selected(), 1);
 
-        // Remove the playing entry: acts like `n` (plays the next one).
+        // Remove the playing entry: acts like `>` (plays the next one).
         let playing = press(&mut app, &[Action::Up, Action::Activate], now);
         let load = load_id(&playing);
         app.handle_playback_event(PlaybackEvent::Started { load }, now);
@@ -6350,7 +6372,7 @@ mod tests {
         let commands = press(&mut app, &[Action::Activate], now);
         started(&mut app, &commands, now);
         app.take_scrobble_requests();
-        // Seeking through the track with the arrow keys is not listening.
+        // Seeking through the track with `,` and `.` is not listening.
         let mut at = 0;
         while at < 180 {
             at += 5;
@@ -6380,7 +6402,7 @@ mod tests {
         let commands = press(&mut app, &[Action::Activate], now);
         started(&mut app, &commands, now);
         progress(&mut app, 0.0, 20.0, now);
-        // `n` before the submission: the next load has not started, so
+        // `>` before the submission: the next load has not started, so
         // positions still arriving for the old track count for nothing.
         let commands = press(&mut app, &[Action::Next], now);
         progress(&mut app, 20.0, 40.0, now);

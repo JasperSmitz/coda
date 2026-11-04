@@ -20,7 +20,7 @@ use crate::onboarding::{
     Busy, Field, Input, Onboarding, SaveError, Screen, ServerForm, leftover_overrides_message,
     navidrome_blocked_message,
 };
-use crate::ui::render::{fit, fit_tail};
+use crate::ui::render::{DIM_TEXT, fit, fit_tail};
 
 const MAX_WIDTH: u16 = 76;
 const MAX_HEIGHT: u16 = 18;
@@ -97,7 +97,7 @@ impl Panel {
     }
 
     pub(crate) fn hint(&mut self, text: &str) {
-        self.styled(text, Style::default().fg(Color::DarkGray));
+        self.styled(text, DIM_TEXT);
     }
 
     /// Something to be aware of, e.g. a setting made outside Coda.
@@ -143,7 +143,7 @@ impl Panel {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            DIM_TEXT
         };
         if focused {
             self.cursor = Some((self.lines.len(), column));
@@ -159,7 +159,7 @@ impl Panel {
         let label = format!("{label:<14}");
         let room = self.width.saturating_sub(label.width());
         self.lines.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
+            Span::styled(label, DIM_TEXT),
             Span::raw(fit(value, room)),
         ]));
     }
