@@ -104,3 +104,35 @@ export type Intent =
   | { type: "playTracks"; tracks: TrackRef[]; start?: number | null; shuffle?: boolean }
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number };
+
+// ----- settings (`src-tauri/src/settings.rs`) -----
+
+/** The server as the settings show it (never a password). */
+export type ServerSettings =
+  | { kind: "notConfigured" }
+  /** Written by Coda (keychain): can be edited and disconnected. */
+  | { kind: "coda"; url: string; username: string }
+  /** Set outside Coda; `by` names the variables or keys. */
+  | { kind: "outside"; url: string | null; username: string | null; by: string[] };
+
+export interface Settings {
+  configPath: string | null;
+  /** As written in the file (`~/Music` stays `~/Music`). */
+  musicDir: string | null;
+  /** `CODA_MUSIC_DIR` is set and used instead. */
+  musicDirEnv: boolean;
+  server: ServerSettings;
+  /** Variables that keep a server from being saved here. */
+  serverBlockedBy: string[];
+  scrobble: boolean;
+  coverArt: boolean;
+  /** Why the file could not be read (nothing can be saved then). */
+  problem: string | null;
+}
+
+/** A server as typed; the password goes to the keychain only. */
+export interface ServerInput {
+  url: string;
+  username: string;
+  password: string;
+}

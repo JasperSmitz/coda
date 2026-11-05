@@ -115,11 +115,77 @@ struct ExistingNavidrome {
     scrobble: Option<bool>,
 }
 
+/// Settings the desktop app's settings view changes besides the server.
+/// `None` keeps the file's value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preferences {
+    /// The music folder, as chosen (`~/` is kept as typed).
+    pub music_dir: Option<String>,
+    /// `[navidrome] scrobble`.
+    pub scrobble: Option<bool>,
+    /// `[ui] cover_art`.
+    pub cover_art: Option<bool>,
+}
+
+/// What the file says about [`Preferences`], with the defaults applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePreferences {
+    pub music_dir: Option<String>,
+    pub scrobble: bool,
+    pub cover_art: bool,
+}
+
+/// Overrides applied while writing (see [`write_preferences`]).
+#[derive(Default)]
+struct Overrides {
+    scrobble: Option<bool>,
+    cover_art: Option<bool>,
+    /// `[navidrome]` is kept if there is one; none is not an error.
+    navidrome_optional: bool,
+}
+
 /// Writes `config` to `path`. Returns the backup's path if the old file
 /// was backed up.
 pub fn write(path: &Path, config: &SetupConfig) -> io::Result<Option<PathBuf>> {
     let music_dir = MusicDirSection::Set(config.music_dir.clone());
-    write_sections(path, &music_dir, &config.navidrome).map(|written| written.backup)
+    write_sections(path, &music_dir, &config.navidrome, &Overrides::default())
+        .map(|written| written.backup)
+}
+
+/// Writes `preferences` to `path`, keeping `[navidrome]` (if any) and
+/// every setting not given as it is in the file. Like
+/// [`write_navidrome`], an existing file that cannot be parsed is not
+/// replaced. A file with no source is not refused: the folder is only
+/// ever set here, never removed.
+pub fn write_preferences(path: &Path, preferences: &Preferences) -> io::Result<Written> {
+    let music_dir = match &preferences.music_dir {
+        Some(dir) => MusicDirSection::Set(Some(dir.clone())),
+        None => MusicDirSection::Keep,
+    };
+    let overrides = Overrides {
+        scrobble: preferences.scrobble,
+        cover_art: preferences.cover_art,
+        navidrome_optional: true,
+    };
+    write_sections(path, &music_dir, &NavidromeSection::Keep, &overrides)
+}
+
+/// Reads the [`Preferences`] the file at `path` holds (defaults for a
+/// missing file). A file that cannot be parsed is an error (its content
+/// is not quoted).
+pub fn read_preferences(path: &Path) -> io::Result<FilePreferences> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => toml::from_str::<Existing>(&text).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "the settings could not be read")
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Existing::default(),
+        Err(e) => return Err(e),
+    };
+    Ok(FilePreferences {
+        music_dir: existing.music_dir.filter(|dir| !dir.trim().is_empty()),
+        scrobble: existing.navidrome.and_then(|n| n.scrobble).unwrap_or(true),
+        cover_art: existing.ui.and_then(|ui| ui.cover_art).unwrap_or(true),
+    })
 }
 
 /// Writes `navidrome` to `path`, keeping `music_dir` and `scrobble` as
@@ -128,13 +194,19 @@ pub fn write(path: &Path, config: &SetupConfig) -> io::Result<Option<PathBuf>> {
 /// Removing Navidrome from a file without a `music_dir` is refused
 /// ([`NO_SOURCE_LEFT`]): the file would configure no source.
 pub fn write_navidrome(path: &Path, navidrome: &NavidromeSection) -> io::Result<Written> {
-    write_sections(path, &MusicDirSection::Keep, navidrome)
+    write_sections(
+        path,
+        &MusicDirSection::Keep,
+        navidrome,
+        &Overrides::default(),
+    )
 }
 
 fn write_sections(
     path: &Path,
     music_dir: &MusicDirSection,
     navidrome: &NavidromeSection,
+    overrides: &Overrides,
 ) -> io::Result<Written> {
     let dir = parent_dir(path)?;
     fs::DirBuilder::new()
@@ -174,7 +246,7 @@ fn write_sections(
     if keep_music_dir && *navidrome == NavidromeSection::Remove && music_dir.is_none() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, NO_SOURCE_LEFT));
     }
-    if keep && parsed.is_none() {
+    if keep && parsed.is_none() && !overrides.navidrome_optional {
         // The file changed (or went away) since setup read it.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -186,14 +258,16 @@ fn write_sections(
         _ => None,
     };
 
-    let parsed = parsed.unwrap_or_default();
+    let mut parsed = parsed.unwrap_or_default();
+    if overrides.scrobble.is_some() {
+        parsed.scrobble = overrides.scrobble;
+    }
+    let mut ui = ui.unwrap_or_default();
+    if overrides.cover_art.is_some() {
+        ui.cover_art = overrides.cover_art;
+    }
     let scrobble = parsed.scrobble.unwrap_or(true);
-    let text = render(
-        music_dir.as_deref(),
-        navidrome,
-        parsed,
-        ui.unwrap_or_default(),
-    );
+    let text = render(music_dir.as_deref(), navidrome, parsed, ui);
     let file_name = path.file_name().map_or_else(
         || "config.toml".into(),
         |n| n.to_string_lossy().into_owned(),
@@ -784,6 +858,87 @@ mod tests {
         let text = fs::read_to_string(f.path()).unwrap();
         assert!(!text.contains("[ui]"), "{text}");
         assert!(f.load().cover_art);
+    }
+
+    #[test]
+    fn write_preferences_changes_only_what_is_given() {
+        let f = Fixture::new();
+        fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+        fs::create_dir_all(f.home().join("Music")).unwrap();
+        fs::create_dir_all(f.home().join("Other")).unwrap();
+        // A hand-written password_command, kept by value.
+        let old = "music_dir = \"~/Music\"\n[navidrome]\nurl = \"https://h.example\"\n\
+                   username = \"me\"\npassword_command = [\"pass\", \"nd\"]\n";
+        fs::write(f.path(), old).unwrap();
+        let prefs = Preferences {
+            scrobble: Some(false),
+            cover_art: Some(false),
+            ..Preferences::default()
+        };
+        let written = write_preferences(&f.path(), &prefs).unwrap();
+        assert!(!written.scrobble);
+        assert!(written.backup.is_some(), "hand-written: backed up");
+        let text = fs::read_to_string(f.path()).unwrap();
+        assert!(text.contains("music_dir = \"~/Music\""), "{text}");
+        assert!(
+            text.contains("password_command = [\"pass\", \"nd\"]"),
+            "{text}"
+        );
+        let config = f.load();
+        assert!(!config.cover_art);
+        assert!(!config.navidrome.as_ref().unwrap().scrobble);
+        assert_eq!(
+            read_preferences(&f.path()).unwrap(),
+            FilePreferences {
+                music_dir: Some("~/Music".into()),
+                scrobble: false,
+                cover_art: false,
+            }
+        );
+        // The folder alone; the rest stays.
+        let prefs = Preferences {
+            music_dir: Some("~/Other".into()),
+            ..Preferences::default()
+        };
+        write_preferences(&f.path(), &prefs).unwrap();
+        let config = f.load();
+        assert_eq!(
+            config.music_dir.unwrap(),
+            f.home().join("Other").canonicalize().unwrap()
+        );
+        assert!(!config.cover_art);
+        assert!(config.navidrome.is_some());
+    }
+
+    #[test]
+    fn write_preferences_without_navidrome_or_a_file() {
+        let f = Fixture::new();
+        assert_eq!(
+            read_preferences(&f.path()).unwrap(),
+            FilePreferences {
+                music_dir: None,
+                scrobble: true,
+                cover_art: true,
+            }
+        );
+        let music = f.dir.path().join("m");
+        fs::create_dir(&music).unwrap();
+        let prefs = Preferences {
+            music_dir: Some(music.to_str().unwrap().into()),
+            ..Preferences::default()
+        };
+        let written = write_preferences(&f.path(), &prefs).unwrap();
+        assert_eq!(written.backup, None);
+        let text = fs::read_to_string(f.path()).unwrap();
+        assert!(!text.contains("[navidrome]"), "{text}");
+        assert!(f.load().navidrome.is_none());
+        // What it wrote is Coda's own: no backup on the next write.
+        assert!(!needs_backup(&text), "{text}");
+        // An unreadable file is never replaced.
+        fs::write(f.path(), "music_dir = [").unwrap();
+        assert!(write_preferences(&f.path(), &prefs).is_err());
+        assert!(read_preferences(&f.path()).is_err());
+        assert_eq!(fs::read_to_string(f.path()).unwrap(), "music_dir = [");
     }
 
     #[test]

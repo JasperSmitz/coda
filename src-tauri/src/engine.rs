@@ -65,6 +65,8 @@ enum Msg {
     Intent(Intent),
     Snapshot(oneshot::Sender<Snapshot>),
     Shutdown(oneshot::Sender<()>),
+    /// A saved settings change to apply live (see [`settings`]).
+    Settings(SettingsChange, oneshot::Sender<Result<(), String>>),
 }
 
 /// The way in: cheap to clone, used by Tauri commands and the exit hook.
@@ -94,6 +96,17 @@ impl EngineHandle {
             .await
             .map_err(|_| EngineGone)?;
         rx.await.map_err(|_| EngineGone)
+    }
+
+    /// Applies a settings change that was saved to the config. Fails while
+    /// starting (the change takes effect at the next start then) or quitting.
+    pub async fn apply_settings(&self, change: SettingsChange) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Msg::Settings(change, tx))
+            .await
+            .map_err(|_| EngineGone.to_string())?;
+        rx.await.map_err(|_| EngineGone.to_string())?
     }
 
     /// Final session save, then mpv shutdown (both bounded). Returns when
@@ -155,6 +168,14 @@ pub struct Engine {
     sent: Option<Snapshot>,
     sent_queue: Option<Vec<QueueEntryId>>,
     sent_progress: Option<(ProgressDto, Instant)>,
+    // Live settings (see [`settings`]).
+    /// The load playing when the client was swapped: its listen belonged
+    /// to the old server and is not reported to the new one.
+    unscrobbled_load: Option<LoadId>,
+    /// The file's `scrobble` setting (scrobbling also needs a client).
+    scrobble_setting: bool,
+    client_change: Option<ClientChange>,
+    rescan: Option<PathBuf>,
 }
 
 impl Engine {
@@ -189,6 +210,10 @@ impl Engine {
             sent: None,
             sent_queue: None,
             sent_progress: None,
+            unscrobbled_load: None,
+            scrobble_setting: false,
+            client_change: None,
+            rescan: None,
         }
     }
 
@@ -228,6 +253,7 @@ impl Engine {
             }
         };
         self.client = sources.client;
+        self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();
         if let Some(dir) = sources.music_dir {
             self.library = Some(Library::new(dir));
@@ -544,6 +570,7 @@ impl Engine {
     fn listen_started(&mut self, load: LoadId) {
         if !self.scrobbling
             || self.player.current_load() != Some(load)
+            || self.unscrobbled_load == Some(load)
             || self.listen.as_ref().is_some_and(|l| l.load() == load)
         {
             return;
@@ -1152,6 +1179,14 @@ where
                     let _ = reply.send(engine.full_snapshot());
                 }
                 Some(Msg::Shutdown(reply)) => break Some(reply),
+                Some(Msg::Settings(change, reply)) => {
+                    let result = engine.apply_settings(change, Instant::now());
+                    let _ = reply.send(result.as_ref().map(drop).map_err(Clone::clone));
+                    if let Ok(commands) = result {
+                        io.send(commands);
+                    }
+                    apply_settings_io(&mut engine, &mut io);
+                }
                 None => break None,
             },
             event = next_playback(&mut io.playback), if io.playback.is_some() => match event {
@@ -1247,6 +1282,10 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
         }
     }
 }
+
+mod settings;
+pub use settings::SettingsChange;
+use settings::{ClientChange, apply_settings_io};
 
 #[cfg(test)]
 mod tests;

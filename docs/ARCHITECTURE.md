@@ -1,6 +1,6 @@
 # Coda App — Architecture
 
-What exists in the code (M1 foundation, 2026-11-05). Proposals are marked as such.
+What exists in the code (M1 foundation and the M4 experience slice, 2026-11-05). Proposals are marked as such.
 
 ```text
 React UI ──invoke("intent", {intent})──▶ commands.rs ──mpsc(256)──▶ engine.rs (one Tokio task)
@@ -13,12 +13,12 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
 ```
 
 ## Crates
-- `crates/coda-core` (lib `coda_core`): Coda's engine, vendored. Additions for the GUI in M1: `cover::load` (async, one cover at a key and size; `spawn_load` now uses it), `cover::encode_jpeg`, `Library::track_id_by_path`, `logging::init_logging_at(path)`.
+- `crates/coda-core` (lib `coda_core`): Coda's engine, vendored. Additions for the GUI in M1: `cover::load` (async, one cover at a key and size; `spawn_load` now uses it), `cover::encode_jpeg`, `Library::track_id_by_path`, `logging::init_logging_at(path)`. In M4: `config_writer::{Preferences, write_preferences, read_preferences}` (music folder, `scrobble`, `[ui] cover_art`; `[navidrome]` kept as is, same backup/atomic-write rules), `playback::mpv::process::{find_program, default_program, FALLBACK_DIRS}` (`spawn_backend` looks for mpv on `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`), and `Player::set_volume` now works while stopped (the request becomes the shown and saved preferred volume; mpv accepts volume while idle).
 - `src-tauri` (`coda-app`, lib `coda_app_lib`): the backend.
 
 ## Backend modules (`src-tauri/src/`)
 - `lib.rs`: Tauri builder; registers the `coda` URI scheme, spawns the engine in `setup`, manages `EngineHandle`, and owns the quit sequence.
-- `bootstrap.rs`: `Paths` (GUI files under `<Coda state dir>/coda-app/`: `session.json`, `coda-app.log`; Coda's cover cache is shared), `init_logging`, and `start()`: `Config::load(Cli::default(), Env::from_process())`, password + `navidrome::Client` (`config::navidrome_client`), `playback::spawn_backend()` and the session restore, run concurrently. Every failure becomes a `ProblemDto` (`noConfig`, `config`, `mpvMissing`, `playback`, `navidrome`); nothing panics.
+- `bootstrap.rs`: `Paths` (GUI files under `<Coda state dir>/coda-app/`: `session.json`, `coda-app.log`, `media/` for the media-controls cover; Coda's cover cache is shared; `tui_session` = the TUI's `state.json`), `init_logging`, and `start()`: `Config::load(cli_from_process(), Env::from_process())` (`CODA_MUSIC_DIR` honoured like the TUI), password + `navidrome::Client` (`config::navidrome_client`), `playback::spawn_backend()` and the session restore, run concurrently. Restore first imports the TUI's session once when the GUI has none: the file's bytes are copied (regular file, ≤16 MiB, 0600, atomic) and the copy is loaded, so a bad file is set aside as the GUI's copy and the TUI's file is never modified. Every failure becomes a `ProblemDto` (`noConfig`, `config`, `mpvMissing`, `playback`, `navidrome`); nothing panics.
 - `engine.rs`: the actor.
   - `Engine` is the synchronous core: `start(sources, playback_problem, restored)`, `handle_intent`, `handle_playback_event`, `handle_scan_event`/`scan_closed`, `handle_ping`, `handle_scrobble_failure`, `tick`; outputs `Vec<PlaybackCommand>` plus queued visualizer frames and scrobble requests. Every player call goes through `resolve::dispatch` (which also re-announces the gapless next after queue edits), then `take_messages()` become notices and the save revision is checked.
   - `run` is the loop: `select!` over startup completion, intents, playback events, scan events, the Navidrome ping, the first scrobble failure, and a 50 ms tick (notice expiry, session-save polling). After each branch it flushes: visualizer frames at once, scrobbles to the worker, a `snapshot` event if anything visible changed, `progress` if the position changed and ≥100 ms passed.
@@ -26,13 +26,16 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
   - Session: revision based (`Player::revision`), saved 2 s after the last change, one blocking write at a time; restore never auto-plays; final save at exit bounded to 2 s. The GUI has its own session file, so it never overwrites the TUI's queue.
   - Scrobbling: `listen_started`/`listen_progressed` ported from the TUI's `App` (no client swap yet, so no `unscrobbled_load`).
   - Visualizer: `SetVisualizer(true)` only while the UI says a view is visible (`setVisualizerVisible`), never after `VisualizerUnavailable`; frames are forwarded raw only for `audible_load` while playing. Smoothing/decay is the UI's job (none yet: no visualizer view in M1).
+  - Live settings (`engine/settings.rs`, `Msg::Settings` → `Engine::apply_settings`, refused until `ready`): `Client` (port of the TUI's `swap_client`: new `CoverService` client, which forgets remote cover tokens and mixes a new generation into new ones so the webview never shows the old server's cached art; queue resent; listen dropped and the current load marked `unscrobbled_load`; scrobble state reset; `Player::client_changed` re-announces/reloads remote entries signed by the old client; the loop pings the new client and replaces the scrobbler), `MusicDir` (new `Library`, `Scanning`, the loop starts a new scan; dropping the old receiver ends the old scan), `CoverArt` (URLs on/off, queue resent), `Scrobble` (needs a client; a track already playing is not reported halfway). `Client`/`MusicDir` clear `noConfig`/`config` problems (onboarding).
   - Shutdown (`EngineHandle::shutdown`): `phase = shuttingDown` snapshot, wait ≤3 s for a still-running startup (else abort it; dropping the handle kills mpv), final save, `PlaybackHandle::shutdown(2 s)`, reply.
 - `dto.rs`: serde DTOs (camelCase), mirrored by hand in `src/lib/types.ts`.
-- `commands.rs`: `intent(intent)` and `snapshot()`; nothing else.
+- `commands.rs`: `intent(intent)` and `snapshot()`.
+- `settings.rs`: the Settings view's and onboarding's commands (below). Reads the file with `config::read_for_setup` + `config_writer::read_preferences` (never resolves the password); ownership like the TUI's settings: a server Coda wrote (keychain) can be edited/disconnected, one set outside Coda (`CODA_NAVIDROME_*`, hand-written `password`/`password_command`) is shown and left alone; `onboarding::navidrome_blocked_by` blocks saving a server. Saves go through `setup_actions` (ping first, then keychain, then config; old keychain entry removed) and `config_writer::write_preferences`, on blocking threads, one at a time (`SettingsLock`, which the quit sequence awaits ≤3 s before the engine shutdown); only then `EngineHandle::apply_settings`. `ServerInput` (the typed password) has a redacted `Debug`; no DTO carries a password. The folder picker is `tauri-plugin-dialog` used from Rust (no JS plugin API, no capability).
+- `media.rs`: OS media controls (`souvlaki`, zbus MPRIS backend on Linux, `MPNowPlayingInfoCenter` on macOS). `TauriSink` feeds it every snapshot/progress; `Publisher` (pure, tested) publishes metadata on a track change, status on a change, the position on the first report, a jump >1.5 s or every 5 s while playing. Covers: loaded through `CoverService::image_for_url`, written as `<state>/coda-app/media/cover-<n>.jpg` (0600, older ones removed) and published as `file://`. Events → intents (`Play`/`Pause` only toggle when needed, seek ±10 s, set position, volume; `Raise` focuses the window; `Quit` takes the normal quit path). Every souvlaki call runs on the main thread (`run_on_main_thread`, controls in a main-thread `thread_local`); a failure to create them is logged and the app runs without. Dropped at `RunEvent::Exit`.
 - `cover.rs`: `CoverService` (registry, current client, small/large disk caches, 4 concurrent loads) and the protocol handler.
 
 ## IPC contract
-- Commands: `intent({ intent })`, `snapshot()` → full `Snapshot` (queue included).
+- Commands: `intent({ intent })`, `snapshot()` → full `Snapshot` (queue included). Settings (each rejects with a message to show): `settings_get()` → `Settings` (`configPath`, `musicDir` as written, `musicDirEnv`, `server` = `notConfigured` | `coda{url, username}` | `outside{url, username, by}`, `serverBlockedBy`, `scrobble`, `coverArt`, `problem`), `settings_test_server({server})`, `settings_save_server({server})`, `settings_disconnect()`, `settings_pick_folder()` → path or `null`, `settings_set_music_dir({folder})` (refused while `CODA_MUSIC_DIR` is set), `settings_set_options({coverArt?, scrobble?})`, `onboarding_finish({musicDir?, server?})`. `server` is `{url, username, password}`.
 - Events:
   - `snapshot` (coalesced on the 50 ms tick, only when the snapshot differs from the last one sent). `queue` is `null` when the entry list (by key) did not change, so a 10,000-entry queue is not resent on every status change; the UI keeps its last queue. A `snapshot()` call resets this, so the next event carries the queue again (the UI applies the command's result only if no event arrived first).
   - `progress`: `{ positionMs, durationMs }` of the heard track, ≤10/s.
@@ -48,22 +51,27 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
 - Local: embedded art, else a folder image. Navidrome: `getCoverArt` via the current client, cached in Coda's disk cache (shared with the TUI). Served as JPEG with `Cache-Control: private, max-age=86400`. `[ui] cover_art = false` turns URLs off.
 
 ## Lifecycle
-- Window close / Cmd+Q / last window closed → `RunEvent::ExitRequested`: prevent the exit, run `EngineHandle::shutdown`, then `app.exit(0)`.
+- `tauri-plugin-window-state` remembers the window's size and position.
+- Window close / Cmd+Q / last window closed / media-controls Quit → `RunEvent::ExitRequested`: prevent the exit, wait (≤3 s) for a running settings save, run `EngineHandle::shutdown`, then `app.exit(0)`.
 - `RunEvent::Exit` without a finished shutdown (a quit path that skipped `ExitRequested`): blocking, bounded (8 s) shutdown on the event-loop thread.
 - mpv is also spawned with `kill_on_drop`.
 
 ## Security
-- Capabilities: `core:default` only (events, app/window basics); the opener plugin was removed.
+- Capabilities: `core:default` only (events, app/window basics); the opener plugin was removed. The dialog and window-state plugins are used from Rust only, so they need no permissions.
 - CSP: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' coda: http://coda.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` (`devCsp` adds the Vite HMR socket). `freezePrototype` on.
 - DTOs carry no passwords, tokens or stream URLs (a test asserts the snapshot JSON of a Navidrome track has none). Server/tag text is rendered as React text only.
 
 ## Frontend (`src/`)
-- `lib/types.ts` (DTO mirror), `lib/ipc.ts` (`intent()`, `fetchSnapshot()`, `onSnapshot/onProgress/onVisualizer`, `coverSrc`), `lib/format.ts`.
+- `lib/types.ts` (DTO mirror), `lib/ipc.ts` (`intent()`, `fetchSnapshot()`, `onSnapshot/onProgress/onVisualizer`, `coverSrc`, `settingsApi`, `errorText`), `lib/format.ts`, `lib/visualizer.ts` (port of `coda_core::visualizer`: `Meter` smoothing with attack 0.7, decay 1.6/s, 300 ms stale fade; `spreadBands` monotone cubic on a log-frequency axis).
 - `state/store.ts`: two `useSyncExternalStore` stores (app snapshot + queue; progress separately so the position does not re-render the queue). `connect()` subscribes first, then fetches the snapshot.
 - `components/`: `Sidebar`, `NowPlayingBar` (cover, title/artist, prev/play/next, seek bar, repeat, volume, queue toggle), `Slider` (pointer drag + own keys), `QueuePanel` (virtualized 36 px rows; double-click/Enter plays, Delete/hover button/context menu removes), `ContextMenu`, `Banner` (problems), `Toasts` (notices), `Cover` (+ generated placeholder), `icons.tsx`.
-- `views/`: `PlaceholderView` for every browse entry (M2).
-- `hooks/useShortcuts.ts`: Space, n/p, Ctrl+→/←, ←/→ (∓5 s), +/=/-, r, q; ignored while typing in a text field.
+- `views/`: `PlaceholderView` for every browse entry (M2); `NowPlayingView` (`f`, a click on the bar's cover; Esc/`f`/Close or a sidebar entry closes it): large cover over a blurred, darkened small cover, title, artist — album, the shared `SeekBar`, transport, `Visualizer` and Up next; it sends `setVisualizerVisible(true)` while shown and `document.visibilityState` is `visible` (false when minimised/hidden or closed); `SettingsView` (folder, server form via `ServerFields` with Test/Save/Cancel, two-click Disconnect, switches); `Onboarding` (shown instead of the shell while the snapshot has a `noConfig` problem).
+- `components/Visualizer.tsx`: canvas + `requestAnimationFrame`, 32–48 bars by width, redraws only when something moved; reduced motion → 4 updates/s. Colour `--viz-color`.
+- `styles/experience.css`: buttons/fields, settings, onboarding, Now Playing.
+- `hooks/useShortcuts.ts`: Space, n/p, Ctrl+→/←, ←/→ (∓5 s), +/=/-, r, q, f; ignored while typing in a text field.
 - `styles/`: `tokens.css` (dark first, light via `prefers-color-scheme`, reduced motion), `base.css` (native feel), `app.css` (shell).
 
 ## Tests
-- `src-tauri`: DTO serialization (`dto.rs`), cover registry/protocol (`cover.rs`), paths (`bootstrap.rs`), engine core with fake playback events (`engine/tests.rs`: restore never plays, intents via the player, keys, `TrackRef` resolution, shuffle start, enqueue placement, Navidrome refs + scrobbling, mpv missing, backend exit, visualizer gating, save debounce, snapshot coalescing, progress throttle, notices, scan failure), the loop end-to-end without mpv, and an `#[ignore]`d real-mpv shutdown test (no process left, session saved).
+- `src-tauri`: DTO serialization (`dto.rs`), cover registry/protocol (`cover.rs`), paths (`bootstrap.rs`), engine core with fake playback events (`engine/tests.rs`: restore never plays, intents via the player, keys, `TrackRef` resolution, shuffle start, enqueue placement, Navidrome refs + scrobbling, mpv missing, backend exit, visualizer gating, save debounce, snapshot coalescing, progress throttle, notices, scan failure), the loop end-to-end without mpv, and an `#[ignore]`d real-mpv shutdown test (no process left, session saved); live settings (client swap keeps playback, new cover URLs, no scrobble of the swapped listen, next track scrobbled with the new client, disconnect; music folder rescan clears `noConfig`; cover art resends the queue; scrobbling off/on; refused while starting).
+- `src-tauri` also: `settings.rs` (ownership, blocked servers, unreadable files, no password in the DTO), `media.rs` (publish decisions, media keys → intents, private art files), `bootstrap.rs` (TUI session import: once, byte copy, TUI file untouched even when invalid), `cover.rs` (new remote tokens per client).
+- `coda-core`: `config_writer` preferences (only what is given changes; hand-written keys kept by value; no file / no navidrome; unreadable file never replaced), `find_program` (PATH, fallbacks, non-executable, explicit paths), volume while stopped.
