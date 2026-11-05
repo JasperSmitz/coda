@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-albums"
+description = "Enables the navidrome_albums command without any pre-configured scope."
+commands.allow = ["navidrome_albums"]
+
+[[permission]]
+identifier = "deny-navidrome-albums"
+description = "Denies the navidrome_albums command without any pre-configured scope."
+commands.deny = ["navidrome_albums"]

@@ -3,29 +3,54 @@
 // context. Ignored while typing in a text field (Escape there leaves the
 // field first).
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { shuffleContext } from "../lib/play";
 import { nav } from "../state/nav";
 import { isTyping } from "./useShortcuts";
 
-export function useBrowseKeys(enabled: boolean) {
+interface Options {
+  /** `s` may play (playback available). */
+  enabled: boolean;
+  /** Navigation keys work at all (not during onboarding). */
+  active: boolean;
+  /** Back goes here instead of the stack (an overlay such as Now Playing). */
+  onBack?: () => void;
+}
+
+export function useBrowseKeys({ enabled, active, onBack }: Options) {
+  const state = useRef({ enabled, active, onBack });
+  state.current = { enabled, active, onBack };
   useEffect(() => {
+    const back = (): boolean => {
+      const { onBack } = state.current;
+      if (onBack) {
+        onBack();
+        return true;
+      }
+      return nav.back();
+    };
+    // Search replaces an overlay too.
+    const search = () => {
+      state.current.onBack?.();
+      nav.search();
+    };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || !state.current.active) return;
+      const { enabled } = state.current;
       const typing = isTyping(e.target);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && !e.altKey) {
-        nav.search();
+        search();
       } else if (e.altKey && e.key === "ArrowLeft" && !typing) {
-        nav.back();
+        back();
       } else if (typing) {
         if (e.key === "Escape" && e.target instanceof HTMLElement) e.target.blur();
         else return;
       } else if (e.ctrlKey || e.metaKey || e.altKey) {
         return;
       } else if (e.key === "Backspace" || e.key === "Escape") {
-        if (!nav.back()) return;
+        if (!back()) return;
       } else if (e.key === "/") {
-        nav.search();
+        search();
       } else if (e.key === "s") {
         if (enabled) shuffleContext();
       } else {
@@ -35,9 +60,9 @@ export function useBrowseKeys(enabled: boolean) {
     };
     // Mouse "back" button (button 3).
     const onMouseUp = (e: MouseEvent) => {
-      if (e.button === 3) {
+      if (e.button === 3 && state.current.active) {
         e.preventDefault();
-        nav.back();
+        back();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -46,5 +71,5 @@ export function useBrowseKeys(enabled: boolean) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("mouseup", onMouseUp);
     };
-  }, [enabled]);
+  }, []);
 }

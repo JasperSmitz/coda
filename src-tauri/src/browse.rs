@@ -151,7 +151,7 @@ impl BrowseHandle {
         }
     }
 
-    fn client_generation(&self) -> u64 {
+    pub fn client_generation(&self) -> u64 {
         self.0
             .remote
             .read()

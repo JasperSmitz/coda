@@ -44,7 +44,9 @@ export function openAlbum(source: SourceKind, album: Album) {
 
 export function AlbumGrid({ albums, source, scroller, hideArtist = false, onEnd, label }: Props) {
   const { snapshot } = useAppState();
-  const disabled = snapshot?.phase !== "ready" || snapshot.status === "unavailable";
+  // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
+  const locked = snapshot?.phase !== "ready";
+  const disabled = locked || snapshot.status === "unavailable";
   const grid = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 800, offset: 0, width: 800 });
   const [menu, setMenu] = useState<(MenuState & { album: Album }) | null>(null);
@@ -205,12 +207,12 @@ export function AlbumGrid({ albums, source, scroller, hideArtist = false, onEnd,
             },
             {
               label: "Play next",
-              disabled,
+              disabled: locked,
               action: () => void tracksOf(menu.album).then((t) => enqueue(t, true)),
             },
             {
               label: "Add to queue",
-              disabled,
+              disabled: locked,
               action: () => void tracksOf(menu.album).then((t) => enqueue(t, false)),
             },
             // ADD TO PLAYLIST: "Add to playlist…" goes here (later slice).

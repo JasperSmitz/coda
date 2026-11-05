@@ -290,9 +290,39 @@ impl PlaybackHandle {
     }
 }
 
-/// Starts the default backend (mpv from `PATH`) and connects to it.
+/// A handle dropped without [`PlaybackHandle::shutdown`] while its backend
+/// still runs (e.g. a startup abandoned at exit) terminates mpv at once,
+/// synchronously: closing the command channel alone would leave the
+/// graceful stop to a task that may never run again if the process exits
+/// next. After `shutdown`, or once the backend has ended (its child reaped,
+/// so the pid may be reused), nothing is sent.
+impl Drop for PlaybackHandle {
+    fn drop(&mut self) {
+        let Some(task) = &self.task else {
+            return;
+        };
+        if task.is_finished() {
+            return;
+        }
+        if let Some(pid) = self.pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            // SAFETY: `kill` has no memory effects; the pid is our own
+            // unreaped child (the driver task still owns it).
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            tracing::info!("playback handle dropped without shutdown; mpv terminated");
+        }
+    }
+}
+
+/// Starts the default backend (mpv from `PATH`, else from a well-known
+/// folder, see [`mpv::process::default_program`]) and connects to it.
 pub async fn spawn_backend() -> Result<PlaybackHandle, BackendError> {
-    mpv::spawn(mpv::MpvOptions::default()).await
+    mpv::spawn(mpv::MpvOptions {
+        program: mpv::process::default_program(),
+        ..mpv::MpvOptions::default()
+    })
+    .await
 }
 
 #[cfg(test)]

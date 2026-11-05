@@ -10,15 +10,18 @@ interface Props {
   track: Track;
   /** Plays the track in its context (the list it is shown in). */
   onPlay: () => void;
+  /** No playback (Play). */
   disabled: boolean;
+  /** No queue edits at all (starting or quitting). */
+  locked: boolean;
   onClose: () => void;
 }
 
-export function TrackMenu({ state, track, onPlay, disabled, onClose }: Props) {
+export function TrackMenu({ state, track, onPlay, disabled, locked, onClose }: Props) {
   const items: MenuItem[] = [
     { label: "Play", disabled, action: onPlay },
-    { label: "Play next", disabled, action: () => enqueue([track], true) },
-    { label: "Add to queue", disabled, action: () => enqueue([track], false) },
+    { label: "Play next", disabled: locked, action: () => enqueue([track], true) },
+    { label: "Add to queue", disabled: locked, action: () => enqueue([track], false) },
     // ADD TO PLAYLIST: "Add to playlist…" goes here (later slice; see
     // docs/PLAN.md). Keep it after the queue actions, before navigation.
     { label: "Go to album", disabled: !canGoToAlbum(track), action: () => goToAlbum(track) },

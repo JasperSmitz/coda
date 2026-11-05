@@ -17,10 +17,13 @@ interface Props {
   currentKey: string | null;
   playingKey: string | null;
   status: Status;
+  /** Playing is not possible (starting, or playback unavailable). */
   disabled: boolean;
+  /** Editing is not possible yet (still starting, or quitting). */
+  locked: boolean;
 }
 
-export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: Props) {
+export function QueuePanel({ queue, currentKey, playingKey, status, disabled, locked }: Props) {
   const list = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [height, setHeight] = useState(0);
@@ -60,6 +63,7 @@ export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: 
 
   const play = (key: string) => intent({ type: "playEntry", key });
   const remove = (key: string) => {
+    if (locked) return;
     const index = indexOf(key);
     intent({ type: "removeEntry", key });
     if (key === selected) {
@@ -100,6 +104,8 @@ export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: 
         if (selectedIndex >= 0 && !disabled) play(queue[selectedIndex].key);
         break;
       case "Delete":
+      // The ⌫ key on Mac keyboards (Delete needs fn+⌫).
+      case "Backspace":
         if (selectedIndex >= 0) remove(queue[selectedIndex].key);
         break;
       default:
@@ -129,7 +135,7 @@ export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: 
         <button
           className="text-button"
           onClick={() => intent({ type: "clearQueue" })}
-          disabled={queue.length === 0}
+          disabled={locked || queue.length === 0}
           title="Clear the queue"
         >
           Clear
@@ -165,7 +171,7 @@ export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: 
                   selected={item.key === selected}
                   onSelect={setSelected}
                   onPlay={disabled ? undefined : play}
-                  onRemove={remove}
+                  onRemove={locked ? undefined : remove}
                   onMenu={(x, y) => {
                     setSelected(item.key);
                     setMenu({ x, y, key: item.key });
@@ -182,7 +188,7 @@ export function QueuePanel({ queue, currentKey, playingKey, status, disabled }: 
           onClose={() => setMenu(null)}
           items={[
             { label: "Play", disabled, action: () => play(menu.key) },
-            { label: "Remove from queue", action: () => remove(menu.key) },
+            { label: "Remove from queue", disabled: locked, action: () => remove(menu.key) },
           ]}
         />
       )}
@@ -200,7 +206,7 @@ interface RowProps {
   selected: boolean;
   onSelect: (key: string) => void;
   onPlay?: (key: string) => void;
-  onRemove: (key: string) => void;
+  onRemove?: (key: string) => void;
   onMenu: (x: number, y: number) => void;
 }
 
@@ -245,6 +251,7 @@ const QueueRow = memo(function QueueRow({
         <span className="queue-artist secondary">{track.artist ?? "Unknown artist"}</span>
       </span>
       <span className="queue-duration time secondary">{formatTime(track.durationMs)}</span>
+      {onRemove && (
       <button
         className="icon-button queue-remove"
         tabIndex={-1}
@@ -258,6 +265,7 @@ const QueueRow = memo(function QueueRow({
       >
         <CloseIcon size={14} />
       </button>
+      )}
     </div>
   );
 });

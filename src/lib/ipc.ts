@@ -3,7 +3,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Intent, Progress, Snapshot, VisualizerFrame } from "./types";
+import type {
+  Intent,
+  Progress,
+  ServerInput,
+  Settings,
+  Snapshot,
+  VisualizerFrame,
+} from "./types";
 
 /** Sends an intent to the engine. Failures (only while quitting) are logged. */
 export function intent(value: Intent): void {
@@ -34,4 +41,25 @@ export type CoverSize = "small" | "large";
 /** The image URL for a track's cover at `size`. */
 export function coverSrc(coverUrl: string, size: CoverSize): string {
   return `${coverUrl}/${size}`;
+}
+
+// ----- settings and onboarding (each rejects with a message to show) -----
+
+export const settingsApi = {
+  get: () => invoke<Settings>("settings_get"),
+  testServer: (server: ServerInput) => invoke<void>("settings_test_server", { server }),
+  saveServer: (server: ServerInput) => invoke<void>("settings_save_server", { server }),
+  disconnect: () => invoke<void>("settings_disconnect"),
+  /** The native folder picker; `null` if cancelled. */
+  pickFolder: () => invoke<string | null>("settings_pick_folder"),
+  setMusicDir: (folder: string) => invoke<void>("settings_set_music_dir", { folder }),
+  setOptions: (options: { coverArt?: boolean; scrobble?: boolean }) =>
+    invoke<void>("settings_set_options", options),
+  finishOnboarding: (musicDir: string | null, server: ServerInput | null) =>
+    invoke<void>("onboarding_finish", { musicDir, server }),
+};
+
+/** A command's rejection as text. */
+export function errorText(error: unknown): string {
+  return typeof error === "string" ? error : error instanceof Error ? error.message : "Something went wrong";
 }

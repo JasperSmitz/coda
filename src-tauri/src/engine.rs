@@ -42,6 +42,8 @@ pub const TICK: Duration = Duration::from_millis(50);
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Quiet time after the last change before the session is saved.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+/// Longest wait before retrying a failed session write.
+pub const SAVE_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Bound on the final session save at exit.
 pub const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on mpv's shutdown at exit.
@@ -66,6 +68,8 @@ enum Msg {
     Intent(Intent),
     Snapshot(oneshot::Sender<Snapshot>),
     Shutdown(oneshot::Sender<()>),
+    /// A saved settings change to apply live (see [`settings`]).
+    Settings(SettingsChange, oneshot::Sender<Result<(), String>>),
 }
 
 /// The way in: cheap to clone, used by Tauri commands and the exit hook.
@@ -95,6 +99,17 @@ impl EngineHandle {
             .await
             .map_err(|_| EngineGone)?;
         rx.await.map_err(|_| EngineGone)
+    }
+
+    /// Applies a settings change that was saved to the config. Fails while
+    /// starting (the change takes effect at the next start then) or quitting.
+    pub async fn apply_settings(&self, change: SettingsChange) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Msg::Settings(change, tx))
+            .await
+            .map_err(|_| EngineGone.to_string())?;
+        rx.await.map_err(|_| EngineGone.to_string())?
     }
 
     /// Final session save, then mpv shutdown (both bounded). Returns when
@@ -153,11 +168,21 @@ pub struct Engine {
     seen_revision: u64,
     saved_revision: Option<u64>,
     save_due: Option<Instant>,
+    /// Failed writes in a row (retry back-off).
+    save_failures: u32,
     // Emission.
     dirty: bool,
     sent: Option<Snapshot>,
     sent_queue: Option<Vec<QueueEntryId>>,
     sent_progress: Option<(ProgressDto, Instant)>,
+    // Live settings (see [`settings`]).
+    /// The load playing when the client was swapped: its listen belonged
+    /// to the old server and is not reported to the new one.
+    unscrobbled_load: Option<LoadId>,
+    /// The file's `scrobble` setting (scrobbling also needs a client).
+    scrobble_setting: bool,
+    client_change: Option<ClientChange>,
+    rescan: Option<PathBuf>,
 }
 
 impl Engine {
@@ -195,10 +220,15 @@ impl Engine {
             seen_revision: 0,
             saved_revision: Some(0),
             save_due: None,
+            save_failures: 0,
             dirty: true,
             sent: None,
             sent_queue: None,
             sent_progress: None,
+            unscrobbled_load: None,
+            scrobble_setting: false,
+            client_change: None,
+            rescan: None,
         }
     }
 
@@ -239,6 +269,7 @@ impl Engine {
         };
         self.browse.set_client(sources.client.clone());
         self.client = sources.client;
+        self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();
         if let Some(dir) = sources.music_dir {
             self.browse.replace_library(Some(Library::new(dir)));
@@ -635,6 +666,7 @@ impl Engine {
     fn listen_started(&mut self, load: LoadId) {
         if !self.scrobbling
             || self.player.current_load() != Some(load)
+            || self.unscrobbled_load == Some(load)
             || self.listen.as_ref().is_some_and(|l| l.load() == load)
         {
             return;
@@ -830,6 +862,22 @@ impl Engine {
         self.saved_revision = None;
     }
 
+    /// After a failed write: try again later even without a new change,
+    /// backing off (2 s, 4 s, … up to [`SAVE_RETRY_MAX`]).
+    pub fn retry_save(&mut self, now: Instant) {
+        let delay = SAVE_DEBOUNCE
+            .saturating_mul(1 << self.save_failures.min(5))
+            .min(SAVE_RETRY_MAX);
+        self.save_failures = self.save_failures.saturating_add(1);
+        let retry = now + delay;
+        self.save_due = Some(self.save_due.map_or(retry, |due| due.min(retry)));
+    }
+
+    /// A write succeeded: the retry back-off starts over.
+    pub fn save_succeeded(&mut self) {
+        self.save_failures = 0;
+    }
+
     fn save_snapshot(&mut self) -> Session {
         self.saved_revision = Some(self.player.revision());
         // The GUI's visualizer follows its views; nothing to restore.
@@ -951,6 +999,10 @@ impl Engine {
                 })
                 .collect(),
             visualizer_available: !self.visualizer_unavailable,
+            browse: BrowseGenerationsDto {
+                library: self.browse.library_generation(),
+                server: self.browse.client_generation(),
+            },
         }
     }
 
@@ -1098,8 +1150,14 @@ impl Saver {
                 return;
             }
             let task = self.in_flight.take();
-            if let Some(Some(Ok(false) | Err(_))) = task.map(futures_now) {
-                engine.save_failed();
+            match task.map(futures_now) {
+                Some(Some(Ok(true))) => engine.save_succeeded(),
+                Some(Some(Ok(false) | Err(_))) => {
+                    engine.save_failed();
+                    engine.retry_save(now);
+                }
+                // Not collectable (coop budget): unknown, nothing to do.
+                _ => {}
             }
         }
         if let Some(session) = engine.take_due_save(now) {
@@ -1258,6 +1316,14 @@ where
                     let _ = reply.send(engine.full_snapshot());
                 }
                 Some(Msg::Shutdown(reply)) => break Some(reply),
+                Some(Msg::Settings(change, reply)) => {
+                    let result = engine.apply_settings(change, Instant::now());
+                    let _ = reply.send(result.as_ref().map(drop).map_err(Clone::clone));
+                    if let Ok(commands) = result {
+                        io.send(commands);
+                    }
+                    apply_settings_io(&mut engine, &mut io);
+                }
                 None => break None,
             },
             event = next_playback(&mut io.playback), if io.playback.is_some() => match event {
@@ -1270,6 +1336,7 @@ where
                 None => {
                     if let Some(playback) = io.playback.take() {
                         playback.shutdown(SHUTDOWN_TIMEOUT).await;
+                        crate::bootstrap::forget_mpv_pid();
                     }
                 }
             },
@@ -1306,13 +1373,22 @@ where
     // Shutdown: tell the UI, final save, then mpv (both bounded).
     engine.set_shutting_down();
     io.flush(&mut engine, Instant::now());
-    if let Some(task) = startup.take() {
-        // mpv may still be starting; let it finish so it is shut down
-        // cleanly, else abort (dropping the handle kills the child).
-        match tokio::time::timeout(STARTUP_GRACE, task).await {
+    if let Some(mut task) = startup.take() {
+        // mpv may still be starting; let startup finish so mpv is shut down
+        // cleanly. Otherwise abort it and wait for the abort: that drops
+        // the startup future, and with it a `PlaybackHandle` already made
+        // (its `Drop` terminates mpv) or a half-started mpv child
+        // (`kill_on_drop`), before we reply. Merely dropping the
+        // `JoinHandle` would detach the task and orphan mpv at exit.
+        match tokio::time::timeout(STARTUP_GRACE, &mut task).await {
             Ok(Ok(started)) => io.playback = started.playback.ok(),
             Ok(Err(_)) => {}
-            Err(_) => tracing::warn!("startup still running at exit; abandoned"),
+            Err(_) => {
+                tracing::warn!("startup still running at exit; aborted");
+                task.abort();
+                let _ = task.await;
+                crate::bootstrap::forget_mpv_pid();
+            }
         }
     }
     io.saver.finish(&mut engine).await;
@@ -1321,6 +1397,7 @@ where
     if let Some(playback) = io.playback.take() {
         let outcome = playback.shutdown(SHUTDOWN_TIMEOUT).await;
         tracing::info!(?outcome, "playback backend shut down");
+        crate::bootstrap::forget_mpv_pid();
     }
     if let Some(reply) = reply {
         let _ = reply.send(());
@@ -1353,6 +1430,10 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
         }
     }
 }
+
+mod settings;
+pub use settings::SettingsChange;
+use settings::{ClientChange, apply_settings_io};
 
 #[cfg(test)]
 mod tests;

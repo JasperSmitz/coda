@@ -68,7 +68,9 @@ export function TrackTable({
   label,
 }: Props) {
   const { snapshot } = useAppState();
-  const disabled = snapshot?.phase !== "ready" || snapshot.status === "unavailable";
+  // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
+  const locked = snapshot?.phase !== "ready";
+  const disabled = locked || snapshot.status === "unavailable";
   const playing = snapshot?.playing ?? null;
   const animated = snapshot?.status === "playing";
   const table = useRef<HTMLDivElement>(null);
@@ -227,6 +229,7 @@ export function TrackTable({
           state={menu}
           track={tracks[menu.index]}
           disabled={disabled}
+          locked={locked}
           onPlay={() => play(menu.index)}
           onClose={() => {
             setMenu(null);

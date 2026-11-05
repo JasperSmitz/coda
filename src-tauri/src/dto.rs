@@ -159,7 +159,8 @@ pub struct NavidromeDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProblemKind {
-    /// No music folder or Navidrome server configured (onboarding later).
+    /// No music folder or Navidrome server configured: the UI shows
+    /// onboarding.
     NoConfig,
     /// The config file could not be used.
     Config,
@@ -215,6 +216,17 @@ pub struct Snapshot {
     pub notices: Vec<NoticeDto>,
     /// `false` once mpv said it cannot provide visualizer data.
     pub visualizer_available: bool,
+    /// Browse generations: a change means browse ids and cached answers
+    /// of that source are stale (reload).
+    pub browse: BrowseGenerationsDto,
+}
+
+/// The library and Navidrome client generations (see `browse`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseGenerationsDto {
+    pub library: u64,
+    pub server: u64,
 }
 
 /// The `progress` event: the heard track's position (at most 10 per
@@ -458,8 +470,13 @@ mod tests {
                 text: "Repeat all".into(),
             }],
             visualizer_available: true,
+            browse: BrowseGenerationsDto {
+                library: 2,
+                server: 1,
+            },
         };
         let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["browse"], json!({"library": 2, "server": 1}));
         assert_eq!(value["phase"], "ready");
         assert_eq!(value["status"], "paused");
         assert_eq!(value["currentKey"], "q1");
@@ -478,7 +495,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 14, "{keys:?}");
+        assert_eq!(keys.len(), 15, "{keys:?}");
     }
 
     #[test]

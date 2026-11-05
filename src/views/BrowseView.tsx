@@ -7,9 +7,9 @@ import { AlbumsView } from "./AlbumsView";
 import { ArtistView } from "./ArtistView";
 import { ArtistsView } from "./ArtistsView";
 import { FolderView } from "./FolderView";
-import { PlaceholderView } from "./PlaceholderView";
 import { PlaylistView, PlaylistsView } from "./PlaylistsView";
 import { SearchView } from "./SearchView";
+import { SettingsView } from "./SettingsView";
 
 export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapshot }) {
   const { route } = entry;
@@ -58,6 +58,6 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
         />
       );
     case "settings":
-      return <PlaceholderView view="settings" snapshot={snapshot} />;
+      return <SettingsView key={entry.id} snapshot={snapshot} />;
   }
 }

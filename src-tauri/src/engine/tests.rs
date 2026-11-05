@@ -879,3 +879,331 @@ async fn shutdown_saves_and_leaves_no_mpv_process() {
     assert_eq!(saved.repeat, RepeatMode::All);
     assert_eq!(saved.tracks.len(), 1);
 }
+
+#[test]
+fn a_failed_save_is_retried_with_back_off() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], Some(0));
+    engine.handle_intent(Intent::CycleRepeat, now);
+    let due = now + SAVE_DEBOUNCE;
+    assert!(engine.take_due_save(due).is_some());
+    // The write failed: due again after the debounce, with no new change.
+    engine.save_failed();
+    engine.retry_save(due);
+    assert!(engine.take_due_save(due + SAVE_DEBOUNCE / 2).is_none());
+    assert!(engine.take_due_save(due + SAVE_DEBOUNCE).is_some());
+    // Failing again waits twice as long.
+    let again = due + SAVE_DEBOUNCE;
+    engine.save_failed();
+    engine.retry_save(again);
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE).is_none());
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE * 2).is_some());
+    // The back-off is capped.
+    for _ in 0..20 {
+        engine.save_failed();
+        engine.retry_save(again);
+        assert!(engine.take_due_save(again + SAVE_RETRY_MAX).is_some());
+    }
+    // A success resets it.
+    engine.save_succeeded();
+    engine.save_failed();
+    engine.retry_save(again);
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE).is_some());
+}
+
+#[tokio::test]
+#[ignore = "needs mpv on PATH"]
+async fn quitting_during_a_slow_startup_leaves_no_mpv_process() {
+    // mpv is up, but the password (say) never comes: the startup future
+    // holds the finished `PlaybackHandle` and never resolves.
+    let (pid_tx, pid_rx) = oneshot::channel();
+    let startup = async move {
+        let (_playback, never) = tokio::join!(
+            async {
+                let playback = coda_core::playback::spawn_backend().await.unwrap();
+                let _ = pid_tx.send(playback.pid().unwrap());
+                playback
+            },
+            std::future::pending::<Startup>()
+        );
+        never
+    };
+    let (tx, rx) = mpsc::channel(16);
+    let task = tokio::spawn(run(
+        rx,
+        Recorder::default(),
+        Arc::new(CoverService::new(None)),
+        startup,
+    ));
+    let handle = EngineHandle { tx };
+    let pid = pid_rx.await.unwrap();
+    assert!(process_exists(pid));
+    assert_eq!(handle.snapshot().await.unwrap().phase, Phase::Starting);
+    let started = Instant::now();
+    handle.shutdown().await;
+    task.await.unwrap();
+    assert!(started.elapsed() < STARTUP_GRACE + Duration::from_secs(1));
+    for _ in 0..40 {
+        if !process_exists(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!process_exists(pid), "mpv {pid} outlived the app");
+}
+
+// ----- live settings ----------------------------------------------------
+
+fn remote_ref(song: &str) -> TrackRef {
+    TrackRef {
+        source: SourceDto::Navidrome {
+            song_id: song.into(),
+            cover_art: Some(format!("al-{song}")),
+        },
+        title: Some(song.into()),
+        artist: None,
+        album: None,
+        album_artist: None,
+        track_no: None,
+        disc_no: None,
+        duration_ms: Some(120_000),
+        album_id: None,
+        artist_id: None,
+    }
+}
+
+#[test]
+fn settings_are_refused_until_started() {
+    let mut engine = engine();
+    let result = engine.apply_settings(SettingsChange::CoverArt(false), Instant::now());
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_new_client_replaces_the_old_without_stopping_playback() {
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.start(
+        sources(None, Some(client())),
+        None,
+        restored(vec![], None),
+        now,
+    );
+    engine.handle_ping(Ok(()));
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![remote_ref("s1"), remote_ref("s2")],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert_eq!(engine.take_scrobbles().len(), 1, "now playing");
+    let old_cover = engine.full_snapshot().playing.unwrap().cover_url;
+
+    let commands = engine
+        .apply_settings(
+            SettingsChange::Client {
+                client: Some(client()),
+                scrobble: true,
+            },
+            now,
+        )
+        .unwrap();
+    // The track heard plays on: nothing is loaded again.
+    assert!(loads(&commands).is_empty(), "{commands:?}");
+    assert_eq!(engine.full_snapshot().status, StatusDto::Playing);
+    let change = engine.take_client_change().unwrap();
+    assert!(change.ping && change.scrobble && change.client.is_some());
+    assert_eq!(
+        engine.full_snapshot().navidrome.state,
+        ConnectionDto::Connecting
+    );
+    // Remote covers get new URLs (the old server's cache is not reused).
+    assert_ne!(engine.full_snapshot().playing.unwrap().cover_url, old_cover);
+    // The listen of the old server is not reported to the new one.
+    for second in 1..=61 {
+        engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(second)), now);
+    }
+    assert!(engine.take_scrobbles().is_empty());
+    // The next track is resolved with the new client and scrobbled.
+    let commands = engine.handle_intent(Intent::Next, now);
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert_eq!(
+        engine.take_scrobbles(),
+        vec![ScrobbleRequest::now_playing("s2".into())]
+    );
+
+    // Disconnected: no client, no scrobbling, a queued remote track no
+    // longer resolves.
+    engine
+        .apply_settings(
+            SettingsChange::Client {
+                client: None,
+                scrobble: false,
+            },
+            now,
+        )
+        .unwrap();
+    let change = engine.take_client_change().unwrap();
+    assert!(change.client.is_none() && !change.scrobble);
+    let snapshot = engine.full_snapshot();
+    assert_eq!(snapshot.navidrome.state, ConnectionDto::NotConfigured);
+    assert!(!engine.scrobbling());
+}
+
+#[test]
+fn a_new_music_folder_is_scanned_and_clears_the_no_config_problem() {
+    let now = Instant::now();
+    let mut engine = engine();
+    let mut no_config = sources(None, None);
+    no_config.problems.push(ProblemDto {
+        kind: ProblemKind::NoConfig,
+        message: "none".into(),
+    });
+    engine.start(no_config, None, restored(vec![], None), now);
+    assert_eq!(engine.full_snapshot().problems.len(), 1);
+    let fixture = Fixture::new(&["a.flac"]);
+    engine
+        .apply_settings(SettingsChange::MusicDir(fixture.root.clone()), now)
+        .unwrap();
+    assert_eq!(engine.take_rescan(), Some(fixture.root.clone()));
+    assert_eq!(engine.take_rescan(), None, "once");
+    let snapshot = engine.full_snapshot();
+    assert!(snapshot.problems.is_empty());
+    assert_eq!(snapshot.scan.state, ScanStateDto::Scanning);
+    engine.handle_scan_event(ScanEvent::Batch(vec![fixture.track("a.flac")]), now);
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![fixture.local_ref(&engine, "a.flac")],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1, "played from the new library");
+}
+
+#[test]
+fn cover_art_and_scrobbling_switch_live() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], Some(0));
+    engine.take_snapshot_event();
+    assert!(
+        engine.full_snapshot().queue.unwrap()[0]
+            .track
+            .cover_url
+            .is_some()
+    );
+    engine.take_snapshot_event();
+    engine
+        .apply_settings(SettingsChange::CoverArt(false), now)
+        .unwrap();
+    // The queue is sent again, without cover URLs.
+    let event = engine.take_snapshot_event().unwrap();
+    assert!(event.queue.unwrap()[0].track.cover_url.is_none());
+
+    // Scrobbling needs a client: switching it on without one does nothing.
+    engine
+        .apply_settings(SettingsChange::Scrobble(true), now)
+        .unwrap();
+    assert!(!engine.scrobbling());
+    assert!(engine.take_client_change().is_none());
+    assert!(engine.scrobble_setting());
+}
+
+#[test]
+fn scrobbling_can_be_switched_off_and_on() {
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.start(
+        sources(None, Some(client())),
+        None,
+        restored(vec![], None),
+        now,
+    );
+    assert!(engine.scrobbling());
+    engine
+        .apply_settings(SettingsChange::Scrobble(false), now)
+        .unwrap();
+    assert!(!engine.scrobbling());
+    let change = engine.take_client_change().unwrap();
+    assert!(!change.scrobble && !change.ping);
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![remote_ref("s1")],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    engine.handle_playback_event(
+        PlaybackEvent::Started {
+            load: loads(&commands)[0],
+        },
+        now,
+    );
+    assert!(engine.take_scrobbles().is_empty());
+    engine
+        .apply_settings(SettingsChange::Scrobble(true), now)
+        .unwrap();
+    assert!(engine.take_client_change().unwrap().scrobble);
+    // The track already playing is not reported halfway; the next one is.
+    for second in 1..=61 {
+        engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(second)), now);
+    }
+    assert!(engine.take_scrobbles().is_empty());
+}
+
+#[test]
+fn settings_changes_reach_the_browse_handle_and_bump_its_generations() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], None);
+    let before = engine.full_snapshot().browse;
+    let old = fixture.local_ref(&engine, "a.flac");
+
+    engine
+        .apply_settings(
+            SettingsChange::Client {
+                client: Some(client()),
+                scrobble: false,
+            },
+            now,
+        )
+        .unwrap();
+    let after_client = engine.full_snapshot().browse;
+    assert_eq!(after_client.server, before.server + 1);
+    assert_eq!(after_client.library, before.library);
+    assert_eq!(
+        engine.browse().client_generation(),
+        after_client.server,
+        "browse commands use the new client"
+    );
+
+    engine
+        .apply_settings(SettingsChange::MusicDir(fixture.root.clone()), now)
+        .unwrap();
+    let after_dir = engine.full_snapshot().browse;
+    assert_eq!(after_dir.library, before.library + 1);
+    // The new library is empty until scanned; ids from the old one are stale.
+    engine.handle_scan_event(ScanEvent::Batch(vec![fixture.track("a.flac")]), now);
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![old],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert!(loads(&commands).is_empty());
+    assert!(
+        engine
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text.starts_with("The library changed"))
+    );
+}

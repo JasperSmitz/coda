@@ -46,6 +46,9 @@ fn url(token: u64) -> String {
 struct Tokens {
     keys: HashMap<u64, CoverKey>,
     order: VecDeque<u64>,
+    /// Mixed into remote covers' tokens and bumped with every client, so
+    /// a new server's cover never hits the webview's cache of the old one.
+    remote_generation: u64,
 }
 
 /// Opaque tokens for cover keys. Tokens are keyed hashes (a per-run
@@ -78,8 +81,12 @@ impl CoverRegistry {
     }
 
     fn register(&self, key: CoverKey) -> u64 {
-        let token = self.hasher.hash_one(&key);
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
+        let token = if key.is_remote() {
+            self.hasher.hash_one((tokens.remote_generation, &key))
+        } else {
+            self.hasher.hash_one(&key)
+        };
         if !tokens.keys.contains_key(&token) {
             while tokens.order.len() >= self.max {
                 if let Some(old) = tokens.order.pop_front() {
@@ -90,6 +97,16 @@ impl CoverRegistry {
             tokens.keys.insert(token, key);
         }
         token
+    }
+
+    /// The Navidrome client changed: remote tokens are forgotten (they now
+    /// answer 404) and new ones differ from the old.
+    fn client_changed(&self) {
+        let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
+        tokens.remote_generation += 1;
+        let Tokens { keys, order, .. } = &mut *tokens;
+        keys.retain(|_, key| !key.is_remote());
+        order.retain(|token| keys.contains_key(token));
     }
 
     fn get(&self, token: u64) -> Option<CoverKey> {
@@ -125,6 +142,41 @@ impl CoverService {
 
     pub fn set_client(&self, client: Option<Client>) {
         *self.client.write().unwrap_or_else(|e| e.into_inner()) = client;
+        self.registry.client_changed();
+    }
+
+    /// The cover behind a cover URL this service handed out (for the OS
+    /// media controls), if it is still known and has art.
+    pub async fn image_for_url(
+        &self,
+        cover_url: &str,
+        size: CoverSize,
+    ) -> Option<Arc<cover::CoverImage>> {
+        let token = cover_url.rsplit('/').next()?;
+        let token = u64::from_str_radix(token, 16)
+            .ok()
+            .filter(|_| token.len() == 16)?;
+        let key = self.registry.get(token)?;
+        match self.load(&key, size).await {
+            Outcome::Art(image) => Some(image),
+            Outcome::NoArt | Outcome::Failed => None,
+        }
+    }
+
+    async fn load(&self, key: &CoverKey, size: CoverSize) -> Outcome {
+        let Ok(_permit) = self.loads.acquire().await else {
+            return Outcome::Failed;
+        };
+        let client = self
+            .client
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let cache = match size {
+            CoverSize::Small => self.small.clone(),
+            CoverSize::Large => self.large.clone(),
+        };
+        cover::load(key, size, client, cache).await
     }
 
     /// `[ui] cover_art = false` turns cover URLs off.
@@ -156,19 +208,7 @@ impl CoverService {
         let Some(key) = self.registry.get(token) else {
             return status(StatusCode::NOT_FOUND);
         };
-        let Ok(_permit) = self.loads.acquire().await else {
-            return status(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        let client = self
-            .client
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let cache = match size {
-            CoverSize::Small => self.small.clone(),
-            CoverSize::Large => self.large.clone(),
-        };
-        let image = match cover::load(&key, size, client, cache).await {
+        let image = match self.load(&key, size).await {
             Outcome::Art(image) => image,
             Outcome::NoArt => return status(StatusCode::NOT_FOUND),
             Outcome::Failed => return status(StatusCode::SERVICE_UNAVAILABLE),
@@ -268,6 +308,28 @@ mod tests {
         registry.register(CoverKey::Local("/c".into()));
         assert_eq!(registry.get(first), None);
         assert_eq!(registry.tokens.lock().unwrap().keys.len(), 2);
+    }
+
+    #[test]
+    fn a_new_client_gets_new_remote_tokens() {
+        let registry = CoverRegistry::default();
+        let remote = Track::navidrome(
+            "s1".into(),
+            TrackMetadata {
+                cover_art: Some("al-1".into()),
+                ..Default::default()
+            },
+        );
+        let old = registry.url_for(&remote).unwrap();
+        let local_url = registry.url_for(&local("/a.flac")).unwrap();
+        registry.client_changed();
+        let token = |url: &str| u64::from_str_radix(url.rsplit('/').next().unwrap(), 16).unwrap();
+        assert_eq!(registry.get(token(&old)), None, "old remote token gone");
+        let new = registry.url_for(&remote).unwrap();
+        assert_ne!(new, old);
+        assert!(registry.get(token(&new)).is_some());
+        assert_eq!(registry.url_for(&local("/a.flac")).unwrap(), local_url);
+        assert!(registry.get(token(&local_url)).is_some(), "local kept");
     }
 
     #[test]

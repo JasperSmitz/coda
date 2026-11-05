@@ -81,6 +81,32 @@ export function useNav(): Entry[] {
   return useSyncExternalStore(subscribe, () => stack);
 }
 
+/** The source a route reads (`null`: none or both). */
+export function routeSource(route: Route): SourceKind | null {
+  switch (route.kind) {
+    case "folder":
+      return "local";
+    case "search":
+    case "settings":
+      return null;
+    default:
+      return route.source;
+  }
+}
+
+/**
+ * The library or server was replaced (settings): every view of that
+ * source (and search) holds stale ids, so the stack restarts at its root,
+ * which reloads.
+ */
+export function sourceReplaced(source: SourceKind) {
+  const affected = stack.some((e) => {
+    const s = routeSource(e.route);
+    return s === source || e.route.kind === "search";
+  });
+  if (affected) nav.root(stack[0].route);
+}
+
 /** The sidebar's routes. */
 export function routeFor(view: ViewId): Route {
   switch (view) {

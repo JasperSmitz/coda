@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-artist-tracks"
+description = "Enables the navidrome_artist_tracks command without any pre-configured scope."
+commands.allow = ["navidrome_artist_tracks"]
+
+[[permission]]
+identifier = "deny-navidrome-artist-tracks"
+description = "Denies the navidrome_artist_tracks command without any pre-configured scope."
+commands.deny = ["navidrome_artist_tracks"]
