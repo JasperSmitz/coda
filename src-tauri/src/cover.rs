@@ -138,6 +138,13 @@ impl CoverService {
         enabled.then(|| self.registry.url_for(track)).flatten()
     }
 
+    /// The cover URL for an album, artist or playlist cover `key`, if
+    /// covers are on.
+    pub fn url_for_key(&self, key: CoverKey) -> Option<String> {
+        let enabled = *self.enabled.read().unwrap_or_else(|e| e.into_inner());
+        enabled.then(|| url(self.registry.register(key)))
+    }
+
     /// Answers one `coda://` request: `GET /cover/<token>/<small|large>`.
     pub async fn respond(&self, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
         if request.method() != tauri::http::Method::GET {

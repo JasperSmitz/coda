@@ -185,6 +185,15 @@ fn key_of(value: Option<&str>) -> Option<(String, &str)> {
     Some((value.to_lowercase(), value))
 }
 
+/// The tag a track is grouped by: the album artist, else the artist.
+fn artist_tag(track: &Track) -> Option<&str> {
+    track
+        .album_artist
+        .as_deref()
+        .filter(|a| !a.trim().is_empty())
+        .or(track.artist.as_deref())
+}
+
 /// Album track order: disc, track number, title, then path.
 pub fn compare_album_tracks(a: &Track, b: &Track) -> Ordering {
     a.disc_no
@@ -216,15 +225,49 @@ impl TagIndex {
         }
     }
 
+    /// The artist `track` is grouped under, if it was inserted.
+    pub fn artist_of(&self, track: &Track) -> Option<ArtistId> {
+        let key = key_of(artist_tag(track)).map(|(key, _)| key);
+        self.artist_ids.get(&key).copied()
+    }
+
+    /// The album `track` is grouped under, if it was inserted.
+    pub fn album_of(&self, track: &Track) -> Option<AlbumId> {
+        let artist = self.artist_of(track)?;
+        let key = key_of(track.album.as_deref()).map(|(key, _)| key);
+        self.album_ids.get(&(artist, key)).copied()
+    }
+
+    /// Artists and albums whose shown name contains `query` (trimmed,
+    /// ignoring case), each A–Z, at most `limit` of each. Empty for a
+    /// blank query.
+    pub fn search(&self, query: &str, limit: usize) -> (Vec<ArtistId>, Vec<AlbumId>) {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let has = |name: &str| name.to_lowercase().contains(&needle);
+        let artists = self
+            .artists_sorted
+            .iter()
+            .copied()
+            .filter(|id| has(self.artist(*id).name()))
+            .take(limit)
+            .collect();
+        let albums = self
+            .albums_by_name
+            .iter()
+            .copied()
+            .filter(|id| has(self.album(*id).name()))
+            .take(limit)
+            .collect();
+        (artists, albums)
+    }
+
     /// Adds track `id` (`tracks[id]`) to its artist and album.
     pub fn insert(&mut self, id: TrackId, tracks: &[Track]) {
         let track = &tracks[id.index()];
-        let artist_tag = track
-            .album_artist
-            .as_deref()
-            .filter(|a| !a.trim().is_empty())
-            .or(track.artist.as_deref());
-        let artist = self.artist_for(key_of(artist_tag));
+        let artist = self.artist_for(key_of(artist_tag(track)));
         let album = self.album_for(artist, key_of(track.album.as_deref()));
         self.artists[artist.0 as usize].tracks += 1;
         let album = &mut self.albums[album.0 as usize];
@@ -684,5 +727,76 @@ mod tests {
         assert!(artist.spellings.0.len() <= MAX_SPELLINGS);
         assert_eq!(artist.name(), "aaaaaa");
         assert_eq!(artist.track_count(), 64);
+    }
+
+    #[test]
+    fn a_track_finds_its_album_and_artist() {
+        let tracks = [
+            track(
+                "a/1.flac",
+                Tags {
+                    artist: Some("Guest"),
+                    album_artist: Some("Band"),
+                    album: Some("Live"),
+                    ..Tags::default()
+                },
+            ),
+            track(
+                "b/2.flac",
+                Tags {
+                    artist: Some("band "),
+                    album: Some("live"),
+                    ..Tags::default()
+                },
+            ),
+            track("c/3.flac", Tags::default()),
+        ];
+        let index = index(&tracks);
+        let album = index.album_of(&tracks[0]).unwrap();
+        assert_eq!(index.album_of(&tracks[1]), Some(album));
+        assert_eq!(index.album(album).tracks().len(), 2);
+        let artist = index.artist_of(&tracks[1]).unwrap();
+        assert_eq!(index.album(album).artist(), artist);
+        let unknown = index.album_of(&tracks[2]).unwrap();
+        assert_eq!(index.album(unknown).name(), UNKNOWN_ALBUM);
+        // Not inserted: an artist the index has never seen.
+        let stranger = track(
+            "d/4.flac",
+            Tags {
+                artist: Some("Nobody"),
+                ..Tags::default()
+            },
+        );
+        assert_eq!(index.album_of(&stranger), None);
+    }
+
+    #[test]
+    fn names_are_searched_ignoring_case() {
+        let tracks = [
+            track(
+                "1.flac",
+                Tags {
+                    artist: Some("The Bandits"),
+                    album: Some("Bandwagon"),
+                    ..Tags::default()
+                },
+            ),
+            track(
+                "2.flac",
+                Tags {
+                    artist: Some("Other"),
+                    album: Some("Quiet"),
+                    ..Tags::default()
+                },
+            ),
+        ];
+        let index = index(&tracks);
+        let (artists, albums) = index.search("  BAND ", 10);
+        assert_eq!(artists.len(), 1);
+        assert_eq!(index.artist(artists[0]).name(), "The Bandits");
+        assert_eq!(albums.len(), 1);
+        assert_eq!(index.album(albums[0]).name(), "Bandwagon");
+        assert_eq!(index.search("   ", 10), (vec![], vec![]));
+        assert_eq!(index.search("t", 1).0.len(), 1);
     }
 }

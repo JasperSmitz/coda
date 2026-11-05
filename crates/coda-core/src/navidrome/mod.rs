@@ -22,6 +22,8 @@ pub struct Artist {
     pub id: String,
     pub name: String,
     pub album_count: Option<u32>,
+    /// The artist's `getCoverArt` id, if the server sent one.
+    pub cover_art: Option<String>,
 }
 
 /// An album as listed by `getArtist` or `search3`.
@@ -33,6 +35,10 @@ pub struct Album {
     pub year: Option<u32>,
     pub song_count: Option<u32>,
     pub duration: Option<Duration>,
+    /// The album's `getCoverArt` id, if the server sent one.
+    pub cover_art: Option<String>,
+    /// The album artist's id (`getArtist`), if the server sent one.
+    pub artist_id: Option<String>,
 }
 
 /// A playlist as listed by `getPlaylists`. Its songs are fetched with
@@ -46,6 +52,8 @@ pub struct Playlist {
     pub duration: Option<Duration>,
     /// Who may edit it; see [`Access`].
     pub access: Access,
+    /// The playlist's `getCoverArt` id, if the server sent one.
+    pub cover_art: Option<String>,
 }
 
 /// Who owns a playlist, as the server reports it: the `owner` username

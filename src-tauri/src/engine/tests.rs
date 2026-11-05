@@ -33,11 +33,19 @@ impl Fixture {
         )
     }
 
-    fn local_ref(&self, name: &str) -> TrackRef {
+    /// A ref to `name` by its id in `engine`'s library (`"0:999"`, an id
+    /// the library does not hold, for a file it never scanned).
+    fn local_ref(&self, engine: &Engine, name: &str) -> TrackRef {
+        let path = self.root.join(name);
+        let id = engine.browse().read_library(|view| {
+            let view = view.unwrap();
+            match view.library.track_id_by_path(&path) {
+                Some(id) => browse::local_id(view.generation, id.0),
+                None => browse::local_id(view.generation, 999),
+            }
+        });
         TrackRef {
-            source: SourceDto::Local {
-                path: self.root.join(name).to_string_lossy().into_owned(),
-            },
+            source: SourceDto::Local { id: Some(id) },
             title: Some("ignored".into()),
             artist: None,
             album: None,
@@ -45,6 +53,8 @@ impl Fixture {
             track_no: None,
             disc_no: None,
             duration_ms: None,
+            album_id: None,
+            artist_id: None,
         }
     }
 }
@@ -251,9 +261,9 @@ fn play_tracks_resolves_local_refs_through_the_library() {
     let commands = engine.handle_intent(
         Intent::PlayTracks {
             tracks: vec![
-                fixture.local_ref("c.flac"),
-                fixture.local_ref("a.flac"),
-                fixture.local_ref("b.flac"),
+                fixture.local_ref(&engine, "c.flac"),
+                fixture.local_ref(&engine, "a.flac"),
+                fixture.local_ref(&engine, "b.flac"),
             ],
             start: Some(2),
             shuffle: false,
@@ -285,7 +295,10 @@ fn play_tracks_shuffled_starts_with_the_chosen_track() {
     let (mut engine, now) = started(&fixture, &names, None);
     engine.handle_intent(
         Intent::PlayTracks {
-            tracks: names.iter().map(|n| fixture.local_ref(n)).collect(),
+            tracks: names
+                .iter()
+                .map(|n| fixture.local_ref(&engine, n))
+                .collect(),
             start: Some(7),
             shuffle: true,
         },
@@ -305,7 +318,10 @@ fn enqueue_adds_at_the_end_or_next() {
     engine.handle_intent(Intent::ClearQueue, now);
     engine.handle_intent(
         Intent::Enqueue {
-            tracks: vec![fixture.local_ref("a.flac"), fixture.local_ref("b.flac")],
+            tracks: vec![
+                fixture.local_ref(&engine, "a.flac"),
+                fixture.local_ref(&engine, "b.flac"),
+            ],
             next: false,
         },
         now,
@@ -314,7 +330,7 @@ fn enqueue_adds_at_the_end_or_next() {
     engine.handle_intent(Intent::PlayEntry { key: first }, now);
     engine.handle_intent(
         Intent::Enqueue {
-            tracks: vec![fixture.local_ref("c.flac")],
+            tracks: vec![fixture.local_ref(&engine, "c.flac")],
             next: true,
         },
         now,
@@ -361,6 +377,8 @@ fn navidrome_refs_are_built_from_their_metadata_and_scrobbled() {
         track_no: Some(1),
         disc_no: None,
         duration_ms: Some(120_000),
+        album_id: Some("al-9".into()),
+        artist_id: None,
     };
     let commands = engine.handle_intent(
         Intent::PlayTracks {
@@ -379,6 +397,8 @@ fn navidrome_refs_are_built_from_their_metadata_and_scrobbled() {
     assert_eq!(playing.title, "Remote");
     assert_eq!(playing.duration_ms, Some(120_000));
     assert!(playing.cover_url.is_some());
+    // The album link given in the ref survives into the queue.
+    assert_eq!(playing.album_id.as_deref(), Some("al-9"));
 
     engine.handle_playback_event(PlaybackEvent::Started { load }, now);
     let scrobbles = engine.take_scrobbles();
@@ -632,6 +652,128 @@ impl Sink for Recorder {
     }
     fn progress(&self, _: &ProgressDto) {}
     fn visualizer(&self, _: &VisualizerDto) {}
+}
+
+#[test]
+fn local_refs_from_an_older_library_generation_are_rejected() {
+    let fixture = Fixture::new(&["a.flac", "b.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac", "b.flac"], None);
+    let old = fixture.local_ref(&engine, "a.flac");
+    // A rescan: same files, new library, new generation.
+    engine
+        .browse()
+        .replace_library(Some(Library::new(fixture.root.clone())));
+    engine.handle_scan_event(
+        ScanEvent::Batch(vec![fixture.track("a.flac"), fixture.track("b.flac")]),
+        now,
+    );
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![old],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert!(loads(&commands).is_empty(), "{commands:?}");
+    let snapshot = engine.full_snapshot();
+    assert!(
+        snapshot
+            .notices
+            .iter()
+            .any(|n| n.text == "The library changed; 1 track skipped. Reload the view"),
+        "{:?}",
+        snapshot.notices
+    );
+    // A fresh ref plays.
+    let fresh = fixture.local_ref(&engine, "b.flac");
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![fresh],
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1);
+    // Malformed ids are simply missing.
+    let mut bad = fixture.local_ref(&engine, "a.flac");
+    bad.source = SourceDto::Local {
+        id: Some("nonsense".into()),
+    };
+    engine.handle_intent(
+        Intent::Enqueue {
+            tracks: vec![bad],
+            next: false,
+        },
+        now,
+    );
+    assert!(
+        engine
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text == "1 track not in the library; skipped")
+    );
+}
+
+#[test]
+fn queue_dtos_name_local_tracks_by_id_with_album_and_artist() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, _) = started(&fixture, &["a.flac"], Some(0));
+    let queue = engine.full_snapshot().queue.unwrap();
+    let generation = engine.browse().library_generation();
+    assert_eq!(
+        queue[0].track.source,
+        SourceDto::Local {
+            id: Some(format!("{generation}:0"))
+        }
+    );
+    assert_eq!(queue[0].track.album_id, Some(format!("{generation}:0")));
+    assert_eq!(queue[0].track.artist_id, Some(format!("{generation}:0")));
+    let json = serde_json::to_string(&queue).unwrap();
+    assert!(!json.contains(fixture.root.to_str().unwrap()), "{json}");
+}
+
+#[test]
+fn shuffle_library_plays_every_scanned_track() {
+    let names: Vec<String> = (0..12).map(|i| format!("{i}.flac")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let fixture = Fixture::new(&names);
+    let (mut shuffled, now) = started(&fixture, &names, None);
+    let commands = shuffled.handle_intent(Intent::ShuffleLibrary, now);
+    assert_eq!(loads(&commands).len(), 1);
+    let snapshot = shuffled.full_snapshot();
+    let mut titles: Vec<String> = snapshot
+        .queue
+        .unwrap()
+        .into_iter()
+        .map(|i| i.track.title)
+        .collect();
+    titles.sort();
+    let mut expected: Vec<String> = names.iter().map(|n| n.to_uppercase()).collect();
+    expected.sort();
+    assert_eq!(titles, expected);
+    assert!(
+        snapshot
+            .notices
+            .iter()
+            .any(|n| n.text == "Shuffling all (12 tracks scanned so far)"),
+        "{:?}",
+        snapshot.notices
+    );
+    // Without a library there is nothing to shuffle.
+    let mut empty = engine();
+    let now = Instant::now();
+    empty.start(sources(None, None), None, restored(vec![], None), now);
+    assert!(empty.handle_intent(Intent::ShuffleLibrary, now).is_empty());
+    assert!(
+        empty
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text == "Nothing to play")
+    );
 }
 
 fn process_exists(pid: u32) -> bool {

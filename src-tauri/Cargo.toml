@@ -29,3 +29,4 @@ image = { version = "=0.25.10", default-features = false, features = ["png"] }
 tempfile = "3.27.0"
 url = "2.5.8"
 libc = "0.2.191"
+wiremock = "0.6.5"

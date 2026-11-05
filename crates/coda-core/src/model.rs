@@ -45,6 +45,12 @@ pub struct Track {
     /// The id to ask Navidrome's `getCoverArt` for; always `None` for
     /// local tracks (their art is read from the file or its folder).
     pub cover_art: Option<String>,
+    /// Navidrome's album id (`getAlbum`), when the server sent one; always
+    /// `None` for local tracks. For navigation only: not saved in the
+    /// session.
+    pub album_id: Option<String>,
+    /// Navidrome's artist id (`getArtist`), like [`Track::album_id`].
+    pub artist_id: Option<String>,
 }
 
 impl Track {
@@ -63,6 +69,8 @@ impl Track {
             disc_no: metadata.disc_no,
             duration: metadata.duration,
             cover_art: None,
+            album_id: None,
+            artist_id: None,
             source: TrackSource::Local { path },
         }
     }
@@ -79,6 +87,8 @@ impl Track {
             disc_no: metadata.disc_no,
             duration: metadata.duration,
             cover_art: metadata.cover_art.filter(|id| !id.is_empty()),
+            album_id: None,
+            artist_id: None,
             source: TrackSource::Navidrome { song_id },
         }
     }

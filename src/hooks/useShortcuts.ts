@@ -8,7 +8,7 @@ import { intent } from "../lib/ipc";
 const SEEK_STEP = 5;
 const VOLUME_STEP = 5;
 
-function isTyping(target: EventTarget | null): boolean {
+export function isTyping(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
   if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;

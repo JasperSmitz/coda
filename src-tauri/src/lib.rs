@@ -4,6 +4,7 @@
 //! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
 
 pub mod bootstrap;
+pub mod browse;
 pub mod commands;
 pub mod cover;
 pub mod dto;
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use crate::bootstrap::Paths;
+use crate::browse::BrowseHandle;
 use crate::cover::CoverService;
 use crate::dto::{ProgressDto, Snapshot, VisualizerDto};
 use crate::engine::{EngineHandle, Sink};
@@ -57,6 +59,7 @@ pub fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda-app starting");
     let covers = Arc::new(CoverService::new(paths.cover_cache.clone()));
     let protocol_covers = covers.clone();
+    let browse = BrowseHandle::new(covers.clone());
 
     let app = tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol(
@@ -71,16 +74,36 @@ pub fn run() {
         .setup(move |app| {
             let sink = TauriSink(app.handle().clone());
             let startup_paths = paths.clone();
-            let engine = engine::spawn(sink, covers, async move {
+            let engine = engine::spawn(sink, covers, browse.clone(), async move {
                 bootstrap::start(&startup_paths).await
             });
             app.manage(engine);
+            app.manage(browse);
             app.manage(Quit::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::intent,
-            commands::snapshot
+            commands::snapshot,
+            browse::commands::local_artists,
+            browse::commands::local_albums,
+            browse::commands::local_artist,
+            browse::commands::local_artist_tracks,
+            browse::commands::local_album,
+            browse::commands::local_folder,
+            browse::commands::local_folder_tracks,
+            browse::commands::local_playlists,
+            browse::commands::local_playlist,
+            browse::commands::local_search,
+            browse::commands::navidrome_artists,
+            browse::commands::navidrome_artist,
+            browse::commands::navidrome_artist_tracks,
+            browse::commands::navidrome_album,
+            browse::commands::navidrome_albums,
+            browse::commands::navidrome_playlists,
+            browse::commands::navidrome_playlist,
+            browse::commands::navidrome_random_songs,
+            browse::commands::navidrome_search
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

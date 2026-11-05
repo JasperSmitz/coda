@@ -1,9 +1,12 @@
 // Hand-maintained mirror of the backend DTOs in `src-tauri/src/dto.rs`.
 // Keep the two in step: field names are the camelCase serde output.
 
-/** Where a track comes from. Sent back unchanged inside a `TrackRef`. */
+/**
+ * Where a track comes from. Sent back unchanged inside a `TrackRef`. A
+ * local `id` is opaque (`null` for a queued file the library does not hold).
+ */
 export type Source =
-  | { kind: "local"; path: string }
+  | { kind: "local"; id: string | null }
   | { kind: "navidrome"; songId: string; coverArt: string | null };
 
 export interface Track {
@@ -17,6 +20,9 @@ export interface Track {
   durationMs: number | null;
   /** Base cover URL; append `/small` or `/large` (see `coverSrc`). */
   coverUrl: string | null;
+  /** The album / artist to go to (same source as the track), if known. */
+  albumId: string | null;
+  artistId: string | null;
 }
 
 /**
@@ -103,4 +109,86 @@ export type Intent =
   | { type: "setVisualizerVisible"; visible: boolean }
   | { type: "playTracks"; tracks: TrackRef[]; start?: number | null; shuffle?: boolean }
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
-  | { type: "dismissNotice"; id: number };
+  | { type: "dismissNotice"; id: number }
+  | { type: "shuffleLibrary" };
+
+// ----- Browse (src-tauri/src/browse/dto.rs) -----
+
+export type SourceKind = "local" | "navidrome";
+
+export interface Artist {
+  id: string;
+  name: string;
+  albumCount: number | null;
+  /** Local only. */
+  trackCount: number | null;
+  coverUrl: string | null;
+}
+
+export interface Album {
+  id: string;
+  name: string;
+  artist: string | null;
+  artistId: string | null;
+  year: number | null;
+  trackCount: number | null;
+  durationMs: number | null;
+  coverUrl: string | null;
+}
+
+export interface Playlist {
+  id: string;
+  name: string;
+  trackCount: number | null;
+  durationMs: number | null;
+  coverUrl: string | null;
+  owner: string | null;
+  readonly: boolean;
+}
+
+export interface ArtistDetail {
+  artist: Artist;
+  albums: Album[];
+}
+
+export interface AlbumDetail {
+  album: Album;
+  tracks: Track[];
+}
+
+export type Hidden = { kind: "none" } | { kind: "some"; count: number } | { kind: "suspect" };
+
+export interface PlaylistDetail {
+  playlist: Playlist;
+  tracks: Track[];
+  missing: number;
+  truncated: [number, number] | null;
+  hidden: Hidden;
+  warning: string | null;
+}
+
+export interface Folder {
+  path: string[];
+  dirs: string[];
+  tracks: Track[];
+}
+
+export interface AlbumPage {
+  albums: Album[];
+  nextOffset: number | null;
+}
+
+export interface SearchResults {
+  artists: Artist[];
+  albums: Album[];
+  tracks: Track[];
+  totalTracks: number;
+}
+
+export type LocalAlbumOrder = "name" | "artist";
+export type AlbumSort = "name" | "artist" | "newest" | "frequent" | "recent" | "random";
+
+export interface BrowseError {
+  kind: "notConfigured" | "stale" | "notFound" | "failed";
+  message: string;
+}
