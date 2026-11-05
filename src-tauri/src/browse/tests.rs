@@ -121,13 +121,22 @@ async fn local_artists_albums_and_tracks() {
 
     // `s` on an artist: every album A–Z, each in album order.
     let id = artists[0].id.clone();
-    let tracks = browse
-        .local(move |v, c| local::artist_tracks(v, &id, c))
+    let titles: Vec<(String, String)> = browse
+        .local(move |v, _| {
+            let ids = local::context_track_ids(&v, &LocalContextDto::Artist { id })?;
+            Ok(ids
+                .iter()
+                .map(|t| {
+                    let track = v.library.track(*t);
+                    (track.album.clone().unwrap(), track.title.clone())
+                })
+                .collect())
+        })
         .await
         .unwrap();
-    let titles: Vec<(&str, &str)> = tracks
+    let titles: Vec<(&str, &str)> = titles
         .iter()
-        .map(|t| (t.album.as_deref().unwrap(), t.title.as_str()))
+        .map(|(a, t)| (a.as_str(), t.as_str()))
         .collect();
     assert_eq!(
         titles,
@@ -194,10 +203,29 @@ async fn local_folders_level_by_level() {
     assert_eq!(band.dirs, ["First", "Second"]);
     assert!(band.tracks.is_empty());
     let all = browse
-        .local(|v, c| local::folder_tracks(v, vec!["Band".into()], c))
+        .local(|v, _| {
+            local::context_track_ids(
+                &v,
+                &LocalContextDto::Folder {
+                    path: vec!["Band".into()],
+                },
+            )
+        })
         .await
         .unwrap();
     assert_eq!(all.len(), 3);
+    let error = browse
+        .local(|v, _| {
+            local::context_track_ids(
+                &v,
+                &LocalContextDto::Artist {
+                    id: "nonsense".into(),
+                },
+            )
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, BrowseErrorKind::NotFound);
     let error = browse
         .local(|v, c| local::folder(v, vec!["Nope".into()], c))
         .await
@@ -310,7 +338,7 @@ async fn navidrome_artists_albums_and_tracks() {
     for (id, songs) in [
         (
             "al1",
-            json!([{ "id": "s1", "title": "Dancing Queen", "duration": 230 }, { "id": "s2", "title": "Money" }]),
+            json!([{ "id": "s1", "title": "Dancing Queen", "duration": 230, "artistId": "ar-guest" }, { "id": "s2", "title": "Money" }]),
         ),
         ("al2", json!([{ "id": "s3", "title": "Chiquitita" }])),
     ] {
@@ -318,7 +346,8 @@ async fn navidrome_artists_albums_and_tracks() {
             .and(path("/rest/getAlbum"))
             .and(query_param("id", id))
             .respond_with(ok(json!({ "album": {
-                "id": id, "name": id, "coverArt": format!("cover-{id}"), "artistId": "ar1", "song": songs
+                "id": id, "name": id, "artist": "ABBA", "year": 1976,
+                "coverArt": format!("cover-{id}"), "artistId": "ar1", "song": songs
             }})))
             .mount(&server)
             .await;
@@ -341,6 +370,13 @@ async fn navidrome_artists_albums_and_tracks() {
     assert_eq!(album.tracks.len(), 2);
     assert_eq!(album.tracks[0].album_id.as_deref(), Some("al1"));
     assert_eq!(album.album.track_count, Some(2));
+    // The header is the album's own: the album artist's id (not the first
+    // song's track artist), the year and the name.
+    assert_eq!(album.album.artist_id.as_deref(), Some("ar1"));
+    assert_eq!(album.album.artist.as_deref(), Some("ABBA"));
+    assert_eq!(album.album.year, Some(1976));
+    assert_eq!(album.album.name, "al1");
+    assert_eq!(album.tracks[0].artist_id.as_deref(), Some("ar-guest"));
     // One duration unknown: no total.
     assert_eq!(album.album.duration_ms, None);
     assert!(album.album.cover_url.is_some());
@@ -509,4 +545,23 @@ async fn navidrome_requests_are_limited_to_the_fetch_cap() {
         task.await.unwrap().unwrap();
     }
     assert_eq!(browse.0.fetches.available_permits(), MAX_CONCURRENT_FETCHES);
+}
+
+#[tokio::test]
+async fn ids_and_queries_from_the_ui_are_bounded() {
+    let (_server, browse) = server().await;
+    let long = "x".repeat(MAX_INPUT_CHARS + 1);
+    for result in [
+        browse.navidrome_album(long.clone()).await.map(drop),
+        browse.navidrome_artist(String::new()).await.map(drop),
+        browse.navidrome_playlist(long.clone()).await.map(drop),
+        browse.navidrome_artist_tracks(long.clone()).await.map(drop),
+    ] {
+        assert_eq!(result.unwrap_err().kind, BrowseErrorKind::NotFound);
+    }
+    assert_eq!(
+        cap_query(&format!("  {long}  ")).chars().count(),
+        MAX_INPUT_CHARS
+    );
+    assert_eq!(cap_query("  abba "), "abba");
 }

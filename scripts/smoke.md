@@ -114,3 +114,11 @@ Same setup as above. A configured music folder and Navidrome server make every s
 50. Onboarding race: with the onboarding screen showing, run `coda --setup` in a terminal and connect a server; then in the GUI choose only a folder and Continue → "The settings were changed meanwhile…"; `config.toml` and the keychain entry are unchanged.
 51. Save a server with an unreachable URL and quit during the ping: the app quits at once (the ping is not under the write lock), and nothing was written.
 52. Symlink `config.toml` to a dotfiles copy → Settings shows the symbolic-link warning.
+
+## Browse review fixes
+53. Large library, while the scan runs: open Local → Folders and press `s` at the root, open Search and type, scroll Albums — playback never stutters or skips a gapless transition (the engine never waits for browse reads; `RUST_LOG=trace` shows "changes deferred" now and then).
+54. Folders root → Shuffle on a library larger than 10,000 tracks: plays at once, toast "Shuffling 10,000 of N tracks"; the bar's cover, the queue covers and the album grid you came from still show their covers afterwards.
+55. Navidrome: open a compilation (or an album whose first track has a guest artist) from the grid; the header shows the album artist and year, and clicking the artist opens the album artist, not the first track's.
+56. Stop the server, then use an album's menu → Play (or Navidrome Albums → Shuffle): a toast "Could not play: …" appears. Change the music folder in Settings while an artist page is open and press Play at once: no silent failure (the view reloads with a toast).
+57. Navidrome Albums sorted "Random": keep scrolling; more pages keep loading even when a page repeats albums, until the end.
+58. During a scan, open the context menu on a track of an album being scanned and wait: when the list refreshes, the menu still acts on the same track (or closes if it disappeared); the selection stays on its track.

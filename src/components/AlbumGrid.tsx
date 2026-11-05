@@ -13,7 +13,7 @@ import {
   type RefObject,
 } from "react";
 import { browse } from "../lib/browse";
-import { enqueue, playTracks } from "../lib/play";
+import { enqueue, playFrom, playTracks } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav } from "../state/nav";
 import { useAppState } from "../state/store";
@@ -35,6 +35,11 @@ interface Props {
   hideArtist?: boolean;
   /** Called when the last rows come into view. */
   onEnd?: () => void;
+  /**
+   * Changes whenever another page may be asked for (e.g. the next offset):
+   * `onEnd` is asked again even if the last page added no new albums.
+   */
+  endKey?: unknown;
   label: string;
 }
 
@@ -42,7 +47,15 @@ export function openAlbum(source: SourceKind, album: Album) {
   nav.push({ kind: "album", source, id: album.id, name: album.name, hint: album });
 }
 
-export function AlbumGrid({ albums, source, scroller, hideArtist = false, onEnd, label }: Props) {
+export function AlbumGrid({
+  albums,
+  source,
+  scroller,
+  hideArtist = false,
+  onEnd,
+  endKey,
+  label,
+}: Props) {
   const { snapshot } = useAppState();
   // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
   const locked = snapshot?.phase !== "ready";
@@ -94,7 +107,7 @@ export function AlbumGrid({ albums, source, scroller, hideArtist = false, onEnd,
   const nearEnd = rowCount > 0 && last >= rowCount;
   useEffect(() => {
     if (nearEnd) onEnd?.();
-  }, [nearEnd, onEnd, albums.length]);
+  }, [nearEnd, onEnd, albums.length, endKey]);
 
   useEffect(() => {
     const index = focusAfterRender.current;
@@ -198,22 +211,23 @@ export function AlbumGrid({ albums, source, scroller, hideArtist = false, onEnd,
             {
               label: "Play",
               disabled,
-              action: () => void tracksOf(menu.album).then((t) => playTracks(t)),
+              action: () => playFrom(async () => playTracks(await tracksOf(menu.album))),
             },
             {
               label: "Shuffle",
               disabled,
-              action: () => void tracksOf(menu.album).then((t) => playTracks(t, undefined, true)),
+              action: () =>
+                playFrom(async () => playTracks(await tracksOf(menu.album), undefined, true)),
             },
             {
               label: "Play next",
               disabled: locked,
-              action: () => void tracksOf(menu.album).then((t) => enqueue(t, true)),
+              action: () => playFrom(async () => enqueue(await tracksOf(menu.album), true)),
             },
             {
               label: "Add to queue",
               disabled: locked,
-              action: () => void tracksOf(menu.album).then((t) => enqueue(t, false)),
+              action: () => playFrom(async () => enqueue(await tracksOf(menu.album), false)),
             },
             // ADD TO PLAYLIST: "Add to playlist…" goes here (later slice).
             { label: "Open album", action: () => openAlbum(source, menu.album) },

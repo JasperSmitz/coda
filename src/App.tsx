@@ -32,8 +32,10 @@ function loadQueueOpen(): boolean {
  */
 function useBrowseGenerations(snapshot: Snapshot | null) {
   const seen = useRef<Snapshot["browse"] | null>(null);
-  const library = snapshot?.browse.library;
-  const server = snapshot?.browse.server;
+  // Only once started: startup itself sets the first generations.
+  const ready = snapshot?.phase === "ready";
+  const library = ready ? snapshot.browse.library : undefined;
+  const server = ready ? snapshot.browse.server : undefined;
   useEffect(() => {
     if (library === undefined || server === undefined) return;
     const last = seen.current;

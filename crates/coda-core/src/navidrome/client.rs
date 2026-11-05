@@ -363,6 +363,17 @@ impl Client {
         Ok(album.into_tracks())
     }
 
+    /// One album (`getAlbum`): the album itself, when its id is usable,
+    /// and its songs in served order.
+    pub async fn album_detail(&self, id: &str) -> Result<(Option<Album>, Vec<Track>), Error> {
+        let album = self
+            .get::<api::AlbumReply>("getAlbum", &[("id", id)])
+            .await?
+            .album
+            .ok_or_else(|| Error::Decode("getAlbum: missing album".into()))?;
+        Ok(album.into_album_and_tracks())
+    }
+
     /// One page of albums in `sort` order (`getAlbumList2`), starting at
     /// `offset`. `size` is clamped to `1..=500`.
     pub async fn album_list(

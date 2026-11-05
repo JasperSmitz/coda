@@ -322,6 +322,15 @@ pub enum Intent {
     },
     /// Shuffle the entries after the current one.
     ShuffleUpcoming,
+    /// Play (or shuffle) a local folder or artist resolved in the engine,
+    /// from track `start` of the context when given.
+    PlayLocal {
+        context: crate::browse::dto::LocalContextDto,
+        #[serde(default)]
+        start: Option<usize>,
+        #[serde(default)]
+        shuffle: bool,
+    },
 }
 
 #[cfg(test)]
@@ -442,6 +451,16 @@ mod tests {
                 Intent::DismissNotice { id: 7 },
             ),
             (json!({"type": "shuffleLibrary"}), Intent::ShuffleLibrary),
+            (
+                json!({"type": "playLocal", "context": {"kind": "folder", "path": ["a"]}, "shuffle": true}),
+                Intent::PlayLocal {
+                    context: crate::browse::dto::LocalContextDto::Folder {
+                        path: vec!["a".into()],
+                    },
+                    start: None,
+                    shuffle: true,
+                },
+            ),
         ];
         for (value, intent) in cases {
             assert_eq!(serde_json::from_value::<Intent>(value).unwrap(), intent);

@@ -118,7 +118,11 @@ export type Intent =
   | { type: "removeEntries"; keys: string[] }
   /** Moves the entries right after the current one. */
   | { type: "playNextEntries"; keys: string[] }
-  | { type: "shuffleUpcoming" };
+  | { type: "shuffleUpcoming" }
+  | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean };
+
+/** A local context the engine resolves and plays itself. */
+export type LocalContext = { kind: "folder"; path: string[] } | { kind: "artist"; id: string };
 
 // ----- Browse (src-tauri/src/browse/dto.rs) -----
 

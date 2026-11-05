@@ -125,6 +125,21 @@ pub struct SearchDto {
     pub total_tracks: usize,
 }
 
+/// A local context the engine resolves and plays itself (`playLocal`),
+/// so a whole-library folder or a big artist never crosses IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LocalContextDto {
+    /// Everything below a folder (names from the music root).
+    Folder { path: Vec<String> },
+    /// Every album of an artist, A–Z.
+    Artist { id: String },
+}
+
 /// The order of the local Albums list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]

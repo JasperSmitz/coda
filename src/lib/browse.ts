@@ -78,10 +78,9 @@ export const browse = {
     });
   },
 
-  artistTracks(source: SourceKind, id: string): Promise<Track[]> {
-    return source === "local"
-      ? call("local_artist_tracks", { id })
-      : cached(`artistTracks:${id}`, () => call("navidrome_artist_tracks", { id }));
+  /** Navidrome only (local artists play through `playLocal`). */
+  navidromeArtistTracks(id: string): Promise<Track[]> {
+    return cached(`artistTracks:${id}`, () => call("navidrome_artist_tracks", { id }));
   },
 
   album(source: SourceKind, id: string): Promise<AlbumDetail> {
@@ -96,15 +95,14 @@ export const browse = {
 
   navidromeAlbums(sort: AlbumSort, offset: number): Promise<AlbumPage> {
     const load = () => call<AlbumPage>("navidrome_albums", { sort, offset });
-    return sort === "random" ? load() : cached(`albums:${sort}:${offset}`, load);
+    // Only the alphabetical orders are stable enough to mix cached and
+    // fresh pages (recently added/played shift between requests).
+    const stable = sort === "name" || sort === "artist";
+    return stable ? cached(`albums:${sort}:${offset}`, load) : load();
   },
 
   folder(path: string[]): Promise<Folder> {
     return call("local_folder", { path });
-  },
-
-  folderTracks(path: string[]): Promise<Track[]> {
-    return call("local_folder_tracks", { path });
   },
 
   playlists(source: SourceKind): Promise<Playlist[]> {

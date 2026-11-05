@@ -4,7 +4,7 @@
 // removed and reordered (M3, `lib/playlists.ts`); read-only ones show
 // why instead.
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
@@ -48,6 +48,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
   const list = useRef<HTMLDivElement>(null);
   const playlists = load.data ?? [];
   useScroll(scroller, entry, playlists.length > 0);
+  const idPrefix = useId();
   const [selected, setSelected] = useState<number | null>(null);
   const [menu, setMenu] = useState<(MenuState & { playlist: Playlist }) | null>(null);
   const canEdit = useCanEdit() && source === "navidrome";
@@ -81,7 +82,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
       e.stopPropagation();
       return;
     } else if (e.key === "ContextMenu" && selected !== null && canEdit) {
-      const row = document.getElementById(`playlist-${selected}`)?.getBoundingClientRect();
+      const row = document.getElementById(`${idPrefix}-${selected}`)?.getBoundingClientRect();
       setMenu({ x: (row?.left ?? 0) + 40, y: row?.bottom ?? 0, key: playlists[selected].id, playlist: playlists[selected] });
       e.preventDefault();
       return;
@@ -90,7 +91,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
     e.stopPropagation();
     const index = Math.min(playlists.length - 1, Math.max(0, to));
     setSelected(index);
-    document.getElementById(`playlist-${index}`)?.scrollIntoView({ block: "nearest" });
+    document.getElementById(`${idPrefix}-${index}`)?.scrollIntoView({ block: "nearest" });
   };
 
   return (
@@ -128,13 +129,13 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
             role="listbox"
             aria-label="Playlists"
             tabIndex={0}
-            aria-activedescendant={selected !== null ? `playlist-${selected}` : undefined}
+            aria-activedescendant={selected !== null ? `${idPrefix}-${selected}` : undefined}
             onKeyDown={onKeyDown}
           >
             {playlists.map((playlist, index) => (
               <div
                 key={playlist.id}
-                id={`playlist-${index}`}
+                id={`${idPrefix}-${index}`}
                 role="option"
                 aria-selected={selected === index}
                 className={`playlist-row ${selected === index ? "is-selected" : ""}`}

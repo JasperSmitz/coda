@@ -44,8 +44,12 @@ fn url(token: u64) -> String {
 
 #[derive(Default)]
 struct Tokens {
-    keys: HashMap<u64, CoverKey>,
-    order: VecDeque<u64>,
+    /// Each token's key and the stamp of its last use.
+    keys: HashMap<u64, (CoverKey, u64)>,
+    /// Uses, oldest first; an entry whose stamp is no longer its token's
+    /// is a stale copy (the token was used again later) and is skipped.
+    order: VecDeque<(u64, u64)>,
+    next_stamp: u64,
     /// Mixed into remote covers' tokens and bumped with every client, so
     /// a new server's cover never hits the webview's cache of the old one.
     remote_generation: u64,
@@ -87,14 +91,25 @@ impl CoverRegistry {
         } else {
             self.hasher.hash_one(&key)
         };
-        if !tokens.keys.contains_key(&token) {
-            while tokens.order.len() >= self.max {
-                if let Some(old) = tokens.order.pop_front() {
-                    tokens.keys.remove(&old);
-                }
+        // Least recently used first out: a token handed out again (the
+        // playing track, the queue, a list on screen) moves to the back,
+        // so a long list cannot push out covers still shown.
+        let stamp = tokens.next_stamp;
+        tokens.next_stamp += 1;
+        tokens.keys.insert(token, (key, stamp));
+        tokens.order.push_back((token, stamp));
+        while tokens.keys.len() > self.max {
+            let Some((old, old_stamp)) = tokens.order.pop_front() else {
+                break;
+            };
+            if tokens.keys.get(&old).is_some_and(|(_, s)| *s == old_stamp) {
+                tokens.keys.remove(&old);
             }
-            tokens.order.push_back(token);
-            tokens.keys.insert(token, key);
+        }
+        // Bound the stale copies.
+        if tokens.order.len() > 2 * self.max + 64 {
+            let Tokens { keys, order, .. } = &mut *tokens;
+            order.retain(|(t, s)| keys.get(t).is_some_and(|(_, stamp)| stamp == s));
         }
         token
     }
@@ -105,13 +120,13 @@ impl CoverRegistry {
         let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         tokens.remote_generation += 1;
         let Tokens { keys, order, .. } = &mut *tokens;
-        keys.retain(|_, key| !key.is_remote());
-        order.retain(|token| keys.contains_key(token));
+        keys.retain(|_, (key, _)| !key.is_remote());
+        order.retain(|(token, _)| keys.contains_key(token));
     }
 
     fn get(&self, token: u64) -> Option<CoverKey> {
         let tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
-        tokens.keys.get(&token).cloned()
+        tokens.keys.get(&token).map(|(key, _)| key.clone())
     }
 }
 
@@ -310,6 +325,24 @@ mod tests {
         registry.register(CoverKey::Local("/c".into()));
         assert_eq!(registry.get(first), None);
         assert_eq!(registry.tokens.lock().unwrap().keys.len(), 2);
+    }
+
+    #[test]
+    fn a_token_used_again_outlives_a_long_list() {
+        let registry = CoverRegistry::with_capacity(3);
+        let playing = registry.register(CoverKey::Local("/playing".into()));
+        for i in 0..100 {
+            registry.register(CoverKey::Local(format!("/list/{i}").into()));
+            // The playing track's cover is handed out with every snapshot.
+            assert_eq!(
+                registry.register(CoverKey::Local("/playing".into())),
+                playing
+            );
+        }
+        assert!(registry.get(playing).is_some());
+        let tokens = registry.tokens.lock().unwrap();
+        assert_eq!(tokens.keys.len(), 3);
+        assert!(tokens.order.len() <= 2 * 3 + 64, "stale copies are bounded");
     }
 
     #[test]

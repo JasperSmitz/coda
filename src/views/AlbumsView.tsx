@@ -42,7 +42,7 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
   const scroller = useRef<HTMLDivElement>(null);
   const albums = load.data ?? [];
   useScroll(scroller, entry, albums.length > 0);
-  useShuffleContext(() => void shuffleAll("local"));
+  useShuffleContext(() => shuffleAll("local"));
   return (
     <section className="view">
       <ViewHeader
@@ -55,7 +55,7 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
               options={ORDERS}
               onChange={(order) => nav.replace({ kind: "albums", source: "local", order })}
             />
-            <PlayButtons onShuffle={() => void shuffleAll("local")} />
+            <PlayButtons onShuffle={() => shuffleAll("local")} />
           </>
         }
       >
@@ -90,18 +90,23 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
   const [pages, setPages] = useState<Pages>({ albums: [], next: 0, loading: false, error: null });
   const [attempt, setAttempt] = useState(0);
   const generation = useRef(0);
+  // Set at once (state updates later): two `onEnd`s before a render must
+  // not fetch the same page twice.
+  const inFlight = useRef(false);
   useScroll(scroller, entry, pages.albums.length > 0);
-  useShuffleContext(() => void shuffleAll("navidrome"));
+  useShuffleContext(() => shuffleAll("navidrome"));
 
   const loadMore = useCallback(
     (from: Pages) => {
-      if (from.loading || from.next === null) return;
+      if (inFlight.current || from.loading || from.next === null) return;
       const offset = from.next;
       const mine = generation.current;
+      inFlight.current = true;
       setPages({ ...from, loading: true, error: null });
       browse.navidromeAlbums(sort, offset).then(
         (page) => {
           if (generation.current !== mine) return;
+          inFlight.current = false;
           setPages((p) => {
             // A random order may repeat albums across pages.
             const seen = new Set(p.albums.map((a) => a.id));
@@ -116,6 +121,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
         },
         (error: unknown) => {
           if (generation.current !== mine) return;
+          inFlight.current = false;
           setPages((p) => ({ ...p, loading: false, error: toBrowseError(error) }));
         },
       );
@@ -125,6 +131,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
 
   useEffect(() => {
     generation.current += 1;
+    inFlight.current = false;
     const start = { albums: [], next: 0, loading: false, error: null };
     setPages(start);
     loadMore(start);
@@ -150,7 +157,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
               options={SORTS}
               onChange={(sort) => nav.replace({ kind: "albums", source: "navidrome", sort })}
             />
-            <PlayButtons onShuffle={() => void shuffleAll("navidrome")} />
+            <PlayButtons onShuffle={() => shuffleAll("navidrome")} />
           </>
         }
       >
@@ -180,6 +187,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
             source="navidrome"
             scroller={scroller}
             onEnd={onEnd}
+            endKey={`${pages.next}:${pages.loading}`}
             label="Albums"
           />
         )}
