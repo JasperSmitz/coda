@@ -50,13 +50,45 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "appimage",
+      "rpm",
+      "app",
+      "dmg"
+    ],
+    "publisher": "Jasper Smitz",
+    "copyright": "Copyright (c) 2026 Jasper Smitz",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "category": "Music",
+    "shortDescription": "A music player for local files and Navidrome",
+    "longDescription": "Coda is a desktop music player for your local music library and a personal Navidrome server, with gapless playback through mpv, a play queue shared with the Coda terminal player, and keyboard-first controls. It needs mpv installed.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "mpv"
+        ],
+        "section": "sound"
+      },
+      "rpm": {
+        "depends": [
+          "mpv"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }
