@@ -113,6 +113,12 @@ export type Intent =
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number }
   | { type: "shuffleLibrary" }
+  /** Moves the entries (one block, in queue order) to the gap before index `to`. */
+  | { type: "moveEntries"; keys: string[]; to: number }
+  | { type: "removeEntries"; keys: string[] }
+  /** Moves the entries right after the current one. */
+  | { type: "playNextEntries"; keys: string[] }
+  | { type: "shuffleUpcoming" }
   | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean };
 
 /** A local context the engine resolves and plays itself. */
@@ -150,6 +156,10 @@ export interface Playlist {
   coverUrl: string | null;
   owner: string | null;
   readonly: boolean;
+  /** Navidrome: the connected user may change it (always `false` for local). */
+  editable: boolean;
+  /** Navidrome: why it cannot be changed. */
+  readOnlyReason: string | null;
 }
 
 export interface ArtistDetail {
@@ -197,6 +207,18 @@ export type AlbumSort = "name" | "artist" | "newest" | "frequent" | "recent" | "
 export interface BrowseError {
   kind: "notConfigured" | "stale" | "notFound" | "failed";
   message: string;
+}
+
+// ----- Playlist edits (src-tauri/src/playlists/dto.rs) -----
+
+export type EditStatus = "done" | "partial" | "stale" | "failed" | "refused";
+
+/** A playlist edit's outcome; `message` is also shown as a notice. */
+export interface EditOutcome {
+  status: EditStatus;
+  message: string;
+  /** The new playlist's id, for a create. */
+  created: string | null;
 }
 
 // ----- settings (`src-tauri/src/settings.rs`) -----

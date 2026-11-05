@@ -49,6 +49,11 @@ function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
   return value;
 }
 
+/** Forgets these cached server answers (e.g. after a playlist edit). */
+export function forgetCached(...keys: string[]) {
+  keys.forEach((key) => cache.delete(key));
+}
+
 /** Forgets cached server answers (a retry wants fresh data). */
 export function clearBrowseCache() {
   cache.clear();

@@ -305,6 +305,23 @@ pub enum Intent {
     /// scanned track (a random sample at the queue cap), shuffled, as in
     /// Coda. Navidrome's "Shuffle all" is `playTracks` with random songs.
     ShuffleLibrary,
+    /// Move the entries `keys` (one block, in queue order) to the gap `to`:
+    /// before the entry now at index `to` (the queue's length: the end).
+    MoveEntries {
+        keys: Vec<String>,
+        to: usize,
+    },
+    /// Remove the entries `keys` (the playing one last, so playback moves
+    /// on to an entry that stays).
+    RemoveEntries {
+        keys: Vec<String>,
+    },
+    /// Move the entries `keys` right after the current entry.
+    PlayNextEntries {
+        keys: Vec<String>,
+    },
+    /// Shuffle the entries after the current one.
+    ShuffleUpcoming,
     /// Play (or shuffle) a local folder or artist resolved in the engine,
     /// from track `start` of the context when given.
     PlayLocal {

@@ -5,7 +5,8 @@
 use coda_core::model::Track;
 use coda_core::model::thousands;
 use coda_core::navidrome::browse::MAX_ALBUMS;
-use coda_core::navidrome::{Album, AlbumSort, Artist, Hidden, Playlist};
+use coda_core::navidrome::browse::read_only_reason;
+use coda_core::navidrome::{Access, Album, AlbumSort, Artist, Hidden, Playlist};
 use tokio::task::JoinSet;
 
 use super::dto::*;
@@ -54,7 +55,17 @@ fn album_dto(album: &Album, covers: &CoverService) -> AlbumDto {
     }
 }
 
-fn playlist_dto(playlist: &Playlist, covers: &CoverService) -> PlaylistDto {
+/// `(editable, read_only_reason)` of `access` for `username`.
+fn editability(access: &Access, username: &str) -> (bool, Option<String>) {
+    if access.editable_by(username) {
+        (true, None)
+    } else {
+        (false, Some(read_only_reason(access, username).to_owned()))
+    }
+}
+
+fn playlist_dto(playlist: &Playlist, covers: &CoverService, username: &str) -> PlaylistDto {
+    let (editable, read_only_reason) = editability(&playlist.access, username);
     PlaylistDto {
         id: playlist.id.clone(),
         name: playlist.name.clone(),
@@ -63,6 +74,8 @@ fn playlist_dto(playlist: &Playlist, covers: &CoverService) -> PlaylistDto {
         cover_url: remote_cover(covers, playlist.cover_art.as_ref()),
         owner: playlist.access.owner.clone(),
         readonly: playlist.access.readonly,
+        editable,
+        read_only_reason,
     }
 }
 
@@ -193,10 +206,15 @@ impl BrowseHandle {
     }
 
     pub async fn navidrome_playlists(&self) -> Result<Vec<PlaylistDto>, BrowseError> {
-        let playlists = self.fetch(|c| async move { c.playlists().await }).await?;
+        let (playlists, username) = self
+            .fetch(|c| async move {
+                let username = c.username().to_owned();
+                c.playlists().await.map(|p| (p, username))
+            })
+            .await?;
         Ok(playlists
             .iter()
-            .map(|p| playlist_dto(p, self.covers()))
+            .map(|p| playlist_dto(p, self.covers(), &username))
             .collect())
     }
 
@@ -205,7 +223,13 @@ impl BrowseHandle {
     pub async fn navidrome_playlist(&self, id: String) -> Result<PlaylistDetailDto, BrowseError> {
         check_id(&id)?;
         let playlist_id = id.clone();
-        let songs = self.fetch(|c| async move { c.playlist(&id).await }).await?;
+        let (songs, username) = self
+            .fetch(|c| async move {
+                let username = c.username().to_owned();
+                c.playlist(&id).await.map(|s| (s, username))
+            })
+            .await?;
+        let (editable, read_only_reason) = editability(&songs.access, &username);
         let hidden = songs.hidden_entries();
         let mut notes = Vec::new();
         if let Some((kept, total)) = songs.truncated() {
@@ -241,6 +265,8 @@ impl BrowseHandle {
             cover_url: None,
             owner: songs.access.owner.clone(),
             readonly: songs.access.readonly,
+            editable,
+            read_only_reason,
         };
         Ok(PlaylistDetailDto {
             playlist,

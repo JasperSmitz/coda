@@ -1347,3 +1347,219 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             .any(|n| n.text == "The library changed; reload the view")
     );
 }
+
+// ----- M3: queue edits ----------------------------------------------------
+
+/// The file the gapless next was last announced as, if any.
+fn announced_next(commands: &[PlaybackCommand]) -> Option<Option<PathBuf>> {
+    commands.iter().rev().find_map(|c| match c {
+        PlaybackCommand::SetNext { next, .. } => {
+            Some(next.as_ref().map(|(_, target)| match target {
+                PlaybackTarget::File(path) => path.clone(),
+                PlaybackTarget::Stream(_) => PathBuf::from("<stream>"),
+            }))
+        }
+        _ => None,
+    })
+}
+
+fn titles(engine: &mut Engine) -> Vec<String> {
+    engine
+        .full_snapshot()
+        .queue
+        .unwrap()
+        .into_iter()
+        .map(|i| i.track.title)
+        .collect()
+}
+
+#[test]
+fn moving_entries_reorders_and_reannounces_the_gapless_next() {
+    let names = ["a.flac", "b.flac", "c.flac", "d.flac"];
+    let fixture = Fixture::new(&names);
+    let (mut engine, now) = started(&fixture, &names, None);
+    let k = keys(&mut engine);
+    let commands = engine.handle_intent(Intent::PlayEntry { key: k[0].clone() }, now);
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    // D right after A (the gap before B): D is the gapless next now.
+    let commands = engine.handle_intent(
+        Intent::MoveEntries {
+            keys: vec![k[3].clone()],
+            to: 1,
+        },
+        now,
+    );
+    assert!(loads(&commands).is_empty(), "a move never reloads");
+    assert_eq!(
+        announced_next(&commands),
+        Some(Some(fixture.root.join("d.flac")))
+    );
+    assert_eq!(
+        titles(&mut engine),
+        ["A.FLAC", "D.FLAC", "B.FLAC", "C.FLAC"]
+    );
+    // A selection (in any order) moves as one block, keys unchanged.
+    engine.handle_intent(
+        Intent::MoveEntries {
+            keys: vec![k[1].clone(), k[0].clone(), "q999".into()],
+            to: 4,
+        },
+        now,
+    );
+    assert_eq!(
+        titles(&mut engine),
+        ["D.FLAC", "C.FLAC", "A.FLAC", "B.FLAC"]
+    );
+    assert_eq!(engine.full_snapshot().current_key, Some(k[0].clone()));
+    let mut sorted = keys(&mut engine);
+    sorted.sort();
+    let mut before = k.clone();
+    before.sort();
+    assert_eq!(sorted, before);
+}
+
+#[test]
+fn removing_a_selection_with_the_playing_entry_moves_on_to_one_that_stays() {
+    let names = ["a.flac", "b.flac", "c.flac", "d.flac"];
+    let fixture = Fixture::new(&names);
+    let (mut engine, now) = started(&fixture, &names, None);
+    let k = keys(&mut engine);
+    let commands = engine.handle_intent(Intent::PlayEntry { key: k[1].clone() }, now);
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    // B is playing; removing B and C plays D (not C first).
+    let commands = engine.handle_intent(
+        Intent::RemoveEntries {
+            keys: vec![k[2].clone(), k[1].clone()],
+        },
+        now,
+    );
+    let loads_sent: Vec<_> = commands
+        .iter()
+        .filter_map(|c| match c {
+            PlaybackCommand::Load { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loads_sent,
+        [PlaybackTarget::File(fixture.root.join("d.flac"))]
+    );
+    assert_eq!(titles(&mut engine), ["A.FLAC", "D.FLAC"]);
+    assert_eq!(engine.full_snapshot().current_key, Some(k[3].clone()));
+}
+
+#[test]
+fn play_next_entries_moves_them_after_the_current_one() {
+    let names = ["a.flac", "b.flac", "c.flac", "d.flac"];
+    let fixture = Fixture::new(&names);
+    let (mut engine, now) = started(&fixture, &names, Some(1));
+    let k = keys(&mut engine);
+    engine.handle_intent(
+        Intent::PlayNextEntries {
+            keys: vec![k[3].clone(), k[0].clone(), k[1].clone()],
+        },
+        now,
+    );
+    // The current entry (B) stays; A and D follow it in queue order.
+    assert_eq!(
+        titles(&mut engine),
+        ["B.FLAC", "A.FLAC", "D.FLAC", "C.FLAC"]
+    );
+    let notices = engine.full_snapshot().notices;
+    assert!(
+        notices.iter().any(|n| n.text == "Playing next: 2 tracks"),
+        "{notices:?}"
+    );
+}
+
+#[test]
+fn shuffle_upcoming_keeps_the_current_entry_and_earlier_ones() {
+    let names: Vec<String> = (0..12).map(|i| format!("{i:02}.flac")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let fixture = Fixture::new(&refs);
+    let (mut engine, now) = started(&fixture, &refs, Some(2));
+    let before = titles(&mut engine);
+    engine.handle_intent(Intent::ShuffleUpcoming, now);
+    let after = titles(&mut engine);
+    assert_eq!(after[..3], before[..3]);
+    let mut a = after[3..].to_vec();
+    let mut b = before[3..].to_vec();
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+    assert!(
+        engine
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text == "Shuffled 9 upcoming entries")
+    );
+}
+
+#[test]
+fn queue_songs_lists_navidrome_tracks_in_order_and_counts_local_ones() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], None);
+    engine.handle_intent(
+        Intent::Enqueue {
+            tracks: vec![remote_ref("s2"), remote_ref("s1")],
+            next: false,
+        },
+        now,
+    );
+    assert_eq!(engine.queue_songs(), (vec!["s2".into(), "s1".into()], 1));
+}
+
+#[test]
+fn queue_edit_intents_are_ignored_until_started() {
+    let mut engine = engine();
+    let now = Instant::now();
+    for intent in [
+        Intent::MoveEntries {
+            keys: vec!["q1".into()],
+            to: 0,
+        },
+        Intent::RemoveEntries {
+            keys: vec!["q1".into()],
+        },
+        Intent::PlayNextEntries {
+            keys: vec!["q1".into()],
+        },
+        Intent::ShuffleUpcoming,
+    ] {
+        assert!(engine.handle_intent(intent, now).is_empty());
+    }
+    assert!(engine.full_snapshot().notices.is_empty());
+}
+
+#[test]
+fn queue_edit_intents_deserialize_from_the_ui() {
+    let intent: Intent = serde_json::from_value(
+        serde_json::json!({ "type": "moveEntries", "keys": ["q1", "q2"], "to": 3 }),
+    )
+    .unwrap();
+    assert!(matches!(intent, Intent::MoveEntries { ref keys, to: 3 } if keys.len() == 2));
+    for (json, ok) in [
+        (
+            serde_json::json!({ "type": "removeEntries", "keys": ["q1"] }),
+            true,
+        ),
+        (
+            serde_json::json!({ "type": "playNextEntries", "keys": [] }),
+            true,
+        ),
+        (serde_json::json!({ "type": "shuffleUpcoming" }), true),
+        (
+            serde_json::json!({ "type": "moveEntries", "keys": ["q1"], "to": -1 }),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<Intent>(json.clone()).is_ok(),
+            ok,
+            "{json}"
+        );
+    }
+}
