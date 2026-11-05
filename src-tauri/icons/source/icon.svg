@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Coda App icon source: the musical coda sign in the accent amber on a
+       dark rounded square (macOS grid: 824px tile, 100px margin).
+       Regenerate the set with `pnpm tauri icon src-tauri/icons/source/icon.svg`. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22242a"/>
+      <stop offset="1" stop-color="#0f1012"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g fill="none" stroke="#f0a83a" stroke-linecap="round">
+    <ellipse cx="512" cy="512" rx="170" ry="205" stroke-width="56"/>
+    <line x1="512" y1="235" x2="512" y2="789" stroke-width="40"/>
+    <line x1="268" y1="512" x2="756" y2="512" stroke-width="40"/>
+  </g>
+</svg>

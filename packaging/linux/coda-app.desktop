@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Coda
+GenericName=Music Player
+Comment=A music player for local files and Navidrome
+Exec=coda-app
+Icon=coda-app
+Terminal=false
+StartupWMClass=coda-app
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;navidrome;subsonic;mpv;
