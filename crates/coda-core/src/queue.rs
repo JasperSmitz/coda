@@ -257,6 +257,41 @@ impl Queue {
         }
     }
 
+    /// Moves the entries `ids` (unknown ones are ignored; duplicates count
+    /// once) as one block, in their queue order, to the gap `to`: the
+    /// place before the entry now at index `to` (`len` = the end), as a
+    /// drop between two rows names it. Returns `false` (and changes
+    /// nothing) if no known entry is given or the order stays the same.
+    /// `current` keeps pointing at the same entry.
+    pub fn move_entries(&mut self, ids: &[QueueEntryId], to: usize) -> bool {
+        let to = to.min(self.entries.len());
+        let ids: std::collections::HashSet<QueueEntryId> = ids.iter().copied().collect();
+        let moving: Vec<bool> = self.entries.iter().map(|e| ids.contains(&e.id)).collect();
+        if !moving.contains(&true) {
+            return false;
+        }
+        // The gap, counted among the entries that stay.
+        let at = moving[..to].iter().filter(|m| !**m).count();
+        let old: Vec<QueueEntryId> = self.entries.iter().map(|e| e.id).collect();
+        let (mut block, mut rest) = (Vec::new(), Vec::new());
+        for (entry, moved) in self.entries.drain(..).zip(moving) {
+            if moved {
+                block.push(entry);
+            } else {
+                rest.push(entry);
+            }
+        }
+        let tail = rest.split_off(at);
+        rest.extend(block);
+        rest.extend(tail);
+        self.entries = rest;
+        let same = self.entries.iter().map(|e| e.id).eq(old.iter().copied());
+        if !same {
+            self.changed();
+        }
+        !same
+    }
+
     /// Removes every entry. Ids are never reused afterwards.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -478,6 +513,58 @@ mod tests {
         assert!(!q.move_up(c), "unknown id");
         assert!(!q.move_down(c));
         assert_eq!(titles(&q), ["B*", "A"]);
+    }
+
+    #[test]
+    fn move_entries_moves_a_block_to_a_gap() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        let b = q.append(t("B"));
+        let c = q.append(t("C"));
+        let d = q.append(t("D"));
+        q.set_current(b);
+        let rev = q.revision();
+        // One entry down: the gap after C (index 3).
+        assert!(q.move_entries(&[a], 3));
+        assert_eq!(titles(&q), ["B*", "C", "A", "D"]);
+        assert!(q.revision() > rev);
+        // To the end.
+        assert!(q.move_entries(&[b], 4));
+        assert_eq!(titles(&q), ["C", "A", "D", "B*"]);
+        assert_eq!(q.current(), Some(b));
+        // To the start; a gap past the end is the end.
+        assert!(q.move_entries(&[b], 0));
+        assert_eq!(titles(&q), ["B*", "C", "A", "D"]);
+        assert!(q.move_entries(&[c], 99));
+        assert_eq!(titles(&q), ["B*", "A", "D", "C"]);
+        // A non-contiguous selection becomes one block in queue order,
+        // whatever order the ids were given in.
+        assert!(q.move_entries(&[c, a, c], 1));
+        assert_eq!(titles(&q), ["B*", "A", "C", "D"]);
+        assert!(q.move_entries(&[d, b], 2));
+        assert_eq!(titles(&q), ["A", "B*", "D", "C"]);
+        let _ = d;
+    }
+
+    #[test]
+    fn move_entries_without_a_change_does_nothing() {
+        let mut q = Queue::new();
+        let a = q.append(t("A"));
+        let b = q.append(t("B"));
+        let c = q.append(t("C"));
+        let rev = q.revision();
+        // Gaps around the entry itself leave it where it is.
+        assert!(!q.move_entries(&[b], 1));
+        assert!(!q.move_entries(&[b], 2));
+        assert!(!q.move_entries(&[a, b], 0));
+        assert!(!q.move_entries(&[a, b, c], 3));
+        assert!(!q.move_entries(&[], 0));
+        q.remove(c);
+        let rev2 = q.revision();
+        assert!(rev2 > rev);
+        assert!(!q.move_entries(&[c], 0), "unknown id");
+        assert_eq!(q.revision(), rev2);
+        assert_eq!(titles(&q), ["A", "B"]);
     }
 
     #[test]

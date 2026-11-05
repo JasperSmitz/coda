@@ -36,7 +36,7 @@ pub struct AlbumDto {
 
 /// Navidrome's warning data for a playlist whose server count and served
 /// entries differ (`coda_core::navidrome::Hidden`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum HiddenDto {
     None,
@@ -60,6 +60,11 @@ pub struct PlaylistDto {
     pub owner: Option<String>,
     /// Navidrome: the server marks it read-only (another user's, smart).
     pub readonly: bool,
+    /// Navidrome: the connected user may change it
+    /// (`Access::editable_by`). Always `false` for local playlists.
+    pub editable: bool,
+    /// Navidrome: why it cannot be changed (Coda's `read_only_reason`).
+    pub read_only_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1,18 +1,40 @@
 // Playlists of a source (local `.m3u` files or the server's), and one
-// playlist's tracks in order, duplicates kept.
+// playlist's tracks in order, duplicates kept. Navidrome playlists the
+// user owns can be created, renamed and deleted here, and their tracks
+// removed and reordered (M3, `lib/playlists.ts`); read-only ones show
+// why instead.
 
 import { useRef, useState, type KeyboardEvent } from "react";
+import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
+import { PlaylistTracks } from "../components/PlaylistTracks";
 import { TrackTable } from "../components/TrackTable";
-import { AlertIcon } from "../components/icons";
+import { AlertIcon, MoreIcon } from "../components/icons";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { playTracks, useShuffleContext } from "../lib/play";
+import {
+  createPlaylistFlow,
+  deletePlaylistFlow,
+  renamePlaylistFlow,
+  useEditsRunning,
+  usePlaylistsVersion,
+} from "../lib/playlists";
 import type { Playlist, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useAppState } from "../state/store";
 import { PlayButtons, ScanLine, SOURCE_LABEL, summary, ViewHeader, plural } from "./common";
+
+/** Shown instead of index-based edits when not every entry could be read (Coda's). */
+const INCOMPLETE = "This playlist has entries Coda cannot show; edit it in Navidrome";
+
+/** Playlist edits are possible (started; edits wait for each other in the backend). */
+function useCanEdit(): boolean {
+  const { snapshot } = useAppState();
+  return snapshot?.phase === "ready" && snapshot.navidrome.state !== "notConfigured";
+}
 
 function openPlaylist(source: SourceKind, playlist: Playlist) {
   nav.push({ kind: "playlist", source, id: playlist.id, name: playlist.name, hint: playlist });
@@ -20,11 +42,22 @@ function openPlaylist(source: SourceKind, playlist: Playlist) {
 
 export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceKind }) {
   const version = useLibraryVersion();
-  const load = useLoad(() => browse.playlists(source), source, source === "local" ? version : null);
+  const edits = usePlaylistsVersion();
+  const load = useLoad(() => browse.playlists(source), source, source === "local" ? version : edits);
   const scroller = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const playlists = load.data ?? [];
   useScroll(scroller, entry, playlists.length > 0);
   const [selected, setSelected] = useState<number | null>(null);
+  const [menu, setMenu] = useState<(MenuState & { playlist: Playlist }) | null>(null);
+  const canEdit = useCanEdit() && source === "navidrome";
+
+  const rename = (playlist: Playlist) => {
+    if (canEdit && playlist.editable) void renamePlaylistFlow(playlist);
+  };
+  const remove = (playlist: Playlist) => {
+    if (canEdit && playlist.editable) void deletePlaylistFlow(playlist);
+  };
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (playlists.length === 0) return;
@@ -38,6 +71,20 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
       openPlaylist(source, playlists[selected]);
       e.preventDefault();
       return;
+    } else if (e.key === "F2" && selected !== null) {
+      rename(playlists[selected]);
+      e.preventDefault();
+      return;
+    } else if ((e.key === "Delete" || (e.key === "Backspace" && e.metaKey)) && selected !== null) {
+      remove(playlists[selected]);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    } else if (e.key === "ContextMenu" && selected !== null && canEdit) {
+      const row = document.getElementById(`playlist-${selected}`)?.getBoundingClientRect();
+      setMenu({ x: (row?.left ?? 0) + 40, y: row?.bottom ?? 0, key: playlists[selected].id, playlist: playlists[selected] });
+      e.preventDefault();
+      return;
     } else return;
     e.preventDefault();
     e.stopPropagation();
@@ -48,7 +95,17 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
 
   return (
     <section className="view">
-      <ViewHeader eyebrow={SOURCE_LABEL[source]} title="Playlists">
+      <ViewHeader
+        eyebrow={SOURCE_LABEL[source]}
+        title="Playlists"
+        actions={
+          canEdit && (
+            <button className="button" onClick={() => void createPlaylistFlow()}>
+              New playlist…
+            </button>
+          )
+        }
+      >
         {load.state === "ready" && (
           <div className="secondary">{plural(playlists.length, "playlist")}</div>
         )}
@@ -67,6 +124,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
         {playlists.length > 0 && (
           <div
             className="playlist-list"
+            ref={list}
             role="listbox"
             aria-label="Playlists"
             tabIndex={0}
@@ -84,6 +142,11 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
                   setSelected(index);
                   openPlaylist(source, playlist);
                 }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSelected(index);
+                  if (canEdit) setMenu({ x: e.clientX, y: e.clientY, key: playlist.id, playlist });
+                }}
               >
                 <Cover
                   url={playlist.coverUrl}
@@ -95,12 +158,48 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
                 <span className="secondary">
                   {summary(playlist.trackCount, playlist.durationMs)}
                 </span>
-                {playlist.readonly && <span className="tag">Read-only</span>}
+                {source === "navidrome" && !playlist.editable ? (
+                  <span className="tag" title={playlist.readOnlyReason ?? undefined}>
+                    Read-only
+                  </span>
+                ) : (
+                  playlist.readonly && <span className="tag">Read-only</span>
+                )}
+                {canEdit && playlist.editable && (
+                  <button
+                    className="icon-button playlist-more"
+                    tabIndex={-1}
+                    aria-label={`More for ${playlist.name}`}
+                    title="More"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setSelected(index);
+                      setMenu({ x: rect.left, y: rect.bottom, key: playlist.id, playlist });
+                    }}
+                  >
+                    <MoreIcon size={16} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
+      {menu && (
+        <ContextMenu
+          state={menu}
+          onClose={() => {
+            setMenu(null);
+            list.current?.focus();
+          }}
+          items={[
+            { label: "Open", action: () => openPlaylist(source, menu.playlist) },
+            { label: "Rename…", disabled: !menu.playlist.editable, action: () => rename(menu.playlist) },
+            { label: "Delete…", disabled: !menu.playlist.editable, action: () => remove(menu.playlist) },
+          ]}
+        />
+      )}
     </section>
   );
 }
@@ -115,18 +214,45 @@ interface PlaylistProps {
 
 export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const version = useLibraryVersion();
+  const edits = usePlaylistsVersion();
   const load = useLoad(
     () => browse.playlist(source, id),
     `${source}:${id}`,
-    source === "local" ? version : null,
+    source === "local" ? version : edits,
   );
+  const canEdit = useCanEdit() && source === "navidrome";
+  const busy = useEditsRunning() > 0;
+  // A rename shows at once; the listing's name is the fallback.
+  const [renamed, setRenamed] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const detail = load.data;
   const tracks = detail?.tracks ?? [];
   useScroll(scroller, entry, tracks.length > 0);
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true) : null);
 
-  const title = detail?.playlist.name || hint?.name || name;
+  const title = renamed ?? (detail?.playlist.name || hint?.name || name);
+  // The detail has no name (`getPlaylist` sends none here): use the shown one.
+  const playlist: Playlist | null = detail ? { ...detail.playlist, name: title } : null;
+  const editable = canEdit && playlist !== null && playlist.editable;
+  const complete = detail !== undefined && detail.missing === 0 && detail.truncated === null;
+  const readOnly =
+    source === "navidrome" && detail && !detail.playlist.editable
+      ? detail.playlist.readOnlyReason
+      : null;
+
+  const rename = async () => {
+    if (!playlist) return;
+    const outcome = await renamePlaylistFlow(playlist);
+    if (outcome?.status === "done") {
+      const next = await browse.playlists("navidrome").catch(() => null);
+      setRenamed(next?.find((p) => p.id === id)?.name ?? null);
+    }
+  };
+  const remove = async () => {
+    if (!playlist) return;
+    const outcome = await deletePlaylistFlow(playlist);
+    if (outcome?.status === "done") nav.back();
+  };
   const cover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? tracks[0]?.coverUrl ?? null;
   return (
     <section className="view">
@@ -142,11 +268,23 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
           />
         }
         actions={
-          <PlayButtons
-            onPlay={() => playTracks(tracks)}
-            onShuffle={() => playTracks(tracks, undefined, true)}
-            disabled={tracks.length === 0}
-          />
+          <>
+            <PlayButtons
+              onPlay={() => playTracks(tracks)}
+              onShuffle={() => playTracks(tracks, undefined, true)}
+              disabled={tracks.length === 0}
+            />
+            {editable && (
+              <div className="play-buttons">
+                <button className="button" onClick={() => void rename()} disabled={busy}>
+                  Rename…
+                </button>
+                <button className="button" onClick={() => void remove()} disabled={busy}>
+                  Delete…
+                </button>
+              </div>
+            )}
+          </>
         }
       >
         <div className="album-meta">
@@ -168,17 +306,44 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
             <span>{detail.warning}</span>
           </div>
         )}
+        {readOnly && (
+          <div className="inline-note secondary" role="note">
+            {readOnly}
+          </div>
+        )}
+        {editable && !complete && tracks.length > 0 && (
+          <div className="inline-note secondary" role="note">
+            {INCOMPLETE}
+          </div>
+        )}
+        {editable && complete && tracks.length > 0 && (
+          <div className="inline-note secondary" role="note">
+            {busy
+              ? "Saving…"
+              : "Drag tracks (or Alt+↑/↓) to reorder; Delete removes the selection. Changes are saved at once."}
+          </div>
+        )}
         {load.state === "loading" && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && tracks.length === 0 && <Empty title="This playlist is empty" />}
-        {tracks.length > 0 && (
-          <TrackTable
+        {tracks.length > 0 && editable && complete && playlist && detail ? (
+          <PlaylistTracks
+            playlist={playlist}
             tracks={tracks}
+            hidden={detail.hidden}
             scroller={scroller}
-            showAlbum
-            showArtist
             label={`Tracks of ${title}`}
           />
+        ) : (
+          tracks.length > 0 && (
+            <TrackTable
+              tracks={tracks}
+              scroller={scroller}
+              showAlbum
+              showArtist
+              label={`Tracks of ${title}`}
+            />
+          )
         )}
       </div>
     </section>

@@ -226,6 +226,8 @@ fn playlist_dto(view: &LocalView<'_>, id: PlaylistId, covers: &CoverService) -> 
         cover_url: first_track_cover(view.library, &playlist.tracks, covers),
         owner: None,
         readonly: false,
+        editable: false,
+        read_only_reason: None,
     }
 }
 

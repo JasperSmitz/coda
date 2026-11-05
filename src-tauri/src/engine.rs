@@ -70,6 +70,8 @@ enum Msg {
     Shutdown(oneshot::Sender<()>),
     /// A saved settings change to apply live (see [`settings`]).
     Settings(SettingsChange, oneshot::Sender<Result<(), String>>),
+    /// The playlist editor's requests (see [`playlists`]).
+    Playlist(PlaylistMsg),
 }
 
 /// The way in: cheap to clone, used by Tauri commands and the exit hook.
@@ -373,6 +375,10 @@ impl Engine {
                 Vec::new()
             }
             Intent::ShuffleLibrary => self.shuffle_library(now),
+            Intent::MoveEntries { keys, to } => self.move_entries(&keys, to),
+            Intent::RemoveEntries { keys } => self.remove_entries(&keys),
+            Intent::PlayNextEntries { keys } => self.play_next_entries(&keys, now),
+            Intent::ShuffleUpcoming => self.shuffle_upcoming(now),
             Intent::SetVisualizerVisible { .. } | Intent::DismissNotice { .. } => Vec::new(),
         };
         let mut commands = self.dispatch(commands, now);
@@ -1324,6 +1330,7 @@ where
                     }
                     apply_settings_io(&mut engine, &mut io);
                 }
+                Some(Msg::Playlist(msg)) => engine.handle_playlist_msg(msg, Instant::now()),
                 None => break None,
             },
             event = next_playback(&mut io.playback), if io.playback.is_some() => match event {
@@ -1431,7 +1438,10 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
     }
 }
 
+mod playlists;
+mod queue_edit;
 mod settings;
+pub use playlists::PlaylistMsg;
 pub use settings::SettingsChange;
 use settings::{ClientChange, apply_settings_io};
 

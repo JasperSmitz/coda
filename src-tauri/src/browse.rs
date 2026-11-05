@@ -143,7 +143,7 @@ impl BrowseHandle {
     }
 
     /// The current client and its generation.
-    fn client(&self) -> Result<(Client, u64), BrowseError> {
+    pub(crate) fn client(&self) -> Result<(Client, u64), BrowseError> {
         let remote = self.0.remote.read().unwrap_or_else(|e| e.into_inner());
         match &remote.client {
             Some(client) => Ok((client.clone(), remote.generation)),

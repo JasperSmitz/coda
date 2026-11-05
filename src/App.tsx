@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
+import { DialogHost } from "./components/Dialog";
 import { NowPlayingBar } from "./components/NowPlayingBar";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
@@ -145,6 +146,7 @@ export default function App() {
           status={snapshot.status}
           disabled={!ready}
           locked={!started}
+          serverConfigured={snapshot.navidrome.state !== "notConfigured"}
         />
       )}
       {snapshot && (
@@ -157,6 +159,7 @@ export default function App() {
         />
       )}
       {snapshot && <Toasts notices={snapshot.notices} />}
+      <DialogHost />
     </div>
   );
 }

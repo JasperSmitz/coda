@@ -12,6 +12,7 @@ pub mod cover;
 pub mod dto;
 pub mod engine;
 pub mod media;
+pub mod playlists;
 pub mod settings;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +76,10 @@ fn begin_quit(app: &AppHandle) {
         // A settings save in progress finishes first (keychain, then
         // config), bounded.
         app.state::<settings::SettingsLock>().finish().await;
+        // A running playlist edit answers first (bounded), like the TUI.
+        app.state::<playlists::PlaylistEditor>()
+            .finish(playlists::EDIT_GRACE)
+            .await;
         engine.shutdown().await;
         tracing::info!("coda-app quitting");
         app.state::<Quit>().done.store(true, Ordering::SeqCst);
@@ -192,6 +197,7 @@ pub fn run() {
             app.manage(engine);
             app.manage(browse);
             app.manage(settings::SettingsLock::default());
+            app.manage(playlists::PlaylistEditor::default());
             app.manage(Quit::default());
             watch_signals(app.handle().clone());
             Ok(())
@@ -219,6 +225,13 @@ pub fn run() {
             browse::commands::navidrome_playlist,
             browse::commands::navidrome_random_songs,
             browse::commands::navidrome_search,
+            playlists::commands::playlist_create,
+            playlists::commands::playlist_save_queue,
+            playlists::commands::playlist_add,
+            playlists::commands::playlist_rename,
+            playlists::commands::playlist_delete,
+            playlists::commands::playlist_remove,
+            playlists::commands::playlist_reorder,
             settings::settings_get,
             settings::settings_test_server,
             settings::settings_save_server,

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse) and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
+  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse, Navidrome playlist edits) and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
   "windows": ["main"],
   "permissions": [
     "allow-intent",
@@ -33,6 +33,13 @@
     "allow-navidrome-playlist",
     "allow-navidrome-random-songs",
     "allow-navidrome-search",
+    "allow-playlist-create",
+    "allow-playlist-save-queue",
+    "allow-playlist-add",
+    "allow-playlist-rename",
+    "allow-playlist-delete",
+    "allow-playlist-remove",
+    "allow-playlist-reorder",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

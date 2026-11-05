@@ -32,6 +32,14 @@ fn main() {
         "navidrome_playlist",
         "navidrome_random_songs",
         "navidrome_search",
+        // Navidrome playlist edits.
+        "playlist_create",
+        "playlist_save_queue",
+        "playlist_add",
+        "playlist_rename",
+        "playlist_delete",
+        "playlist_remove",
+        "playlist_reorder",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

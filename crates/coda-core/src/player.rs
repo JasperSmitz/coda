@@ -598,6 +598,13 @@ impl Player {
         self.queue.move_down(id)
     }
 
+    /// Moves entries as one block to a gap (see [`Queue::move_entries`]).
+    /// Never changes `current` or playback; the caller re-syncs the
+    /// gapless next (`resolve::dispatch`).
+    pub fn move_entries(&mut self, ids: &[QueueEntryId], to: usize) -> bool {
+        self.queue.move_entries(ids, to)
+    }
+
     /// Shuffles the entries after the current one (all entries without a
     /// current one). Never changes `current` or playback. Returns the
     /// number of entries shuffled.
