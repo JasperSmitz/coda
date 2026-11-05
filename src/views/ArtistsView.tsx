@@ -32,7 +32,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   const scrollTop = useScroll(scroller, entry, artists.length > 0);
   const { height } = useElementSize(scroller);
   const [selected, setSelected] = useState<number | null>(null);
-  useShuffleContext(() => void shuffleAll(source));
+  useShuffleContext(() => shuffleAll(source));
 
   const letters = useMemo(() => {
     const first = new Map<string, number>();
@@ -99,7 +99,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
       <ViewHeader
         eyebrow={SOURCE_LABEL[source]}
         title="Artists"
-        actions={<PlayButtons onShuffle={() => void shuffleAll(source)} />}
+        actions={<PlayButtons onShuffle={() => shuffleAll(source)} />}
       >
         {load.state === "ready" && (
           <div className="secondary">{plural(artists.length, "artist")}</div>

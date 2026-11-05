@@ -1,7 +1,7 @@
 // Playlists of a source (local `.m3u` files or the server's), and one
 // playlist's tracks in order, duplicates kept.
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
 import { TrackTable } from "../components/TrackTable";
@@ -24,6 +24,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
   const scroller = useRef<HTMLDivElement>(null);
   const playlists = load.data ?? [];
   useScroll(scroller, entry, playlists.length > 0);
+  const idPrefix = useId();
   const [selected, setSelected] = useState<number | null>(null);
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -43,7 +44,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
     e.stopPropagation();
     const index = Math.min(playlists.length - 1, Math.max(0, to));
     setSelected(index);
-    document.getElementById(`playlist-${index}`)?.scrollIntoView({ block: "nearest" });
+    document.getElementById(`${idPrefix}-${index}`)?.scrollIntoView({ block: "nearest" });
   };
 
   return (
@@ -70,13 +71,13 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
             role="listbox"
             aria-label="Playlists"
             tabIndex={0}
-            aria-activedescendant={selected !== null ? `playlist-${selected}` : undefined}
+            aria-activedescendant={selected !== null ? `${idPrefix}-${selected}` : undefined}
             onKeyDown={onKeyDown}
           >
             {playlists.map((playlist, index) => (
               <div
                 key={playlist.id}
-                id={`playlist-${index}`}
+                id={`${idPrefix}-${index}`}
                 role="option"
                 aria-selected={selected === index}
                 className={`playlist-row ${selected === index ? "is-selected" : ""}`}

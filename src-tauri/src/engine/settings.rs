@@ -160,7 +160,7 @@ impl Engine {
         self.problems
             .retain(|p| !matches!(p.kind, ProblemKind::NoConfig | ProblemKind::Config));
         // A new library generation: ids handed out before are stale.
-        self.browse.replace_library(Some(Library::new(dir.clone())));
+        self.replace_library(Some(dir.clone()), now);
         // Queued local tracks are named by ids of the new library.
         self.sent_queue = None;
         self.scan = ScanState::Scanning;

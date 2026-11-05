@@ -5,9 +5,12 @@
 //! read-only view the engine keeps current.
 //!
 //! - **Local:** the engine owns the [`Library`] inside the handle and is
-//!   its only writer (scan batches, a short write lock each). Commands
-//!   read it on a blocking thread, so a long read (a search, a 5,000-album
-//!   list) never runs on the engine task. Every replacement of the library
+//!   its only writer. It never waits for the lock: it writes with
+//!   [`BrowseHandle::try_write_local`] and keeps a change for later while a
+//!   browse read holds the lock (see `engine/library.rs`). Commands read
+//!   it on a blocking thread, so a long read (a search, a 5,000-album
+//!   list) never runs on the engine task, and the engine's own reads never
+//!   wait either (no writer ever waits). Every replacement of the library
 //!   bumps its *generation*; local ids carry it (`"<generation>:<n>"`), so
 //!   an id from an older library is rejected as stale instead of naming
 //!   another item.
@@ -53,12 +56,32 @@ struct Shared {
     local: RwLock<LocalState>,
     remote: RwLock<RemoteState>,
     fetches: Semaphore,
+    /// Album fetches of one artist play-all (within `fetches`).
+    play_fetches: Semaphore,
     covers: Arc<CoverService>,
 }
 
 /// The shared browse state; see the module docs. Cheap to clone.
 #[derive(Clone)]
 pub struct BrowseHandle(Arc<Shared>);
+
+/// Write access to the local library (see [`BrowseHandle::try_write_local`]).
+pub struct LocalWriter<'a>(std::sync::RwLockWriteGuard<'a, LocalState>);
+
+impl LocalWriter<'_> {
+    /// Replaces the library (a new music folder or a rescan) and bumps the
+    /// generation, so ids handed out before are stale.
+    pub fn replace(&mut self, library: Option<Library>) {
+        self.0.generation += 1;
+        self.0.library = library;
+    }
+
+    /// The library to change in place (scan results). Ids stay valid: the
+    /// library only grows.
+    pub fn library_mut(&mut self) -> Option<&mut Library> {
+        self.0.library.as_mut()
+    }
+}
 
 /// A read view of the local library at one generation.
 pub struct LocalView<'a> {
@@ -72,6 +95,7 @@ impl BrowseHandle {
             local: RwLock::new(LocalState::default()),
             remote: RwLock::new(RemoteState::default()),
             fetches: Semaphore::new(MAX_CONCURRENT_FETCHES),
+            play_fetches: Semaphore::new(coda_core::navidrome::browse::MAX_JOB_FETCHES),
             covers,
         }))
     }
@@ -82,19 +106,21 @@ impl BrowseHandle {
 
     // ----- the engine's side --------------------------------------------
 
-    /// Replaces the library (a new music folder or a rescan) and bumps the
-    /// generation, so ids handed out before are stale.
+    /// Replaces the library and bumps the generation, waiting for the
+    /// lock. For tests and setup; the engine uses [`Self::try_write_local`].
     pub fn replace_library(&self, library: Option<Library>) {
-        let mut local = self.0.local.write().unwrap_or_else(|e| e.into_inner());
-        local.generation += 1;
-        local.library = library;
+        let local = self.0.local.write().unwrap_or_else(|e| e.into_inner());
+        LocalWriter(local).replace(library);
     }
 
-    /// Changes the library in place (scan results). Ids stay valid: the
-    /// library only grows. `None` without a library.
-    pub fn update_library<R>(&self, f: impl FnOnce(&mut Library) -> R) -> Option<R> {
-        let mut local = self.0.local.write().unwrap_or_else(|e| e.into_inner());
-        local.library.as_mut().map(f)
+    /// The library for writing, unless a reader holds it right now (then
+    /// `None` at once: the engine never waits on browse work).
+    pub fn try_write_local(&self) -> Option<LocalWriter<'_>> {
+        match self.0.local.try_write() {
+            Ok(guard) => Some(LocalWriter(guard)),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(LocalWriter(e.into_inner())),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     }
 
     /// Reads the library (`None` without one). Keep it short on the engine
@@ -189,7 +215,24 @@ impl BrowseHandle {
     }
 }
 
-// ----- ids ----------------------------------------------------------------
+// ----- ids and input bounds -------------------------------------------------
+
+/// Longest id or search query taken from the UI (ids: as the server's
+/// are bounded; queries: a pasted wall of text is not a search).
+pub const MAX_INPUT_CHARS: usize = 256;
+
+/// A Navidrome id from the UI: non-empty and bounded.
+pub fn check_id(id: &str) -> Result<(), BrowseError> {
+    if id.is_empty() || id.chars().count() > MAX_INPUT_CHARS {
+        return Err(BrowseError::not_found("Item"));
+    }
+    Ok(())
+}
+
+/// A search query, trimmed and cut at [`MAX_INPUT_CHARS`].
+pub fn cap_query(query: &str) -> String {
+    query.trim().chars().take(MAX_INPUT_CHARS).collect()
+}
 
 /// A local id: `"<generation>:<n>"`.
 pub fn local_id(generation: u64, n: u32) -> String {

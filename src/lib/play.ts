@@ -3,9 +3,33 @@
 
 import { useEffect, useRef } from "react";
 import { nav } from "../state/nav";
-import { browse } from "./browse";
+import { showUiNotice } from "../state/uiNotices";
+import { browse, clearBrowseCache, toBrowseError } from "./browse";
 import { intent } from "./ipc";
-import type { SourceKind, Track } from "./types";
+import type { LocalContext, SourceKind, Track } from "./types";
+
+/**
+ * Runs a play action that first loads from the library or server, and
+ * tells the user when that fails. A stale answer (the library or server
+ * changed) reloads the shown view.
+ */
+export function playFrom(action: () => Promise<void>) {
+  action().catch((error: unknown) => {
+    const e = toBrowseError(error);
+    if (e.kind === "stale") {
+      clearBrowseCache();
+      nav.reload();
+      showUiNotice("The library changed; the view was reloaded");
+    } else {
+      showUiNotice(`Could not play: ${e.message}`);
+    }
+  });
+}
+
+/** A local folder or artist, resolved and played by the engine. */
+export function playLocal(context: LocalContext, shuffle: boolean, start?: number) {
+  intent({ type: "playLocal", context, start: start ?? null, shuffle });
+}
 
 export function playTracks(tracks: Track[], start?: number, shuffle = false) {
   if (tracks.length === 0) return;
@@ -18,13 +42,13 @@ export function enqueue(tracks: Track[], next: boolean) {
 }
 
 /** "Shuffle all": the whole local library, or fresh random songs. */
-export async function shuffleAll(source: SourceKind): Promise<void> {
+export function shuffleAll(source: SourceKind) {
   if (source === "local") {
     intent({ type: "shuffleLibrary" });
     return;
   }
   // Already random, in served order (as in Coda).
-  playTracks(await browse.randomSongs());
+  playFrom(async () => playTracks(await browse.randomSongs()));
 }
 
 export function sourceOf(track: Track): SourceKind {

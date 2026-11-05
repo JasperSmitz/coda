@@ -183,6 +183,10 @@ pub struct Engine {
     scrobble_setting: bool,
     client_change: Option<ClientChange>,
     rescan: Option<PathBuf>,
+    /// The library's folder, and changes waiting for the library lock
+    /// (`engine/library.rs`).
+    music_dir: Option<PathBuf>,
+    library_ops: Vec<library::LibraryOp>,
 }
 
 impl Engine {
@@ -229,6 +233,8 @@ impl Engine {
             scrobble_setting: false,
             client_change: None,
             rescan: None,
+            music_dir: None,
+            library_ops: Vec::new(),
         }
     }
 
@@ -272,7 +278,7 @@ impl Engine {
         self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();
         if let Some(dir) = sources.music_dir {
-            self.browse.replace_library(Some(Library::new(dir)));
+            self.replace_library(Some(dir), now);
             self.scan = ScanState::Scanning;
         }
         if let Some(problem) = playback {
@@ -309,8 +315,7 @@ impl Engine {
 
     /// The music folder to scan, once started.
     pub fn music_dir(&self) -> Option<PathBuf> {
-        self.browse
-            .read_library(|view| view.map(|v| v.library.root_path().to_path_buf()))
+        self.music_dir.clone()
     }
 
     /// The shared browse state this engine keeps current.
@@ -373,6 +378,11 @@ impl Engine {
                 Vec::new()
             }
             Intent::ShuffleLibrary => self.shuffle_library(now),
+            Intent::PlayLocal {
+                context,
+                start,
+                shuffle,
+            } => self.play_local(context, start, shuffle, now),
             Intent::SetVisualizerVisible { .. } | Intent::DismissNotice { .. } => Vec::new(),
         };
         let mut commands = self.dispatch(commands, now);
@@ -745,60 +755,7 @@ impl Engine {
 
     // ----- library scan ------------------------------------------------
 
-    pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
-        // One short write per batch; browse reads wait at most that long.
-        let Some(finished) = self.browse.update_library(|library| match event {
-            ScanEvent::Batch(tracks) => {
-                library.extend(tracks);
-                None
-            }
-            ScanEvent::Playlist(file) => {
-                if library.add_playlist(file).is_none() {
-                    tracing::debug!("playlist over the cap ignored");
-                }
-                None
-            }
-            ScanEvent::Finished {
-                tracks,
-                skipped,
-                errors,
-            } => Some((tracks, skipped, errors, library.playlists().len())),
-        }) else {
-            return;
-        };
-        if let Some((tracks, skipped, errors, playlists)) = finished {
-            tracing::info!(tracks, skipped, errors, "library scan finished");
-            self.scan = ScanState::Finished { skipped, errors };
-            let mut text = format!("Library scan complete: {}", count(tracks, "track"));
-            if playlists > 0 {
-                text.push_str(&format!(", {}", count(playlists, "playlist")));
-            }
-            if skipped > 0 {
-                text.push_str(&format!(", {skipped} skipped"));
-            }
-            if errors > 0 {
-                text.push_str(&format!(", {}", count(errors, "error")));
-            }
-            self.notify(text, now);
-        }
-        self.dirty = true;
-    }
-
-    /// The scan channel closed; without `Finished` first, the scan failed.
-    pub fn scan_closed(&mut self, now: Instant) {
-        if self.scan == ScanState::Scanning {
-            let tracks = self.library_counts().0;
-            tracing::warn!(tracks, "library scan ended without finishing");
-            self.scan = ScanState::Failed;
-            self.notify(
-                format!(
-                    "Library scan failed after {}; see the log",
-                    count(tracks, "track")
-                ),
-                now,
-            );
-        }
-    }
+    // Scan events, scan end and library replacement: `engine/library.rs`.
 
     // ----- notices and timers ------------------------------------------
 
@@ -823,6 +780,7 @@ impl Engine {
 
     /// Expires notices.
     pub fn tick(&mut self, now: Instant) {
+        self.apply_library_ops(now);
         let before = self.notices.len();
         self.notices.retain(|n| n.expires_at > now);
         if self.notices.len() != before {
@@ -1434,6 +1392,9 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
 mod settings;
 pub use settings::SettingsChange;
 use settings::{ClientChange, apply_settings_io};
+
+mod context;
+mod library;
 
 #[cfg(test)]
 mod tests;

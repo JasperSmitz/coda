@@ -112,7 +112,11 @@ export type Intent =
   | { type: "playTracks"; tracks: TrackRef[]; start?: number | null; shuffle?: boolean }
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number }
-  | { type: "shuffleLibrary" };
+  | { type: "shuffleLibrary" }
+  | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean };
+
+/** A local context the engine resolves and plays itself. */
+export type LocalContext = { kind: "folder"; path: string[] } | { kind: "artist"; id: string };
 
 // ----- Browse (src-tauri/src/browse/dto.rs) -----
 

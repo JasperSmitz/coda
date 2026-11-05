@@ -46,6 +46,10 @@ export const nav = {
   replace(route: Route) {
     set([...stack.slice(0, -1), entry(route)]);
   },
+  /** Shows the top route again from scratch (reloads it). */
+  reload() {
+    nav.replace(stack[stack.length - 1].route);
+  },
   /** Back; the root stays. Returns `false` at the root. */
   back(): boolean {
     if (stack.length <= 1) return false;

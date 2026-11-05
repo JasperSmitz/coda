@@ -35,16 +35,6 @@ pub async fn local_artist(browse: State<'_, BrowseHandle>, id: String) -> Result
 }
 
 #[tauri::command]
-pub async fn local_artist_tracks(
-    browse: State<'_, BrowseHandle>,
-    id: String,
-) -> Result<Vec<TrackDto>> {
-    browse
-        .local(move |view, covers| local::artist_tracks(view, &id, covers))
-        .await
-}
-
-#[tauri::command]
 pub async fn local_album(browse: State<'_, BrowseHandle>, id: String) -> Result<AlbumDetailDto> {
     browse
         .local(move |view, covers| local::album(view, &id, covers))
@@ -55,16 +45,6 @@ pub async fn local_album(browse: State<'_, BrowseHandle>, id: String) -> Result<
 pub async fn local_folder(browse: State<'_, BrowseHandle>, path: Vec<String>) -> Result<FolderDto> {
     browse
         .local(move |view, covers| local::folder(view, path, covers))
-        .await
-}
-
-#[tauri::command]
-pub async fn local_folder_tracks(
-    browse: State<'_, BrowseHandle>,
-    path: Vec<String>,
-) -> Result<Vec<TrackDto>> {
-    browse
-        .local(move |view, covers| local::folder_tracks(view, path, covers))
         .await
 }
 

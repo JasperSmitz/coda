@@ -7,6 +7,7 @@
 import {
   memo,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -26,6 +27,39 @@ const ROW = 36;
 const OVERSCAN = 10;
 
 type Row = { kind: "disc"; disc: number } | { kind: "track"; index: number };
+
+/** A track's identity in a list (the same track twice shares it). */
+function trackKey(track: Track | undefined): string | null {
+  if (!track) return null;
+  return track.source.kind === "local"
+    ? `l:${track.source.id ?? track.title}`
+    : `n:${track.source.songId}`;
+}
+
+/** A position held by track identity, so it survives a reload of the list. */
+interface Anchor {
+  index: number;
+  track: string | null;
+}
+
+/**
+ * Where `anchor` is in `tracks` now: the same index if it still holds the
+ * track, else the nearest index that does, else `null`.
+ */
+function resolve(anchor: Anchor | null, tracks: Track[]): number | null {
+  if (!anchor) return null;
+  if (trackKey(tracks[anchor.index]) === anchor.track) return anchor.index;
+  let best: number | null = null;
+  tracks.forEach((t, i) => {
+    if (
+      trackKey(t) === anchor.track &&
+      (best === null || Math.abs(i - anchor.index) < Math.abs(best - anchor.index))
+    ) {
+      best = i;
+    }
+  });
+  return best;
+}
 
 interface Props {
   tracks: Track[];
@@ -75,8 +109,18 @@ export function TrackTable({
   const animated = snapshot?.status === "playing";
   const table = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 800, offset: 0 });
-  const [selected, setSelected] = useState<number | null>(null);
-  const [menu, setMenu] = useState<(MenuState & { index: number }) | null>(null);
+  // Selection and the open menu follow their track when the list reloads
+  // (a scan inserts tracks while a view refreshes quietly).
+  const [selection, setSelection] = useState<Anchor | null>(null);
+  const [menu, setMenu] = useState<(MenuState & Anchor) | null>(null);
+  const selected = resolve(selection, tracks);
+  const menuIndex = resolve(menu, tracks);
+  const setSelected = (index: number | null) =>
+    setSelection(index === null ? null : { index, track: trackKey(tracks[index]) });
+  const openMenu = (index: number, x: number, y: number) =>
+    setMenu({ x, y, key: String(index), index, track: trackKey(tracks[index]) });
+  // DOM ids unique per table (Search shows several).
+  const idPrefix = useId();
   const rows = rowsFor(tracks, discs);
 
   // Follow the scroller to render only the rows in view.
@@ -102,9 +146,10 @@ export function TrackTable({
     if (offset !== view.offset) setView((v) => ({ ...v, offset }));
   });
 
+  // The menu's track left the list: close it.
   useEffect(() => {
-    if (selected !== null && selected >= tracks.length) setSelected(null);
-  }, [selected, tracks.length]);
+    if (menu && menuIndex === null) setMenu(null);
+  }, [menu, menuIndex]);
 
   const play = (index: number) => {
     if (disabled) return;
@@ -158,7 +203,7 @@ export function TrackTable({
         const index = Math.max(0, at);
         const rect = table.current?.getBoundingClientRect();
         const y = (rect?.top ?? 0) + rowOf(index) * ROW + ROW - view.top + view.offset;
-        setMenu({ x: (rect?.left ?? 0) + 40, y, key: String(index), index });
+        openMenu(index, (rect?.left ?? 0) + 40, y);
         break;
       }
       default:
@@ -189,7 +234,7 @@ export function TrackTable({
         role="listbox"
         aria-label={label}
         tabIndex={0}
-        aria-activedescendant={selected !== null ? `track-${selected}` : undefined}
+        aria-activedescendant={selected !== null ? `${idPrefix}-${selected}` : undefined}
         style={{ height: rows.length * ROW }}
         onKeyDown={onKeyDown}
       >
@@ -206,6 +251,7 @@ export function TrackTable({
           return (
             <TrackRow
               key={row.index}
+              id={`${idPrefix}-${row.index}`}
               index={row.index}
               track={track}
               top={top}
@@ -218,19 +264,19 @@ export function TrackTable({
               onPlay={play}
               onMenu={(index, x, y) => {
                 setSelected(index);
-                setMenu({ x, y, key: String(index), index });
+                openMenu(index, x, y);
               }}
             />
           );
         })}
       </div>
-      {menu && tracks[menu.index] && (
+      {menu && menuIndex !== null && (
         <TrackMenu
           state={menu}
-          track={tracks[menu.index]}
+          track={tracks[menuIndex]}
           disabled={disabled}
           locked={locked}
-          onPlay={() => play(menu.index)}
+          onPlay={() => play(menuIndex)}
           onClose={() => {
             setMenu(null);
             table.current?.focus();
@@ -242,6 +288,7 @@ export function TrackTable({
 }
 
 interface RowProps {
+  id: string;
   index: number;
   track: Track;
   top: number;
@@ -256,6 +303,7 @@ interface RowProps {
 }
 
 const TrackRow = memo(function TrackRow({
+  id,
   index,
   track,
   top,
@@ -274,7 +322,7 @@ const TrackRow = memo(function TrackRow({
   if (selected) classes.push("is-selected");
   return (
     <div
-      id={`track-${index}`}
+      id={id}
       className={classes.join(" ")}
       style={{ top }}
       role="option"

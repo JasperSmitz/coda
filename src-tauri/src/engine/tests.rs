@@ -1207,3 +1207,143 @@ fn settings_changes_reach_the_browse_handle_and_bump_its_generations() {
             .any(|n| n.text.starts_with("The library changed"))
     );
 }
+
+#[test]
+fn scan_writes_never_wait_for_a_browse_read() {
+    let fixture = Fixture::new(&["a.flac", "b.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], None);
+    let browse = engine.browse().clone();
+    let (held, release) = (
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+        std::sync::Arc::new(std::sync::Barrier::new(2)),
+    );
+    let reader = {
+        let (held, release) = (held.clone(), release.clone());
+        std::thread::spawn(move || {
+            browse.read_library(|_| {
+                held.wait();
+                release.wait();
+            })
+        })
+    };
+    held.wait();
+    // A long browse read holds the lock: the batch is queued, not waited for.
+    let start = Instant::now();
+    engine.handle_scan_event(ScanEvent::Batch(vec![fixture.track("b.flac")]), now);
+    engine.tick(now);
+    assert!(start.elapsed() < Duration::from_millis(200));
+    assert_eq!(engine.library_ops_pending(), 1);
+    assert_eq!(engine.full_snapshot().scan.tracks, 1, "not applied yet");
+    release.wait();
+    reader.join().unwrap();
+    // The next tick applies it.
+    engine.tick(now);
+    assert_eq!(engine.library_ops_pending(), 0);
+    assert_eq!(engine.full_snapshot().scan.tracks, 2);
+}
+
+#[test]
+fn a_finished_scan_resends_the_queue_with_local_ids() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.start(
+        sources(Some(fixture.root.clone()), None),
+        None,
+        restored(vec![fixture.track("a.flac")], Some(0)),
+        now,
+    );
+    // The restored queue went out before the scan found the file.
+    let first = engine.take_snapshot_event().unwrap();
+    assert_eq!(
+        first.queue.unwrap()[0].track.source,
+        SourceDto::Local { id: None }
+    );
+    engine.handle_scan_event(ScanEvent::Batch(vec![fixture.track("a.flac")]), now);
+    engine.handle_scan_event(
+        ScanEvent::Finished {
+            tracks: 1,
+            skipped: 0,
+            errors: 0,
+        },
+        now,
+    );
+    let after = engine.take_snapshot_event().unwrap();
+    let queue = after.queue.expect("the queue is sent again");
+    assert!(matches!(
+        &queue[0].track.source,
+        SourceDto::Local { id: Some(_) }
+    ));
+    assert!(queue[0].track.album_id.is_some());
+}
+
+#[test]
+fn play_local_resolves_folders_and_artists_in_the_engine() {
+    let names: Vec<String> = (0..6).map(|i| format!("{i}.flac")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let fixture = Fixture::new(&names);
+    let (mut engine, now) = started(&fixture, &names, None);
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Folder { path: vec![] },
+            start: Some(2),
+            shuffle: false,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1);
+    let snapshot = engine.full_snapshot();
+    let queue = snapshot.queue.unwrap();
+    assert_eq!(queue.len(), 6);
+    assert_eq!(snapshot.current_key.as_deref(), Some(queue[2].key.as_str()));
+
+    // Shuffled with a start: that track first.
+    engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Folder { path: vec![] },
+            start: Some(4),
+            shuffle: true,
+        },
+        now,
+    );
+    let queue = engine.full_snapshot().queue.unwrap();
+    assert_eq!(queue.len(), 6);
+    assert_eq!(queue[0].track.title, "4.FLAC");
+
+    // An artist (all tracks are "Unknown artist" here) by its id.
+    let artist = engine.browse().read_library(|view| {
+        let view = view.unwrap();
+        browse::local_id(view.generation, view.library.tags().artists()[0].0)
+    });
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Artist { id: artist.clone() },
+            start: None,
+            shuffle: true,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1);
+    assert_eq!(engine.full_snapshot().queue.unwrap().len(), 6);
+
+    // A stale artist id is refused with a notice; nothing changes.
+    engine
+        .browse()
+        .replace_library(Some(Library::new(fixture.root.clone())));
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Artist { id: artist },
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert!(loads(&commands).is_empty());
+    assert!(
+        engine
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text == "The library changed; reload the view")
+    );
+}

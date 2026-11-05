@@ -452,6 +452,25 @@ impl RawAlbum {
         })
     }
 
+    /// The album itself (`None` without a usable id) and its songs as
+    /// tracks: what an album page needs (the album artist's id, year and
+    /// cover, which the songs' own fields do not give).
+    pub fn into_album_and_tracks(self) -> (Option<Album>, Vec<Track>) {
+        let header = RawAlbum {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            year: self.year,
+            song_count: self.song_count,
+            duration: self.duration,
+            cover_art: self.cover_art.clone(),
+            artist_id: self.artist_id.clone(),
+            song: Vec::new(),
+        };
+        (header.into_album(), self.into_tracks())
+    }
+
     /// The album's songs as tracks, in served order. A song without its
     /// own `coverArt` takes the album's.
     pub fn into_tracks(self) -> Vec<Track> {
@@ -938,7 +957,15 @@ mod tests {
                 { "id": "2", "artistId": "" },
             ]}
         }));
-        let tracks = r.album.unwrap().into_tracks();
+        let (album, tracks) = r.album.unwrap().into_album_and_tracks();
+        let album = album.unwrap();
+        assert_eq!(
+            album.artist_id.as_deref(),
+            Some("ar-1"),
+            "the album artist's id"
+        );
+        assert_eq!(album.cover_art.as_deref(), Some("al-1"));
+        assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].album_id.as_deref(), Some("al-1"));
         assert_eq!(tracks[0].artist_id.as_deref(), Some("ar-2"));
         // A song without its own album id takes the album's.

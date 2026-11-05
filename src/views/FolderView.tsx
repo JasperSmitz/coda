@@ -9,7 +9,7 @@ import { FolderIcon } from "../components/icons";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
-import { playTracks, useShuffleContext } from "../lib/play";
+import { playLocal, useShuffleContext } from "../lib/play";
 import { nav, type Entry } from "../state/nav";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
@@ -20,8 +20,9 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
   const folder = load.data;
   useScroll(scroller, entry, folder !== undefined);
 
-  const playAll = (shuffle: boolean) =>
-    void browse.folderTracks(path).then((tracks) => playTracks(tracks, undefined, shuffle));
+  // Everything below the folder, resolved by the engine (a whole-library
+  // folder never crosses IPC).
+  const playAll = (shuffle: boolean) => playLocal({ kind: "folder", path }, shuffle);
   const hasContent = folder !== undefined && (folder.dirs.length > 0 || folder.tracks.length > 0);
   useShuffleContext(hasContent ? () => playAll(true) : null);
 

@@ -141,24 +141,6 @@ pub fn artist(
     })
 }
 
-/// Every track of an artist: each album A–Z, in album order (what `s`
-/// plays, as in Coda).
-pub fn artist_tracks(
-    view: LocalView<'_>,
-    id: &str,
-    covers: &CoverService,
-) -> Result<Vec<TrackDto>, BrowseError> {
-    let id = artist_id(&view, id)?;
-    let tags = view.library.tags();
-    let ids: Vec<TrackId> = tags
-        .artist(id)
-        .albums()
-        .iter()
-        .flat_map(|a| tags.album(*a).tracks().iter().copied())
-        .collect();
-    Ok(tracks_dto(&view, &ids, covers))
-}
-
 /// An album and its tracks (disc, track number, title, path).
 pub fn album(
     view: LocalView<'_>,
@@ -191,19 +173,32 @@ pub fn folder(
     })
 }
 
-/// Every track below a folder, in browse order (what `s` plays).
-pub fn folder_tracks(
-    view: LocalView<'_>,
-    path: Vec<String>,
-    covers: &CoverService,
-) -> Result<Vec<TrackDto>, BrowseError> {
-    let tree = view.library.tree();
-    let dir = tree
-        .dir(&path)
-        .ok_or_else(|| BrowseError::not_found("Folder"))?;
+/// The track ids a context plays (`playLocal`), in order: everything
+/// below a folder in browse order, or an artist's albums A–Z, each in
+/// album order (as Coda's `s`). Ids only: the engine clones just the
+/// tracks it queues, and nothing is sent to the webview.
+pub fn context_track_ids(
+    view: &LocalView<'_>,
+    context: &LocalContextDto,
+) -> Result<Vec<TrackId>, BrowseError> {
     let mut ids = Vec::new();
-    tree.for_each_id(dir, |id| ids.push(id));
-    Ok(tracks_dto(&view, &ids, covers))
+    match context {
+        LocalContextDto::Folder { path } => {
+            let tree = view.library.tree();
+            let dir = tree
+                .dir(path)
+                .ok_or_else(|| BrowseError::not_found("Folder"))?;
+            tree.for_each_id(dir, |id| ids.push(id));
+        }
+        LocalContextDto::Artist { id } => {
+            let id = artist_id(view, id)?;
+            let tags = view.library.tags();
+            for album in tags.artist(id).albums() {
+                ids.extend_from_slice(tags.album(*album).tracks());
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn playlist_dto(view: &LocalView<'_>, id: PlaylistId, covers: &CoverService) -> PlaylistDto {
@@ -288,8 +283,9 @@ pub fn search(
     query: &str,
     covers: &CoverService,
 ) -> Result<SearchDto, BrowseError> {
-    let (artists, albums) = view.library.tags().search(query, SEARCH_GROUP_LIMIT);
-    let found = search::search(view.library.tree(), query);
+    let query = super::cap_query(query);
+    let (artists, albums) = view.library.tags().search(&query, SEARCH_GROUP_LIMIT);
+    let found = search::search(view.library.tree(), &query);
     let (tracks, total_tracks) = match found {
         Some(found) => (
             found

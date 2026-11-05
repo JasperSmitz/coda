@@ -9,7 +9,7 @@ use coda_core::navidrome::{Album, AlbumSort, Artist, Hidden, Playlist};
 use tokio::task::JoinSet;
 
 use super::dto::*;
-use super::{BrowseHandle, remote_cover, track_dto};
+use super::{BrowseHandle, cap_query, check_id, remote_cover, track_dto};
 use crate::cover::CoverService;
 use crate::dto::TrackDto;
 
@@ -82,19 +82,23 @@ impl BrowseHandle {
 
     /// An artist's albums, as served.
     pub async fn navidrome_artist(&self, id: String) -> Result<Vec<AlbumDto>, BrowseError> {
+        check_id(&id)?;
         let albums = self.fetch(|c| async move { c.artist(&id).await }).await?;
         Ok(albums.iter().map(|a| album_dto(a, self.covers())).collect())
     }
 
     /// Every track of an artist: their albums in served order, each in
-    /// album order (what `s` plays). Albums load in parallel within the
-    /// fetch limit.
+    /// album order (what `s` plays). At most `MAX_JOB_FETCHES` album
+    /// requests run at once (as Coda's enqueue jobs), so the rest of the
+    /// fetch limit stays free for the views.
     pub async fn navidrome_artist_tracks(&self, id: String) -> Result<Vec<TrackDto>, BrowseError> {
+        check_id(&id)?;
         let albums = self.fetch(|c| async move { c.artist(&id).await }).await?;
         let mut set = JoinSet::new();
         for (i, album) in albums.into_iter().enumerate() {
             let handle = self.clone();
             set.spawn(async move {
+                let _slot = handle.0.play_fetches.acquire().await;
                 let id = album.id;
                 (i, handle.fetch(|c| async move { c.album(&id).await }).await)
             });
@@ -112,27 +116,46 @@ impl BrowseHandle {
             .collect())
     }
 
-    /// An album's tracks in served order, with a header built from them
-    /// (`getAlbum` gives no year here; the UI keeps the one it listed).
+    /// An album and its tracks in served order. The header is the
+    /// album's own (`getAlbum`: name, album artist and their id, year,
+    /// cover); what it lacks comes from the tracks.
     pub async fn navidrome_album(&self, id: String) -> Result<AlbumDetailDto, BrowseError> {
+        check_id(&id)?;
         let album_id = id.clone();
-        let tracks = self.fetch(|c| async move { c.album(&id).await }).await?;
+        let (album, tracks) = self
+            .fetch(|c| async move { c.album_detail(&id).await })
+            .await?;
         let first = tracks.first();
         let durations: Option<u64> = tracks
             .iter()
             .map(|t| t.duration.map(|d| d.as_millis() as u64))
             .sum();
-        let album = AlbumDto {
+        let from_tracks = AlbumDto {
             id: album_id,
             name: first
                 .and_then(|t| t.album.clone())
                 .unwrap_or_else(|| coda_core::navidrome::UNKNOWN_ALBUM.to_owned()),
             artist: first.and_then(|t| t.album_artist.clone().or_else(|| t.artist.clone())),
-            artist_id: first.and_then(|t| t.artist_id.clone()),
+            // A song's `artistId` is the track artist's, not the album's:
+            // never shown under the album artist's name.
+            artist_id: None,
             year: None,
             track_count: Some(u32::try_from(tracks.len()).unwrap_or(u32::MAX)),
             duration_ms: durations.filter(|_| !tracks.is_empty()),
             cover_url: remote_cover(self.covers(), first.and_then(|t| t.cover_art.as_ref())),
+        };
+        let album = match album {
+            Some(album) => {
+                let own = album_dto(&album, self.covers());
+                AlbumDto {
+                    artist: own.artist.or(from_tracks.artist),
+                    track_count: from_tracks.track_count,
+                    duration_ms: own.duration_ms.or(from_tracks.duration_ms),
+                    cover_url: own.cover_url.or(from_tracks.cover_url),
+                    ..own
+                }
+            }
+            None => from_tracks,
         };
         Ok(AlbumDetailDto {
             album,
@@ -180,6 +203,7 @@ impl BrowseHandle {
     /// A playlist's songs in order, with the hidden-entries warning data
     /// (`Hidden`) Coda shows before edits.
     pub async fn navidrome_playlist(&self, id: String) -> Result<PlaylistDetailDto, BrowseError> {
+        check_id(&id)?;
         let playlist_id = id.clone();
         let songs = self.fetch(|c| async move { c.playlist(&id).await }).await?;
         let hidden = songs.hidden_entries();
@@ -242,7 +266,7 @@ impl BrowseHandle {
 
     /// `search3`: artists, albums and songs.
     pub async fn navidrome_search(&self, query: String) -> Result<SearchDto, BrowseError> {
-        let query = query.trim().to_owned();
+        let query = cap_query(&query);
         if query.is_empty() {
             return Ok(SearchDto {
                 artists: Vec::new(),
