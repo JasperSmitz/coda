@@ -16,10 +16,11 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc='A desktop music player for local files and Navidrome (Tauri GUI for Coda)'
 arch=('x86_64' 'aarch64')
-url='https://github.com/JasperSmitz/coda'
+url='https://github.com/JasperSmitz/coda-app'
 license=('MIT')
-depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2' 'libsoup3'
-         'hicolor-icon-theme' 'gcc-libs' 'glibc' 'mpv')
+# mpv is not linked but run as a process; namcap cannot see that.
+depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2' 'libsoup3' 'dbus'
+         'hicolor-icon-theme' 'libgcc' 'glibc' 'mpv')
 makedepends=('git' 'cargo' 'nodejs' 'pnpm')
 optdepends=('gnome-keyring: store the Navidrome password (or another Secret Service provider such as KWallet)')
 options=('!lto')
