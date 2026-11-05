@@ -6,6 +6,7 @@
 //! the OS media controls.
 
 pub mod bootstrap;
+pub mod browse;
 pub mod commands;
 pub mod cover;
 pub mod dto;
@@ -19,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use crate::bootstrap::Paths;
+use crate::browse::BrowseHandle;
 use crate::cover::CoverService;
 use crate::dto::{ProgressDto, Snapshot, VisualizerDto};
 use crate::engine::{EngineHandle, Sink};
@@ -155,6 +157,7 @@ pub fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda-app starting");
     let covers = Arc::new(CoverService::new(paths.cover_cache.clone()));
     let protocol_covers = covers.clone();
+    let browse = BrowseHandle::new(covers.clone());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -172,7 +175,7 @@ pub fn run() {
             let media = Arc::new(OnceLock::new());
             let sink = TauriSink(app.handle().clone(), media.clone());
             let startup_paths = paths.clone();
-            let engine = engine::spawn(sink, covers.clone(), async move {
+            let engine = engine::spawn(sink, covers.clone(), browse.clone(), async move {
                 bootstrap::start(&startup_paths).await
             });
             let art_dir = paths
@@ -187,6 +190,7 @@ pub fn run() {
                 art_dir,
             ));
             app.manage(engine);
+            app.manage(browse);
             app.manage(settings::SettingsLock::default());
             app.manage(Quit::default());
             watch_signals(app.handle().clone());
@@ -196,6 +200,25 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::intent,
             commands::snapshot,
+            browse::commands::local_artists,
+            browse::commands::local_albums,
+            browse::commands::local_artist,
+            browse::commands::local_artist_tracks,
+            browse::commands::local_album,
+            browse::commands::local_folder,
+            browse::commands::local_folder_tracks,
+            browse::commands::local_playlists,
+            browse::commands::local_playlist,
+            browse::commands::local_search,
+            browse::commands::navidrome_artists,
+            browse::commands::navidrome_artist,
+            browse::commands::navidrome_artist_tracks,
+            browse::commands::navidrome_album,
+            browse::commands::navidrome_albums,
+            browse::commands::navidrome_playlists,
+            browse::commands::navidrome_playlist,
+            browse::commands::navidrome_random_songs,
+            browse::commands::navidrome_search,
             settings::settings_get,
             settings::settings_test_server,
             settings::settings_save_server,

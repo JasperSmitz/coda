@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-search"
+description = "Enables the navidrome_search command without any pre-configured scope."
+commands.allow = ["navidrome_search"]
+
+[[permission]]
+identifier = "deny-navidrome-search"
+description = "Denies the navidrome_search command without any pre-configured scope."
+commands.deny = ["navidrome_search"]

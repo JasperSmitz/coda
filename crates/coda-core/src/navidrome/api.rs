@@ -261,6 +261,8 @@ pub struct RawArtist {
     pub name: Option<String>,
     #[serde(deserialize_with = "uint")]
     pub album_count: Option<u32>,
+    #[serde(deserialize_with = "id")]
+    pub cover_art: Option<String>,
     #[serde(deserialize_with = "list")]
     pub album: Vec<RawAlbum>,
 }
@@ -286,6 +288,8 @@ pub struct RawAlbum {
     /// The album's `getCoverArt` id; its songs fall back to it.
     #[serde(deserialize_with = "id")]
     pub cover_art: Option<String>,
+    #[serde(deserialize_with = "id")]
+    pub artist_id: Option<String>,
     #[serde(deserialize_with = "list")]
     pub song: Vec<RawSong>,
 }
@@ -313,6 +317,10 @@ pub struct RawSong {
     /// The song's `getCoverArt` id (Navidrome: `mf-…` or `al-…`).
     #[serde(deserialize_with = "id")]
     pub cover_art: Option<String>,
+    #[serde(deserialize_with = "id")]
+    pub album_id: Option<String>,
+    #[serde(deserialize_with = "id")]
+    pub artist_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -368,6 +376,8 @@ pub struct RawPlaylist {
     /// OpenSubsonic; absent from plain Subsonic servers.
     #[serde(deserialize_with = "boolean")]
     pub readonly: Option<bool>,
+    #[serde(deserialize_with = "id")]
+    pub cover_art: Option<String>,
     #[serde(deserialize_with = "playlist_entries")]
     pub entry: Counted<RawSong>,
 }
@@ -400,6 +410,7 @@ impl RawPlaylist {
             song_count: self.song_count,
             duration: self.duration,
             access,
+            cover_art: valid_id(self.cover_art),
         })
     }
 
@@ -419,6 +430,7 @@ impl RawArtist {
             id: valid_id(self.id)?,
             name: clean_text(self.name).unwrap_or_else(|| UNKNOWN_ARTIST.to_owned()),
             album_count: self.album_count,
+            cover_art: valid_id(self.cover_art),
         })
     }
 }
@@ -435,6 +447,8 @@ impl RawAlbum {
             year: self.year,
             song_count: self.song_count,
             duration: self.duration,
+            cover_art: valid_id(self.cover_art),
+            artist_id: valid_id(self.artist_id),
         })
     }
 
@@ -442,10 +456,12 @@ impl RawAlbum {
     /// own `coverArt` takes the album's.
     pub fn into_tracks(self) -> Vec<Track> {
         let album_cover = valid_id(self.cover_art);
+        let album_id = valid_id(self.id);
         self.song
             .into_iter()
             .filter_map(|mut song| {
                 song.cover_art = valid_id(song.cover_art).or_else(|| album_cover.clone());
+                song.album_id = valid_id(song.album_id).or_else(|| album_id.clone());
                 song.into_track()
             })
             .collect()
@@ -456,7 +472,7 @@ impl RawSong {
     /// `None` if the id is missing, empty or oversized.
     pub fn into_track(self) -> Option<Track> {
         let id = valid_id(self.id)?;
-        Some(Track::navidrome(
+        let mut track = Track::navidrome(
             id,
             TrackMetadata {
                 title: self.title,
@@ -468,7 +484,10 @@ impl RawSong {
                 duration: self.duration,
                 cover_art: valid_id(self.cover_art),
             },
-        ))
+        );
+        track.album_id = valid_id(self.album_id);
+        track.artist_id = valid_id(self.artist_id);
+        Some(track)
     }
 }
 
@@ -908,6 +927,45 @@ mod tests {
             tracks[3].album_artist.as_ref().unwrap().chars().count(),
             MAX_METADATA_CHARS
         );
+    }
+
+    #[test]
+    fn album_artist_and_cover_ids_are_read_for_navigation() {
+        let r = response(json!({
+            "status": "ok",
+            "album": { "id": "al-1", "coverArt": "al-1", "artistId": "ar-1", "song": [
+                { "id": "1", "albumId": "al-1", "artistId": "ar-2" },
+                { "id": "2", "artistId": "" },
+            ]}
+        }));
+        let tracks = r.album.unwrap().into_tracks();
+        assert_eq!(tracks[0].album_id.as_deref(), Some("al-1"));
+        assert_eq!(tracks[0].artist_id.as_deref(), Some("ar-2"));
+        // A song without its own album id takes the album's.
+        assert_eq!(tracks[1].album_id.as_deref(), Some("al-1"));
+        assert_eq!(tracks[1].artist_id, None);
+        let r = response(json!({
+            "status": "ok",
+            "artist": { "id": "ar-1", "coverArt": "ar-1", "album": [
+                { "id": "al-1", "coverArt": "al-1", "artistId": "ar-1" },
+                { "id": "al-2", "coverArt": ["no"] },
+            ]}
+        }));
+        let artist = r.artist.unwrap();
+        let albums: Vec<_> = artist
+            .album
+            .into_iter()
+            .filter_map(RawAlbum::into_album)
+            .collect();
+        assert_eq!(albums[0].cover_art.as_deref(), Some("al-1"));
+        assert_eq!(albums[0].artist_id.as_deref(), Some("ar-1"));
+        assert_eq!(albums[1].cover_art, None);
+        let r = response(json!({
+            "status": "ok",
+            "playlist": { "id": "pl-1", "coverArt": "pl-1" }
+        }));
+        let playlist = r.playlist.unwrap().into_playlist().unwrap();
+        assert_eq!(playlist.cover_art.as_deref(), Some("pl-1"));
     }
 
     #[test]

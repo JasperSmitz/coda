@@ -2653,6 +2653,7 @@ mod tests {
             id: id.into(),
             name: format!("Artist {id}"),
             album_count: None,
+            cover_art: None,
         }
     }
 
@@ -2664,6 +2665,8 @@ mod tests {
             year: None,
             song_count: None,
             duration: None,
+            cover_art: None,
+            artist_id: None,
         }
     }
 
@@ -3033,6 +3036,7 @@ mod tests {
             song_count: None,
             duration: None,
             access: Default::default(),
+            cover_art: None,
         }
     }
 

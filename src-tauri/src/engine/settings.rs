@@ -112,6 +112,9 @@ impl Engine {
     ) -> Vec<PlaybackCommand> {
         // New cover tokens for remote covers, fetched with the new client.
         self.covers.set_client(client.clone());
+        // Browse commands use the new client; ids and results of the old
+        // one are stale (a new client generation).
+        self.browse.set_client(client.clone());
         self.sent_queue = None;
         self.problems.retain(|p| {
             !matches!(
@@ -156,7 +159,10 @@ impl Engine {
     fn set_music_dir(&mut self, dir: PathBuf, now: Instant) {
         self.problems
             .retain(|p| !matches!(p.kind, ProblemKind::NoConfig | ProblemKind::Config));
-        self.library = Some(Library::new(dir.clone()));
+        // A new library generation: ids handed out before are stale.
+        self.browse.replace_library(Some(Library::new(dir.clone())));
+        // Queued local tracks are named by ids of the new library.
+        self.sent_queue = None;
         self.scan = ScanState::Scanning;
         self.rescan = Some(dir);
         self.notify("Scanning the new music folder", now);

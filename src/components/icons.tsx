@@ -137,3 +137,21 @@ export const AlertIcon = (p: IconProps) => (
     <path d="M12 10v4.5M12 17.5v.01" />
   </Icon>
 );
+export const ShuffleIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3.5 7h3.5c4 0 6 10 10 10h3.5M3.5 17h3.5c1.6 0 2.8-1.6 3.9-3.6M13.1 9.6C14.2 7.6 15.4 7 17 7h3.5" />
+    <path d="M18 4.5l2.5 2.5-2.5 2.5M18 14.5l2.5 2.5-2.5 2.5" />
+  </Icon>
+);
+export const MoreIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+  </Icon>
+);
+export const BackIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M15 5l-7 7 7 7" />
+  </Icon>
+);

@@ -60,7 +60,38 @@ For now a queue comes from a restored GUI session. To seed one, copy the TUI's s
 ## Window
 32. Resize and move the window, quit, relaunch: same size and position (also after a maximise).
 
+## Browse (M2)
+
+Same setup as above. A configured music folder and Navidrome server make every section visible; with only one, the other section is hidden from the sidebar.
+
+### Navigation
+33. Local → Artists: an alphabetical list with a letter index on the right; clicking a letter jumps there. While the scan runs, a "Scanning the library… N tracks so far" line shows and the list grows (refreshes about every 2 s) without losing the scroll position.
+34. Click an artist → artist page (albums grid, Play / Shuffle). Click an album → album page (large cover, artist link, year for Navidrome albums opened from a grid, track count, length; tracks grouped by disc when there are several). Back with Backspace, Alt+←, Escape, the header's back arrow, and the mouse back button: each returns to the previous page at the same scroll position.
+35. A sidebar entry always starts a fresh stack (Back does nothing at a sidebar root).
+
+### Lists and grids
+36. Local → Albums: grid with covers (placeholder initials without art), Sort A–Z / By artist. Arrow keys move between tiles, Enter opens, right-click or the "…" on hover opens the album menu (Play, Shuffle, Play next, Add to queue, Open album, Go to artist).
+37. Navidrome → Albums: all six sorts; scrolling down loads more ("Loading more…") until the end; Random gives a new order each time it is chosen.
+38. Folders: sub-folders as tiles, then the folder's own tracks; breadcrumbs go back up. Shuffle (or `s`) plays everything below the folder.
+39. Playlists (local `.m3u` and Navidrome): open one; duplicates are kept; a local playlist with missing entries shows an amber note ("N entries not found in the library"); a Navidrome playlist whose server count differs shows the hidden-entries note.
+
+### Tracks and playing
+40. In a track table: ↑/↓ select, Enter or double-click plays the list from that track (the queue becomes that album/playlist/folder list); the playing row shows the amber equaliser in every view.
+41. Right-click a track or its "…" button: Play, Play next, Add to queue, Go to album, Go to artist (disabled when unknown). Play next / Add to queue show a toast.
+42. `s` shuffles the shown context: an album/playlist's tracks, an artist's tracks (all albums), a folder's tracks below it, or "Shuffle all" on the Artists/Albums lists (local: whole library, toast "Shuffling all (N tracks)"; Navidrome: a fresh set of random songs).
+43. Go to album / Go to artist from a queue-built context (e.g. after Play next) lands on the right page for both sources.
+
+### Search
+44. `/` or Ctrl+F opens Search with the cursor in the field (from anywhere, also again while on Search). Typing searches after a short pause; results are grouped per source into Artists, Albums and Tracks. Enter on a track plays that source's matching tracks from it; Escape leaves the field, a second Escape goes back.
+45. A query with no matches shows "No matches"; Navidrome down (stop the server) shows an error with Retry, while local results still show.
+
+### Errors and states
+46. Stop the Navidrome server and open Navidrome → Artists: loading skeleton, then "Could not load" with Retry; start the server and Retry loads.
+47. Light and dark themes: skeletons, tiles, rows, menus and notes are readable in both; focus rings visible when tabbing through the album grid and lists.
+48. Settings → change the music folder, or save/disconnect the server, while a browse view of that source is open: the view returns to its list root and reloads (no stale ids); a cached Navidrome list is not shown again after a server change. With only one source configured, the sidebar shows only that one and a hidden source's view switches to the other source's artists.
+49. Now Playing open: Backspace/Escape/Alt+← close it (the browse stack stays); `/` closes it and opens Search; Go to album/artist or a sidebar entry also closes it.
+
 ## Review fixes
-33. Onboarding race: with the onboarding screen showing, run `coda --setup` in a terminal and connect a server; then in the GUI choose only a folder and Continue → "The settings were changed meanwhile…"; `config.toml` and the keychain entry are unchanged.
-34. Save a server with an unreachable URL and quit during the ping: the app quits at once (the ping is not under the write lock), and nothing was written.
-35. Symlink `config.toml` to a dotfiles copy → Settings shows the symbolic-link warning.
+50. Onboarding race: with the onboarding screen showing, run `coda --setup` in a terminal and connect a server; then in the GUI choose only a folder and Continue → "The settings were changed meanwhile…"; `config.toml` and the keychain entry are unchanged.
+51. Save a server with an unreachable URL and quit during the ping: the app quits at once (the ping is not under the write lock), and nothing was written.
+52. Symlink `config.toml` to a dotfiles copy → Settings shows the symbolic-link warning.

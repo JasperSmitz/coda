@@ -13,7 +13,7 @@
 //! sends raw playback commands.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -24,7 +24,7 @@ use coda_core::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
 use coda_core::navidrome::{self, Client};
 use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use coda_core::player::{PlaybackStatus, Player, PlayerCommand, RepeatMode};
-use coda_core::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, shuffle_with_first};
+use coda_core::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
 use coda_core::resolve;
 use coda_core::session::{self, Restored, Session};
 use tokio::sync::{mpsc, oneshot};
@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::bootstrap::{Sources, Startup};
+use crate::browse::{self, BrowseHandle, LocalView};
 use crate::cover::CoverService;
 use crate::dto::*;
 
@@ -142,7 +143,9 @@ pub struct Engine {
     player: Player,
     client: Option<Client>,
     covers: Arc<CoverService>,
-    library: Option<Library>,
+    /// The library (owned through the shared browse handle, which browse
+    /// commands read) and the published Navidrome client.
+    browse: BrowseHandle,
     scan: ScanState,
     /// Report Navidrome plays (configured, and a client exists).
     scrobbling: bool,
@@ -184,12 +187,19 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(covers: Arc<CoverService>) -> Self {
+        let browse = BrowseHandle::new(covers.clone());
+        Self::with_browse(covers, browse)
+    }
+
+    /// An engine that keeps `browse` current (`browse` must share
+    /// `covers`).
+    pub fn with_browse(covers: Arc<CoverService>, browse: BrowseHandle) -> Self {
         Self {
             phase: Phase::Starting,
             player: Player::new(),
             client: None,
             covers,
-            library: None,
+            browse,
             scan: ScanState::NoLibrary,
             scrobbling: false,
             listen: None,
@@ -257,11 +267,12 @@ impl Engine {
                 message: None,
             }
         };
+        self.browse.set_client(sources.client.clone());
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();
         if let Some(dir) = sources.music_dir {
-            self.library = Some(Library::new(dir));
+            self.browse.replace_library(Some(Library::new(dir)));
             self.scan = ScanState::Scanning;
         }
         if let Some(problem) = playback {
@@ -298,7 +309,13 @@ impl Engine {
 
     /// The music folder to scan, once started.
     pub fn music_dir(&self) -> Option<PathBuf> {
-        self.library.as_ref().map(|l| l.root_path().to_path_buf())
+        self.browse
+            .read_library(|view| view.map(|v| v.library.root_path().to_path_buf()))
+    }
+
+    /// The shared browse state this engine keeps current.
+    pub fn browse(&self) -> &BrowseHandle {
+        &self.browse
     }
 
     pub fn client(&self) -> Option<&Client> {
@@ -355,6 +372,7 @@ impl Engine {
                 self.enqueue(tracks, next, now);
                 Vec::new()
             }
+            Intent::ShuffleLibrary => self.shuffle_library(now),
             Intent::SetVisualizerVisible { .. } | Intent::DismissNotice { .. } => Vec::new(),
         };
         let mut commands = self.dispatch(commands, now);
@@ -372,39 +390,112 @@ impl Engine {
     }
 
     /// The tracks `refs` name, in order; `None` for a local track not in
-    /// the scanned library.
-    fn resolve_refs(&self, refs: Vec<TrackRef>) -> Vec<Option<Track>> {
-        refs.into_iter()
-            .map(|r| match r.source {
-                SourceDto::Local { path } => {
-                    let library = self.library.as_ref()?;
-                    let id = library.track_id_by_path(Path::new(&path))?;
-                    Some(library.track(id).clone())
-                }
-                SourceDto::Navidrome { song_id, cover_art } => Some(Track::navidrome(
-                    song_id,
-                    TrackMetadata {
-                        title: r.title,
-                        artist: r.artist,
-                        album: r.album,
-                        album_artist: r.album_artist,
-                        track_no: r.track_no,
-                        disc_no: r.disc_no,
-                        duration: r.duration_ms.map(Duration::from_millis),
-                        cover_art,
-                    },
-                )),
-            })
-            .collect()
+    /// the scanned library or from an older library generation. Also
+    /// returns how many refs were stale.
+    fn resolve_refs(&self, refs: Vec<TrackRef>) -> (Vec<Option<Track>>, usize) {
+        let mut stale = 0;
+        let tracks = self.browse.read_library(|view| {
+            refs.into_iter()
+                .map(|r| match r.source {
+                    SourceDto::Local { id } => {
+                        let view = view.as_ref()?;
+                        let n = match browse::parse_local_id(id.as_deref()?, view.generation) {
+                            Ok(n) => n,
+                            Err(error) => {
+                                if error.kind == browse::dto::BrowseErrorKind::Stale {
+                                    stale += 1;
+                                }
+                                return None;
+                            }
+                        };
+                        let all = view.library.tree().tracks();
+                        all.get(n as usize).cloned()
+                    }
+                    SourceDto::Navidrome { song_id, cover_art } => {
+                        let mut track = Track::navidrome(
+                            song_id,
+                            TrackMetadata {
+                                title: r.title,
+                                artist: r.artist,
+                                album: r.album,
+                                album_artist: r.album_artist,
+                                track_no: r.track_no,
+                                disc_no: r.disc_no,
+                                duration: r.duration_ms.map(Duration::from_millis),
+                                cover_art,
+                            },
+                        );
+                        track.album_id = r.album_id.filter(|id| valid_ref_id(id));
+                        track.artist_id = r.artist_id.filter(|id| valid_ref_id(id));
+                        Some(track)
+                    }
+                })
+                .collect()
+        });
+        (tracks, stale)
     }
 
-    fn report_missing(&mut self, missing: usize, now: Instant) {
+    fn report_missing(&mut self, missing: usize, stale: usize, now: Instant) {
+        if stale > 0 {
+            self.notify(
+                format!(
+                    "The library changed; {} skipped. Reload the view",
+                    count(stale, "track")
+                ),
+                now,
+            );
+        }
+        let missing = missing - stale;
         if missing > 0 {
             self.notify(
                 format!("{} not in the library; skipped", count(missing, "track")),
                 now,
             );
         }
+    }
+
+    /// "Shuffle all" (local), as in Coda: every scanned track, shuffled;
+    /// a random sample of [`MAX_QUEUE_LEN`] from a larger library.
+    fn shuffle_library(&mut self, now: Instant) -> Vec<PlayerCommand> {
+        let partial = matches!(self.scan, ScanState::Scanning | ScanState::Failed);
+        let rng = &mut self.rng;
+        let picked = self.browse.read_library(|view| {
+            let all = view?.library.tree().tracks();
+            let mut picked: Vec<usize> = (0..all.len()).collect();
+            sample(&mut picked, MAX_QUEUE_LEN, rng);
+            Some((
+                picked
+                    .into_iter()
+                    .map(|i| all[i].clone())
+                    .collect::<Vec<_>>(),
+                all.len(),
+            ))
+        });
+        let Some((tracks, total)) = picked.filter(|(tracks, _)| !tracks.is_empty()) else {
+            let note = if partial {
+                " (0 tracks scanned so far)"
+            } else {
+                ""
+            };
+            self.notify(format!("Nothing to play{note}"), now);
+            return Vec::new();
+        };
+        let shown = tracks.len();
+        let commands = self.player.play_context(tracks, 0);
+        if !commands.is_empty() {
+            let counts = if shown < total {
+                format!(
+                    "{} of {}",
+                    coda_core::model::thousands(shown),
+                    count(total, "track")
+                )
+            } else {
+                count(shown, "track")
+            };
+            let scope = if partial { " scanned so far" } else { "" };
+            self.notify(format!("Shuffling all ({counts}{scope})"), now);
+        }
+        commands
     }
 
     /// Replaces the queue (like the TUI's `replace_queue`).
@@ -415,9 +506,9 @@ impl Engine {
         shuffle: bool,
         now: Instant,
     ) -> Vec<PlayerCommand> {
-        let resolved = self.resolve_refs(refs);
+        let (resolved, stale) = self.resolve_refs(refs);
         let missing = resolved.iter().filter(|t| t.is_none()).count();
-        self.report_missing(missing, now);
+        self.report_missing(missing, stale, now);
         // The start's place among the tracks that resolved; a missing start
         // track starts at the next one that did.
         let start = start.map(|s| resolved.iter().take(s).filter(|t| t.is_some()).count());
@@ -450,9 +541,9 @@ impl Engine {
     }
 
     fn enqueue(&mut self, refs: Vec<TrackRef>, next: bool, now: Instant) {
-        let resolved = self.resolve_refs(refs);
+        let (resolved, stale) = self.resolve_refs(refs);
         let missing = resolved.iter().filter(|t| t.is_none()).count();
-        self.report_missing(missing, now);
+        self.report_missing(missing, stale, now);
         let tracks: Vec<Track> = resolved.into_iter().flatten().collect();
         if tracks.is_empty() {
             return;
@@ -655,36 +746,40 @@ impl Engine {
     // ----- library scan ------------------------------------------------
 
     pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
-        let Some(library) = self.library.as_mut() else {
-            return;
-        };
-        match event {
-            ScanEvent::Batch(tracks) => library.extend(tracks),
+        // One short write per batch; browse reads wait at most that long.
+        let Some(finished) = self.browse.update_library(|library| match event {
+            ScanEvent::Batch(tracks) => {
+                library.extend(tracks);
+                None
+            }
             ScanEvent::Playlist(file) => {
                 if library.add_playlist(file).is_none() {
                     tracing::debug!("playlist over the cap ignored");
                 }
+                None
             }
             ScanEvent::Finished {
                 tracks,
                 skipped,
                 errors,
-            } => {
-                tracing::info!(tracks, skipped, errors, "library scan finished");
-                self.scan = ScanState::Finished { skipped, errors };
-                let playlists = library.playlists().len();
-                let mut text = format!("Library scan complete: {}", count(tracks, "track"));
-                if playlists > 0 {
-                    text.push_str(&format!(", {}", count(playlists, "playlist")));
-                }
-                if skipped > 0 {
-                    text.push_str(&format!(", {skipped} skipped"));
-                }
-                if errors > 0 {
-                    text.push_str(&format!(", {}", count(errors, "error")));
-                }
-                self.notify(text, now);
+            } => Some((tracks, skipped, errors, library.playlists().len())),
+        }) else {
+            return;
+        };
+        if let Some((tracks, skipped, errors, playlists)) = finished {
+            tracing::info!(tracks, skipped, errors, "library scan finished");
+            self.scan = ScanState::Finished { skipped, errors };
+            let mut text = format!("Library scan complete: {}", count(tracks, "track"));
+            if playlists > 0 {
+                text.push_str(&format!(", {}", count(playlists, "playlist")));
             }
+            if skipped > 0 {
+                text.push_str(&format!(", {skipped} skipped"));
+            }
+            if errors > 0 {
+                text.push_str(&format!(", {}", count(errors, "error")));
+            }
+            self.notify(text, now);
         }
         self.dirty = true;
     }
@@ -692,7 +787,7 @@ impl Engine {
     /// The scan channel closed; without `Finished` first, the scan failed.
     pub fn scan_closed(&mut self, now: Instant) {
         if self.scan == ScanState::Scanning {
-            let tracks = self.library.as_ref().map_or(0, Library::len);
+            let tracks = self.library_counts().0;
             tracing::warn!(tracks, "library scan ended without finishing");
             self.scan = ScanState::Failed;
             self.notify(
@@ -796,27 +891,15 @@ impl Engine {
 
     // ----- state for the UI --------------------------------------------
 
-    fn track_dto(&self, track: &Track) -> TrackDto {
-        let source = match &track.source {
-            TrackSource::Local { path } => SourceDto::Local {
-                path: path.to_string_lossy().into_owned(),
-            },
-            TrackSource::Navidrome { song_id } => SourceDto::Navidrome {
-                song_id: song_id.clone(),
-                cover_art: track.cover_art.clone(),
-            },
-        };
-        TrackDto {
-            source,
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            album_artist: track.album_artist.clone(),
-            track_no: track.track_no,
-            disc_no: track.disc_no,
-            duration_ms: track.duration.map(|d| d.as_millis() as u64),
-            cover_url: self.covers.url_for(track),
-        }
+    fn track_dto(&self, track: &Track, local: Option<&LocalView<'_>>) -> TrackDto {
+        browse::track_dto(track, local, &self.covers)
+    }
+
+    /// Tracks and playlists in the library.
+    fn library_counts(&self) -> (usize, usize) {
+        self.browse.read_library(|view| {
+            view.map_or((0, 0), |v| (v.library.len(), v.library.playlists().len()))
+        })
     }
 
     fn problems(&self) -> Vec<ProblemDto> {
@@ -847,8 +930,7 @@ impl Engine {
     }
 
     fn scan_dto(&self) -> ScanDto {
-        let tracks = self.library.as_ref().map_or(0, Library::len);
-        let playlists = self.library.as_ref().map_or(0, |l| l.playlists().len());
+        let (tracks, playlists) = self.library_counts();
         let (state, skipped, errors) = match self.scan {
             ScanState::NoLibrary => (ScanStateDto::NoLibrary, 0, 0),
             ScanState::Scanning => (ScanStateDto::Scanning, 0, 0),
@@ -865,15 +947,17 @@ impl Engine {
     }
 
     fn queue_dto(&self) -> Vec<QueueItemDto> {
-        self.player
-            .queue()
-            .entries()
-            .iter()
-            .map(|e| QueueItemDto {
-                key: e.id.to_string(),
-                track: self.track_dto(&e.track),
-            })
-            .collect()
+        self.browse.read_library(|view| {
+            self.player
+                .queue()
+                .entries()
+                .iter()
+                .map(|e| QueueItemDto {
+                    key: e.id.to_string(),
+                    track: self.track_dto(&e.track, view.as_ref()),
+                })
+                .collect()
+        })
     }
 
     /// The snapshot without the queue.
@@ -892,7 +976,10 @@ impl Engine {
             current_key: queue.current().map(|id| id.to_string()),
             playing_key: playing.map(|e| e.id.to_string()),
             up_next_key: self.player.up_next().map(|e| e.id.to_string()),
-            playing: playing.map(|e| self.track_dto(&e.track)),
+            playing: playing.map(|e| {
+                self.browse
+                    .read_library(|view| self.track_dto(&e.track, view.as_ref()))
+            }),
             queue: None,
             volume: self.player.volume(),
             repeat: match self.player.repeat() {
@@ -912,6 +999,10 @@ impl Engine {
                 })
                 .collect(),
             visualizer_available: !self.visualizer_unavailable,
+            browse: BrowseGenerationsDto {
+                library: self.browse.library_generation(),
+                server: self.browse.client_generation(),
+            },
         }
     }
 
@@ -964,6 +1055,11 @@ impl Engine {
     }
 }
 
+/// A Navidrome id from the UI: as bounded as the server's.
+fn valid_ref_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().count() <= 256
+}
+
 fn count(n: usize, noun: &str) -> String {
     let n_text = coda_core::model::thousands(n);
     if n == 1 {
@@ -978,13 +1074,19 @@ fn count(n: usize, noun: &str) -> String {
 /// Starts the engine task. `startup` produces the sources, mpv and the
 /// session (see [`crate::bootstrap::start`]); it runs concurrently, so the
 /// UI gets a `Starting` snapshot at once.
-pub fn spawn<S, F>(sink: S, covers: Arc<CoverService>, startup: F) -> EngineHandle
+pub fn spawn<S, F>(
+    sink: S,
+    covers: Arc<CoverService>,
+    browse: BrowseHandle,
+    startup: F,
+) -> EngineHandle
 where
     S: Sink,
     F: Future<Output = Startup> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel(256);
-    tauri::async_runtime::spawn(run(rx, sink, covers, startup));
+    let engine = Engine::with_browse(covers, browse);
+    tauri::async_runtime::spawn(run_engine(rx, sink, engine, startup));
     EngineHandle { tx }
 }
 
@@ -1145,12 +1247,20 @@ impl<S: Sink> Io<S> {
     }
 }
 
-async fn run<S, F>(mut rx: mpsc::Receiver<Msg>, sink: S, covers: Arc<CoverService>, startup: F)
+#[cfg(test)]
+async fn run<S, F>(rx: mpsc::Receiver<Msg>, sink: S, covers: Arc<CoverService>, startup: F)
 where
     S: Sink,
     F: Future<Output = Startup> + Send + 'static,
 {
-    let mut engine = Engine::new(covers);
+    run_engine(rx, sink, Engine::new(covers), startup).await
+}
+
+async fn run_engine<S, F>(mut rx: mpsc::Receiver<Msg>, sink: S, mut engine: Engine, startup: F)
+where
+    S: Sink,
+    F: Future<Output = Startup> + Send + 'static,
+{
     let mut startup = Some(tokio::spawn(startup));
     let mut io = Io {
         sink,

@@ -2,7 +2,7 @@
 //! hand in `src/lib/types.ts`. Library types never cross the IPC boundary.
 //!
 //! Nothing here may carry a password, token or signed stream URL: tracks
-//! name their source by local path or Navidrome song id only.
+//! name their source by local library id or Navidrome song id only.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
     rename_all_fields = "camelCase"
 )]
 pub enum SourceDto {
-    /// A file in the local library, by its absolute path (lossy UTF-8).
-    Local { path: String },
+    /// A file in the local library, by its library id
+    /// (`"<generation>:<n>"`, see `browse`), so any path plays; `None`
+    /// for a queued file the library does not (yet) hold.
+    Local { id: Option<String> },
     /// A Navidrome song. `cover_art` is the server's opaque cover id.
     Navidrome {
         song_id: String,
@@ -41,12 +43,17 @@ pub struct TrackDto {
     /// Base URL of the cover (`<base>/small` or `<base>/large`), served by
     /// our `coda` URI scheme; `None` without art or with covers disabled.
     pub cover_url: Option<String>,
+    /// The album to go to (a local id, or Navidrome's album id), if known.
+    pub album_id: Option<String>,
+    /// The artist to go to, like `album_id`.
+    pub artist_id: Option<String>,
 }
 
 /// A track the UI asks to play or enqueue: a [`TrackDto`] it received
 /// (unknown fields such as `coverUrl` are ignored). A local track is
-/// looked up in the scanned library by path, so its metadata comes from
-/// the scan, not from the UI; a Navidrome track is built from the
+/// looked up in the scanned library by id (a stale generation is
+/// rejected), so its metadata comes from the scan, not from the UI; a
+/// Navidrome track is built from the
 /// metadata given (the backend keeps no browse cache), which is cleaned
 /// and capped like server data.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -67,6 +74,11 @@ pub struct TrackRef {
     pub disc_no: Option<u32>,
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// Navidrome only (kept for "Go to album/artist" from the queue).
+    #[serde(default)]
+    pub album_id: Option<String>,
+    #[serde(default)]
+    pub artist_id: Option<String>,
 }
 
 /// One queue entry. `key` is stable for the entry's lifetime in this run
@@ -204,6 +216,17 @@ pub struct Snapshot {
     pub notices: Vec<NoticeDto>,
     /// `false` once mpv said it cannot provide visualizer data.
     pub visualizer_available: bool,
+    /// Browse generations: a change means browse ids and cached answers
+    /// of that source are stale (reload).
+    pub browse: BrowseGenerationsDto,
+}
+
+/// The library and Navidrome client generations (see `browse`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseGenerationsDto {
+    pub library: u64,
+    pub server: u64,
 }
 
 /// The `progress` event: the heard track's position (at most 10 per
@@ -278,6 +301,10 @@ pub enum Intent {
     DismissNotice {
         id: u64,
     },
+    /// "Shuffle all" for the local library: replaces the queue with every
+    /// scanned track (a random sample at the queue cap), shuffled, as in
+    /// Coda. Navidrome's "Shuffle all" is `playTracks` with random songs.
+    ShuffleLibrary,
 }
 
 #[cfg(test)]
@@ -299,6 +326,8 @@ mod tests {
             disc_no: None,
             duration_ms: Some(61_500),
             cover_url: Some("coda://localhost/cover/00ff".into()),
+            album_id: Some("al-1".into()),
+            artist_id: None,
         }
     }
 
@@ -317,14 +346,16 @@ mod tests {
                 "discNo": null,
                 "durationMs": 61500,
                 "coverUrl": "coda://localhost/cover/00ff",
+                "albumId": "al-1",
+                "artistId": null,
             })
         );
         let local = SourceDto::Local {
-            path: "/m/a.flac".into(),
+            id: Some("1:7".into()),
         };
         assert_eq!(
             serde_json::to_value(local).unwrap(),
-            json!({"kind": "local", "path": "/m/a.flac"})
+            json!({"kind": "local", "id": "1:7"})
         );
     }
 
@@ -334,6 +365,7 @@ mod tests {
         let back: TrackRef = serde_json::from_value(value).unwrap();
         assert_eq!(back.title.as_deref(), Some("Song"));
         assert_eq!(back.duration_ms, Some(61_500));
+        assert_eq!(back.album_id.as_deref(), Some("al-1"));
         assert_eq!(
             back.source,
             SourceDto::Navidrome {
@@ -343,9 +375,14 @@ mod tests {
         );
         // A bare local ref is enough.
         let local: TrackRef =
-            serde_json::from_value(json!({"source": {"kind": "local", "path": "/m/a.flac"}}))
-                .unwrap();
+            serde_json::from_value(json!({"source": {"kind": "local", "id": "1:7"}})).unwrap();
         assert_eq!(local.title, None);
+        assert_eq!(
+            local.source,
+            SourceDto::Local {
+                id: Some("1:7".into())
+            }
+        );
     }
 
     #[test]
@@ -387,6 +424,7 @@ mod tests {
                 json!({"type": "dismissNotice", "id": 7}),
                 Intent::DismissNotice { id: 7 },
             ),
+            (json!({"type": "shuffleLibrary"}), Intent::ShuffleLibrary),
         ];
         for (value, intent) in cases {
             assert_eq!(serde_json::from_value::<Intent>(value).unwrap(), intent);
@@ -432,8 +470,13 @@ mod tests {
                 text: "Repeat all".into(),
             }],
             visualizer_available: true,
+            browse: BrowseGenerationsDto {
+                library: 2,
+                server: 1,
+            },
         };
         let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["browse"], json!({"library": 2, "server": 1}));
         assert_eq!(value["phase"], "ready");
         assert_eq!(value["status"], "paused");
         assert_eq!(value["currentKey"], "q1");
@@ -452,7 +495,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 14, "{keys:?}");
+        assert_eq!(keys.len(), 15, "{keys:?}");
     }
 
     #[test]

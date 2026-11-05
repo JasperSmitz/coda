@@ -1,4 +1,4 @@
-// The sidebar's destinations. Browse views are placeholders until M2.
+// The sidebar's destinations (routes: `routeFor` in state/nav.ts).
 
 export type ViewId =
   | "search"

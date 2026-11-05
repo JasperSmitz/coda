@@ -487,7 +487,7 @@ mod tests {
     fn track(title: &str) -> TrackDto {
         TrackDto {
             source: SourceDto::Local {
-                path: format!("/m/{title}.flac"),
+                id: Some(format!("1:{title}")),
             },
             title: title.into(),
             artist: Some("Artist".into()),
@@ -497,6 +497,8 @@ mod tests {
             disc_no: None,
             duration_ms: Some(200_000),
             cover_url: Some("coda://localhost/cover/00000000000000ff".into()),
+            album_id: None,
+            artist_id: None,
         }
     }
 
@@ -525,6 +527,10 @@ mod tests {
             problems: Vec::new(),
             notices: Vec::new(),
             visualizer_available: true,
+            browse: BrowseGenerationsDto {
+                library: 1,
+                server: 1,
+            },
         }
     }
 
