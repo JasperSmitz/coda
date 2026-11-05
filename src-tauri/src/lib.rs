@@ -130,6 +130,23 @@ fn install_panic_hook() {
     }));
 }
 
+/// Tells the webview when the window is minimised or restored (the
+/// Now Playing view stops visualizer readings then): WebKitGTK does not
+/// reliably turn `document.visibilityState` hidden on minimise.
+fn report_minimized(window: &tauri::Window, event: &tauri::WindowEvent) {
+    static MINIMIZED: AtomicBool = AtomicBool::new(false);
+    if !matches!(
+        event,
+        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)
+    ) {
+        return;
+    }
+    let minimized = window.is_minimized().unwrap_or(false);
+    if MINIMIZED.swap(minimized, Ordering::SeqCst) != minimized {
+        let _ = window.emit("window-minimized", minimized);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let paths = Paths::from_process();
@@ -175,6 +192,7 @@ pub fn run() {
             watch_signals(app.handle().clone());
             Ok(())
         })
+        .on_window_event(report_minimized)
         .invoke_handler(tauri::generate_handler![
             commands::intent,
             commands::snapshot,

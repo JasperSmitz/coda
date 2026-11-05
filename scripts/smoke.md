@@ -59,3 +59,8 @@ For now a queue comes from a restored GUI session. To seed one, copy the TUI's s
 
 ## Window
 32. Resize and move the window, quit, relaunch: same size and position (also after a maximise).
+
+## Review fixes
+33. Onboarding race: with the onboarding screen showing, run `coda --setup` in a terminal and connect a server; then in the GUI choose only a folder and Continue → "The settings were changed meanwhile…"; `config.toml` and the keychain entry are unchanged.
+34. Save a server with an unreachable URL and quit during the ping: the app quits at once (the ping is not under the write lock), and nothing was written.
+35. Symlink `config.toml` to a dotfiles copy → Settings shows the symbolic-link warning.

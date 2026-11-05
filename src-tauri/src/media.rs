@@ -339,7 +339,10 @@ impl Media {
                     return;
                 }
                 *published = Some((cover_url, url.to_string()));
-                drop(published);
+                // Still holding `art`: a track change (which takes it to
+                // bump the generation) cannot post its metadata before this
+                // post, so this old track's metadata can never land last.
+                // `run_on_main_thread` only posts, so no deadlock.
                 // The newest metadata of this track (its length may have
                 // come in meanwhile).
                 let latest = lock(&publisher)
@@ -348,6 +351,7 @@ impl Media {
                     .filter(|m| m.cover_url == metadata.cover_url)
                     .unwrap_or(metadata);
                 media.apply(Update::Metadata(Some(latest)), Some(url.to_string()));
+                drop(published);
             }
         });
     }

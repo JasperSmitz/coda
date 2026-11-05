@@ -8,7 +8,7 @@ import { Cover } from "../components/Cover";
 import { SeekBar } from "../components/NowPlayingBar";
 import { Visualizer } from "../components/Visualizer";
 import { NextIcon, PauseIcon, PlayIcon, PreviousIcon } from "../components/icons";
-import { coverSrc, intent } from "../lib/ipc";
+import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
 import type { QueueItem, Snapshot } from "../lib/types";
 
 interface Props {
@@ -17,23 +17,46 @@ interface Props {
   onClose: () => void;
 }
 
-/** Tells the engine to send visualizer readings while `wanted` and the page is visible. */
+// Visualizer requests go out one at a time, each carrying the latest
+// wish, so a quick off/on (StrictMode, fast `f`) can never reach the
+// engine reordered.
+let visualizerChain: Promise<void> = Promise.resolve();
+let visualizerWanted = false;
+let visualizerSent: boolean | null = null;
+
+function requestVisualizer(visible: boolean) {
+  visualizerWanted = visible;
+  visualizerChain = visualizerChain.then(async () => {
+    const wanted = visualizerWanted;
+    if (wanted === visualizerSent) return;
+    visualizerSent = wanted;
+    await intentInOrder({ type: "setVisualizerVisible", visible: wanted });
+  });
+}
+
+/**
+ * Asks for visualizer readings while `wanted`, the page is visible and the
+ * window is not minimised.
+ */
 function useVisualizerReadings(wanted: boolean) {
   useEffect(() => {
     if (!wanted) return;
-    let sent: boolean | null = null;
+    let minimized = false;
+    let disposed = false;
     const sync = () => {
-      const visible = document.visibilityState === "visible";
-      if (visible !== sent) {
-        sent = visible;
-        intent({ type: "setVisualizerVisible", visible });
-      }
+      if (!disposed) requestVisualizer(document.visibilityState === "visible" && !minimized);
     };
     sync();
     document.addEventListener("visibilitychange", sync);
+    const unlisten = onWindowMinimized((m) => {
+      minimized = m;
+      sync();
+    });
     return () => {
+      disposed = true;
       document.removeEventListener("visibilitychange", sync);
-      intent({ type: "setVisualizerVisible", visible: false });
+      unlisten.then((f) => f()).catch(() => {});
+      requestVisualizer(false);
     };
   }, [wanted]);
 }

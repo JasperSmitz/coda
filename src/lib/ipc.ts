@@ -19,6 +19,21 @@ export function intent(value: Intent): void {
   });
 }
 
+/** Like `intent`, but resolves once the engine has received it (for ordering). */
+export function intentInOrder(value: Intent): Promise<void> {
+  return invoke<void>("intent", { intent: value }).catch((error: unknown) => {
+    console.warn("intent failed", value.type, error);
+  });
+}
+
+/**
+ * The backend's report that the main window was minimised (`true`) or
+ * restored; `document.visibilityState` does not say so on every platform.
+ */
+export function onWindowMinimized(handler: (minimized: boolean) => void): Promise<UnlistenFn> {
+  return listen<boolean>("window-minimized", (event) => handler(event.payload));
+}
+
 /** The full current state, queue included. */
 export function fetchSnapshot(): Promise<Snapshot> {
   return invoke<Snapshot>("snapshot");

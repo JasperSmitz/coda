@@ -76,10 +76,17 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
             <MusicSection settings={settings} snapshot={snapshot} reload={reload} />
             <ServerSection settings={settings} snapshot={snapshot} reload={reload} />
             <OptionsSection settings={settings} reload={reload} />
+            {settings.configIsLink && (
+              <p className="settings-status settings-status-error">
+                The config file is a symbolic link. Saving here replaces the link with a regular
+                file; the file it points to is left as it is.
+              </p>
+            )}
             {settings.configPath && (
               <p className="settings-footnote secondary">
                 Saved in <span className="mono">{settings.configPath}</span>, shared with the Coda
-                terminal app.
+                terminal app. Comments in it are not kept; the first save of a hand-edited file
+                keeps a backup next to it.
               </p>
             )}
           </>

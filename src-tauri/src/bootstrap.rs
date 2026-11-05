@@ -191,62 +191,67 @@ pub fn kill_recorded_mpv() {
     }
 }
 
-/// Largest TUI session file imported (the session loader's own cap).
-const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+/// Next to the GUI's session: the TUI's session was looked at once (and
+/// imported if it was valid). Never again after that, even if the GUI's
+/// own session is later set aside.
+const IMPORT_MARKER: &str = ".tui-imported";
 
-/// Copies the TUI's session file to `gui` if the GUI has none yet, so the
-/// first run starts with the TUI's queue. The TUI's file is only read:
-/// the copy is what the loader validates (and sets aside if it is
-/// invalid). Returns whether a copy was made.
+/// Copies the TUI's session file to `gui` once, if the GUI has none yet,
+/// so the first run starts with the TUI's queue. The TUI's file is only
+/// read (non-blocking, regular files only, see `session::read_valid`)
+/// and copied only if it is a valid session, so the GUI never sets aside
+/// a copy of it. Whatever the outcome, a marker records that the import
+/// was tried. Returns whether a copy was made.
 pub fn import_tui_session(gui: &Path, tui: &Path) -> bool {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    match std::fs::symlink_metadata(gui) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return false,
-    }
-    let Ok(file) = std::fs::File::open(tui) else {
-        return false;
-    };
-    // A regular file only (never block on a FIFO), within the cap.
-    match file.metadata() {
-        Ok(m) if m.is_file() && m.len() <= MAX_IMPORT_BYTES => {}
-        _ => return false,
-    }
-    let mut bytes = Vec::new();
-    if file
-        .take(MAX_IMPORT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-        || bytes.len() as u64 > MAX_IMPORT_BYTES
-    {
-        return false;
-    }
     let Some(dir) = gui.parent() else {
         return false;
     };
+    let marker = dir.join(IMPORT_MARKER);
+    let exists = |path: &Path| std::fs::symlink_metadata(path).is_ok();
+    if exists(gui) || exists(&marker) || !exists(tui) {
+        return false;
+    }
+    let bytes = session::read_valid(tui);
     let temp = gui.with_extension("json.import");
     let result = (|| {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
-        let mut out = std::fs::OpenOptions::new()
+        if let Some(bytes) = &bytes {
+            // A stale temp from an interrupted import is removed; the new
+            // one is created fresh, never through a link.
+            let _ = std::fs::remove_file(&temp);
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&temp)?;
+            out.write_all(bytes)?;
+            out.sync_all()?;
+            std::fs::rename(&temp, gui)?;
+        }
+        std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
             .mode(0o600)
-            .open(&temp)?;
-        out.write_all(&bytes)?;
-        out.sync_all()?;
-        std::fs::rename(&temp, gui)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&marker)
+            .map(drop)
     })();
-    match result {
-        Ok(()) => {
+    match (result, bytes.is_some()) {
+        (Ok(()), true) => {
             tracing::info!("imported the TUI's session");
             true
         }
-        Err(error) => {
+        (Ok(()), false) => {
+            tracing::info!("the TUI's session is not usable; not imported");
+            false
+        }
+        (Err(error), _) => {
             tracing::warn!(error = %error.kind(), "could not import the TUI's session");
             let _ = std::fs::remove_file(&temp);
             false
@@ -327,29 +332,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tui = dir.path().join("coda/state.json");
         let gui = dir.path().join("coda/coda-app/session.json");
+        let marker = gui.parent().unwrap().join(IMPORT_MARKER);
         std::fs::create_dir_all(tui.parent().unwrap()).unwrap();
-        let text = r#"{"version":1,"tracks":[{"source":{"kind":"local","path":"/m/a.flac"},"title":"A"}],"current":0,"volume":40,"repeat":"off"}"#;
-        std::fs::write(&tui, text).unwrap();
+        session::save(&tui, &session::Session::default()).unwrap();
+        let text = std::fs::read(&tui).unwrap();
         assert!(import_tui_session(&gui, &tui));
-        assert_eq!(std::fs::read_to_string(&gui).unwrap(), text);
+        assert_eq!(std::fs::read(&gui).unwrap(), text);
+        assert!(marker.exists());
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&gui).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        // Once the GUI has its own, the TUI's is never imported again.
-        std::fs::write(&tui, "{}").unwrap();
+        // Never again: not while the GUI has its own, and not after the
+        // GUI's own was set aside either.
         assert!(!import_tui_session(&gui, &tui));
-        assert_eq!(std::fs::read_to_string(&gui).unwrap(), text);
-        // An invalid TUI file: the GUI's copy is set aside by the loader,
-        // the TUI's own file stays exactly as it was.
         std::fs::remove_file(&gui).unwrap();
+        assert!(!import_tui_session(&gui, &tui));
+        assert!(!gui.exists());
+        assert_eq!(std::fs::read(&tui).unwrap(), text, "TUI file untouched");
+    }
+
+    #[test]
+    fn an_invalid_tui_session_is_not_copied_nor_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let tui = dir.path().join("coda/state.json");
+        let gui = dir.path().join("coda/coda-app/session.json");
+        std::fs::create_dir_all(tui.parent().unwrap()).unwrap();
         std::fs::write(&tui, "not json").unwrap();
-        assert!(import_tui_session(&gui, &tui));
-        let restored = session::restore(Some(gui.clone()));
-        assert!(restored.session.tracks.is_empty());
+        assert!(!import_tui_session(&gui, &tui));
+        assert!(!gui.exists(), "nothing for the GUI to set aside");
         assert_eq!(std::fs::read_to_string(&tui).unwrap(), "not json");
-        // No TUI file: nothing to import.
-        let other = dir.path().join("x/session.json");
-        assert!(!import_tui_session(&other, &dir.path().join("none.json")));
+        let names: Vec<_> = std::fs::read_dir(tui.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "state.json and coda-app/ only: {names:?}");
+        // Fixed later: still not imported (the attempt was made once).
+        session::save(&tui, &session::Session::default()).unwrap();
+        assert!(!import_tui_session(&gui, &tui));
+        // A FIFO does not hang and is not imported.
+        let other = dir.path().join("x/coda-app/session.json");
+        let fifo = dir.path().join("fifo.json");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(!import_tui_session(&other, &fifo));
         assert!(!other.exists());
+        // No TUI file: no marker either (a later TUI session can still be
+        // imported).
+        let none = dir.path().join("y/coda-app/session.json");
+        assert!(!import_tui_session(&none, &dir.path().join("none.json")));
+        assert!(!none.parent().unwrap().join(IMPORT_MARKER).exists());
     }
 }

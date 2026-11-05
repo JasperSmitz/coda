@@ -141,8 +141,10 @@ impl CoverService {
     }
 
     pub fn set_client(&self, client: Option<Client>) {
-        *self.client.write().unwrap_or_else(|e| e.into_inner()) = client;
+        // Forget the old remote tokens first, so no request can resolve an
+        // old token and load it with the new client.
         self.registry.client_changed();
+        *self.client.write().unwrap_or_else(|e| e.into_inner()) = client;
     }
 
     /// The cover behind a cover URL this service handed out (for the OS

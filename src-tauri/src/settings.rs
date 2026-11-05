@@ -16,17 +16,19 @@
 //! keychain and the client only: never back to the webview, never logged.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use coda_core::config::{self, Env, MUSIC_DIR_ENV};
 use coda_core::config_writer::{self, Preferences};
 use coda_core::navidrome::{self, Password};
 use coda_core::onboarding::{self, SaveError, Server};
-use coda_core::secret_store::SecretStore;
+use coda_core::secret_store::{SecretError, SecretStore};
 use coda_core::setup_actions::{self, SaveNavidrome};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, oneshot};
 
 use crate::engine::{EngineHandle, SettingsChange};
 
@@ -39,19 +41,41 @@ const OUTSIDE: &str = "This server is set up outside Coda; change it where it is
 const NOTHING_CHOSEN: &str = "Choose a music folder or connect a server";
 const SAVED_FOR_NEXT_START: &str = "Saved; the change applies when Coda is started again";
 
-/// One settings write at a time (and the exit waits for it).
+const QUITTING: &str = "Coda is quitting; nothing was saved";
+const CHANGED_MEANWHILE: &str = "The settings were changed meanwhile (by Coda in a terminal?); nothing was saved. \
+     Restart Coda to use them.";
+
+/// One settings write (keychain, then config) at a time. Held only for
+/// the write itself (never across a network ping). Once quitting starts,
+/// [`SettingsLock::finish`] takes it for good, so no write can start
+/// while the app shuts down.
 #[derive(Default)]
-pub struct SettingsLock(Mutex<()>);
+pub struct SettingsLock {
+    lock: Arc<Mutex<()>>,
+    quitting: AtomicBool,
+}
 
 impl SettingsLock {
-    /// Waits up to [`WRITE_GRACE`] for a running write, so the app does
-    /// not quit between the keychain write and the config write.
+    /// The lock for one write; refused once quitting has started.
+    async fn acquire(&self) -> Result<OwnedMutexGuard<()>, String> {
+        if self.quitting.load(Ordering::SeqCst) {
+            return Err(QUITTING.into());
+        }
+        let guard = self.lock.clone().lock_owned().await;
+        if self.quitting.load(Ordering::SeqCst) {
+            return Err(QUITTING.into());
+        }
+        Ok(guard)
+    }
+
+    /// Stops new writes and waits up to [`WRITE_GRACE`] for a running one,
+    /// so the app does not quit between the keychain write and the config
+    /// write. The lock is then kept until the process exits.
     pub async fn finish(&self) {
-        if tokio::time::timeout(WRITE_GRACE, self.0.lock())
-            .await
-            .is_err()
-        {
-            tracing::warn!("a settings save did not finish before exit");
+        self.quitting.store(true, Ordering::SeqCst);
+        match tokio::time::timeout(WRITE_GRACE, self.lock.clone().lock_owned()).await {
+            Ok(guard) => std::mem::forget(guard),
+            Err(_) => tracing::warn!("a settings save did not finish before exit"),
         }
     }
 }
@@ -84,6 +108,9 @@ pub enum ServerSettingsDto {
 pub struct SettingsDto {
     /// The config file, if a location is known (shown to the user).
     pub config_path: Option<String>,
+    /// `config.toml` is a symbolic link (e.g. managed dotfiles): a save
+    /// replaces the link with a regular file and leaves its target alone.
+    pub config_is_link: bool,
     /// `music_dir` as written in the file (`~/Music` stays `~/Music`).
     pub music_dir: Option<String>,
     /// `CODA_MUSIC_DIR` is set and used instead of the file's folder.
@@ -147,6 +174,7 @@ fn read_current(env: &Env) -> Current {
     let music_dir_env = std::env::var_os(MUSIC_DIR_ENV).is_some_and(|d| !d.is_empty());
     let mut dto = SettingsDto {
         config_path: None,
+        config_is_link: false,
         music_dir: None,
         music_dir_env,
         server: ServerSettingsDto::NotConfigured,
@@ -170,6 +198,8 @@ fn read_current(env: &Env) -> Current {
         }
     };
     dto.config_path = Some(start.config_path.display().to_string());
+    dto.config_is_link =
+        std::fs::symlink_metadata(&start.config_path).is_ok_and(|m| m.file_type().is_symlink());
     dto.music_dir = start.music_dir.clone();
     match config_writer::read_preferences(&start.config_path) {
         Ok(prefs) => {
@@ -305,8 +335,9 @@ pub async fn settings_test_server(server: ServerInput) -> Result<(), String> {
     setup_actions::ping(server.into_server()?).await
 }
 
-/// Pings the server, stores the password, writes `[navidrome]` (keeping
-/// the folder and `scrobble`), then switches the engine to the new client.
+/// Pings the server (before taking the write lock), stores the password,
+/// writes `[navidrome]` (keeping the folder and `scrobble`), then switches
+/// the engine to the new client.
 #[tauri::command]
 pub async fn settings_save_server(
     engine: State<'_, EngineHandle>,
@@ -314,22 +345,27 @@ pub async fn settings_save_server(
     server: ServerInput,
 ) -> Result<(), String> {
     let server = server.into_server()?;
-    let _write = lock.0.lock().await;
-    let current = current().await?;
-    let path = current.server_writable()?;
+    // Refused at once if a server cannot be saved here; checked again
+    // under the lock.
+    current().await?.server_writable()?;
     setup_actions::ping(server.clone()).await?;
     let client = client_for(&server)?;
-    let previous = current.previous_account;
-    let scrobble = blocking(move || {
-        setup_actions::save_navidrome(
-            &path,
-            SaveNavidrome::Server(server),
-            SecretStore::system,
-            previous.as_deref(),
-        )
-    })
-    .await?
-    .map_err(save_message)?;
+    let scrobble = {
+        let _write = lock.acquire().await?;
+        let current = current().await?;
+        let path = current.server_writable()?;
+        let previous = current.previous_account;
+        blocking(move || {
+            setup_actions::save_navidrome(
+                &path,
+                SaveNavidrome::Server(server),
+                SecretStore::system,
+                previous.as_deref(),
+            )
+        })
+        .await?
+        .map_err(save_message)?
+    };
     apply(
         &engine,
         SettingsChange::Client {
@@ -347,27 +383,29 @@ pub async fn settings_disconnect(
     engine: State<'_, EngineHandle>,
     lock: State<'_, SettingsLock>,
 ) -> Result<(), String> {
-    let _write = lock.0.lock().await;
-    let current = current().await?;
-    let path = current.server_writable()?;
-    if current.dto.music_dir.is_none() {
-        return Err(
-            "Navidrome is the only source in the config file, so it stays; \
-                    choose a music folder first"
-                .into(),
-        );
+    {
+        let _write = lock.acquire().await?;
+        let current = current().await?;
+        let path = current.server_writable()?;
+        if current.dto.music_dir.is_none() {
+            return Err(
+                "Navidrome is the only source in the config file, so it stays; \
+                        choose a music folder first"
+                    .into(),
+            );
+        }
+        let previous = current.previous_account;
+        blocking(move || {
+            setup_actions::save_navidrome(
+                &path,
+                SaveNavidrome::Remove,
+                SecretStore::system,
+                previous.as_deref(),
+            )
+        })
+        .await?
+        .map_err(save_message)?;
     }
-    let previous = current.previous_account;
-    blocking(move || {
-        setup_actions::save_navidrome(
-            &path,
-            SaveNavidrome::Remove,
-            SecretStore::system,
-            previous.as_deref(),
-        )
-    })
-    .await?
-    .map_err(save_message)?;
     apply(
         &engine,
         SettingsChange::Client {
@@ -405,25 +443,27 @@ pub async fn settings_set_music_dir(
     lock: State<'_, SettingsLock>,
     folder: String,
 ) -> Result<(), String> {
-    let _write = lock.0.lock().await;
-    let current = current().await?;
-    let path = current.writable()?;
-    if current.dto.music_dir_env {
-        return Err(format!(
-            "{MUSIC_DIR_ENV} is set and would be used instead; unset it to change the folder here."
-        ));
-    }
     let typed = folder.trim().to_owned();
     let dir = blocking({
         let typed = typed.clone();
         move || check_folder(&typed)
     })
     .await??;
-    let prefs = Preferences {
-        music_dir: Some(typed),
-        ..Preferences::default()
-    };
-    write_preferences(path, prefs).await?;
+    {
+        let _write = lock.acquire().await?;
+        let current = current().await?;
+        let path = current.writable()?;
+        if current.dto.music_dir_env {
+            return Err(format!(
+                "{MUSIC_DIR_ENV} is set and would be used instead; unset it to change the folder here."
+            ));
+        }
+        let prefs = Preferences {
+            music_dir: Some(typed),
+            ..Preferences::default()
+        };
+        write_preferences(path, prefs).await?;
+    }
     apply(&engine, SettingsChange::MusicDir(dir)).await
 }
 
@@ -435,21 +475,26 @@ pub async fn settings_set_options(
     cover_art: Option<bool>,
     scrobble: Option<bool>,
 ) -> Result<(), String> {
-    let _write = lock.0.lock().await;
-    let path = current().await?.writable()?;
-    let prefs = Preferences {
-        music_dir: None,
-        scrobble,
-        cover_art,
-    };
-    write_preferences(path, prefs).await?;
+    {
+        let _write = lock.acquire().await?;
+        let path = current().await?.writable()?;
+        let prefs = Preferences {
+            music_dir: None,
+            scrobble,
+            cover_art,
+        };
+        write_preferences(path, prefs).await?;
+    }
+    // Both are applied even if the first is refused (both are saved).
+    let mut result = Ok(());
     if let Some(on) = cover_art {
-        apply(&engine, SettingsChange::CoverArt(on)).await?;
+        result = result.and(apply(&engine, SettingsChange::CoverArt(on)).await);
     }
     if let Some(on) = scrobble {
-        apply(&engine, SettingsChange::Scrobble(on)).await?;
+        let applied = apply(&engine, SettingsChange::Scrobble(on)).await;
+        result = result.and(applied);
     }
-    Ok(())
+    result
 }
 
 async fn write_preferences(path: PathBuf, prefs: Preferences) -> Result<(), String> {
@@ -467,8 +512,40 @@ async fn write_preferences(path: PathBuf, prefs: Preferences) -> Result<(), Stri
         })
 }
 
-/// First run: saves a music folder and/or a server (pinged first) like
-/// Coda's setup, then starts using them.
+/// The first-run save. Re-reads the file right before writing and refuses
+/// unless it still configures no source (the TUI's `coda --setup` may have
+/// written one meanwhile), so it never removes a `[navidrome]` section, a
+/// keychain entry or a folder it did not create: with no server typed,
+/// only a section without a server (e.g. `scrobble` alone, which is kept)
+/// can be there, and no keychain entry is ever deleted. Blocking. Returns
+/// the file's `scrobble` setting.
+fn save_onboarding(
+    env: &Env,
+    music_dir: Option<String>,
+    server: Option<Server>,
+    open_store: fn() -> Result<SecretStore, SecretError>,
+) -> Result<bool, String> {
+    let current = read_current(env);
+    let path = if server.is_some() {
+        current.server_writable()?
+    } else {
+        current.writable()?
+    };
+    let sourceless =
+        current.dto.music_dir.is_none() && current.dto.server == ServerSettingsDto::NotConfigured;
+    if !sourceless {
+        return Err(CHANGED_MEANWHILE.into());
+    }
+    let navidrome = match server {
+        Some(server) => SaveNavidrome::Server(server),
+        None => SaveNavidrome::Remove,
+    };
+    setup_actions::save(&path, music_dir, navidrome, open_store, None).map_err(save_message)?;
+    Ok(config_writer::read_preferences(&path).map_or(true, |prefs| prefs.scrobble))
+}
+
+/// First run: saves a music folder and/or a server (pinged first, outside
+/// the write lock) like Coda's setup, then starts using them.
 #[tauri::command]
 pub async fn onboarding_finish(
     engine: State<'_, EngineHandle>,
@@ -483,13 +560,6 @@ pub async fn onboarding_finish(
     if music_dir.is_none() && server.is_none() {
         return Err(NOTHING_CHOSEN.into());
     }
-    let _write = lock.0.lock().await;
-    let current = current().await?;
-    let path = if server.is_some() {
-        current.server_writable()?
-    } else {
-        current.writable()?
-    };
     let dir = match &music_dir {
         Some(typed) => {
             let typed = typed.clone();
@@ -504,26 +574,13 @@ pub async fn onboarding_finish(
         }
         None => None,
     };
-    let previous = current.previous_account;
-    let save_path = path.clone();
-    blocking(move || {
-        let navidrome = match server {
-            Some(server) => SaveNavidrome::Server(server),
-            None => SaveNavidrome::Remove,
-        };
-        setup_actions::save(
-            &save_path,
-            music_dir,
-            navidrome,
-            SecretStore::system,
-            previous.as_deref(),
-        )
-    })
-    .await?
-    .map_err(save_message)?;
-    let scrobble = blocking(move || config_writer::read_preferences(&path))
-        .await?
-        .map_or(true, |prefs| prefs.scrobble);
+    let scrobble = {
+        let _write = lock.acquire().await?;
+        blocking(move || {
+            save_onboarding(&Env::from_process(), music_dir, server, SecretStore::system)
+        })
+        .await??
+    };
     if let Some(dir) = dir {
         apply(&engine, SettingsChange::MusicDir(dir)).await?;
     }
@@ -608,6 +665,18 @@ mod tests {
     }
 
     #[test]
+    fn a_symlinked_config_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles.toml");
+        std::fs::write(&real, "").unwrap();
+        let path = dir.path().join("xdg/coda/config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(!read_current(&env(dir.path())).dto.config_is_link);
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert!(read_current(&env(dir.path())).dto.config_is_link);
+    }
+
+    #[test]
     fn the_settings_never_carry_a_password() {
         let dir = tempfile::tempdir().unwrap();
         write(
@@ -627,6 +696,76 @@ mod tests {
         let server = input.into_server().unwrap();
         assert_eq!(server.url.as_str(), "https://h.example/");
         assert!(!format!("{server:?}").contains("hunter2"));
+    }
+
+    fn no_store() -> Result<SecretStore, SecretError> {
+        Err(SecretError::Unavailable)
+    }
+
+    #[test]
+    fn onboarding_never_replaces_a_source_that_appeared_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let folder = Some(music.to_str().unwrap().to_owned());
+        // `coda --setup` connected a server while onboarding was shown.
+        let tui = "[navidrome]\nurl = \"https://h.example/\"\nusername = \"me\"\n\
+                   password_keychain = true\n";
+        let path = write(dir.path(), tui);
+        let error = save_onboarding(&env(dir.path()), folder.clone(), None, no_store).unwrap_err();
+        assert_eq!(error, CHANGED_MEANWHILE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            tui,
+            "kept as it was"
+        );
+        // Or a folder: a typed server must not drop it.
+        let tui = "music_dir = \"~/Music\"\n";
+        write(dir.path(), tui);
+        let server = ServerInput {
+            url: "h.example".into(),
+            username: "me".into(),
+            password: "pw".into(),
+        }
+        .into_server()
+        .unwrap();
+        let error = save_onboarding(&env(dir.path()), None, Some(server), no_store).unwrap_err();
+        assert_eq!(error, CHANGED_MEANWHILE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), tui);
+    }
+
+    #[test]
+    fn onboarding_writes_a_sourceless_file_keeping_its_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let path = write(
+            dir.path(),
+            "[navidrome]\nscrobble = false\n\n[ui]\ncover_art = false\n",
+        );
+        let folder = Some(music.to_str().unwrap().to_owned());
+        // The store is never opened without a server.
+        let scrobble = save_onboarding(&env(dir.path()), folder, None, no_store).unwrap();
+        assert!(!scrobble);
+        let prefs = config_writer::read_preferences(&path).unwrap();
+        assert_eq!(prefs.music_dir.as_deref(), music.to_str());
+        assert!(!prefs.scrobble && !prefs.cover_art);
+    }
+
+    #[tokio::test]
+    async fn quitting_holds_the_write_lock_for_good() {
+        let lock = SettingsLock::default();
+        let write = lock.acquire().await.unwrap();
+        let finish = tokio::spawn(async move {
+            lock.finish().await;
+            lock
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!finish.is_finished(), "waits for the running write");
+        drop(write);
+        let lock = finish.await.unwrap();
+        assert_eq!(lock.acquire().await.unwrap_err(), QUITTING);
+        assert!(lock.lock.try_lock().is_err(), "still held");
     }
 
     #[test]

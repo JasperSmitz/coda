@@ -117,6 +117,8 @@ export type ServerSettings =
 
 export interface Settings {
   configPath: string | null;
+  /** `config.toml` is a symlink; a save replaces the link with a regular file. */
+  configIsLink: boolean;
   /** As written in the file (`~/Music` stays `~/Music`). */
   musicDir: string | null;
   /** `CODA_MUSIC_DIR` is set and used instead. */

@@ -484,6 +484,16 @@ pub fn load(path: &Path) -> (Session, LoadOutcome) {
     }
 }
 
+/// The bytes of a valid session file at `path`, read like [`load`]
+/// (non-blocking open, regular files only, size cap) but **read-only**:
+/// an unusable file is left exactly as it is and `None` is returned. For
+/// importing another program's session (the desktop app copies the
+/// TUI's).
+pub fn read_valid(path: &Path) -> Option<Vec<u8>> {
+    let bytes = read_bounded(path).ok()??;
+    decode(&bytes).ok().map(|_| bytes)
+}
+
 /// `Ok(None)` if there is no file. Opened non-blocking (so a FIFO cannot
 /// hang startup) and checked on the open handle, so the type cannot change
 /// between the check and the read.
@@ -593,6 +603,27 @@ pub fn save(path: &Path, session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_valid_never_changes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        assert_eq!(read_valid(&path), None, "missing");
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_valid(&path), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no .bad");
+        save(&path, &Session::default()).unwrap();
+        let bytes = read_valid(&path).unwrap();
+        assert_eq!(bytes, std::fs::read(&path).unwrap());
+        // A FIFO is refused without blocking.
+        let fifo = dir.path().join("fifo.json");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_valid(&fifo), None);
+        // A directory too.
+        assert_eq!(read_valid(dir.path()), None);
+    }
     use serde_json::Value;
 
     fn local(path: &str, title: &str) -> Track {
