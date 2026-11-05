@@ -34,8 +34,16 @@ export default function App() {
       return !open;
     });
 
-  const ready = snapshot?.phase === "ready" && snapshot.status !== "unavailable";
-  useShortcuts({ volume: snapshot?.volume ?? 0, enabled: ready, onToggleQueue: toggleQueue });
+  // `started`: the engine accepts intents (not starting or quitting);
+  // `ready`: playback works too.
+  const started = snapshot?.phase === "ready";
+  const ready = started && snapshot.status !== "unavailable";
+  useShortcuts({
+    volume: snapshot?.volume ?? 0,
+    enabled: ready,
+    started,
+    onToggleQueue: toggleQueue,
+  });
 
   return (
     <div className={`app ${queueOpen ? "queue-open" : ""}`}>
@@ -56,6 +64,7 @@ export default function App() {
           playingKey={snapshot.playingKey}
           status={snapshot.status}
           disabled={!ready}
+          locked={!started}
         />
       )}
       {snapshot && (

@@ -13,7 +13,7 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
 ```
 
 ## Crates
-- `crates/coda-core` (lib `coda_core`): Coda's engine, vendored. Additions for the GUI in M1: `cover::load` (async, one cover at a key and size; `spawn_load` now uses it), `cover::encode_jpeg`, `Library::track_id_by_path`, `logging::init_logging_at(path)`.
+- `crates/coda-core` (lib `coda_core`): Coda's engine, vendored. Additions for the GUI in M1: `cover::load` (async, one cover at a key and size; `spawn_load` now uses it), `cover::encode_jpeg`, `Library::track_id_by_path`, `logging::init_logging_at(path)`, `Drop for PlaybackHandle` (SIGTERM to a still-running mpv), and on Linux `PR_SET_PDEATHSIG` in `mpv_command`.
 - `src-tauri` (`coda-app`, lib `coda_app_lib`): the backend.
 
 ## Backend modules (`src-tauri/src/`)
@@ -26,7 +26,7 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
   - Session: revision based (`Player::revision`), saved 2 s after the last change, one blocking write at a time; restore never auto-plays; final save at exit bounded to 2 s. The GUI has its own session file, so it never overwrites the TUI's queue.
   - Scrobbling: `listen_started`/`listen_progressed` ported from the TUI's `App` (no client swap yet, so no `unscrobbled_load`).
   - Visualizer: `SetVisualizer(true)` only while the UI says a view is visible (`setVisualizerVisible`), never after `VisualizerUnavailable`; frames are forwarded raw only for `audible_load` while playing. Smoothing/decay is the UI's job (none yet: no visualizer view in M1).
-  - Shutdown (`EngineHandle::shutdown`): `phase = shuttingDown` snapshot, wait ≤3 s for a still-running startup (else abort it; dropping the handle kills mpv), final save, `PlaybackHandle::shutdown(2 s)`, reply.
+  - Shutdown (`EngineHandle::shutdown`): `phase = shuttingDown` snapshot, wait ≤3 s for a still-running startup (else abort and await it, so a `PlaybackHandle` it holds is dropped and mpv terminated), final save, `PlaybackHandle::shutdown(2 s)`, reply.
 - `dto.rs`: serde DTOs (camelCase), mirrored by hand in `src/lib/types.ts`.
 - `commands.rs`: `intent(intent)` and `snapshot()`; nothing else.
 - `cover.rs`: `CoverService` (registry, current client, small/large disk caches, 4 concurrent loads) and the protocol handler.
@@ -48,12 +48,16 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
 - Local: embedded art, else a folder image. Navidrome: `getCoverArt` via the current client, cached in Coda's disk cache (shared with the TUI). Served as JPEG with `Cache-Control: private, max-age=86400`. `[ui] cover_art = false` turns URLs off.
 
 ## Lifecycle
-- Window close / Cmd+Q / last window closed → `RunEvent::ExitRequested`: prevent the exit, run `EngineHandle::shutdown`, then `app.exit(0)`.
+- Window close / Cmd+Q / last window closed → `RunEvent::ExitRequested`: prevent the exit, `begin_quit` (run `EngineHandle::shutdown`, then `app.exit(0)`).
+- SIGTERM, SIGINT and SIGHUP (`watch_signals` in `lib.rs`) take the same `begin_quit` path; a second signal while quitting terminates mpv and exits at once.
 - `RunEvent::Exit` without a finished shutdown (a quit path that skipped `ExitRequested`): blocking, bounded (8 s) shutdown on the event-loop thread.
-- mpv is also spawned with `kill_on_drop`.
+- A startup still running at exit gets 3 s, then is aborted *and awaited*, which drops a finished-but-unclaimed `PlaybackHandle` before the reply.
+- `coda-core`: dropping a `PlaybackHandle` without `shutdown` while its backend runs sends mpv SIGTERM synchronously; on Linux mpv is spawned with `PR_SET_PDEATHSIG = SIGTERM` (covers SIGKILL and aborts); mpv is also spawned with `kill_on_drop`.
+- Panics: the app records mpv's pid (`bootstrap::MPV_PID`); a panic hook terminates it when the panic ends the process (always under the release profile's `panic = "abort"`, or on the main thread).
+- Session saves that fail are retried with back-off (2 s doubling to 60 s), not only at exit.
 
 ## Security
-- Capabilities: `core:default` only (events, app/window basics); the opener plugin was removed.
+- Capabilities (`capabilities/default.json`): exactly `allow-intent`, `allow-snapshot` (our commands, declared via `AppManifest::commands` in `build.rs`, so none is allowed implicitly), `core:event:allow-listen`, `core:event:allow-unlisten`. No emit (the webview cannot forge engine events), menu, tray, path, window or webview APIs. The opener plugin was removed.
 - CSP: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' coda: http://coda.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` (`devCsp` adds the Vite HMR socket). `freezePrototype` on.
 - DTOs carry no passwords, tokens or stream URLs (a test asserts the snapshot JSON of a Navidrome track has none). Server/tag text is rendered as React text only.
 
@@ -62,7 +66,7 @@ webview <img src="coda://localhost/cover/<token>/small">             │   Scrob
 - `state/store.ts`: two `useSyncExternalStore` stores (app snapshot + queue; progress separately so the position does not re-render the queue). `connect()` subscribes first, then fetches the snapshot.
 - `components/`: `Sidebar`, `NowPlayingBar` (cover, title/artist, prev/play/next, seek bar, repeat, volume, queue toggle), `Slider` (pointer drag + own keys), `QueuePanel` (virtualized 36 px rows; double-click/Enter plays, Delete/hover button/context menu removes), `ContextMenu`, `Banner` (problems), `Toasts` (notices), `Cover` (+ generated placeholder), `icons.tsx`.
 - `views/`: `PlaceholderView` for every browse entry (M2).
-- `hooks/useShortcuts.ts`: Space, n/p, Ctrl+→/←, ←/→ (∓5 s), +/=/-, r, q; ignored while typing in a text field.
+- `hooks/useShortcuts.ts`: Space, n/p, Ctrl+→/←, ←/→ (∓5 s), +/=/-, r, q; ignored while typing in a text field. Controls and shortcuts that send intents are disabled until the engine is `ready` (and transport ones while playback is unavailable).
 - `styles/`: `tokens.css` (dark first, light via `prefers-color-scheme`, reduced motion), `base.css` (native feel), `app.css` (shell).
 
 ## Tests

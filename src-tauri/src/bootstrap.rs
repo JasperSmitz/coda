@@ -9,6 +9,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use coda_core::config::{self, Cli, Config, ConfigError, Env};
 use coda_core::navidrome::Client;
@@ -132,7 +133,13 @@ pub async fn sources() -> Sources {
 /// Starts mpv. A failure is a problem, not an error: the app runs without
 /// playback.
 pub async fn playback() -> Result<PlaybackHandle, ProblemDto> {
-    playback::spawn_backend().await.map_err(|error| {
+    let spawned = playback::spawn_backend().await;
+    if let Ok(handle) = &spawned
+        && let Some(pid) = handle.pid()
+    {
+        MPV_PID.store(pid, Ordering::SeqCst);
+    }
+    spawned.map_err(|error| {
         tracing::error!(%error, "mpv could not be started");
         ProblemDto {
             kind: if error.is_not_found() {
@@ -143,6 +150,31 @@ pub async fn playback() -> Result<PlaybackHandle, ProblemDto> {
             message: error.to_string(),
         }
     })
+}
+
+/// The running mpv's pid (0: none), for [`kill_recorded_mpv`]: the last
+/// resort when the process ends without the normal shutdown (a panic,
+/// which aborts in release builds).
+static MPV_PID: AtomicU32 = AtomicU32::new(0);
+
+/// mpv was shut down (or never ran): nothing to kill any more, and its pid
+/// may be reused.
+pub fn forget_mpv_pid() {
+    MPV_PID.store(0, Ordering::SeqCst);
+}
+
+/// Sends SIGTERM to the recorded mpv, if any. Async-signal-safe enough for
+/// a panic hook: one atomic load and one `kill`.
+pub fn kill_recorded_mpv() {
+    let pid = MPV_PID.swap(0, Ordering::SeqCst);
+    if let Ok(pid) = libc::pid_t::try_from(pid)
+        && pid > 0
+    {
+        // SAFETY: `kill` has no memory effects.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
 }
 
 /// Reads the GUI's saved session on a blocking thread.

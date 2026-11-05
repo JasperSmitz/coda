@@ -20,19 +20,22 @@ function isTyping(target: EventTarget | null): boolean {
 
 interface Options {
   volume: number;
+  /** Playback intents work (started, playback available). */
   enabled: boolean;
+  /** The engine accepts intents at all (not starting or quitting). */
+  started: boolean;
   onToggleQueue: () => void;
 }
 
-export function useShortcuts({ volume, enabled, onToggleQueue }: Options) {
+export function useShortcuts({ volume, enabled, started, onToggleQueue }: Options) {
   // Read through a ref so the listener is installed once.
-  const state = useRef({ volume, enabled, onToggleQueue });
-  state.current = { volume, enabled, onToggleQueue };
+  const state = useRef({ volume, enabled, started, onToggleQueue });
+  state.current = { volume, enabled, started, onToggleQueue };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || isTyping(e.target) || e.metaKey || e.altKey) return;
-      const { volume, enabled, onToggleQueue } = state.current;
+      const { volume, enabled, started, onToggleQueue } = state.current;
       const ctrl = e.ctrlKey;
       let handled = true;
       if (ctrl) {
@@ -64,7 +67,7 @@ export function useShortcuts({ volume, enabled, onToggleQueue }: Options) {
             if (enabled) intent({ type: "setVolume", volume: Math.max(0, volume - VOLUME_STEP) });
             break;
           case "r":
-            intent({ type: "cycleRepeat" });
+            if (started) intent({ type: "cycleRepeat" });
             break;
           case "q":
             onToggleQueue();

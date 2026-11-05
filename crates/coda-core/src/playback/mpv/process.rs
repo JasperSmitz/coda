@@ -109,8 +109,38 @@ pub fn mpv_command(program: &OsStr, socket: &Path, extra_args: &[&str]) -> Comma
     for name in STRIPPED_ENV {
         command.env_remove(name);
     }
+    die_with_parent(&mut command);
     command
 }
+
+/// Linux: mpv gets SIGTERM when its parent dies, however it dies (SIGKILL,
+/// abort on panic), so it never outlives the player. The signal is tied to
+/// the *thread* that spawned mpv; Tokio spawns on the calling worker
+/// thread, which lives as long as the runtime (do not spawn mpv from
+/// `spawn_blocking`, whose threads exit when idle).
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs between fork and exec and only makes
+    // async-signal-safe calls (`prctl`, `getppid`) without allocating.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The parent died before `prctl` took effect: do not start.
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Elsewhere (macOS has no parent-death signal) the app's own exit, signal
+/// and panic handling stop mpv.
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent(_command: &mut Command) {}
 
 /// Candidate base directories for the socket directory, in preference
 /// order: `$XDG_RUNTIME_DIR`, `$TMPDIR`, then `/tmp`. Empty or relative

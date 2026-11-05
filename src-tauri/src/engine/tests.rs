@@ -737,3 +737,75 @@ async fn shutdown_saves_and_leaves_no_mpv_process() {
     assert_eq!(saved.repeat, RepeatMode::All);
     assert_eq!(saved.tracks.len(), 1);
 }
+
+#[test]
+fn a_failed_save_is_retried_with_back_off() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], Some(0));
+    engine.handle_intent(Intent::CycleRepeat, now);
+    let due = now + SAVE_DEBOUNCE;
+    assert!(engine.take_due_save(due).is_some());
+    // The write failed: due again after the debounce, with no new change.
+    engine.save_failed();
+    engine.retry_save(due);
+    assert!(engine.take_due_save(due + SAVE_DEBOUNCE / 2).is_none());
+    assert!(engine.take_due_save(due + SAVE_DEBOUNCE).is_some());
+    // Failing again waits twice as long.
+    let again = due + SAVE_DEBOUNCE;
+    engine.save_failed();
+    engine.retry_save(again);
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE).is_none());
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE * 2).is_some());
+    // The back-off is capped.
+    for _ in 0..20 {
+        engine.save_failed();
+        engine.retry_save(again);
+        assert!(engine.take_due_save(again + SAVE_RETRY_MAX).is_some());
+    }
+    // A success resets it.
+    engine.save_succeeded();
+    engine.save_failed();
+    engine.retry_save(again);
+    assert!(engine.take_due_save(again + SAVE_DEBOUNCE).is_some());
+}
+
+#[tokio::test]
+#[ignore = "needs mpv on PATH"]
+async fn quitting_during_a_slow_startup_leaves_no_mpv_process() {
+    // mpv is up, but the password (say) never comes: the startup future
+    // holds the finished `PlaybackHandle` and never resolves.
+    let (pid_tx, pid_rx) = oneshot::channel();
+    let startup = async move {
+        let (_playback, never) = tokio::join!(
+            async {
+                let playback = coda_core::playback::spawn_backend().await.unwrap();
+                let _ = pid_tx.send(playback.pid().unwrap());
+                playback
+            },
+            std::future::pending::<Startup>()
+        );
+        never
+    };
+    let (tx, rx) = mpsc::channel(16);
+    let task = tokio::spawn(run(
+        rx,
+        Recorder::default(),
+        Arc::new(CoverService::new(None)),
+        startup,
+    ));
+    let handle = EngineHandle { tx };
+    let pid = pid_rx.await.unwrap();
+    assert!(process_exists(pid));
+    assert_eq!(handle.snapshot().await.unwrap().phase, Phase::Starting);
+    let started = Instant::now();
+    handle.shutdown().await;
+    task.await.unwrap();
+    assert!(started.elapsed() < STARTUP_GRACE + Duration::from_secs(1));
+    for _ in 0..40 {
+        if !process_exists(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!process_exists(pid), "mpv {pid} outlived the app");
+}

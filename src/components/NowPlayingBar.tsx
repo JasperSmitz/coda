@@ -91,6 +91,7 @@ export function NowPlayingBar({ snapshot, queueOpen, onToggleQueue }: Props) {
         <button
           className={`icon-button ${repeat !== "off" ? "is-active" : ""}`}
           onClick={() => intent({ type: "cycleRepeat" })}
+          disabled={snapshot.phase !== "ready"}
           aria-label={repeatLabel}
           aria-pressed={repeat !== "off"}
           title={`${repeatLabel} (r)`}

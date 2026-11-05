@@ -41,6 +41,8 @@ pub const TICK: Duration = Duration::from_millis(50);
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Quiet time after the last change before the session is saved.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+/// Longest wait before retrying a failed session write.
+pub const SAVE_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Bound on the final session save at exit.
 pub const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on mpv's shutdown at exit.
@@ -150,6 +152,8 @@ pub struct Engine {
     seen_revision: u64,
     saved_revision: Option<u64>,
     save_due: Option<Instant>,
+    /// Failed writes in a row (retry back-off).
+    save_failures: u32,
     // Emission.
     dirty: bool,
     sent: Option<Snapshot>,
@@ -185,6 +189,7 @@ impl Engine {
             seen_revision: 0,
             saved_revision: Some(0),
             save_due: None,
+            save_failures: 0,
             dirty: true,
             sent: None,
             sent_queue: None,
@@ -735,6 +740,22 @@ impl Engine {
         self.saved_revision = None;
     }
 
+    /// After a failed write: try again later even without a new change,
+    /// backing off (2 s, 4 s, … up to [`SAVE_RETRY_MAX`]).
+    pub fn retry_save(&mut self, now: Instant) {
+        let delay = SAVE_DEBOUNCE
+            .saturating_mul(1 << self.save_failures.min(5))
+            .min(SAVE_RETRY_MAX);
+        self.save_failures = self.save_failures.saturating_add(1);
+        let retry = now + delay;
+        self.save_due = Some(self.save_due.map_or(retry, |due| due.min(retry)));
+    }
+
+    /// A write succeeded: the retry back-off starts over.
+    pub fn save_succeeded(&mut self) {
+        self.save_failures = 0;
+    }
+
     fn save_snapshot(&mut self) -> Session {
         self.saved_revision = Some(self.player.revision());
         // The GUI's visualizer follows its views; nothing to restore.
@@ -1000,8 +1021,14 @@ impl Saver {
                 return;
             }
             let task = self.in_flight.take();
-            if let Some(Some(Ok(false) | Err(_))) = task.map(futures_now) {
-                engine.save_failed();
+            match task.map(futures_now) {
+                Some(Some(Ok(true))) => engine.save_succeeded(),
+                Some(Some(Ok(false) | Err(_))) => {
+                    engine.save_failed();
+                    engine.retry_save(now);
+                }
+                // Not collectable (coop budget): unknown, nothing to do.
+                _ => {}
             }
         }
         if let Some(session) = engine.take_due_save(now) {
@@ -1164,6 +1191,7 @@ where
                 None => {
                     if let Some(playback) = io.playback.take() {
                         playback.shutdown(SHUTDOWN_TIMEOUT).await;
+                        crate::bootstrap::forget_mpv_pid();
                     }
                 }
             },
@@ -1200,13 +1228,22 @@ where
     // Shutdown: tell the UI, final save, then mpv (both bounded).
     engine.set_shutting_down();
     io.flush(&mut engine, Instant::now());
-    if let Some(task) = startup.take() {
-        // mpv may still be starting; let it finish so it is shut down
-        // cleanly, else abort (dropping the handle kills the child).
-        match tokio::time::timeout(STARTUP_GRACE, task).await {
+    if let Some(mut task) = startup.take() {
+        // mpv may still be starting; let startup finish so mpv is shut down
+        // cleanly. Otherwise abort it and wait for the abort: that drops
+        // the startup future, and with it a `PlaybackHandle` already made
+        // (its `Drop` terminates mpv) or a half-started mpv child
+        // (`kill_on_drop`), before we reply. Merely dropping the
+        // `JoinHandle` would detach the task and orphan mpv at exit.
+        match tokio::time::timeout(STARTUP_GRACE, &mut task).await {
             Ok(Ok(started)) => io.playback = started.playback.ok(),
             Ok(Err(_)) => {}
-            Err(_) => tracing::warn!("startup still running at exit; abandoned"),
+            Err(_) => {
+                tracing::warn!("startup still running at exit; aborted");
+                task.abort();
+                let _ = task.await;
+                crate::bootstrap::forget_mpv_pid();
+            }
         }
     }
     io.saver.finish(&mut engine).await;
@@ -1215,6 +1252,7 @@ where
     if let Some(playback) = io.playback.take() {
         let outcome = playback.shutdown(SHUTDOWN_TIMEOUT).await;
         tracing::info!(?outcome, "playback backend shut down");
+        crate::bootstrap::forget_mpv_pid();
     }
     if let Some(reply) = reply {
         let _ = reply.send(());

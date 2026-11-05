@@ -499,6 +499,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_the_handle_without_shutdown_terminates_mpv() {
+        let (fake, _peer) = fake_mpv(Duration::from_secs(30));
+        let pid = fake.pid;
+        assert!(pid_exists(pid));
+        let handle = PlaybackHandle::new(fake.commands, fake.events, fake.task, Some(pid));
+        drop(handle);
+        // SIGTERM went out synchronously; the driver then reaps the child.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pid_exists(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!pid_exists(pid), "stand-in mpv still exists");
+    }
+
+    #[tokio::test]
     async fn mpv_that_never_replies_is_reported_and_killed() {
         let timeout = Duration::from_millis(400);
         let started = Instant::now();

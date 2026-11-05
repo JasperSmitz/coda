@@ -3,6 +3,7 @@
 Run from the repo root: `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
 
 ## Startup
+0. While "Starting…" (e.g. during a keychain prompt) the transport, repeat, Clear and remove controls are disabled.
 1. With your normal Coda config: the window opens at once ("Starting…" only if the password/keychain is slow), sidebar shows "Scanning… N" then "N tracks"; Navidrome dot turns green; a toast "Library scan complete: …" appears and fades after ~5 s.
 2. First run: the queue is empty (the GUI keeps its own session; the TUI's queue is not imported). After step "Queue" below, quit and relaunch: the same queue and current track come back, **paused/stopped, not playing**.
 3. Without config: `CODA_CONFIG=/nonexistent pnpm tauri dev` → amber banner "No music source is set up yet…"; the app stays usable (no crash).
@@ -18,12 +19,15 @@ For now a queue comes from a restored GUI session. To seed one, copy the TUI's s
 
 ## Queue
 10. `q` (and the bar's queue button) toggles the panel; the choice survives a relaunch.
-11. Double-click an entry plays it; click selects; ↑/↓ move, Enter plays, Delete removes; hover shows ×; right-click → Play / Remove. Removing the playing entry moves on to the next.
+11. Double-click an entry plays it; click selects; ↑/↓ move, Enter plays, Delete or ⌫ (Backspace) removes; hover shows ×; right-click → Play / Remove. Removing the playing entry moves on to the next.
 12. Clear empties the queue and stops playback.
 
 ## Quit
 13. Close the window (and separately, Cmd+Q on macOS / the WM close on Linux): the app exits within ~2 s; `pgrep -l mpv` shows no new mpv; relaunch restores the queue and position-free current track.
 14. Change something (e.g. `r`) and quit within 2 s: the change is still restored (final save).
+14a. Signals: while playing, `kill -TERM <coda-app pid>` (also try `-HUP`, and Ctrl-C in the `pnpm tauri dev` terminal): music stops, the app exits within ~2 s, `pgrep -l mpv` shows no new mpv, and the queue is restored on relaunch. A second Ctrl-C while quitting exits at once (mpv still terminated).
+14b. Linux only: `kill -KILL <coda-app pid>` while playing: mpv stops too (parent-death signal).
+14c. Quit while startup is slow (e.g. a `password_command` that waits on pinentry, or an unanswered macOS keychain prompt): close the window during the prompt; within ~3 s the app exits and no mpv is left.
 
 ## Look
 15. Dark and light (switch the OS appearance): readable, accent amber, no text selectable outside inputs, no page scroll/bounce, focus rings visible when tabbing.
