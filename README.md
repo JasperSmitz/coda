@@ -39,6 +39,8 @@ cargo install --path .
 ### Install a release
 Each [GitHub release](https://github.com/JasperSmitz/coda/releases) has a `coda-<version>-<target>.tar.gz` for Linux (`x86_64`, `aarch64`) and macOS (`aarch64-apple-darwin` for Apple silicon, `x86_64-apple-darwin` for Intel), with a `.sha256` beside it. mpv is still needed.
 
+**macOS:** the binaries are not signed or notarised, so macOS says it "can't verify" a `coda` downloaded in a browser. Remove the quarantine flag once after installing: `xattr -d com.apple.quarantine ~/.local/bin/coda`. Alternatively, open it once, then choose **Open Anyway** in System Settings → Privacy & Security. Downloads made with `curl`, as below, are not quarantined.
+
 ```sh
 v=1.0.0 t=aarch64-apple-darwin   # pick your version and target
 curl -LO https://github.com/JasperSmitz/coda/releases/download/v$v/coda-$v-$t.tar.gz
@@ -47,8 +49,6 @@ shasum -a 256 -c coda-$v-$t.tar.gz.sha256
 tar -xzf coda-$v-$t.tar.gz
 mkdir -p ~/.local/bin && install -m 755 coda-$v-$t/coda ~/.local/bin/   # or any folder on PATH
 ```
-
-**macOS:** the binaries are not signed or notarised. If macOS refuses to open `coda` after a browser download, remove the quarantine flag once: `xattr -d com.apple.quarantine ~/.local/bin/coda`.
 
 **Linux:** the binaries are built on Ubuntu 24.04 (glibc 2.39). If one does not start on an older system, build from source.
 
