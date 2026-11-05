@@ -1,6 +1,6 @@
 // The queue: current entry highlighted, double-click or Enter plays an
 // entry. Multi-select (click, Shift/Cmd/Ctrl-click, Shift+↑/↓, Cmd/Ctrl+A);
-// Delete removes the selection, Alt+↑/↓ moves it, drag-and-drop moves it
+// Delete or Cmd+Backspace removes the selection (plain Backspace is Back), Alt+↑/↓ moves it, drag-and-drop moves it
 // to the drop gap. The header shuffles the upcoming entries, saves the
 // queue as a Navidrome playlist and clears it (after a confirmation, as
 // in Coda). Rows are virtualized (fixed 36px), since a queue holds up to
@@ -11,6 +11,7 @@ import { useDragReorder } from "../hooks/useDragReorder";
 import { useSelection } from "../hooks/useSelection";
 import { formatTime } from "../lib/format";
 import { intent } from "../lib/ipc";
+import { isRemoveKey } from "../lib/keys";
 import { addToPlaylistFlow, canAddToPlaylist, saveQueueFlow, songIds } from "../lib/playlists";
 import type { QueueItem, Status } from "../lib/types";
 import { confirm } from "../state/dialogs";
@@ -114,7 +115,7 @@ export function QueuePanel({
     const first = Math.min(...positions);
     const last = Math.max(...positions);
     const to = delta < 0 ? Math.max(0, first - 1) : Math.min(queue.length, last + 2);
-    intent({ type: "moveEntries", keys: target, to });
+    intent({ type: "moveEntries", keys: target, before: queue[to]?.key ?? null });
     scrollToIndex(delta < 0 ? Math.max(0, first - 1) : Math.min(queue.length - 1, last + 1));
   };
 
@@ -124,7 +125,10 @@ export function QueuePanel({
     rowHeight: ROW,
     count: queue.length,
     disabled: locked,
-    onDrop: (gap, payload) => intent({ type: "moveEntries", keys: payload, to: gap }),
+    // The gap as the entry it precedes, so a queue that changed since
+    // this render still gets the block where it was dropped.
+    onDrop: (gap, payload) =>
+      intent({ type: "moveEntries", keys: payload, before: queue[gap]?.key ?? null }),
   });
 
   const onRowPointerDown = (e: PointerEvent, key: string) => {
@@ -177,8 +181,10 @@ export function QueuePanel({
         if (cursor >= 0 && !disabled) play(queue[cursor].key);
         break;
       case "Delete":
-      // The ⌫ key on Mac keyboards (Delete needs fn+⌫).
       case "Backspace":
+        // Plain Backspace is Back (DESIGN.md); removing needs Delete
+        // (fn+⌫ on Mac keyboards) or Cmd+Backspace.
+        if (!isRemoveKey(e)) return;
         remove(selection.ordered());
         break;
       case "ContextMenu": {
@@ -427,7 +433,7 @@ const QueueRow = memo(function QueueRow({
           className="icon-button queue-remove"
           tabIndex={-1}
           aria-label={`Remove ${track.title}`}
-          title="Remove (Delete)"
+          title="Remove (Delete or ⌘⌫)"
           onClick={(e) => {
             e.stopPropagation();
             onRemove(item.key);

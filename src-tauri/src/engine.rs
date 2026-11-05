@@ -380,7 +380,7 @@ impl Engine {
                 Vec::new()
             }
             Intent::ShuffleLibrary => self.shuffle_library(now),
-            Intent::MoveEntries { keys, to } => self.move_entries(&keys, to),
+            Intent::MoveEntries { keys, before } => self.move_entries(&keys, before.as_deref()),
             Intent::RemoveEntries { keys } => self.remove_entries(&keys),
             Intent::PlayNextEntries { keys } => self.play_next_entries(&keys, now),
             Intent::ShuffleUpcoming => self.shuffle_upcoming(now),

@@ -1,6 +1,6 @@
 // The tracks of a Navidrome playlist the user may change: TrackTable's
 // look plus multi-select (click, Shift/Cmd/Ctrl-click, Shift+↑/↓,
-// Cmd/Ctrl+A), removal (Delete) and reordering (drag-and-drop or
+// Cmd/Ctrl+A), removal (Delete or Cmd+Backspace, always confirmed) and reordering (drag-and-drop or
 // Alt+↑/↓). Every change is saved at once as Coda does it: a replace of
 // the whole list, refused by the backend if the playlist changed on the
 // server; a playlist with hidden entries asks first. While an edit runs
@@ -11,7 +11,16 @@ import { useDragReorder } from "../hooks/useDragReorder";
 import { useSelection } from "../hooks/useSelection";
 import { formatTime } from "../lib/format";
 import { canGoToAlbum, canGoToArtist, enqueue, goToAlbum, goToArtist, playTracks, sameTrack } from "../lib/play";
-import { addToPlaylistFlow, canAddToPlaylist, confirmRewrite, playlistEdits, songIds, useEditsRunning } from "../lib/playlists";
+import { isRemoveKey } from "../lib/keys";
+import {
+  addToPlaylistFlow,
+  canAddToPlaylist,
+  confirmRemoval,
+  confirmRewrite,
+  playlistEdits,
+  songIds,
+  useEditsRunning,
+} from "../lib/playlists";
 import type { Hidden, Playlist, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
@@ -52,15 +61,29 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
   // The shown order (indices into `tracks`): the loaded one, or a new one
   // being saved.
   const [order, setOrder] = useState<number[]>(() => tracks.map((_, i) => i));
-  const keys = useMemo(() => order.map(String), [order]);
+  // Rows are keyed by song and occurrence (`s1#0`, `s1#1`), not by
+  // position, so the selection follows the songs across the reload after
+  // a saved reorder.
+  const rowKeys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return tracks.map((t, i) => {
+      const id = t.source.kind === "navidrome" ? t.source.songId : `local-${i}`;
+      const n = seen.get(id) ?? 0;
+      seen.set(id, n + 1);
+      return `${id}#${n}`;
+    });
+  }, [tracks]);
+  const indexOfKey = useMemo(() => new Map(rowKeys.map((k, i) => [k, i])), [rowKeys]);
+  const toIndices = (list: string[]): number[] =>
+    list.flatMap((k) => {
+      const i = indexOfKey.get(k);
+      return i === undefined ? [] : [i];
+    });
+  const keys = useMemo(() => order.map((i) => rowKeys[i]), [order, rowKeys]);
   const selection = useSelection(keys);
-  const select = selection.set;
-  // A reload (after an edit) starts from the server's order; the old
-  // selection's indices would name other songs.
-  useEffect(() => {
-    setOrder(tracks.map((_, i) => i));
-    select([]);
-  }, [tracks, select]);
+  // A reload (after an edit) starts from the server's order.
+  useEffect(() => setOrder(tracks.map((_, i) => i)), [tracks]);
+  const resetOrder = () => setOrder(tracks.map((_, i) => i));
   const shown = useMemo(() => order.map((i) => tracks[i]).filter(Boolean), [order, tracks]);
   const expected = useMemo(() => songIds(tracks), [tracks]);
 
@@ -103,24 +126,31 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
     if (!canEdit || next.every((v, i) => v === order[i])) return;
     if (!(await confirmRewrite(hidden, "Save the new order"))) return;
     setOrder(next);
-    await playlistEdits.reorder(playlist, expected, next, hidden);
+    const outcome = await playlistEdits.reorder(playlist, expected, next, hidden);
+    // Refused or failed: the server keeps its order, and a quiet reload
+    // may not replace `tracks`; show the server's order again.
+    if (outcome.status !== "done") resetOrder();
   };
 
   /** Selected original indices (or `at`'s row when it is outside the selection). */
   const targets = (key: string | null): number[] => {
-    if (key !== null && !selection.has(key)) return [Number(key)];
-    return selection.ordered().map(Number);
+    if (key !== null && !selection.has(key)) return toIndices([key]);
+    return toIndices(selection.ordered());
   };
 
+  /** Removal from the server's playlist always asks first. */
   const remove = async (indices: number[]) => {
     if (!canEdit || indices.length === 0) return;
-    const what = indices.length === 1 ? "Remove the song" : `Remove ${plural(indices.length, "song")}`;
-    if (!(await confirmRewrite(hidden, what))) return;
+    const first = tracks[indices[0]];
+    const what =
+      indices.length === 1 && first ? `“${first.title}”` : plural(indices.length, "song");
+    if (!(await confirmRemoval(hidden, what, playlist.name))) return;
+    selection.set([]);
     await playlistEdits.remove(playlist, expected, indices, hidden);
   };
 
   const moveSelection = (delta: -1 | 1) => {
-    const moved = new Set(selection.ordered().map(Number));
+    const moved = new Set(toIndices(selection.ordered()));
     if (moved.size === 0) return;
     const positions = order.flatMap((v, at) => (moved.has(v) ? [at] : []));
     const first = Math.min(...positions);
@@ -135,7 +165,7 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
     rowHeight: ROW,
     count: order.length,
     disabled: !canEdit,
-    onDrop: (gap, payload) => void saveOrder(moveOrder(order, new Set(payload.map(Number)), gap)),
+    onDrop: (gap, payload) => void saveOrder(moveOrder(order, new Set(toIndices(payload)), gap)),
   });
 
   const onRowPointerDown = (e: PointerEvent, key: string) => {
@@ -188,7 +218,10 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
         break;
       case "Delete":
       case "Backspace":
-        void remove(selection.ordered().map(Number));
+        // Plain Backspace is Back (DESIGN.md); removing needs Delete or
+        // Cmd+Backspace.
+        if (!isRemoveKey(e)) return;
+        void remove(toIndices(selection.ordered()));
         break;
       case "ContextMenu": {
         const at = Math.max(0, cursor);
@@ -207,7 +240,7 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
     const indices = targets(key);
     const many = indices.length > 1;
     const picked = indices.map((i) => tracks[i]).filter(Boolean);
-    const track = tracks[Number(key)];
+    const track = tracks[indexOfKey.get(key) ?? -1];
     return [
       { label: "Play", disabled: disabled || many, action: () => play(at) },
       { label: "Play next", disabled: locked, action: () => enqueue(picked, true) },
@@ -255,7 +288,7 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
       >
         {keys.slice(first, last).map((key, i) => {
           const at = first + i;
-          const track = tracks[Number(key)];
+          const track = tracks[indexOfKey.get(key) ?? -1];
           if (!track) return null;
           return (
             <Row

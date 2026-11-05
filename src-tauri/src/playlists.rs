@@ -7,9 +7,11 @@
 //! - One edit runs at a time, like Coda's `EditRunner`: a [`PlaylistEditor`]
 //!   (managed state) holds a lock for the edit's whole run, so a second
 //!   edit waits for the first. The quit sequence waits for it, bounded.
-//! - Edits use the browse handle's current client. A result that arrives
-//!   after the client changed is reported as such (the old server's change
-//!   completed or not; nothing is retried with the new one).
+//! - Each edit takes the browse handle's client once it holds the lock, so
+//!   an edit queued behind another uses the server current when it
+//!   starts. One that finishes after the client changed keeps its status
+//!   and says it was made with the previous connection.
+//! - Once quitting began ([`PlaylistEditor::finish`]) no edit starts.
 //! - Every outcome becomes a notice (through the engine) and is returned
 //!   to the caller, which reloads the affected views.
 //! - Song ids, names and errors may be logged by kind; nothing else is
@@ -18,15 +20,16 @@
 pub mod commands;
 pub mod dto;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use coda_core::model::thousands;
+use coda_core::navidrome::Error;
 use coda_core::navidrome::api::MAX_PLAYLIST_ENTRIES;
 use coda_core::navidrome::edit::{self, EditOp, EditResult};
-use coda_core::navidrome::{Client, Error};
 use tokio::sync::Mutex;
 
+use crate::browse::BrowseHandle;
 use crate::browse::dto::HiddenDto;
 use dto::{EditOutcomeDto, EditStatus};
 
@@ -40,7 +43,9 @@ pub const EDIT_GRACE: Duration = Duration::from_secs(3);
 /// Navidrome ignores an empty replace (Coda's `LAST_SONG`).
 pub const LAST_SONG: &str = "Cannot remove every song; delete the playlist instead";
 pub const STALE_PLAYLIST: &str = "The playlist changed on the server; reloaded";
-pub const CLIENT_CHANGED: &str = "The server connection changed during the change; reloaded";
+/// Appended to an outcome whose edit finished after a server change.
+pub const CLIENT_CHANGED: &str = "made with the previous server connection";
+pub const QUITTING: &str = "Not changed: Coda is quitting";
 pub const NO_SERVER: &str = "No Navidrome server is configured";
 pub const NO_REMOTE_IN_QUEUE: &str = "The queue has no Navidrome tracks to save";
 
@@ -49,6 +54,8 @@ pub const NO_REMOTE_IN_QUEUE: &str = "The queue has no Navidrome tracks to save"
 pub struct PlaylistEditor {
     running: Mutex<()>,
     next_id: AtomicU64,
+    /// Set by [`PlaylistEditor::finish`]: the app is quitting.
+    closing: AtomicBool,
 }
 
 /// One validated edit and what its message needs.
@@ -67,27 +74,34 @@ impl PlaylistEditor {
     /// Runs `edit` with `client` once every earlier edit has answered.
     /// `still_current` is asked afterwards whether the client is still the
     /// one in use.
-    pub async fn run(
-        &self,
-        client: &Client,
-        edit: Edit,
-        still_current: impl FnOnce() -> bool,
-    ) -> EditOutcomeDto {
+    /// Runs `edit` once every earlier edit has answered, with the client
+    /// that is current *then* (an edit queued behind another never writes
+    /// to a server the user has since left). Refused once quitting began.
+    pub async fn run(&self, browse: &BrowseHandle, edit: Edit) -> EditOutcomeDto {
         let _running = self.running.lock().await;
+        if self.closing.load(Ordering::SeqCst) {
+            return refused(QUITTING);
+        }
+        let Ok((client, generation)) = browse.client() else {
+            return refused(NO_SERVER);
+        };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(id, edit = edit.op.kind(), "navidrome playlist edit started");
-        let result = edit::run(client, &edit.op).await;
+        let result = edit::run(&client, &edit.op).await;
         log_result(&edit.op, &result);
         let mut outcome = outcome(&edit, &result);
-        if !still_current() {
-            outcome.status = EditStatus::Stale;
-            outcome.message = CLIENT_CHANGED.to_owned();
+        if browse.client_generation() != generation {
+            // The status stays what the old server did (a change it
+            // applied is not "nothing written"); the message says where.
+            outcome.message = format!("{} ({CLIENT_CHANGED})", outcome.message);
         }
         outcome
     }
 
-    /// Waits up to `wait` for a running edit (at exit).
+    /// At exit: no edit starts any more (queued ones are refused), and a
+    /// running one gets up to `wait` to answer.
     pub async fn finish(&self, wait: Duration) {
+        self.closing.store(true, Ordering::SeqCst);
         if tokio::time::timeout(wait, self.running.lock())
             .await
             .is_err()
@@ -194,6 +208,10 @@ pub fn removal(
     indices: &[usize],
     hidden: usize,
 ) -> Result<EditOp, String> {
+    // Bounded work: more indices than songs is not a list the UI showed.
+    if indices.len() > expected.len() {
+        return Err(STALE_PLAYLIST.to_owned());
+    }
     let mut drop = vec![false; expected.len()];
     for &i in indices {
         match drop.get_mut(i) {

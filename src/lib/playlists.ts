@@ -126,6 +126,23 @@ export function confirmRewrite(hidden: Hidden, action: string): Promise<boolean>
   });
 }
 
+/**
+ * Asks before removing songs from a server playlist (always: there is no
+ * undo); the hidden-entries warning is part of the same question.
+ */
+export function confirmRemoval(hidden: Hidden, what: string, playlist: string): Promise<boolean> {
+  const extra =
+    hidden.kind === "none"
+      ? ""
+      : ` Navidrome stores entries of this playlist it does not show; saving replaces the whole list. ${hiddenWarning(hidden)}`;
+  return confirm({
+    title: "Remove from playlist?",
+    message: `${what} will be removed from “${playlist}” on the Navidrome server.${extra}`,
+    confirmLabel: "Remove",
+    danger: true,
+  });
+}
+
 // ----- flows --------------------------------------------------------------
 
 /** "New playlist…": asks for a name, then creates it with `songs`. */
@@ -157,7 +174,10 @@ export async function saveQueueFlow(remote: number, local: number): Promise<void
   await playlistEdits.saveQueue(name);
 }
 
-export async function renamePlaylistFlow(playlist: Playlist): Promise<EditOutcome | null> {
+/** Resolves with the outcome and the name as typed (trimmed), or `null` if cancelled. */
+export async function renamePlaylistFlow(
+  playlist: Playlist,
+): Promise<{ outcome: EditOutcome; name: string } | null> {
   const name = await promptText({
     title: "Rename playlist",
     label: "Name",
@@ -165,7 +185,7 @@ export async function renamePlaylistFlow(playlist: Playlist): Promise<EditOutcom
     confirmLabel: "Rename",
   });
   if (name === null || name.trim() === "" || name.trim() === playlist.name) return null;
-  return playlistEdits.rename(playlist, name);
+  return { outcome: await playlistEdits.rename(playlist, name), name: name.trim() };
 }
 
 export async function deletePlaylistFlow(playlist: Playlist): Promise<EditOutcome | null> {

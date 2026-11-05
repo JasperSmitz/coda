@@ -4,7 +4,7 @@
 // removed and reordered (M3, `lib/playlists.ts`); read-only ones show
 // why instead.
 
-import { useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
@@ -14,6 +14,7 @@ import { AlertIcon, MoreIcon } from "../components/icons";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { isRemoveKey } from "../lib/keys";
 import { playTracks, useShuffleContext } from "../lib/play";
 import {
   createPlaylistFlow,
@@ -76,7 +77,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
       rename(playlists[selected]);
       e.preventDefault();
       return;
-    } else if ((e.key === "Delete" || (e.key === "Backspace" && e.metaKey)) && selected !== null) {
+    } else if (isRemoveKey(e) && selected !== null) {
       remove(playlists[selected]);
       e.preventDefault();
       e.stopPropagation();
@@ -241,13 +242,28 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
       ? detail.playlist.readOnlyReason
       : null;
 
+  // The detail has no name: after any playlist edit (a rename here or in
+  // the list), take the server's name from the fresh listing; a failed
+  // listing keeps the shown one.
+  useEffect(() => {
+    if (source !== "navidrome" || edits === 0) return;
+    let current = true;
+    browse.playlists("navidrome").then(
+      (list) => {
+        const found = list.find((p) => p.id === id);
+        if (current && found) setRenamed(found.name);
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  }, [edits, id, source]);
   const rename = async () => {
     if (!playlist) return;
-    const outcome = await renamePlaylistFlow(playlist);
-    if (outcome?.status === "done") {
-      const next = await browse.playlists("navidrome").catch(() => null);
-      setRenamed(next?.find((p) => p.id === id)?.name ?? null);
-    }
+    const result = await renamePlaylistFlow(playlist);
+    // Shown at once; the listing above replaces it with the server's.
+    if (result?.outcome.status === "done") setRenamed(result.name);
   };
   const remove = async () => {
     if (!playlist) return;
@@ -321,7 +337,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
           <div className="inline-note secondary" role="note">
             {busy
               ? "Saving…"
-              : "Drag tracks (or Alt+↑/↓) to reorder; Delete removes the selection. Changes are saved at once."}
+              : "Drag tracks (or Alt+↑/↓) to reorder; Delete or ⌘⌫ removes the selection (after a confirmation). Changes are saved at once."}
           </div>
         )}
         {load.state === "loading" && <SkeletonRows />}

@@ -86,12 +86,13 @@ function ConfirmDialog({ spec, onAnswer }: { spec: ConfirmSpec; onAnswer: (ok: b
     <Modal title={spec.title} onCancel={() => onAnswer(false)}>
       <p className="dialog-message">{spec.message}</p>
       <div className="dialog-actions">
-        <button className="button" onClick={() => onAnswer(false)}>
+        {/* A destructive action never takes a stray Enter: Cancel has the focus. */}
+        <button className="button" data-autofocus={spec.danger ? true : undefined} onClick={() => onAnswer(false)}>
           Cancel
         </button>
         <button
           className={`button ${spec.danger ? "button-danger" : "button-primary"}`}
-          data-autofocus
+          data-autofocus={spec.danger ? undefined : true}
           onClick={() => onAnswer(true)}
         >
           {spec.confirmLabel}

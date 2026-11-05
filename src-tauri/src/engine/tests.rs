@@ -1386,7 +1386,7 @@ fn moving_entries_reorders_and_reannounces_the_gapless_next() {
     let commands = engine.handle_intent(
         Intent::MoveEntries {
             keys: vec![k[3].clone()],
-            to: 1,
+            before: Some(k[1].clone()),
         },
         now,
     );
@@ -1403,7 +1403,7 @@ fn moving_entries_reorders_and_reannounces_the_gapless_next() {
     engine.handle_intent(
         Intent::MoveEntries {
             keys: vec![k[1].clone(), k[0].clone(), "q999".into()],
-            to: 4,
+            before: None,
         },
         now,
     );
@@ -1519,7 +1519,7 @@ fn queue_edit_intents_are_ignored_until_started() {
     for intent in [
         Intent::MoveEntries {
             keys: vec!["q1".into()],
-            to: 0,
+            before: None,
         },
         Intent::RemoveEntries {
             keys: vec!["q1".into()],
@@ -1537,10 +1537,12 @@ fn queue_edit_intents_are_ignored_until_started() {
 #[test]
 fn queue_edit_intents_deserialize_from_the_ui() {
     let intent: Intent = serde_json::from_value(
-        serde_json::json!({ "type": "moveEntries", "keys": ["q1", "q2"], "to": 3 }),
+        serde_json::json!({ "type": "moveEntries", "keys": ["q1", "q2"], "before": "q3" }),
     )
     .unwrap();
-    assert!(matches!(intent, Intent::MoveEntries { ref keys, to: 3 } if keys.len() == 2));
+    assert!(
+        matches!(intent, Intent::MoveEntries { ref keys, before: Some(ref b) } if keys.len() == 2 && b == "q3")
+    );
     for (json, ok) in [
         (
             serde_json::json!({ "type": "removeEntries", "keys": ["q1"] }),
@@ -1552,7 +1554,7 @@ fn queue_edit_intents_deserialize_from_the_ui() {
         ),
         (serde_json::json!({ "type": "shuffleUpcoming" }), true),
         (
-            serde_json::json!({ "type": "moveEntries", "keys": ["q1"], "to": -1 }),
+            serde_json::json!({ "type": "moveEntries", "keys": ["q1"], "before": 3 }),
             false,
         ),
     ] {
@@ -1562,4 +1564,32 @@ fn queue_edit_intents_deserialize_from_the_ui() {
             "{json}"
         );
     }
+}
+
+#[test]
+fn a_move_lands_before_its_target_entry_even_if_the_queue_changed() {
+    let names = ["a.flac", "b.flac", "c.flac", "d.flac"];
+    let fixture = Fixture::new(&names);
+    let (mut engine, now) = started(&fixture, &names, None);
+    let k = keys(&mut engine);
+    // The UI drew [A, B, C, D] and drops D before C; meanwhile A was
+    // removed, so an index (2) would now land after C.
+    engine.handle_intent(Intent::RemoveEntry { key: k[0].clone() }, now);
+    engine.handle_intent(
+        Intent::MoveEntries {
+            keys: vec![k[3].clone()],
+            before: Some(k[2].clone()),
+        },
+        now,
+    );
+    assert_eq!(titles(&mut engine), ["B.FLAC", "D.FLAC", "C.FLAC"]);
+    // A target that is gone moves nothing.
+    engine.handle_intent(
+        Intent::MoveEntries {
+            keys: vec![k[1].clone()],
+            before: Some(k[0].clone()),
+        },
+        now,
+    );
+    assert_eq!(titles(&mut engine), ["B.FLAC", "D.FLAC", "C.FLAC"]);
 }

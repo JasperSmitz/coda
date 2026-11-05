@@ -526,9 +526,66 @@ async fn a_client_change_during_an_edit_is_reported() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         browse.set_client(None);
     };
-    let (outcome, ()) = tokio::join!(submit(&editor, &browse, Ok(delete)), swap);
-    assert_eq!(outcome.status, EditStatus::Stale);
-    assert_eq!(outcome.message, CLIENT_CHANGED);
+    let queued = async {
+        // Waits behind the first edit, which outlives the swap.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        submit(&editor, &browse, Ok(delete.clone())).await
+    };
+    let (outcome, second, ()) =
+        tokio::join!(submit(&editor, &browse, Ok(delete.clone())), queued, swap);
+    // The old server applied it: still `done`, with a note.
+    assert_eq!(outcome.status, EditStatus::Done);
+    assert_eq!(outcome.message, format!("Deleted Road ({CLIENT_CHANGED})"));
+    // The queued edit takes the client current when it starts: none now.
+    assert_eq!(
+        (second.status, second.message.as_str()),
+        (EditStatus::Refused, NO_SERVER)
+    );
+    assert_eq!(writes(&server, "deletePlaylist").await.len(), 1);
+}
+
+#[tokio::test]
+async fn no_edit_starts_once_quitting_began() {
+    let (server, browse) = server().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/deletePlaylist"))
+        .respond_with(ok(json!({})).set_delay(Duration::from_millis(150)))
+        .mount(&server)
+        .await;
+    let editor = PlaylistEditor::default();
+    let delete = |id: &str| Edit {
+        op: EditOp::Delete {
+            playlist_id: id.into(),
+        },
+        playlist: id.into(),
+        old_name: String::new(),
+        left_out: 0,
+    };
+    let queued = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        submit(&editor, &browse, Ok(delete("pl2"))).await
+    };
+    let quit = async {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        editor.finish(EDIT_GRACE).await;
+    };
+    let (running, second, ()) =
+        tokio::join!(submit(&editor, &browse, Ok(delete("pl1"))), queued, quit);
+    assert_eq!(running.status, EditStatus::Done);
+    assert_eq!(
+        (second.status, second.message.as_str()),
+        (EditStatus::Refused, QUITTING)
+    );
+    assert_eq!(writes(&server, "deletePlaylist").await.len(), 1);
+}
+
+#[test]
+fn removal_indices_are_bounded() {
+    let expected = ids(&["a", "b"]);
+    assert_eq!(
+        removal("pl".into(), expected, &[0, 0, 0], 0).unwrap_err(),
+        STALE_PLAYLIST
+    );
 }
 
 #[tokio::test]

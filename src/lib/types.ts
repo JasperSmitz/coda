@@ -113,8 +113,8 @@ export type Intent =
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number }
   | { type: "shuffleLibrary" }
-  /** Moves the entries (one block, in queue order) to the gap before index `to`. */
-  | { type: "moveEntries"; keys: string[]; to: number }
+  /** Moves the entries (one block, in queue order) before the entry `before` (`null`: the end). */
+  | { type: "moveEntries"; keys: string[]; before: string | null }
   | { type: "removeEntries"; keys: string[] }
   /** Moves the entries right after the current one. */
   | { type: "playNextEntries"; keys: string[] }

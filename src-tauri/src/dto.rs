@@ -305,11 +305,15 @@ pub enum Intent {
     /// scanned track (a random sample at the queue cap), shuffled, as in
     /// Coda. Navidrome's "Shuffle all" is `playTracks` with random songs.
     ShuffleLibrary,
-    /// Move the entries `keys` (one block, in queue order) to the gap `to`:
-    /// before the entry now at index `to` (the queue's length: the end).
+    /// Move the entries `keys` (one block, in queue order) to the gap
+    /// before the entry `before` (`None`: the end). The gap is named by an
+    /// entry, not an index, so a queue that changed since the UI drew it
+    /// still gets the block where it was dropped; an unknown `before`
+    /// (removed meanwhile) moves nothing.
     MoveEntries {
         keys: Vec<String>,
-        to: usize,
+        #[serde(default)]
+        before: Option<String>,
     },
     /// Remove the entries `keys` (the playing one last, so playback moves
     /// on to an entry that stays).

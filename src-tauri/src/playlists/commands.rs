@@ -22,12 +22,7 @@ pub async fn submit(
         Ok(edit) => edit,
         Err(message) => return refused(message),
     };
-    let Ok((client, generation)) = browse.client() else {
-        return refused(NO_SERVER);
-    };
-    editor
-        .run(&client, edit, || browse.client_generation() == generation)
-        .await
+    editor.run(browse, edit).await
 }
 
 async fn finish(

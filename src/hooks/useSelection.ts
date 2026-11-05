@@ -103,7 +103,12 @@ export function useSelection(list: string[]): Selection {
     click,
     moveTo,
     set,
-    selectAll: () => setKeys(new Set(list)),
+    selectAll: () => {
+      setKeys(new Set(list));
+      // Shift+↑/↓ afterwards extends from the first row.
+      setAnchor(list[0] ?? null);
+      setCursor((c) => c ?? list[list.length - 1] ?? null);
+    },
     clear: () => {
       setKeys(new Set());
       setAnchor(null);

@@ -20,11 +20,11 @@ For now a queue comes from a restored GUI session. To seed one, copy the TUI's s
 
 ## Queue
 10. `q` (and the bar's queue button) toggles the panel; the choice survives a relaunch.
-11. Double-click an entry plays it; click selects; ↑/↓ move, Enter plays, Delete or ⌫ (Backspace) removes; hover shows ×; right-click → Play / Remove. Removing the playing entry moves on to the next.
+11. Double-click an entry plays it; click selects; ↑/↓ move, Enter plays, Delete (fn+⌫) or Cmd+⌫ removes; plain ⌫ (Backspace) is Back and removes nothing; hover shows ×; right-click → Play / Remove. Removing the playing entry moves on to the next.
 12. Clear asks first (Cancel/Esc keeps everything); Clear in the dialog empties the queue and stops playback.
 
 ## Queue editing (M3)
-Q1. Multi-select: click, Shift-click (range), Cmd-click (macOS) / Ctrl-click (Linux) toggles; Shift+↑/↓ extends; Cmd/Ctrl+A selects all. The header says "N of M tracks selected". Delete removes the whole selection; if it held the playing track, the next *remaining* track plays (no blip of a removed one).
+Q1. Multi-select: click, Shift-click (range), Cmd-click (macOS) / Ctrl-click (Linux) toggles; Shift+↑/↓ extends; Cmd/Ctrl+A selects all. The header says "N of M tracks selected". Delete or Cmd+⌫ removes the whole selection (plain ⌫ goes Back, the queue is untouched); if it held the playing track, the next *remaining* track plays (no blip of a removed one).
 Q2. Drag one entry (or a selection) up and down: an amber line shows the drop gap, dragged rows dim; near the top/bottom edge the list autoscrolls (try a queue of a few hundred tracks); Esc during the drag cancels; release drops there. The playing entry keeps playing; drag the track after the playing one elsewhere and let the current one end: the new next one follows gaplessly (check the log for `SetNext`).
 Q3. Alt+↑/↓ moves the selection one place (a scattered selection becomes one block).
 Q4. Right-click → "Play N tracks next" puts them right after the current entry; "Remove N tracks"; "Add to playlist…" (Navidrome tracks only).
@@ -33,13 +33,14 @@ Q6. Save… (Navidrome configured, queue with Navidrome tracks): the dialog sugg
 
 ## Playlists (M3, Navidrome)
 P1. Playlists → "New playlist…" → name → Create: toast, the list reloads with it. A blank name cannot be submitted; Esc cancels.
-P2. On one of your playlists, "…"/right-click → Rename… (or F2): new name shows in the list (and in Navidrome's web UI). Delete… (or Delete): a red confirmation; Delete removes it; from the playlist page it goes back to the list.
+P2. On one of your playlists, "…"/right-click → Rename… (or F2): new name shows in the list (and in Navidrome's web UI). Delete… (or Delete/Cmd+⌫): a red confirmation with Cancel focused; clicking Delete removes it; from the playlist page it goes back to the list.
 P3. A playlist owned by another user (or a smart playlist): a Read-only tag (hover: the reason), no Rename/Delete/drag; the page shows the reason.
 P4. Track context menu anywhere (album, search, queue) → "Add to playlist…": a picker of your editable playlists with a filter field (type, ↑/↓, Enter) and "New playlist…" first; adding toasts "Added N songs to …" and the playlist page shows them (reload is automatic). Local tracks: the item is disabled.
-P5. On your playlist's page: drag tracks to reorder (saved at once, "Saving…" while it runs, toast "Saved the new order of …"), Alt+↑/↓ too; select several and press Delete → toast "Removed N songs from …". Removing every song is refused ("delete the playlist instead").
+P5. On your playlist's page: drag tracks to reorder (saved at once, "Saving…" while it runs, toast "Saved the new order of …"), Alt+↑/↓ too; select several and press Delete (or Cmd+⌫) → a confirmation (Cancel focused; Enter cancels) → Remove → toast "Removed N songs from …". Plain ⌫ with a track selected goes Back and removes nothing. Alt+↓ three times in a row moves the selected track three places (the selection stays after each save). With the network off, a drag shows the failure toast and the old order comes back. Removing every song is refused ("delete the playlist instead").
 P6. Stale: open a playlist, change it in Navidrome's web UI, then reorder or remove here → toast "The playlist changed on the server; reloaded" and the page shows the server's list; nothing was overwritten.
 P7. Hidden entries: a playlist whose file for one entry was deleted (Navidrome shows "hides 1 entry"): a reorder or removal first asks in a dialog that names what may be lost; Cancel writes nothing; confirming saves.
-P8. Quit while a large add runs: the app waits (≤3 s) for it, then exits; no mpv left.
+P8. Quit while a large add runs: the app waits (≤3 s) for it, then exits; no mpv left; an edit queued behind it does not start.
+P10. Start an add, and while it runs disconnect the server in Settings and queue another edit: the running one ends with "(made with the previous server connection)", the queued one says no server is configured and writes nothing.
 P9. Keyboard only: every dialog takes Enter/Esc, Tab stays inside it, focus returns to the list afterwards; Space/n/p do nothing while a dialog is open.
 
 ## Quit

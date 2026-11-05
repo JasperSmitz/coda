@@ -24,7 +24,20 @@ impl Engine {
 
     /// Moves the entries `keys` as one block to the gap `to` (before the
     /// entry now at index `to`; the queue's length is the end).
-    pub(super) fn move_entries(&mut self, keys: &[String], to: usize) -> Vec<PlayerCommand> {
+    pub(super) fn move_entries(
+        &mut self,
+        keys: &[String],
+        before: Option<&str>,
+    ) -> Vec<PlayerCommand> {
+        let queue = self.player.queue();
+        let to = match before {
+            None => queue.len(),
+            Some(key) => match queue.entries().iter().position(|e| e.id.to_string() == key) {
+                Some(pos) => pos,
+                // The drop target is gone: do not guess.
+                None => return Vec::new(),
+            },
+        };
         let ids = self.entry_ids(keys);
         self.player.move_entries(&ids, to);
         Vec::new()
