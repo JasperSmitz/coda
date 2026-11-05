@@ -1,14 +1,12 @@
 # Coda App — Plan
 
-Status: M0 in progress (2026-11-05).
+Status: M0 done; building the MVP (M1–M4) (2026-11-05).
 
 ## Stack (decided)
 - **Tauri 2** desktop shell (system webview: WebKitGTK 4.1 on Linux, WKWebView on macOS).
-- **Rust backend** in `src-tauri/`, depending on Coda's library `coda-player` (`default-features = false`).
+- **Rust backend** in `src-tauri/`, on `crates/coda-core`: Coda's engine, vendored (Coda stays TUI-only and is never modified).
 - **React 19 + TypeScript + Vite** frontend in `src/`.
 - Playback stays **mpv via Coda's IPC backend**; mpv must be on `PATH` (as for the TUI).
-
-During development the backend uses a path dependency on `../../coda`. Before CI or releases this becomes a git dependency pinned to a Coda revision.
 
 ## Architecture (proposed)
 
@@ -27,11 +25,8 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 
 ## Milestones
 
-### M0 — Coda library ready for a GUI (in `../coda`, branch `gui-core`)
-- `tui` cargo feature (default on) gating Ratatui/Crossterm, `app`, `setup`, `ui`.
-- `Player::seek_absolute`, public `Player::set_volume`.
-- Logging init and Navidrome client bootstrap available from the library.
-- Acceptance: Coda's full check suite passes, plus `--no-default-features` lib build/clippy/tests; TUI unchanged.
+### M0 — Engine vendored (done)
+- `crates/coda-core`: Coda's UI-free modules without `app`/`setup`/`ui`/`main`, plus `Player::seek_absolute`, public `Player::set_volume`, `logging`, `setup_actions` (Navidrome save/ping) and a config bootstrap. 532 unit + integration tests pass.
 
 ### M1 — A window that plays the queue
 - Backend: config load, logging, Navidrome client, mpv backend, session restore (never auto-plays), engine actor, debounced session save, final save + mpv shutdown on quit.
@@ -56,4 +51,4 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 - Packaging: AppImage/`.deb` and an Arch `PKGBUILD`; macOS `.dmg`. CI on Linux and macOS.
 
 ### Later
-- Move the GUI engine's orchestration down into `coda-player` (an `engine` module) so the TUI and GUI share one implementation.
+- Fixes made in Coda's engine don't flow here automatically; port them by hand when they matter.

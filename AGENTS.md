@@ -3,12 +3,14 @@
 ## Project
 Coda App (`coda-app`) is a desktop GUI for [Coda](../coda), the Rust music player for local files and a Navidrome server. It is a **native desktop app built with Tauri 2**, not a web application: no hosted pages, no server, no browser tab. Linux (Arch, the owner's main desktop) and macOS are supported; Windows is out of scope.
 
-Coda's Rust library (`coda-player`, lib `coda_player`) is the engine: queue, player, gapless mpv playback, Navidrome client, local library scan, session, cover art, visualizer data, credentials. **This repo replaces only Coda's terminal UI.** Never reimplement what the library already does; if the GUI needs something the library hides, add it to Coda (small, reviewed change on a branch there) rather than copying it here.
+The engine is `crates/coda-core` (lib `coda_core`): a **copy of Coda's UI-free library** (queue, player, gapless mpv playback, Navidrome client, local library scan, session, cover art, visualizer data, credentials), vendored from `../coda` at its local `gui-core` branch (ffd5c6d). **Coda itself stays a pure TUI project: never modify, branch or push `../coda`.** It may be read for reference (e.g. `../coda/src/app.rs` shows how the TUI drives the engine). Change `coda-core` here when the GUI needs it; never reimplement in the app what `coda-core` already does.
 
 ## Layout
-- `src-tauri/`: the Rust backend. Depends on `coda-player` with `default-features = false` (no Ratatui/Crossterm). Owns one engine actor and exposes Tauri commands and events.
+- `Cargo.toml`: workspace (`src-tauri`, `crates/coda-core`).
+- `crates/coda-core/`: the engine (see above). Keep its tests passing; add tests for what you add.
+- `src-tauri/`: the Tauri backend. Owns one engine actor and exposes Tauri commands and events.
 - `src/`: the React + TypeScript frontend (Vite). Draws state and sends intents. No business logic that the backend already owns.
-- `docs/PLAN.md`: milestones and acceptance criteria. `docs/ARCHITECTURE.md`: what actually exists (label proposals as such).
+- `docs/DESIGN.md`: the look and layout. `docs/PLAN.md`: milestones and acceptance criteria. `docs/ARCHITECTURE.md`: what actually exists (label proposals as such).
 
 ## Architecture rules
 - **One engine actor** in the backend owns `Player`, the `PlaybackHandle`, the Navidrome client, library and session state, mirroring Coda's single `tokio::select!` loop. Tauri commands send intents to it over a channel; it emits events. No shared `Mutex<Player>` poked from command handlers.
@@ -27,10 +29,9 @@ Coda's Rust library (`coda-player`, lib `coda_player`) is the engine: queue, pla
 ## Workflow
 - Same roles as Coda: owner approves scope; the architect (main session) writes briefs, delegates to implementer/reviewer agents (herdr `hc` templates), resolves findings and reports.
 - Small vertical slices per milestone in `docs/PLAN.md`. Don't commit or push unless asked; the architect may commit an approved slice once review findings are resolved and checks pass. Never push without a request.
-- Changes to `../coda` happen on a branch there, follow Coda's own AGENTS.md, and keep the TUI's behaviour unchanged.
 
 ## Verification
-- `cd src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test`
+- `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` (from the repo root; tests needing mpv are `#[ignore]`d, run them with `-- --ignored`)
 - `pnpm build` (runs `tsc` strict + Vite) and `pnpm lint` once a linter exists.
 - Run the app with `pnpm tauri dev` only when the owner asks or for a hand-off script; agents must not open GUI windows on the owner's desktop unprompted. Backend logic is tested without a window.
 - Report commands actually run; never claim a check passed without running it.

@@ -6,7 +6,7 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 ## Development
 
-Requirements: Rust (stable), Node 22+, pnpm, [mpv](https://mpv.io) on `PATH`, and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) (on Arch: `webkit2gtk-4.1`, `base-devel`, `curl`, `wget`, `file`, `openssl`, `appmenu-gtk-module`, `libappindicator-gtk3`, `librsvg`). Coda must be checked out next to this repo (`../coda`).
+Requirements: Rust (stable), Node 22+, pnpm, [mpv](https://mpv.io) on `PATH`, and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) (on Arch: `webkit2gtk-4.1`, `base-devel`, `curl`, `wget`, `file`, `openssl`, `appmenu-gtk-module`, `libappindicator-gtk3`, `librsvg`).
 
 ```sh
 pnpm install
