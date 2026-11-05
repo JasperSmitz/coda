@@ -23,10 +23,15 @@ pub fn init_logging() {
     else {
         return;
     };
+    init_logging_at(&path);
+}
+
+/// [`init_logging`] to the file at `path` (its folder is created).
+pub fn init_logging_at(path: &std::path::Path) {
     let file = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| open_log_file(&path));
+        .and_then(|()| open_log_file(path));
     let Ok(file) = file else {
         return;
     };

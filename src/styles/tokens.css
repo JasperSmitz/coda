@@ -1,0 +1,69 @@
+/* Design tokens (DESIGN.md). Dark first; light from the same names. */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0f1012;
+  --surface-1: #16171a;
+  --surface-2: #1d1f23;
+  --surface-3: #26292e;
+  --border: #2a2d33;
+  --text: #e9e9ec;
+  --text-2: #a2a5ad;
+  --text-3: #6d717a;
+  --accent: #f0a83a;
+  --accent-text: #1a1206;
+  --accent-soft: rgba(240, 168, 58, 0.14);
+  --danger: #e5675f;
+  --danger-soft: rgba(229, 103, 95, 0.12);
+  --hover: rgba(255, 255, 255, 0.05);
+  --selected: rgba(255, 255, 255, 0.08);
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  --cover-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  --font: system-ui, -apple-system, "Inter", "Cantarell", sans-serif;
+  --text-body: 13px;
+  --text-small: 12px;
+  --text-title: 24px;
+
+  --radius: 6px;
+  --radius-small: 4px;
+  --sidebar-width: 220px;
+  --queue-width: 320px;
+  --bar-height: 76px;
+  --row-height: 36px;
+
+  --motion-fast: 120ms;
+  --motion: 180ms;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --bg: #f6f6f7;
+    --surface-1: #ececee;
+    --surface-2: #ffffff;
+    --surface-3: #e2e3e6;
+    --border: #d9dadf;
+    --text: #18191c;
+    --text-2: #5b5e66;
+    --text-3: #8c9099;
+    --accent: #c97d0e;
+    --accent-text: #ffffff;
+    --accent-soft: rgba(201, 125, 14, 0.13);
+    --danger: #c2413a;
+    --danger-soft: rgba(194, 65, 58, 0.1);
+    --hover: rgba(0, 0, 0, 0.04);
+    --selected: rgba(0, 0, 0, 0.07);
+    --shadow: 0 6px 24px rgba(0, 0, 0, 0.16);
+    --cover-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion: 0ms;
+  }
+}

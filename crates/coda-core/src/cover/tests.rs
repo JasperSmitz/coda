@@ -1010,3 +1010,34 @@ async fn an_aborted_load_still_answers() {
     assert_eq!(response.id, CoverRequestId(9));
     assert!(matches!(response.outcome, Outcome::Failed));
 }
+
+#[test]
+fn encode_jpeg_round_trips_a_cover() {
+    let image = decode(&png(40, 40)).unwrap();
+    let jpeg = encode_jpeg(&image).unwrap();
+    assert_eq!(sniff(&jpeg), Some(Format::Jpeg));
+    let back = decode(&jpeg).unwrap();
+    assert_eq!((back.width(), back.height()), (40, 40));
+}
+
+#[tokio::test]
+async fn load_reads_a_local_folder_cover_at_the_size_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("cover.png"), png(600, 600)).unwrap();
+    let key = CoverKey::Local(dir.path().join("track.flac"));
+    match load(&key, CoverSize::Small, None, None).await {
+        Outcome::Art(image) => assert_eq!(image.width(), COVER_SIZE),
+        other => panic!("{other:?}"),
+    }
+    let none = CoverKey::Local(dir.path().join("sub").join("track.flac"));
+    assert!(matches!(
+        load(&none, CoverSize::Large, None, None).await,
+        Outcome::NoArt
+    ));
+    // A Navidrome cover without a client has no art.
+    let remote = CoverKey::Navidrome("al-1".into());
+    assert!(matches!(
+        load(&remote, CoverSize::Small, None, None).await,
+        Outcome::NoArt
+    ));
+}

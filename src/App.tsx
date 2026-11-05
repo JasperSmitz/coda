@@ -1,51 +1,67 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect, useState } from "react";
+import { Banner } from "./components/Banner";
+import { NowPlayingBar } from "./components/NowPlayingBar";
+import { QueuePanel } from "./components/QueuePanel";
+import { Sidebar } from "./components/Sidebar";
+import { Toasts } from "./components/Toasts";
+import { useShortcuts } from "./hooks/useShortcuts";
+import { connect, useAppState } from "./state/store";
+import { PlaceholderView } from "./views/PlaceholderView";
+import type { ViewId } from "./views/viewList";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+const QUEUE_OPEN_KEY = "coda.queueOpen";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function loadQueueOpen(): boolean {
+  try {
+    return localStorage.getItem(QUEUE_OPEN_KEY) !== "false";
+  } catch {
+    return true;
   }
-
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
 }
 
-export default App;
+export default function App() {
+  useEffect(() => connect(), []);
+  const { snapshot, queue } = useAppState();
+  const [view, setView] = useState<ViewId>("local-artists");
+  const [queueOpen, setQueueOpen] = useState(loadQueueOpen);
+  const toggleQueue = () =>
+    setQueueOpen((open) => {
+      try {
+        localStorage.setItem(QUEUE_OPEN_KEY, String(!open));
+      } catch {
+        // Not saved; harmless.
+      }
+      return !open;
+    });
+
+  const ready = snapshot?.phase === "ready" && snapshot.status !== "unavailable";
+  useShortcuts({ volume: snapshot?.volume ?? 0, enabled: ready, onToggleQueue: toggleQueue });
+
+  return (
+    <div className={`app ${queueOpen ? "queue-open" : ""}`}>
+      <Sidebar view={view} onView={setView} snapshot={snapshot} />
+      <main className="main">
+        {snapshot ? (
+          <>
+            <Banner problems={snapshot.problems} />
+            <PlaceholderView view={view} snapshot={snapshot} />
+          </>
+        ) : null}
+        {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
+      </main>
+      {queueOpen && snapshot && (
+        <QueuePanel
+          queue={queue}
+          currentKey={snapshot.currentKey}
+          playingKey={snapshot.playingKey}
+          status={snapshot.status}
+          disabled={!ready}
+        />
+      )}
+      {snapshot && (
+        <NowPlayingBar snapshot={snapshot} queueOpen={queueOpen} onToggleQueue={toggleQueue} />
+      )}
+      {snapshot && <Toasts notices={snapshot.notices} />}
+    </div>
+  );
+}

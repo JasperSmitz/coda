@@ -178,15 +178,7 @@ impl DiskCache {
     /// Saves `image` as `name` (replacing any entry), then trims the cache.
     pub fn put(&self, name: &str, image: &CoverImage) -> io::Result<()> {
         self.ensure_dir()?;
-        let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY)
-            .encode(
-                image.rgb(),
-                image.width(),
-                image.height(),
-                ExtendedColorType::Rgb8,
-            )
-            .map_err(io::Error::other)?;
+        let bytes = encode_jpeg(image).map_err(io::Error::other)?;
         let mut temp = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .suffix(".tmp")
@@ -235,4 +227,16 @@ impl DiskCache {
             tracing::debug!("broken cover cache entry removed");
         }
     }
+}
+
+/// `image` as a JPEG at the cache's quality.
+pub(crate) fn encode_jpeg(image: &CoverImage) -> Result<Vec<u8>, image::ImageError> {
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY).encode(
+        image.rgb(),
+        image.width(),
+        image.height(),
+        ExtendedColorType::Rgb8,
+    )?;
+    Ok(bytes)
 }

@@ -721,23 +721,41 @@ pub fn spawn_load(
     };
     let reply = Reply::new(responses, answer(request.key.clone(), Outcome::Failed));
     tokio::spawn(async move {
-        let outcome = match &request.key {
-            CoverKey::Local(path) => {
-                let path = path.clone();
-                let pixels = size.pixels();
-                match tokio::task::spawn_blocking(move || local::load_at(&path, pixels)).await {
-                    Ok(Some(image)) => Outcome::Art(Arc::new(image)),
-                    Ok(None) => Outcome::NoArt,
-                    Err(_) => Outcome::Failed,
-                }
-            }
-            CoverKey::Navidrome(id) => match client {
-                Some(client) => remote(&client, cache, id, size).await,
-                None => Outcome::NoArt,
-            },
-        };
+        let outcome = load(&request.key, size, client, cache).await;
         reply.send(answer(request.key, outcome));
     })
+}
+
+/// Loads the cover `key` at `size` (decoding and file I/O on blocking
+/// threads): a local file's tags or folder image, or a Navidrome cover
+/// (needs `client`; looked up in and saved to `cache` when it holds that
+/// size). Must run in a Tokio runtime.
+pub async fn load(
+    key: &CoverKey,
+    size: CoverSize,
+    client: Option<navidrome::Client>,
+    cache: Option<Arc<cache::DiskCache>>,
+) -> Outcome {
+    match key {
+        CoverKey::Local(path) => {
+            let path = path.clone();
+            let pixels = size.pixels();
+            match tokio::task::spawn_blocking(move || local::load_at(&path, pixels)).await {
+                Ok(Some(image)) => Outcome::Art(Arc::new(image)),
+                Ok(None) => Outcome::NoArt,
+                Err(_) => Outcome::Failed,
+            }
+        }
+        CoverKey::Navidrome(id) => match client {
+            Some(client) => remote(&client, cache, id, size).await,
+            None => Outcome::NoArt,
+        },
+    }
+}
+
+/// `image` as JPEG bytes (for handing a decoded cover to a webview).
+pub fn encode_jpeg(image: &CoverImage) -> Result<Vec<u8>, image::ImageError> {
+    cache::encode_jpeg(image)
 }
 
 /// A Navidrome cover at `size`: from the disk cache, else fetched (and

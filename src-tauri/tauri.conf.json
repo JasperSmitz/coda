@@ -12,13 +12,40 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Coda",
         "width": 1200,
-        "height": 780
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' coda: http://coda.localhost data:",
+        "font-src": "'self'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'",
+        "connect-src": "ipc: http://ipc.localhost"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' coda: http://coda.localhost data:",
+        "font-src": "'self'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'",
+        "connect-src": "ipc: http://ipc.localhost ws://localhost:1420"
+      },
+      "freezePrototype": true
     }
   },
   "bundle": {

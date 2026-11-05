@@ -85,6 +85,11 @@ impl Library {
         self.tree.track(id)
     }
 
+    /// The scanned track at `path` (as the scan reported it), if any.
+    pub fn track_id_by_path(&self, path: &Path) -> Option<TrackId> {
+        self.by_path.get(path).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.tree.len()
     }
@@ -200,6 +205,20 @@ mod tests {
             .map(|p| library.playlist(*p).name.as_str())
             .collect();
         assert_eq!(names, ["Alpha", "beta", "road"]);
+    }
+
+    #[test]
+    fn tracks_are_found_by_path() {
+        let mut library = Library::new(PathBuf::from("/music"));
+        library.extend([local("/music/a/1.flac"), local("/music/b/2.flac")]);
+        let id = library
+            .track_id_by_path(Path::new("/music/b/2.flac"))
+            .unwrap();
+        assert_eq!(
+            library.track(id).local_path(),
+            Some(Path::new("/music/b/2.flac"))
+        );
+        assert_eq!(library.track_id_by_path(Path::new("/music/c.flac")), None);
     }
 
     #[test]

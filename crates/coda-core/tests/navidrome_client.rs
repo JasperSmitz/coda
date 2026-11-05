@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use coda_core::model::{MAX_METADATA_CHARS, TrackSource, UNKNOWN_TITLE};
 use coda_core::navidrome::api::MAX_PLAYLIST_ENTRIES;
-use coda_core::navidrome::client::{
-    self, MAX_BODY_BYTES, MAX_PLAYLIST_BODY_BYTES, parse_base_url,
-};
+use coda_core::navidrome::client::{self, MAX_BODY_BYTES, MAX_PLAYLIST_BODY_BYTES, parse_base_url};
 use coda_core::navidrome::{AlbumSort, Client, Error, Password, UNKNOWN_ARTIST};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};

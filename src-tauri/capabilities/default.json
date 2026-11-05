@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "The main window: our own commands plus Tauri's event bus (listen/unlisten) and app/window basics.",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:default"
   ]
 }
