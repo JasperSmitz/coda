@@ -14,6 +14,10 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 pub const DEFAULT_PROGRAM: &str = "mpv";
+/// Where mpv is looked for when it is not on `PATH`: an app started from
+/// Finder, the Dock or a desktop launcher gets a minimal `PATH` that
+/// misses Homebrew's and often `/usr/local/bin`.
+pub const FALLBACK_DIRS: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 pub const SOCKET_NAME: &str = "mpv.sock";
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const CONNECT_RETRY: Duration = Duration::from_millis(20);
@@ -54,6 +58,44 @@ impl SpawnError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
+}
+
+/// The program to run for `name`: `name` itself if it is found on `path`
+/// (a `PATH` value) or is not a bare name, else the first executable
+/// `name` in `fallbacks`, else `name` (whose spawn then fails with
+/// [`SpawnError::NotFound`]).
+pub fn find_program(name: &OsStr, path: Option<&OsStr>, fallbacks: &[&Path]) -> OsString {
+    let bare = Path::new(name).components().count() == 1;
+    if !bare {
+        return name.to_owned();
+    }
+    let on_path = path.is_some_and(|path| {
+        std::env::split_paths(path)
+            .filter(|dir| dir.is_absolute())
+            .any(|dir| is_executable(&dir.join(name)))
+    });
+    if on_path {
+        return name.to_owned();
+    }
+    fallbacks
+        .iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+        .map_or_else(|| name.to_owned(), PathBuf::into_os_string)
+}
+
+/// The default mpv program: `mpv` from `PATH`, else from [`FALLBACK_DIRS`].
+pub fn default_program() -> OsString {
+    let fallbacks: Vec<&Path> = FALLBACK_DIRS.iter().map(Path::new).collect();
+    find_program(
+        OsStr::new(DEFAULT_PROGRAM),
+        std::env::var_os("PATH").as_deref(),
+        &fallbacks,
+    )
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Arguments passed to mpv (excluding the program name). `extra` is
@@ -364,6 +406,49 @@ mod tests {
         assert_eq!(
             args[args.len() - 2..],
             ["--ao=null", "--input-ipc-server=/s/mpv.sock"]
+        );
+    }
+
+    #[test]
+    fn mpv_is_found_on_path_else_in_the_fallback_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (on_path, fallback, empty) = (
+            dir.path().join("bin"),
+            dir.path().join("brew"),
+            dir.path().join("empty"),
+        );
+        for d in [&on_path, &fallback, &empty] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let write = |path: &Path, mode: u32| {
+            std::fs::write(path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write(&on_path.join("mpv"), 0o755);
+        write(&fallback.join("mpv"), 0o755);
+        let mpv = OsStr::new("mpv");
+        let path = std::env::join_paths([&empty, &on_path]).unwrap();
+        let fallbacks = [empty.as_path(), fallback.as_path()];
+        // On PATH: the bare name, so the OS resolves it as before.
+        assert_eq!(find_program(mpv, Some(&path), &fallbacks), "mpv");
+        // Not on PATH (or no PATH at all): the first executable fallback.
+        let path = std::env::join_paths([&empty]).unwrap();
+        assert_eq!(
+            find_program(mpv, Some(&path), &fallbacks),
+            fallback.join("mpv").into_os_string()
+        );
+        assert_eq!(
+            find_program(mpv, None, &fallbacks),
+            fallback.join("mpv").into_os_string()
+        );
+        // A file that is not executable does not count.
+        write(&fallback.join("mpv"), 0o644);
+        assert_eq!(find_program(mpv, Some(&path), &fallbacks), "mpv");
+        // Relative PATH entries are ignored; explicit paths are kept.
+        assert_eq!(find_program(mpv, Some(OsStr::new(".")), &[]), "mpv");
+        assert_eq!(
+            find_program(OsStr::new("/x/mpv"), None, &fallbacks),
+            "/x/mpv"
         );
     }
 

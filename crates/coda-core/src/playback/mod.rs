@@ -315,9 +315,14 @@ impl Drop for PlaybackHandle {
     }
 }
 
-/// Starts the default backend (mpv from `PATH`) and connects to it.
+/// Starts the default backend (mpv from `PATH`, else from a well-known
+/// folder, see [`mpv::process::default_program`]) and connects to it.
 pub async fn spawn_backend() -> Result<PlaybackHandle, BackendError> {
-    mpv::spawn(mpv::MpvOptions::default()).await
+    mpv::spawn(mpv::MpvOptions {
+        program: mpv::process::default_program(),
+        ..mpv::MpvOptions::default()
+    })
+    .await
 }
 
 #[cfg(test)]

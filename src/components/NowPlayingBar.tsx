@@ -21,9 +21,18 @@ interface Props {
   snapshot: Snapshot;
   queueOpen: boolean;
   onToggleQueue: () => void;
+  /** Opens or closes the Now Playing view (`f`). */
+  nowPlayingOpen?: boolean;
+  onToggleNowPlaying?: () => void;
 }
 
-export function NowPlayingBar({ snapshot, queueOpen, onToggleQueue }: Props) {
+export function NowPlayingBar({
+  snapshot,
+  queueOpen,
+  onToggleQueue,
+  nowPlayingOpen = false,
+  onToggleNowPlaying,
+}: Props) {
   const { playing, status, repeat } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
   const isPlaying = status === "playing" || status === "loading";
@@ -34,12 +43,21 @@ export function NowPlayingBar({ snapshot, queueOpen, onToggleQueue }: Props) {
       <div className="bar-track">
         {playing ? (
           <>
-            <Cover
-              url={playing.coverUrl}
-              name={playing.album ?? playing.title}
-              size="small"
-              className="bar-cover"
-            />
+            <button
+              className={`bar-cover-button ${nowPlayingOpen ? "is-active" : ""}`}
+              onClick={onToggleNowPlaying}
+              disabled={!onToggleNowPlaying}
+              aria-label={nowPlayingOpen ? "Close Now Playing" : "Open Now Playing"}
+              aria-pressed={nowPlayingOpen}
+              title="Now Playing (f)"
+            >
+              <Cover
+                url={playing.coverUrl}
+                name={playing.album ?? playing.title}
+                size="small"
+                className="bar-cover"
+              />
+            </button>
             <div className="bar-text">
               <div className="bar-title" title={playing.title}>
                 {playing.title}
@@ -115,7 +133,7 @@ export function NowPlayingBar({ snapshot, queueOpen, onToggleQueue }: Props) {
 
 /** Elapsed · seek slider · total. Shows the drag (then the target) until
  * the backend reports a position again. */
-function SeekBar({ disabled }: { disabled: boolean }) {
+export function SeekBar({ disabled }: { disabled: boolean }) {
   const progress = useProgress();
   const [pending, setPending] = useState<{ ms: number; from: Progress } | null>(null);
   // A seek target stays shown until a newer progress report arrives.

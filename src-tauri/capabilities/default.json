@@ -1,11 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: our two commands and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
+  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding) and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
   "windows": ["main"],
   "permissions": [
     "allow-intent",
     "allow-snapshot",
+    "allow-settings-get",
+    "allow-settings-test-server",
+    "allow-settings-save-server",
+    "allow-settings-disconnect",
+    "allow-settings-pick-folder",
+    "allow-settings-set-music-dir",
+    "allow-settings-set-options",
+    "allow-onboarding-finish",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

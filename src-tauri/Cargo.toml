@@ -24,6 +24,9 @@ libc = "0.2.191"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tracing = "0.1.44"
 coda-core = { path = "../crates/coda-core" }
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 
 [dev-dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }

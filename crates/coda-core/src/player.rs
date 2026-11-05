@@ -557,10 +557,12 @@ impl Player {
     /// Requests `volume` (clamped to [`MAX_VOLUME`]) unless it equals the
     /// effective volume: mpv sends no property change for an unchanged
     /// value, so such a request would never be confirmed (e.g. `+` at
-    /// 100). Like the steps, it needs a loaded track.
+    /// 100). It works while stopped too (mpv keeps its volume while idle,
+    /// as for a restored volume): the request becomes the preferred
+    /// volume, shown and saved, instead of snapping back.
     pub fn set_volume(&mut self, volume: u8) -> Vec<PlayerCommand> {
         let volume = volume.min(MAX_VOLUME);
-        if self.refuse_if_unavailable() || !self.is_loaded() || volume == self.volume() {
+        if self.refuse_if_unavailable() || volume == self.volume() {
             return Vec::new();
         }
         // A request that mpv never echoes (a burst ending on the value it
@@ -1354,10 +1356,13 @@ mod tests {
     }
 
     #[test]
-    fn seek_and_volume_need_a_loaded_track() {
+    fn seeks_need_a_loaded_track_and_volume_steps_do_not() {
         let (mut p, ids) = player_with(&["A"]);
         assert!(p.seek_relative(5.0).is_empty());
-        assert!(p.volume_down().is_empty());
+        assert_eq!(p.volume_down(), [PlayerCommand::SetVolume(95)]);
+        p.handle_event(PlaybackEvent::Volume(95));
+        assert_eq!(p.volume_up(), [PlayerCommand::SetVolume(100)]);
+        p.handle_event(PlaybackEvent::Volume(100));
         start(&mut p, ids[0]);
         assert_eq!(p.seek_relative(-5.0), [PlayerCommand::SeekRelative(-5.0)]);
         assert_eq!(p.volume_up(), Vec::<PlayerCommand>::new(), "already at 100");
@@ -1387,9 +1392,26 @@ mod tests {
     }
 
     #[test]
-    fn set_volume_clamps_and_needs_a_loaded_track() {
+    fn set_volume_while_stopped_is_kept_as_the_preference() {
         let (mut p, ids) = player_with(&["A"]);
-        assert!(p.set_volume(40).is_empty(), "nothing loaded");
+        let revision = p.revision();
+        assert_eq!(p.set_volume(40), [PlayerCommand::SetVolume(40)]);
+        assert_eq!(p.volume(), 40, "shown at once, no snapping back");
+        assert_eq!(p.preferred_volume(), 40);
+        assert_ne!(p.revision(), revision, "saved with the session");
+        assert_eq!(p.status(), PlaybackStatus::Stopped, "nothing starts");
+        // Unconfirmed while idle, it stays the effective volume.
+        let (load, _) = load_of(&p.play_entry(ids[0]));
+        p.handle_event(PlaybackEvent::Started { load });
+        assert_eq!(p.volume(), 40);
+        p.handle_event(PlaybackEvent::Volume(40));
+        assert_eq!(p.volume(), 40);
+        assert_eq!(p.preferred_volume(), 40);
+    }
+
+    #[test]
+    fn set_volume_clamps() {
+        let (mut p, ids) = player_with(&["A"]);
         start(&mut p, ids[0]);
         assert_eq!(p.set_volume(40), [PlayerCommand::SetVolume(40)]);
         assert_eq!(p.volume(), 40);

@@ -147,7 +147,8 @@ pub struct NavidromeDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProblemKind {
-    /// No music folder or Navidrome server configured (onboarding later).
+    /// No music folder or Navidrome server configured: the UI shows
+    /// onboarding.
     NoConfig,
     /// The config file could not be used.
     Config,
