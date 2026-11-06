@@ -165,6 +165,18 @@ pub async fn theme_delete(
     .await
 }
 
+/// Sets the main window's native background (behind the webview) to the
+/// applied theme's background, `#rrggbb`, so resizes and the next start
+/// show no other colour.
+#[tauri::command]
+pub async fn theme_window_background(window: tauri::WebviewWindow, color: String) -> Result<()> {
+    let c = super::color::Rgba::parse_rgb(&color)
+        .ok_or_else(|| format!("`{color}` is not a hex colour"))?;
+    window
+        .set_background_color(Some(tauri::window::Color(c.r, c.g, c.b, 255)))
+        .map_err(|e| e.to_string())
+}
+
 /// Opens the custom themes folder (created if needed) in the file
 /// manager. Only that folder: no path comes from the webview.
 #[tauri::command]

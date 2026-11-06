@@ -3,10 +3,11 @@
 // current: the light or dark one as the system changes, Ghostty's theme
 // again when the window regains focus (Ghostty mode), Settings changes,
 // and previews (the theme list, the colour editor), reverted on cancel.
+// The native window's background follows the applied background.
 
 import { useSyncExternalStore } from "react";
 import { errorText, themeApi } from "../lib/ipc";
-import { applyTokens } from "../lib/theme";
+import { applyTokens, opaquePart, tokenValue } from "../lib/theme";
 import type { Appearance, ResolvedTheme } from "../lib/types";
 
 interface ThemeState {
@@ -29,10 +30,20 @@ export function activeTheme(appearance: Appearance): ResolvedTheme {
   return prefersLight() ? appearance.light : appearance.dark;
 }
 
+/** The native window background last sent (set at creation by the backend). */
+let windowBackground = "";
+
 function render() {
   const { appearance, preview } = state;
   const theme = preview ?? (appearance ? activeTheme(appearance) : null);
-  if (theme) applyTokens(document.documentElement, theme, appearance?.prefs.visualizer ?? "accent");
+  if (!theme) return;
+  applyTokens(document.documentElement, theme, appearance?.prefs.visualizer ?? "accent");
+  // Behind the webview too (resizes, the next window), when it changed.
+  const bg = opaquePart(tokenValue(theme, "bg"));
+  if (bg && bg !== windowBackground) {
+    windowBackground = bg;
+    themeApi.windowBackground(bg).catch(() => {});
+  }
 }
 
 function set(next: Partial<ThemeState>) {

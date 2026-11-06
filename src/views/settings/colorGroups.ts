@@ -22,14 +22,14 @@ const PALETTE_NAMES = [
   "Magenta",
   "Cyan",
   "White",
-  "Bright black",
-  "Bright red",
-  "Bright green",
-  "Bright yellow",
-  "Bright blue",
-  "Bright magenta",
-  "Bright cyan",
-  "Bright white",
+  "Bright Black",
+  "Bright Red",
+  "Bright Green",
+  "Bright Yellow",
+  "Bright Blue",
+  "Bright Magenta",
+  "Bright Cyan",
+  "Bright White",
 ];
 
 export const COLOR_GROUPS: ColorGroup[] = [
@@ -121,12 +121,15 @@ export function colorLabel(key: string): string {
   return LABELS.get(key) ?? key;
 }
 
-/** Base colours whose "reset" means the saved theme's value (no override). */
+/**
+ * Colours stored in Ghostty's own keys: "reset" only drops an unsaved
+ * edit (there is no computed value to go back to).
+ */
 export function isFileColor(key: string): boolean {
-  return key === "bg" || key === "fg" || key.startsWith("palette-");
+  return key === "bg" || key === "fg" || key === "selection" || key.startsWith("palette-");
 }
 
-/** Tokens that may carry alpha (`#rrggbbaa`). */
+/** Tokens that may carry alpha (`#rrggbbaa`); the Ghostty keys cannot. */
 export function allowsAlpha(key: string): boolean {
-  return !isFileColor(key) && key !== "accent";
+  return key === "selection" || (!isFileColor(key) && key !== "accent");
 }

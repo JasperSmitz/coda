@@ -50,8 +50,15 @@ export function ColorEditor({ base, savedAccent, names, onDone }: Props) {
     return () => window.clearTimeout(timer);
   }, [base.name, edits]);
 
-  // Leaving the editor ends the preview.
-  useEffect(() => () => themeStore.setPreview(null), []);
+  // Leaving the editor ends the preview; an answer still on its way is
+  // ignored (it would bring the cancelled colours back).
+  useEffect(
+    () => () => {
+      request.current++;
+      themeStore.setPreview(null);
+    },
+    [],
+  );
 
   const edit = (key: string, value: string | null | undefined) =>
     setEdits((current) => {

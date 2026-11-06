@@ -93,6 +93,8 @@ export const themeApi = {
   remove: (name: string) => invoke<Appearance>("theme_delete", { name }),
   /** Opens the custom themes folder in the file manager. */
   revealFolder: () => invoke<void>("theme_reveal_folder"),
+  /** The native window's background behind the webview (`#rrggbb`). */
+  windowBackground: (color: string) => invoke<void>("theme_window_background", { color }),
 };
 
 /** A command's rejection as text. */

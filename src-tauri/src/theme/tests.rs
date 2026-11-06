@@ -317,3 +317,166 @@ fn tokens_css_defaults_match_the_built_in_themes() {
         }
     }
 }
+
+fn write_file(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn mkfifo(path: &Path) {
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+}
+
+#[test]
+fn copies_look_like_the_original() {
+    let f = fixture();
+    // A third-party theme whose accent fails 3:1: guarded in the original.
+    write_file(
+        &f.dirs.ghostty[0].join("Faint"),
+        "background = #ffffff\nforeground = #000000\ncoda-accent = #fff0c0\ncoda-text-3 = #eeeeee\n",
+    );
+    let prefs = Prefs::default();
+    let original = resolve(
+        &sources::find(&f.dirs, "Faint").unwrap(),
+        &prefs,
+        &Edits::new(),
+    )
+    .unwrap();
+    duplicate(&f.dirs, &prefs, "Faint", "Copy").unwrap();
+    let mut p = prefs.clone();
+    save_custom(&f.dirs, &mut p, "Faint", "Saved", &Edits::new(), None).unwrap();
+    for name in ["Copy", "Saved"] {
+        let copy = resolve(
+            &sources::find(&f.dirs, name).unwrap(),
+            &prefs,
+            &Edits::new(),
+        )
+        .unwrap();
+        assert_eq!(copy.tokens, original.tokens, "{name}");
+    }
+    // An edit in the editor is explicit, and stays so in the saved file.
+    let mut p = prefs.clone();
+    let e = edits(&[("accent", Some("#fff0c0"))]);
+    save_custom(&f.dirs, &mut p, "Copy", "Copy", &e, Some("Copy")).unwrap();
+    let text = std::fs::read_to_string(custom_path(&f, "Copy")).unwrap();
+    assert!(text.contains("coda-explicit = accent"));
+    let copy = resolve(
+        &sources::find(&f.dirs, "Copy").unwrap(),
+        &prefs,
+        &Edits::new(),
+    )
+    .unwrap();
+    assert_eq!(token(&copy, "accent").value, "#fff0c0");
+    assert!(token(&copy, "accent").contrast.is_some());
+    // Reset un-sets it again.
+    let e = edits(&[("accent", None)]);
+    save_custom(&f.dirs, &mut p, "Copy", "Copy", &e, Some("Copy")).unwrap();
+    let text = std::fs::read_to_string(custom_path(&f, "Copy")).unwrap();
+    assert!(!text.contains("coda-explicit"));
+}
+
+#[test]
+fn selection_edits_go_to_ghosttys_key() {
+    let f = fixture();
+    let mut prefs = Prefs::default();
+    let e = edits(&[("selection", Some("#334455"))]);
+    save_custom(&f.dirs, &mut prefs, "Kanso Zen", "Sel", &e, None).unwrap();
+    let text = std::fs::read_to_string(custom_path(&f, "Sel")).unwrap();
+    assert!(text.contains("selection-background = #334455"));
+    assert!(!text.contains("coda-selection"));
+    // With alpha it can only be Coda's key.
+    let e = edits(&[("selection", Some("#33445580"))]);
+    save_custom(&f.dirs, &mut prefs, "Sel", "Sel", &e, Some("Sel")).unwrap();
+    let text = std::fs::read_to_string(custom_path(&f, "Sel")).unwrap();
+    assert!(text.contains("coda-selection = #33445580"));
+}
+
+#[test]
+fn case_only_renames_work() {
+    let f = fixture();
+    let mut prefs = Prefs::default();
+    save_custom(&f.dirs, &mut prefs, "Coda", "Mine", &Edits::new(), None).unwrap();
+    rename_custom(&f.dirs, &mut prefs, "Mine", "MINE").unwrap();
+    let names: Vec<String> = std::fs::read_dir(f.dirs.custom.as_ref().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["MINE"]);
+    assert_eq!(prefs.dark_theme, "MINE");
+    // While saving from the editor too; the file survives.
+    let e = edits(&[("border", Some("#123123"))]);
+    save_custom(&f.dirs, &mut prefs, "MINE", "mine", &e, Some("MINE")).unwrap();
+    let names: Vec<String> = std::fs::read_dir(f.dirs.custom.as_ref().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["mine"]);
+    assert!(
+        std::fs::read_to_string(custom_path(&f, "mine"))
+            .unwrap()
+            .contains("coda-border = #123123")
+    );
+}
+
+#[test]
+fn deleting_a_shadowing_theme_keeps_the_references() {
+    let f = fixture();
+    let mut prefs = Prefs {
+        mode: Mode::Single,
+        theme: "Kanso Zen".into(),
+        ..Prefs::default()
+    };
+    write_file(
+        &custom_path(&f, "Kanso Zen"),
+        "background = #000000\nforeground = #ffffff\n",
+    );
+    delete_custom(&f.dirs, &mut prefs, "Kanso Zen").unwrap();
+    // The built-in one shows again: still selected.
+    assert_eq!(prefs.theme, "Kanso Zen");
+}
+
+#[test]
+fn fifos_in_theme_folders_never_hang() {
+    let f = fixture();
+    mkfifo(&f.dirs.ghostty[0].join("Stuck"));
+    std::fs::create_dir_all(f.dirs.custom.as_ref().unwrap()).unwrap();
+    mkfifo(&custom_path(&f, "Coda"));
+    // Each of these would block forever on a plain open.
+    assert!(
+        !list(&f.dirs, &Prefs::default())
+            .iter()
+            .any(|t| t.name == "Stuck")
+    );
+    assert!(sources::find(&f.dirs, "Stuck").is_none());
+    assert_eq!(
+        sources::find(&f.dirs, "Coda").unwrap().source,
+        Source::BuiltIn
+    );
+    let prefs = Prefs {
+        mode: Mode::Single,
+        theme: "Stuck".into(),
+        ..Prefs::default()
+    };
+    assert_eq!(applied(&f.dirs, &[], &prefs).dark.name, "Coda");
+}
+
+#[test]
+fn ghostty_theme_paths_are_read_directly() {
+    let f = fixture();
+    let file = f
+        .ghostty_config
+        .with_file_name("elsewhere")
+        .join("Kanso Zen");
+    write_file(&file, "background = #123456\nforeground = #ffffff\n");
+    write_file(&f.ghostty_config, &format!("theme = {}\n", file.display()));
+    let prefs = Prefs {
+        mode: Mode::Ghostty,
+        ..Prefs::default()
+    };
+    let a = applied(&f.dirs, std::slice::from_ref(&f.ghostty_config), &prefs);
+    // That file, not the built-in theme of the same name.
+    assert_eq!(token(&a.dark, "bg").value, "#123456");
+    assert_eq!(a.dark.name, "Kanso Zen");
+}

@@ -15,13 +15,13 @@
 pub mod color;
 pub mod commands;
 pub mod derive;
+pub mod fsio;
 pub mod ghostty;
 pub mod parse;
 pub mod prefs;
 pub mod sources;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -131,8 +131,10 @@ impl Appearance {
     /// The script the main window runs before its document: it sets the
     /// chosen theme's tokens on `<html>` (light or dark by the system's
     /// appearance), so the first paint already has the right colours.
-    /// Blocking (reads a few small files); call at window creation.
-    pub fn init_script(&self) -> String {
+    /// Also the light and dark backgrounds, for the native window behind
+    /// the webview. Blocking (reads a few small files); call at window
+    /// creation.
+    pub fn startup(&self) -> Startup {
         // Nothing else holds the lock at window creation.
         let prefs = self
             .state
@@ -140,8 +142,30 @@ impl Appearance {
             .map(|s| s.0.clone())
             .unwrap_or_default();
         let applied = applied(&self.dirs, &self.ghostty_configs, &prefs);
-        init_script(&applied, &prefs)
+        Startup {
+            script: init_script(&applied, &prefs),
+            light_bg: background(&applied.light),
+            dark_bg: background(&applied.dark),
+        }
     }
+}
+
+/// What the main window is created with.
+pub struct Startup {
+    pub script: String,
+    pub light_bg: Rgba,
+    pub dark_bg: Rgba,
+}
+
+/// A resolved theme's background (opaque).
+pub fn background(theme: &ResolvedTheme) -> Rgba {
+    theme
+        .tokens
+        .iter()
+        .find(|t| t.key == "bg")
+        .and_then(|t| Rgba::parse(&t.value))
+        .unwrap_or(color::BLACK)
+        .opaque()
 }
 
 /// The script for [`Appearance::init_script`]. Only token names and hex
@@ -214,6 +238,10 @@ fn apply_edits(theme: &mut ThemeFile, edits: &Edits) -> Result<BTreeSet<String>,
                 if let Some(n) = key.strip_prefix("palette-") {
                     let n: usize = n.parse().map_err(|_| format!("Unknown colour `{key}`"))?;
                     theme.palette[n] = Some(color);
+                } else if key == "selection" && color.is_opaque() {
+                    // Ghostty's own key, so Ghostty sees the edit too.
+                    theme.selection_background = Some(color);
+                    theme.overrides.remove(key);
                 } else {
                     theme.overrides.insert(key.clone(), color);
                 }
@@ -225,19 +253,20 @@ fn apply_edits(theme: &mut ThemeFile, edits: &Edits) -> Result<BTreeSet<String>,
 }
 
 /// `entry` with the saved accent override and `edits`, as a theme file
-/// and the keys the user set.
+/// and the keys the user set: the file's `coda-explicit` keys, a saved
+/// accent and every edit (a reset un-sets). The returned file carries
+/// that set, so a saved or duplicated copy is guarded exactly like the
+/// original.
 fn edited(
     entry: &Entry,
     prefs: &Prefs,
     edits: &Edits,
 ) -> Result<(ThemeFile, BTreeSet<String>), String> {
     let mut theme = entry.theme.clone();
-    let mut explicit = BTreeSet::new();
-    // A custom theme's colours were all chosen by the user.
-    if entry.source == Source::Custom {
-        explicit.extend(theme.overrides.keys().cloned());
-        if theme.accent.is_some() {
-            explicit.insert("accent".to_owned());
+    let mut explicit = theme.explicit.clone();
+    for (key, value) in edits {
+        if value.is_none() {
+            explicit.remove(key);
         }
     }
     match edits.get("accent") {
@@ -245,7 +274,6 @@ fn edited(
         Some(None) => {
             if entry.source == Source::Custom {
                 theme.accent = None;
-                explicit.remove("accent");
             }
         }
         Some(Some(_)) => {}
@@ -257,6 +285,7 @@ fn edited(
         }
     }
     explicit.extend(apply_edits(&mut theme, edits)?);
+    theme.explicit = explicit.clone();
     Ok((theme, explicit))
 }
 
@@ -304,7 +333,13 @@ pub fn list(dirs: &ThemeDirs, prefs: &Prefs) -> Vec<ThemeSummary> {
 /// The theme called `name`, else the default for `fallback_scheme`
 /// (noted). Blocking.
 fn find_or_default(dirs: &ThemeDirs, name: &str, dark: bool, notes: &mut Vec<String>) -> Entry {
-    if let Some(entry) = sources::find(dirs, name) {
+    // Ghostty also takes an absolute path to a theme file.
+    let found = if std::path::Path::new(name).is_absolute() {
+        sources::find_path(std::path::Path::new(name))
+    } else {
+        sources::find(dirs, name)
+    };
+    if let Some(entry) = found {
         return entry;
     }
     let fallback = if dark { DEFAULT_DARK } else { DEFAULT_LIGHT };
@@ -355,7 +390,8 @@ pub fn applied(dirs: &ThemeDirs, ghostty_configs: &[PathBuf], prefs: &Prefs) -> 
         let entry = find_or_default(dirs, name, dark, notes);
         resolve(&entry, prefs, &Edits::new()).expect("no edits cannot fail")
     };
-    let light_theme = resolve_slot(&light, false, &mut notes);
+    // One theme for both (single mode): a missing one falls back to Coda.
+    let light_theme = resolve_slot(&light, dark == light, &mut notes);
     let dark_theme = if dark == light {
         light_theme.clone()
     } else {
@@ -388,7 +424,14 @@ fn check_new_name(dirs: &ThemeDirs, name: &str, replacing: Option<&str>) -> Resu
     if replacing == Some(name) {
         return Ok(());
     }
-    if custom_dir(dirs)?.join(name).exists() {
+    let dir = custom_dir(dirs)?;
+    // Only the letter case changes (case-insensitive file systems).
+    if let Some(old) = replacing
+        && same_file(&dir.join(old), &dir.join(name))
+    {
+        return Ok(());
+    }
+    if dir.join(name).exists() {
         return Err(format!("There is already a custom theme called “{name}”"));
     }
     if let Some(other) = sources::find(dirs, name) {
@@ -402,6 +445,15 @@ fn check_new_name(dirs: &ThemeDirs, name: &str, replacing: Option<&str>) -> Resu
         ));
     }
     Ok(())
+}
+
+/// Whether two paths name the same existing file.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 fn custom_entry(dirs: &ThemeDirs, name: &str) -> Result<Entry, String> {
@@ -421,14 +473,10 @@ fn write_theme(
     based_on: &str,
 ) -> Result<(), String> {
     let dir = custom_dir(dirs)?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     let text = parse::write(theme, Some(based_on));
-    let io = |e: std::io::Error| format!("Could not save the theme: {e}");
-    let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(io)?;
-    temp.write_all(text.as_bytes()).map_err(io)?;
-    temp.as_file().sync_all().map_err(io)?;
-    temp.persist(dir.join(name)).map_err(|e| io(e.error))?;
-    Ok(())
+    // A symlink in the custom folder is replaced, never its target.
+    fsio::write_atomic(&dir.join(name), text.as_bytes())
+        .map_err(|e| format!("Could not save the theme: {e}"))
 }
 
 /// Points the preferences at `name` (the slot matching its scheme in
@@ -465,9 +513,21 @@ pub fn save_custom(
         sources::find(dirs, base).ok_or_else(|| format!("The theme “{base}” was not found"))?;
     let (theme, _) = edited(&entry, prefs, edits)?;
     let scheme = Scheme::of(theme.background);
+    let dir = custom_dir(dirs)?;
+    let renamed = replacing.filter(|old| *old != name);
+    if let Some(old) = renamed
+        && same_file(&dir.join(old), &dir.join(name))
+    {
+        // A case-only rename: rename first, or the write and the removal
+        // of the old name would hit the same file.
+        std::fs::rename(dir.join(old), dir.join(name))
+            .map_err(|e| format!("Could not rename the theme: {e}"))?;
+    }
     write_theme(dirs, name, &theme, base)?;
-    if let Some(old) = replacing.filter(|old| *old != name) {
-        let _ = std::fs::remove_file(custom_dir(dirs)?.join(old));
+    if let Some(old) = renamed {
+        if !same_file(&dir.join(old), &dir.join(name)) {
+            let _ = std::fs::remove_file(dir.join(old));
+        }
         prefs.rename_theme(old, name);
     }
     // The accent is in the file now.
@@ -487,7 +547,7 @@ pub fn rename_custom(
     if from == to {
         return Ok(());
     }
-    check_new_name(dirs, to, None)?;
+    check_new_name(dirs, to, Some(from))?;
     let dir = custom_dir(dirs)?;
     std::fs::rename(dir.join(from), dir.join(to))
         .map_err(|e| format!("Could not rename the theme: {e}"))?;
@@ -504,12 +564,16 @@ pub fn duplicate(dirs: &ThemeDirs, prefs: &Prefs, name: &str, to: &str) -> Resul
     write_theme(dirs, to, &theme, name)
 }
 
-/// Deletes a custom theme; references to it go back to the defaults.
+/// Deletes a custom theme. References to it go back to the defaults,
+/// unless another theme of that name shows again (one it shadowed).
 /// Blocking.
 pub fn delete_custom(dirs: &ThemeDirs, prefs: &mut Prefs, name: &str) -> Result<(), String> {
     custom_entry(dirs, name)?;
     std::fs::remove_file(custom_dir(dirs)?.join(name))
         .map_err(|e| format!("Could not delete the theme: {e}"))?;
+    if sources::find(dirs, name).is_some() {
+        return Ok(());
+    }
     let defaults = Prefs::default();
     for (slot, default) in [
         (&mut prefs.theme, &defaults.theme),

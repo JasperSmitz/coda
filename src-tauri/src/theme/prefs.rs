@@ -5,12 +5,12 @@
 //! `settings.toml.bad` when it is next replaced).
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::color::Rgba;
+use super::fsio;
 use super::sources::{DEFAULT_DARK, DEFAULT_LIGHT, valid_name};
 
 const MAX_PREFS_BYTES: u64 = 256 * 1024;
@@ -118,18 +118,12 @@ pub fn load(path: Option<&Path>) -> (Prefs, bool) {
     let Some(path) = path else {
         return (Prefs::default(), false);
     };
-    let text = match std::fs::metadata(path) {
-        Err(_) => return (Prefs::default(), false),
-        Ok(meta) if meta.len() > MAX_PREFS_BYTES => {
-            tracing::warn!(path = %path.display(), "settings.toml is too large; using the defaults");
-            return (Prefs::default(), true);
-        }
-        Ok(_) => std::fs::read_to_string(path),
+    let text = match fsio::read_regular(path, MAX_PREFS_BYTES) {
+        Ok(None) => return (Prefs::default(), false),
+        Ok(Some(text)) => Ok(text),
+        Err(error) => Err(error.to_string()),
     };
-    match text
-        .map_err(|e| e.to_string())
-        .and_then(|t| toml::from_str::<Prefs>(&t).map_err(|e| e.to_string()))
-    {
+    match text.and_then(|t| toml::from_str::<Prefs>(&t).map_err(|e| e.to_string())) {
         Ok(prefs) => (prefs.sanitized(), false),
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "settings.toml is not valid; using the defaults");
@@ -140,26 +134,50 @@ pub fn load(path: Option<&Path>) -> (Prefs, bool) {
 
 /// Writes `prefs` atomically (a temporary file renamed over the old one).
 /// `keep_bad` first renames an invalid existing file to `.bad`.
+/// A symlinked `settings.toml` (dotfile managers) stays a link: its
+/// target is written.
 pub fn save(path: &Path, prefs: &Prefs, keep_bad: bool) -> std::io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("settings.toml has no folder"))?;
-    std::fs::create_dir_all(dir)?;
-    if keep_bad && path.exists() {
-        let _ = std::fs::rename(path, path.with_extension("toml.bad"));
+    let target = fsio::write_target(path);
+    if keep_bad && target.is_file() {
+        let _ = std::fs::copy(&target, path.with_extension("toml.bad"));
     }
     let text = toml::to_string(prefs).map_err(std::io::Error::other)?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-    temp.write_all(b"# Coda (desktop app) preferences. Written by the app.\n")?;
-    temp.write_all(text.as_bytes())?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    let mut bytes = b"# Coda (desktop app) preferences. Written by the app.\n".to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    fsio::write_atomic(&target, &bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_symlinked_file_stays_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles").join("settings.toml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "mode = 3\n").unwrap();
+        let link = dir.path().join("settings.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (_, bad) = load(Some(&link));
+        let prefs = Prefs {
+            mode: Mode::Single,
+            ..Prefs::default()
+        };
+        save(&link, &prefs, bad).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(load(Some(&target)).0, prefs);
+        // The invalid content was kept aside.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.toml.bad")).unwrap(),
+            "mode = 3\n"
+        );
+    }
 
     #[test]
     fn round_trips_through_the_file() {

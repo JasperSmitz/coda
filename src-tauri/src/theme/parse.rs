@@ -5,13 +5,15 @@
 //! Coda's own keys ride along (Ghostty ignores them): `coda-accent =
 //! #rrggbb | palette:N`, and `coda-<token> = #rrggbb[aa]` overrides for
 //! every derived token ([`super::derive::OVERRIDABLE`]); `coda-surface`
-//! is an alias of `coda-surface-1`.
+//! is an alias of `coda-surface-1`. `coda-explicit = accent, surface-2`
+//! lists the colours the user chose (the colour editor writes it): the
+//! contrast guard leaves those alone and warns instead.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::color::Rgba;
-use super::derive::OVERRIDABLE;
+use super::derive::{OVERRIDABLE, editable_keys};
 
 /// Larger theme files are not read.
 pub const MAX_THEME_BYTES: u64 = 64 * 1024;
@@ -36,6 +38,8 @@ pub struct ThemeFile {
     pub accent: Option<AccentSpec>,
     /// `coda-<token>` overrides, by token name (`surface-1`, `danger`, …).
     pub overrides: BTreeMap<String, Rgba>,
+    /// `coda-explicit`: editor keys the user set (never guarded).
+    pub explicit: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -73,6 +77,7 @@ pub fn parse(text: &str) -> Result<ThemeFile, ParseError> {
         selection_foreground: None,
         accent: None,
         overrides: BTreeMap::new(),
+        explicit: BTreeSet::new(),
     };
     for (index, raw) in text.lines().enumerate() {
         let line = index + 1;
@@ -103,6 +108,16 @@ pub fn parse(text: &str) -> Result<ThemeFile, ParseError> {
                     .palette
                     .get_mut(n)
                     .ok_or(ParseError::BadPalette(line))? = Some(hex);
+            }
+            "coda-explicit" => {
+                // Unknown keys are skipped (a newer app's file).
+                let known: BTreeSet<String> = editable_keys().collect();
+                theme.explicit = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|k| known.contains(*k))
+                    .map(str::to_owned)
+                    .collect();
             }
             "coda-accent" => {
                 theme.accent = Some(parse_accent(value).ok_or(ParseError::BadAccent(line))?)
@@ -185,6 +200,10 @@ pub fn write(theme: &ThemeFile, based_on: Option<&str>) -> String {
     }
     for (token, value) in &theme.overrides {
         let _ = writeln!(out, "coda-{token} = {value}");
+    }
+    if !theme.explicit.is_empty() {
+        let keys: Vec<&str> = theme.explicit.iter().map(String::as_str).collect();
+        let _ = writeln!(out, "coda-explicit = {}", keys.join(", "));
     }
     out
 }
@@ -303,6 +322,7 @@ mod tests {
                 a: 10,
             },
         );
+        theme.explicit = ["accent".to_owned(), "hover".to_owned()].into();
         let text = write(&theme, Some("Kanagawabones\n# evil"));
         assert_eq!(text.lines().filter(|l| l.contains("evil")).count(), 1);
         assert_eq!(parse(&text).unwrap(), theme);

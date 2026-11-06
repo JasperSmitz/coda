@@ -80,16 +80,21 @@ export function AppearanceSection() {
   const run = useCallback(
     (work: () => Promise<Appearance>, done?: string) => {
       setBusy(true);
-      themeStore.setPreview(null);
+      // The preview stays until the answer, so applying the previewed
+      // theme never shows the old one in between.
       return work()
         .then((next) => {
           themeStore.setAppearance(next);
+          themeStore.setPreview(null);
           setStatus(done ? { error: false, text: done } : null);
           clear();
           // Names, accents (swatches) or files may have changed.
           loadList();
         })
-        .catch((e: unknown) => setStatus({ error: true, text: errorText(e) }))
+        .catch((e: unknown) => {
+          themeStore.setPreview(null);
+          setStatus({ error: true, text: errorText(e) });
+        })
         .finally(() => setBusy(false));
     },
     [clear, loadList],

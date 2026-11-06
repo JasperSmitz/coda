@@ -181,7 +181,8 @@ pub fn run() {
         .setup(move |app| {
             // The main window is created here (not from the config) so the
             // chosen theme's colours are set before its first paint.
-            let appearance = theme::Appearance::from_process();
+            app.manage(theme::Appearance::from_process());
+            let startup = app.state::<theme::Appearance>().startup();
             let window_config = app
                 .config()
                 .app
@@ -190,10 +191,19 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .ok_or("no main window in tauri.conf.json")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                .initialization_script(appearance.init_script())
+            // The native window and webview backgrounds are the theme's too,
+            // so nothing light flashes before the first paint: the dark one
+            // at creation, the light one at once if the window is light.
+            let bg = |c: theme::color::Rgba| tauri::window::Color(c.r, c.g, c.b, 255);
+            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .initialization_script(startup.script)
+                .background_color(bg(startup.dark_bg))
                 .build()?;
-            app.manage(appearance);
+            if startup.light_bg != startup.dark_bg
+                && matches!(window.theme(), Ok(tauri::Theme::Light))
+            {
+                let _ = window.set_background_color(Some(bg(startup.light_bg)));
+            }
             let media = Arc::new(OnceLock::new());
             let sink = TauriSink(app.handle().clone(), media.clone());
             let startup_paths = paths.clone();
@@ -263,7 +273,8 @@ pub fn run() {
             theme::commands::theme_rename,
             theme::commands::theme_duplicate,
             theme::commands::theme_delete,
-            theme::commands::theme_reveal_folder
+            theme::commands::theme_reveal_folder,
+            theme::commands::theme_window_background
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

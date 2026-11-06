@@ -47,6 +47,7 @@
     "allow-theme-duplicate",
     "allow-theme-delete",
     "allow-theme-reveal-folder",
+    "allow-theme-window-background",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

@@ -25,6 +25,8 @@ interface Props {
 
 export function ThemeList({ themes, selected, disabled, onPreview, onApply, onActive }: Props) {
   const [query, setQuery] = useState("");
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const shown = useMemo(() => filterThemes(themes, query), [themes, query]);
   const [active, setActive] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -38,12 +40,14 @@ export function ThemeList({ themes, selected, disabled, onPreview, onApply, onAc
     onActive(shown[activeIndex] ?? null);
   }, [shown, activeIndex, onActive]);
 
-  // The applied theme in view when the list opens or the slot changes.
+  // The applied theme in view (of the rows shown) when the list opens, the
+  // slot or the list changes; any preview ends.
   useEffect(() => {
     setActive(null);
-    const i = themes.findIndex((t) => t.name === selected);
+    onPreview(null);
+    const i = filterThemes(themes, queryRef.current).findIndex((t) => t.name === selected);
     if (i >= 0 && list.current) list.current.scrollTop = Math.max(0, i * ROW - HEIGHT / 2 + ROW / 2);
-  }, [selected, themes]);
+  }, [selected, themes, onPreview]);
 
   const reveal = (index: number) => {
     const el = list.current;
@@ -72,8 +76,11 @@ export function ThemeList({ themes, selected, disabled, onPreview, onApply, onAc
       ArrowUp: () => moveTo(activeIndex - 1),
       PageDown: () => moveTo(activeIndex + page),
       PageUp: () => moveTo(activeIndex - page),
+      // Only a highlighted theme other than the applied one is applied.
       Enter: () => {
-        if (activeIndex >= 0) onApply(shown[activeIndex].name);
+        if (active !== null && activeIndex >= 0 && shown[activeIndex].name !== selected) {
+          onApply(shown[activeIndex].name);
+        }
         setActive(null);
       },
       Escape: cancel,
@@ -109,6 +116,7 @@ export function ThemeList({ themes, selected, disabled, onPreview, onApply, onAc
         onChange={(e) => {
           setQuery(e.target.value);
           setActive(null);
+          onPreview(null);
           if (list.current) list.current.scrollTop = 0;
         }}
         onKeyDown={onKeyDown}
@@ -147,7 +155,8 @@ export function ThemeList({ themes, selected, disabled, onPreview, onApply, onAc
                 }}
                 onClick={() => {
                   if (disabled) return;
-                  onApply(t.name);
+                  if (t.name !== selected) onApply(t.name);
+                  else onPreview(null);
                   setActive(null);
                 }}
               >

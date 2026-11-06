@@ -48,6 +48,7 @@ fn main() {
         "theme_duplicate",
         "theme_delete",
         "theme_reveal_folder",
+        "theme_window_background",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

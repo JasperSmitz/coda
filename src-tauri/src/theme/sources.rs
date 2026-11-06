@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::fsio;
 use super::parse::{self, MAX_THEME_BYTES, ThemeFile};
 
 /// The themes compiled into the app (see `themes/THEMES-CREDITS.md`).
@@ -134,39 +134,34 @@ fn built_in(name: &str) -> Option<Entry> {
 }
 
 /// Reads one theme file (size capped). Errors are logged by the caller.
-fn read_file(path: &Path) -> Result<ThemeFile, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a file".into());
+/// `Ok(None)` if there is no file. Never opens a FIFO or device.
+fn read_file(path: &Path) -> Result<Option<ThemeFile>, String> {
+    match fsio::read_regular(path, MAX_THEME_BYTES).map_err(|e| e.to_string())? {
+        Some(text) => parse::parse(&text).map(Some).map_err(|e| e.to_string()),
+        None => Ok(None),
     }
-    if meta.len() > MAX_THEME_BYTES {
-        return Err(parse::ParseError::TooLarge.to_string());
-    }
-    let mut text = String::new();
-    file.take(MAX_THEME_BYTES + 1)
-        .read_to_string(&mut text)
-        .map_err(|e| e.to_string())?;
-    parse::parse(&text).map_err(|e| e.to_string())
 }
 
 fn read_dir(dir: &Path, source: Source, into: &mut BTreeMap<String, Entry>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return; // Not installed: nothing to log.
     };
+    // Bounded before sorting: at most one entry past the cap is kept.
     let mut names: Vec<String> = entries
         .filter_map(Result::ok)
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| valid_name(n))
+        .take(MAX_THEMES_PER_DIR + 1)
         .collect();
     names.sort();
     if names.len() > MAX_THEMES_PER_DIR {
-        tracing::warn!(dir = %dir.display(), count = names.len(), "too many theme files; reading the first {MAX_THEMES_PER_DIR}");
+        tracing::warn!(dir = %dir.display(), "too many theme files; reading {MAX_THEMES_PER_DIR}");
         names.truncate(MAX_THEMES_PER_DIR);
     }
     for name in names {
         match read_file(&dir.join(&name)) {
-            Ok(theme) => {
+            Ok(None) => {}
+            Ok(Some(theme)) => {
                 into.insert(
                     name.clone(),
                     Entry {
@@ -200,6 +195,24 @@ pub fn load_all(dirs: &ThemeDirs) -> BTreeMap<String, Entry> {
     themes
 }
 
+/// The theme file at an absolute `path` (Ghostty's `theme = /path`),
+/// named by its file name.
+pub fn find_path(path: &Path) -> Option<Entry> {
+    let name = path.file_name()?.to_str()?.to_owned();
+    match read_file(path) {
+        Ok(Some(theme)) => Some(Entry {
+            name,
+            source: Source::Ghostty,
+            theme,
+        }),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::info!(path = %path.display(), %error, "skipping a theme file");
+            None
+        }
+    }
+}
+
 /// One theme by name, without reading every folder: the highest-priority
 /// source that has a valid file of that name.
 pub fn find(dirs: &ThemeDirs, name: &str) -> Option<Entry> {
@@ -213,11 +226,9 @@ pub fn find(dirs: &ThemeDirs, name: &str) -> Option<Entry> {
         .chain(dirs.ghostty.iter().rev().map(|d| (d, Source::Ghostty)));
     for (dir, source) in folders {
         let path = dir.join(name);
-        if !path.exists() {
-            continue;
-        }
         match read_file(&path) {
-            Ok(theme) => {
+            Ok(None) => {}
+            Ok(Some(theme)) => {
                 return Some(Entry {
                     name: name.to_owned(),
                     source,
