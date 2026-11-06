@@ -15,7 +15,7 @@ import { isRemoveKey } from "../lib/keys";
 import { addToPlaylistFlow, canAddToPlaylist, saveQueueFlow, songIds } from "../lib/playlists";
 import type { QueueItem, Status } from "../lib/types";
 import { confirm } from "../state/dialogs";
-import { CloseIcon } from "./icons";
+import { BroomIcon, CloseIcon, PlaylistAddIcon, ShuffleIcon } from "./icons";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 
 const ROW = 36;
@@ -267,34 +267,37 @@ export function QueuePanel({
         </div>
         <div className="panel-actions">
           <button
-            className="text-button"
+            className="icon-button"
             onClick={() => intent({ type: "shuffleUpcoming" })}
             disabled={locked || queue.length < 2}
+            aria-label="Shuffle upcoming"
             title="Shuffle the upcoming tracks"
           >
-            Shuffle
+            <ShuffleIcon />
           </button>
           {serverConfigured && (
             <button
-              className="text-button"
+              className="icon-button"
               onClick={save}
               disabled={locked || remote === 0}
+              aria-label="Save queue as playlist…"
               title={
                 remote === 0
-                  ? "The queue has no Navidrome tracks"
-                  : "Save the queue's Navidrome tracks as a playlist"
+                  ? "Save queue as playlist: the queue has no Navidrome tracks"
+                  : "Save the queue's Navidrome tracks as a playlist…"
               }
             >
-              Save…
+              <PlaylistAddIcon />
             </button>
           )}
           <button
-            className="text-button"
+            className="icon-button"
             onClick={() => void clear()}
             disabled={locked || queue.length === 0}
-            title="Clear the queue"
+            aria-label="Clear queue…"
+            title="Clear the queue…"
           >
-            Clear
+            <BroomIcon />
           </button>
         </div>
       </header>
