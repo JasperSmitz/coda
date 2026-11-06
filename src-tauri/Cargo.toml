@@ -26,10 +26,11 @@ tracing = "0.1.44"
 coda-core = { path = "../crates/coda-core" }
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
+tempfile = "3.27.0"
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse", "display"] }
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 
 [dev-dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
-tempfile = "3.27.0"
 url = "2.5.8"
 wiremock = "0.6.5"

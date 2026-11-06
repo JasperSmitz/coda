@@ -432,8 +432,8 @@
   top: 6px;
   width: 30px;
   height: 30px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
+  background: var(--on-cover-bg);
+  color: var(--on-cover);
   opacity: 0;
 }
 
@@ -442,8 +442,8 @@
 }
 
 .album-more:not(:disabled):hover {
-  background: rgba(0, 0, 0, 0.75);
-  color: #fff;
+  background: var(--on-cover-bg-hover);
+  color: var(--on-cover);
 }
 
 /* ----- artist list ----- */

@@ -10,7 +10,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--backdrop);
   animation: dialog-fade var(--motion) ease-out;
 }
 

@@ -7,6 +7,7 @@ import "./styles/app.css";
 import "./styles/browse.css";
 import "./styles/experience.css";
 import "./styles/edit.css";
+import "./styles/appearance.css";
 
 // A desktop app, not a page: no browser context menu outside our own.
 window.addEventListener("contextmenu", (e) => {

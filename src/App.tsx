@@ -10,6 +10,7 @@ import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
 import { nav, routeFor, routeSource, sourceReplaced, useNav, viewFor } from "./state/nav";
 import { connect, useAppState } from "./state/store";
+import { startTheme } from "./state/theme";
 import type { ViewId } from "./views/viewList";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
@@ -70,6 +71,7 @@ function useConfiguredRoot(snapshot: Snapshot | null) {
 
 export default function App() {
   useEffect(() => connect(), []);
+  useEffect(() => startTheme(), []);
   const { snapshot, queue } = useAppState();
   const stack = useNav();
   const top = stack[stack.length - 1];

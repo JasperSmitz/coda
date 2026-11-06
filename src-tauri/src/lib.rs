@@ -3,7 +3,8 @@
 //! intents, and it emits `snapshot`, `progress` and `visualizer` events
 //! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
 //! [`settings`] writes Coda's config and applies it live; [`media`] is
-//! the OS media controls.
+//! the OS media controls; [`theme`] the colour themes (applied before
+//! the window's first paint by an initialization script).
 
 pub mod bootstrap;
 pub mod browse;
@@ -14,6 +15,7 @@ pub mod engine;
 pub mod media;
 pub mod playlists;
 pub mod settings;
+pub mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -177,6 +179,21 @@ pub fn run() {
             },
         )
         .setup(move |app| {
+            // The main window is created here (not from the config) so the
+            // chosen theme's colours are set before its first paint.
+            let appearance = theme::Appearance::from_process();
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .ok_or("no main window in tauri.conf.json")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .initialization_script(appearance.init_script())
+                .build()?;
+            app.manage(appearance);
             let media = Arc::new(OnceLock::new());
             let sink = TauriSink(app.handle().clone(), media.clone());
             let startup_paths = paths.clone();
@@ -237,7 +254,16 @@ pub fn run() {
             settings::settings_pick_folder,
             settings::settings_set_music_dir,
             settings::settings_set_options,
-            settings::onboarding_finish
+            settings::onboarding_finish,
+            theme::commands::appearance_get,
+            theme::commands::appearance_set,
+            theme::commands::theme_list,
+            theme::commands::theme_resolve,
+            theme::commands::theme_save_custom,
+            theme::commands::theme_rename,
+            theme::commands::theme_duplicate,
+            theme::commands::theme_delete,
+            theme::commands::theme_reveal_folder
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

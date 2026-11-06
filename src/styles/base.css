@@ -35,6 +35,11 @@ textarea {
   cursor: text;
 }
 
+::selection {
+  background: var(--selection);
+  color: var(--selection-text);
+}
+
 h1,
 h2,
 p {

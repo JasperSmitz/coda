@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-theme-rename"
+description = "Enables the theme_rename command without any pre-configured scope."
+commands.allow = ["theme_rename"]
+
+[[permission]]
+identifier = "deny-theme-rename"
+description = "Denies the theme_rename command without any pre-configured scope."
+commands.deny = ["theme_rename"]

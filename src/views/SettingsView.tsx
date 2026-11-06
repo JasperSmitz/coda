@@ -1,10 +1,12 @@
 // Settings: music folder (native picker), Navidrome server (test, save,
-// disconnect), cover art and scrobbling. Every change is saved to Coda's
+// disconnect), cover art and scrobbling, and Appearance (themes; the
+// GUI's own settings.toml, see views/settings/AppearanceSection). Every change is saved to Coda's
 // config.toml (shared with the TUI) and the keychain by the backend, then
 // applied live.
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
+import { AppearanceSection } from "./settings/AppearanceSection";
 import { errorText, settingsApi } from "../lib/ipc";
 import type { ServerInput, Settings, Snapshot } from "../lib/types";
 
@@ -76,6 +78,7 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
             <MusicSection settings={settings} snapshot={snapshot} reload={reload} />
             <ServerSection settings={settings} snapshot={snapshot} reload={reload} />
             <OptionsSection settings={settings} reload={reload} />
+            <AppearanceSection />
             {settings.configIsLink && (
               <p className="settings-status settings-status-error">
                 The config file is a symbolic link. Saving here replaces the link with a regular

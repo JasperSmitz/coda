@@ -1,9 +1,41 @@
-/* Design tokens (DESIGN.md). Dark first; light from the same names. */
+/*
+ * Design tokens (DESIGN.md "Theming"). The only place in `src/` with
+ * colour values (`pnpm check:colors` enforces it).
+ *
+ * The values below are the built-in Coda (dark) and Coda Light themes,
+ * as fallbacks only: the backend sets the chosen theme's tokens on
+ * <html> before the first paint (inline style, which wins), and Settings →
+ * Appearance changes them live. A Rust test keeps these in step with the
+ * built-in themes.
+ */
 
 :root {
   color-scheme: dark;
 
+  /* Base colours (a theme's own). */
   --bg: #0f1012;
+  --fg: #e9e9ec;
+  --accent: #f0a83a;
+  --danger: #e5675f;
+  --selection: #3a3125;
+  --palette-0: #1d1f23;
+  --palette-1: #e5675f;
+  --palette-2: #5cb85c;
+  --palette-3: #f0a83a;
+  --palette-4: #5b9bd5;
+  --palette-5: #b482d6;
+  --palette-6: #4fb8b0;
+  --palette-7: #a2a5ad;
+  --palette-8: #6d717a;
+  --palette-9: #f07d75;
+  --palette-10: #7ccf7c;
+  --palette-11: #f5c06a;
+  --palette-12: #7fb4e6;
+  --palette-13: #c9a2e6;
+  --palette-14: #76cfc8;
+  --palette-15: #e9e9ec;
+
+  /* Derived from the base colours (each may be overridden). */
   --surface-1: #16171a;
   --surface-2: #1d1f23;
   --surface-3: #26292e;
@@ -11,15 +43,40 @@
   --text: #e9e9ec;
   --text-2: #a2a5ad;
   --text-3: #6d717a;
-  --accent: #f0a83a;
   --accent-text: #1a1206;
-  --accent-soft: rgba(240, 168, 58, 0.14);
-  --danger: #e5675f;
-  --danger-soft: rgba(229, 103, 95, 0.12);
-  --hover: rgba(255, 255, 255, 0.05);
-  --selected: rgba(255, 255, 255, 0.08);
-  --shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  --cover-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --accent-soft: #f0a83a24;
+  --danger-text: #000000;
+  --danger-soft: #e5675f1f;
+  --success: #5cb85c;
+  --hover: #ffffff0d;
+  --selected: #ffffff14;
+  --selection-text: #e9e9ec;
+  --shadow-color: #00000073;
+  --cover-shadow-color: #00000066;
+  --shadow-strong: #0000008c;
+  --backdrop: #00000073;
+  --np-bg: #0b0b0d;
+  --np-text: #f2f2f4;
+  --np-scrim: #08080a8c;
+  --on-cover: #ffffff;
+  --on-cover-bg: #0000008c;
+  --on-cover-bg-hover: #000000bf;
+  --cover-1: #652926;
+  --cover-2: #245024;
+  --cover-3: #6a4814;
+  --cover-4: #24425e;
+  --cover-5: #4e365e;
+  --cover-6: #1e504c;
+  --viz: #f0a83a;
+
+  /* Composed from the tokens above (no colour values). */
+  --shadow: 0 6px 24px var(--shadow-color);
+  --cover-shadow: 0 2px 8px var(--cover-shadow-color);
+  --shadow-big: 0 18px 50px var(--shadow-strong);
+  --np-text-2: color-mix(in srgb, var(--np-text) 72%, transparent);
+  --np-text-3: color-mix(in srgb, var(--np-text) 50%, transparent);
+  --np-hover: color-mix(in srgb, var(--np-text) 8%, transparent);
+  --np-surface-3: color-mix(in srgb, var(--np-text) 18%, transparent);
 
   --font: system-ui, -apple-system, "Inter", "Cantarell", sans-serif;
   --text-body: 13px;
@@ -42,22 +99,59 @@
     color-scheme: light;
 
     --bg: #f6f6f7;
+    --fg: #18191c;
+    --accent: #c97d0e;
+    --danger: #c2413a;
+    --selection: #f1dcb8;
+    --palette-0: #18191c;
+    --palette-1: #c2413a;
+    --palette-2: #3f8f3f;
+    --palette-3: #c97d0e;
+    --palette-4: #2f6fb0;
+    --palette-5: #8a52b3;
+    --palette-6: #2a8a83;
+    --palette-7: #5b5e66;
+    --palette-8: #8c9099;
+    --palette-9: #d4554e;
+    --palette-10: #4fa34f;
+    --palette-11: #d99220;
+    --palette-12: #4383c4;
+    --palette-13: #9d66c6;
+    --palette-14: #369e96;
+    --palette-15: #ececee;
+
     --surface-1: #ececee;
     --surface-2: #ffffff;
     --surface-3: #e2e3e6;
     --border: #d9dadf;
     --text: #18191c;
     --text-2: #5b5e66;
-    --text-3: #8c9099;
-    --accent: #c97d0e;
-    --accent-text: #ffffff;
-    --accent-soft: rgba(201, 125, 14, 0.13);
-    --danger: #c2413a;
-    --danger-soft: rgba(194, 65, 58, 0.1);
-    --hover: rgba(0, 0, 0, 0.04);
-    --selected: rgba(0, 0, 0, 0.07);
-    --shadow: 0 6px 24px rgba(0, 0, 0, 0.16);
-    --cover-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+    --text-3: #898d96;
+    --accent-text: #1a1206;
+    --accent-soft: #c97d0e21;
+    --danger-text: #ffffff;
+    --danger-soft: #c2413a1a;
+    --success: #3f8f3f;
+    --hover: #0000000a;
+    --selected: #00000012;
+    --selection-text: #18191c;
+    --shadow-color: #00000029;
+    --cover-shadow-color: #0000002e;
+    --shadow-strong: #0000004d;
+    --backdrop: #0000004d;
+    --np-bg: #0b0b0d;
+    --np-text: #f2f2f4;
+    --np-scrim: #08080a8c;
+    --on-cover: #ffffff;
+    --on-cover-bg: #0000008c;
+    --on-cover-bg-hover: #000000bf;
+    --cover-1: #551714;
+    --cover-2: #163c16;
+    --cover-3: #583402;
+    --cover-4: #0f2d4c;
+    --cover-5: #3a1f4d;
+    --cover-6: #0d3a37;
+    --viz: #c97d0e;
   }
 }
 

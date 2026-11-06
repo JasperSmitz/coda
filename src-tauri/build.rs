@@ -38,6 +38,16 @@ fn main() {
         "playlist_delete",
         "playlist_remove",
         "playlist_reorder",
+        // Appearance (themes, the GUI's own preferences).
+        "appearance_get",
+        "appearance_set",
+        "theme_list",
+        "theme_resolve",
+        "theme_save_custom",
+        "theme_rename",
+        "theme_duplicate",
+        "theme_delete",
+        "theme_reveal_folder",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

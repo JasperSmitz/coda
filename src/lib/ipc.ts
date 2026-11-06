@@ -4,11 +4,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  Appearance,
+  AppearancePrefs,
+  ColorEdits,
   Intent,
   Progress,
+  ResolvedTheme,
   ServerInput,
   Settings,
   Snapshot,
+  ThemeSummary,
   VisualizerFrame,
 } from "./types";
 
@@ -72,6 +77,22 @@ export const settingsApi = {
     invoke<void>("settings_set_options", options),
   finishOnboarding: (musicDir: string | null, server: ServerInput | null) =>
     invoke<void>("onboarding_finish", { musicDir, server }),
+};
+
+// ----- appearance (each rejects with a message to show) -----
+
+export const themeApi = {
+  get: () => invoke<Appearance>("appearance_get"),
+  set: (prefs: AppearancePrefs) => invoke<Appearance>("appearance_set", { prefs }),
+  list: () => invoke<ThemeSummary[]>("theme_list"),
+  resolve: (name: string, edits?: ColorEdits) => invoke<ResolvedTheme>("theme_resolve", { name, edits }),
+  saveCustom: (base: string, name: string, edits: ColorEdits, replacing: string | null) =>
+    invoke<Appearance>("theme_save_custom", { base, name, edits, replacing }),
+  rename: (from: string, to: string) => invoke<Appearance>("theme_rename", { from, to }),
+  duplicate: (name: string, to: string) => invoke<Appearance>("theme_duplicate", { name, to }),
+  remove: (name: string) => invoke<Appearance>("theme_delete", { name }),
+  /** Opens the custom themes folder in the file manager. */
+  revealFolder: () => invoke<void>("theme_reveal_folder"),
 };
 
 /** A command's rejection as text. */

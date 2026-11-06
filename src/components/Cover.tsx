@@ -1,5 +1,6 @@
 // A track's cover from our `coda` scheme, or a generated placeholder
-// (initials on a gradient derived from the album name) when there is none.
+// (initials on a gradient of two theme cover colours, picked from the album
+// name) when there is none.
 
 import { useState } from "react";
 import { coverSrc, type CoverSize } from "../lib/ipc";
@@ -27,15 +28,24 @@ function initials(name: string): string {
   return letters.join("").toUpperCase() || "♪";
 }
 
-export function Placeholder({ name, className = "" }: { name: string; className?: string }) {
+/** The theme's cover colours (`--cover-1` … `--cover-6`, from palette 1–6). */
+const COVER_COLORS = 6;
+
+/** Two different cover colours (1-based) for `name`. */
+export function placeholderColors(name: string): [number, number] {
   const h = hash(name);
-  const a = h % 360;
-  const b = (a + 40 + ((h >> 9) % 60)) % 360;
+  const a = h % COVER_COLORS;
+  const b = (a + 1 + ((h >>> 8) % (COVER_COLORS - 1))) % COVER_COLORS;
+  return [a + 1, b + 1];
+}
+
+export function Placeholder({ name, className = "" }: { name: string; className?: string }) {
+  const [a, b] = placeholderColors(name);
   return (
     <div
       className={`cover cover-placeholder ${className}`}
       style={{
-        background: `linear-gradient(135deg, hsl(${a} 32% 34%), hsl(${b} 38% 22%))`,
+        background: `linear-gradient(135deg, var(--cover-${a}), var(--cover-${b}))`,
       }}
       aria-hidden="true"
     >

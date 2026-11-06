@@ -254,3 +254,72 @@ export interface ServerInput {
   username: string;
   password: string;
 }
+
+// ----- appearance (src-tauri/src/theme/) -----
+
+export type ThemeSource = "builtIn" | "ghostty" | "custom";
+export type Scheme = "light" | "dark";
+export type ThemeMode = "single" | "system" | "ghostty";
+export type VisualizerColors = "accent" | "palette";
+
+export interface ContrastWarning {
+  /** Rounded down to one decimal. */
+  ratio: number;
+  min: number;
+  /** The token it was measured against (`bg`, `accent`, …). */
+  against: string;
+}
+
+/** One UI token: `key` is the CSS custom property without `--`. */
+export interface ThemeToken {
+  key: string;
+  /** `#rrggbb` or `#rrggbbaa`. */
+  value: string;
+  /** Set by the theme file, the user or the editor rather than computed. */
+  overridden: boolean;
+  contrast: ContrastWarning | null;
+}
+
+export interface ResolvedTheme {
+  name: string;
+  source: ThemeSource;
+  scheme: Scheme;
+  tokens: ThemeToken[];
+}
+
+export interface ThemeSummary {
+  name: string;
+  source: ThemeSource;
+  scheme: Scheme;
+  bg: string;
+  fg: string;
+  accent: string;
+  /** Palette 1–6. */
+  swatches: string[];
+}
+
+/** The GUI's own preferences (`~/.config/coda-app/settings.toml`). */
+export interface AppearancePrefs {
+  mode: ThemeMode;
+  theme: string;
+  lightTheme: string;
+  darkTheme: string;
+  /** Accent override (`#rrggbb`) by theme name. */
+  accents: Record<string, string>;
+  visualizer: VisualizerColors;
+}
+
+export interface Appearance {
+  prefs: AppearancePrefs;
+  light: ResolvedTheme;
+  dark: ResolvedTheme;
+  /** What Ghostty's config names, in Ghostty mode. */
+  ghostty: { light: string; dark: string } | null;
+  /** Why something else than asked is shown. */
+  notes: string[];
+  /** Where custom themes are saved. */
+  themesFolder: string | null;
+}
+
+/** Colour editor changes: a hex value, or `null` to drop an override. */
+export type ColorEdits = Record<string, string | null>;

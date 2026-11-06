@@ -136,7 +136,7 @@
 }
 
 .connection-connected {
-  background: #5cb85c;
+  background: var(--success);
 }
 
 .connection-connecting {
@@ -435,7 +435,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.85);
+  color: color-mix(in srgb, var(--on-cover) 85%, transparent);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -544,7 +544,7 @@
   margin: -6px 0 0 -6px;
   border-radius: 50%;
   background: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 3px var(--cover-shadow-color);
   opacity: 0;
   transition: opacity var(--motion-fast);
 }
