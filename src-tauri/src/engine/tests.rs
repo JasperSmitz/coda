@@ -1670,15 +1670,20 @@ fn a_context_play_is_recorded_and_listens_count_for_album_and_context() {
         },
         now,
     );
-    let recent = engine.history().recent(SourceKind::Navidrome, 10);
+    let recent = engine
+        .history()
+        .recent(&engine.scope(SourceKind::Navidrome).unwrap(), 10);
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].context.id, "pl-1");
     assert_eq!(recent[0].context.name, "Mix");
     // The cover URL became the server's cover id (no token is stored).
     assert_eq!(recent[0].context.cover_art.as_deref(), Some("pl-art"));
 
+    let server = engine.server.clone();
+    assert_eq!(server, Some(crate::history::server_id(&client())));
     let key = |kind, id: &str| ContextKey {
         source: SourceKind::Navidrome,
+        server: server.clone(),
         kind,
         id: id.into(),
     };
@@ -1756,7 +1761,13 @@ fn a_context_play_is_recorded_and_listens_count_for_album_and_context() {
         },
         now,
     );
-    assert_eq!(engine.history().recent(SourceKind::Navidrome, 10).len(), 1);
+    assert_eq!(
+        engine
+            .history()
+            .recent(&engine.scope(SourceKind::Navidrome).unwrap(), 10)
+            .len(),
+        1
+    );
     listen_half(&mut engine, loads(&commands)[0], now);
     assert_eq!(
         engine
@@ -1832,13 +1843,14 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
         },
         now,
     );
-    let recent = engine.history().recent(SourceKind::Local, 10);
+    let recent = engine.history().recent(&crate::history::Scope::Local, 10);
     assert_eq!(recent[0].context.id, "band\u{1f}record");
     assert_eq!(recent[0].context.name, "Record");
     listen_half(&mut engine, loads(&commands)[0], now);
     assert!(engine.take_scrobbles().is_empty(), "no server, no scrobble");
     let key = ContextKey {
         source: SourceKind::Local,
+        server: None,
         kind: ContextKind::Album,
         id: "band\u{1f}record".into(),
     };
@@ -1854,7 +1866,7 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
         },
         now,
     );
-    let recent = engine.history().recent(SourceKind::Local, 10);
+    let recent = engine.history().recent(&crate::history::Scope::Local, 10);
     assert_eq!(recent[0].context.kind, ContextKind::Folder);
     assert_eq!(recent[0].context.id, "/");
 
@@ -1931,8 +1943,10 @@ fn the_history_is_saved_after_a_debounce_and_at_exit() {
 }
 
 #[test]
-fn a_new_server_clears_the_cached_daily_picks() {
+fn history_and_daily_picks_are_kept_per_server() {
+    use crate::history::{Scope, SourceKind};
     let (mut engine, now) = navidrome_engine();
+    let first = engine.server.clone().unwrap();
     let album = crate::history::DailyAlbum {
         id: "al-1".into(),
         name: "One".into(),
@@ -1946,28 +1960,64 @@ fn a_new_server_clears_the_cached_daily_picks() {
         HistoryMsg::SetDaily("2026-11-06".into(), vec![album], tx),
         now,
     );
-    assert!(engine.history().daily("2026-11-06").is_some());
-    // Disconnecting keeps them; another server does not.
-    engine
-        .apply_settings(
-            SettingsChange::Client {
-                client: None,
-                scrobble: false,
-            },
-            now,
-        )
-        .unwrap();
-    assert!(engine.history().daily("2026-11-06").is_some());
-    engine
-        .apply_settings(
-            SettingsChange::Client {
-                client: Some(client()),
-                scrobble: false,
-            },
-            now,
-        )
-        .unwrap();
-    assert!(engine.history().daily("2026-11-06").is_none());
+    engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![remote_ref("s1")],
+            start: None,
+            shuffle: false,
+            context: Some(PlayContextDto::Album(NamedContextDto {
+                source: SourceKind::Navidrome,
+                id: "al-1".into(),
+                name: Some("One".into()),
+                subtitle: None,
+                cover_url: None,
+            })),
+        },
+        now,
+    );
+    let rows = |engine: &mut Engine| {
+        let (tx, mut rx) = oneshot::channel();
+        engine.handle_history_msg(HistoryMsg::Home(SourceKind::Navidrome, tx), now);
+        rx.try_recv().unwrap()
+    };
+    let daily = |engine: &mut Engine| {
+        let (tx, mut rx) = oneshot::channel();
+        engine.handle_history_msg(HistoryMsg::Daily("2026-11-06".into(), tx), now);
+        rx.try_recv().unwrap()
+    };
+    assert_eq!(rows(&mut engine).recent.len(), 1);
+    assert!(daily(&mut engine).is_some());
+
+    // Disconnected: no server, no Navidrome history.
+    let change = |client| SettingsChange::Client {
+        client,
+        scrobble: false,
+    };
+    engine.apply_settings(change(None), now).unwrap();
+    assert!(engine.scope(SourceKind::Navidrome).is_none());
+    assert!(rows(&mut engine).recent.is_empty());
+    assert!(daily(&mut engine).is_none());
+
+    // Another server (another user here): none of the first one's.
+    let other = Client::new(
+        url::Url::parse("http://127.0.0.1:9/").unwrap(),
+        "someone-else".into(),
+        Password::new("secret".into()),
+    )
+    .unwrap();
+    engine.apply_settings(change(Some(other)), now).unwrap();
+    assert_ne!(engine.server.as_deref(), Some(first.as_str()));
+    assert!(rows(&mut engine).recent.is_empty());
+    assert!(daily(&mut engine).is_none());
+
+    // Back to the first: its history and today's picks again.
+    engine.apply_settings(change(Some(client())), now).unwrap();
+    assert_eq!(
+        engine.scope(SourceKind::Navidrome),
+        Some(Scope::Navidrome(first))
+    );
+    assert_eq!(rows(&mut engine).recent[0].context.id, "al-1");
+    assert_eq!(daily(&mut engine).unwrap()[0].id, "al-1");
 }
 
 #[test]
@@ -2028,6 +2078,7 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
         Password::new("pw".into()),
     )
     .unwrap();
+    let server_id = history::server_id(&client);
     let state = tempfile::tempdir().unwrap();
     let history_path = state.path().join("history.json");
     let covers = Arc::new(CoverService::new(None));
@@ -2079,5 +2130,7 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
     task.await.unwrap();
     // Saved at exit, and loaded back for the same day.
     let loaded = history::load(Some(history_path));
-    assert_eq!(loaded.history.daily(&date).unwrap().len(), 12);
+    assert_eq!(loaded.history.daily(&date, &server_id).unwrap().len(), 12);
+    let text = std::fs::read_to_string(state.path().join("history.json")).unwrap();
+    assert!(!text.contains("listener") && !text.contains("127.0.0.1"));
 }

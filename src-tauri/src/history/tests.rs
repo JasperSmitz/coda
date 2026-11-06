@@ -11,9 +11,18 @@ use coda_core::model::{Track, TrackMetadata};
 use super::*;
 use crate::browse::BrowseHandle;
 
+fn server() -> String {
+    server_id_of("https://music.example/", "listener")
+}
+
+fn nd() -> Scope {
+    Scope::Navidrome(server())
+}
+
 fn remote(kind: ContextKind, id: &str) -> Context {
     Context {
         source: SourceKind::Navidrome,
+        server: Some(server()),
         kind,
         id: id.into(),
         name: format!("Name {id}"),
@@ -81,7 +90,7 @@ fn recent_is_distinct_newest_first_and_per_source() {
     // The same id as another kind is another context.
     history.record_play(remote(ContextKind::Artist, "a"), 5);
     let recent: Vec<(ContextKind, String)> = history
-        .recent(SourceKind::Navidrome, 10)
+        .recent(&nd(), 10)
         .into_iter()
         .map(|p| (p.context.kind, p.context.id))
         .collect();
@@ -93,8 +102,8 @@ fn recent_is_distinct_newest_first_and_per_source() {
             (ContextKind::Playlist, "p".into()),
         ]
     );
-    assert_eq!(history.recent(SourceKind::Navidrome, 1).len(), 1);
-    let local = history.recent(SourceKind::Local, 10);
+    assert_eq!(history.recent(&nd(), 1).len(), 1);
+    let local = history.recent(&Scope::Local, 10);
     assert_eq!(local.len(), 1);
     assert_eq!(local[0].context.id, "Jazz");
 }
@@ -110,11 +119,7 @@ fn listens_count_once_per_context_and_most_played_sorts() {
     assert_eq!(history.count(&key).unwrap().listens, 2);
     assert_eq!(history.count(&key).unwrap().last, 20);
     assert_eq!(history.count(&playlist.key()).unwrap().listens, 1);
-    let most = history.most_played(
-        SourceKind::Navidrome,
-        &[ContextKind::Album, ContextKind::Playlist],
-        10,
-    );
+    let most = history.most_played(&nd(), &[ContextKind::Album, ContextKind::Playlist], 10);
     assert_eq!(
         most.iter()
             .map(|c| c.context.id.as_str())
@@ -122,7 +127,7 @@ fn listens_count_once_per_context_and_most_played_sorts() {
         ["al", "pl"]
     );
     // Kinds filter: Navidrome's Home asks for playlists only.
-    let rows = history.home_rows(SourceKind::Navidrome);
+    let rows = history.home_rows(&nd());
     assert_eq!(rows.most_played.len(), 1);
     assert_eq!(rows.most_played[0].context.kind, ContextKind::Playlist);
     // A renamed playlist shows its latest name.
@@ -182,7 +187,7 @@ fn untrusted_text_is_cleaned_and_bad_ids_are_dropped() {
         },
         1,
     );
-    let played = history.recent(SourceKind::Navidrome, 1).remove(0);
+    let played = history.recent(&nd(), 1).remove(0);
     assert_eq!(played.context.name, "Bad  name");
     assert_eq!(played.context.subtitle, None);
     let long = "x".repeat(300);
@@ -194,11 +199,7 @@ fn untrusted_text_is_cleaned_and_bad_ids_are_dropped() {
         2,
     );
     assert_eq!(
-        history.recent(SourceKind::Navidrome, 1)[0]
-            .context
-            .name
-            .chars()
-            .count(),
+        history.recent(&nd(), 1)[0].context.name.chars().count(),
         256
     );
     let before = history.revision();
@@ -213,10 +214,7 @@ fn untrusted_text_is_cleaned_and_bad_ids_are_dropped() {
         },
         4,
     );
-    assert_eq!(
-        history.recent(SourceKind::Local, 1)[0].context.cover_art,
-        None
-    );
+    assert_eq!(history.recent(&Scope::Local, 1)[0].context.cover_art, None);
 }
 
 #[test]
@@ -228,6 +226,7 @@ fn the_file_round_trips_and_holds_no_urls() {
     history.record_listen(vec![remote(ContextKind::Album, "a")], 8);
     history.set_daily(
         "2026-11-06".into(),
+        server(),
         vec![DailyAlbum {
             id: "al-1".into(),
             name: "One".into(),
@@ -246,8 +245,11 @@ fn the_file_round_trips_and_holds_no_urls() {
     let loaded = load(Some(path.clone()));
     assert_eq!(loaded.path, Some(path));
     assert_eq!(loaded.history.to_file(), history.to_file());
-    assert_eq!(loaded.history.daily("2026-11-06").unwrap().len(), 1);
-    assert!(loaded.history.daily("2026-11-07").is_none());
+    assert_eq!(
+        loaded.history.daily("2026-11-06", &server()).unwrap().len(),
+        1
+    );
+    assert!(loaded.history.daily("2026-11-07", &server()).is_none());
 }
 
 #[test]
@@ -312,14 +314,23 @@ fn invalid_entries_in_a_file_are_skipped_and_bounds_applied() {
         listens: 0,
         last: 1,
     });
-    file.daily = Some(Daily {
+    file.dailies.push(Daily {
         date: "yesterday".into(),
+        server: server(),
         albums: Vec::new(),
+    });
+    // From an older file (or no known server): dropped.
+    file.plays.push(Played {
+        context: Context {
+            server: None,
+            ..remote(ContextKind::Album, "old")
+        },
+        at: 1,
     });
     let history = History::from_file(file);
     assert_eq!(history.plays().count(), MAX_PLAYS);
     assert_eq!(history.counts_len(), 0);
-    assert!(history.to_file().daily.is_none());
+    assert!(history.to_file().dailies.is_empty());
 }
 
 #[test]
@@ -333,15 +344,41 @@ fn the_first_picks_of_a_day_stay_and_another_server_clears_them() {
         cover_art: None,
     };
     let mut history = History::default();
-    let first = history.set_daily("2026-11-06".into(), vec![album("a"), album("")]);
+    let first = history.set_daily("2026-11-06".into(), server(), vec![album("a"), album("")]);
     assert_eq!(first.len(), 1, "bad ids dropped");
-    let again = history.set_daily("2026-11-06".into(), vec![album("b")]);
+    let again = history.set_daily("2026-11-06".into(), server(), vec![album("b")]);
     assert_eq!(again[0].id, "a");
-    let next_day = history.set_daily("2026-11-07".into(), vec![album("c")]);
+    let next_day = history.set_daily("2026-11-07".into(), server(), vec![album("c")]);
     assert_eq!(next_day[0].id, "c");
-    assert!(history.set_daily("bad".into(), vec![album("d")]).is_empty());
-    history.clear_daily();
-    assert!(history.daily("2026-11-07").is_none());
+    assert!(
+        history
+            .set_daily("bad".into(), server(), vec![album("d")])
+            .is_empty()
+    );
+    assert!(
+        history
+            .set_daily("2026-11-07".into(), "nothex".into(), vec![album("d")])
+            .is_empty()
+    );
+    // Per server: another server's day has its own picks, and at most a
+    // few servers are kept.
+    let other = server_id_of("https://other.example/", "listener");
+    assert!(history.daily("2026-11-07", &other).is_none());
+    history.set_daily("2026-11-07".into(), other.clone(), vec![album("e")]);
+    assert_eq!(history.daily("2026-11-07", &other).unwrap()[0].id, "e");
+    assert_eq!(history.daily("2026-11-07", &server()).unwrap()[0].id, "c");
+    for i in 0..5 {
+        history.set_daily(
+            "2026-11-07".into(),
+            server_id_of(&format!("https://s{i}/"), "u"),
+            vec![album("f")],
+        );
+    }
+    assert_eq!(history.to_file().dailies.len(), MAX_DAILY_SERVERS);
+    assert!(
+        history.daily("2026-11-07", &server()).is_none(),
+        "oldest dropped"
+    );
 }
 
 #[test]
@@ -380,7 +417,7 @@ fn local_contexts_resolve_by_stable_keys_across_generations() {
     }
     // Gone from the library: skipped.
     history.record_play(local_folder_context(&["Nope".into()]), 99);
-    let rows = history.home_rows(SourceKind::Local);
+    let rows = history.home_rows(&Scope::Local);
     let home = browse.read_library(|view| home_dto(rows, view.as_ref(), browse.covers()));
     let generation = browse.library_generation();
     let shown: Vec<(ContextKind, String)> =
@@ -407,7 +444,7 @@ fn navidrome_cards_use_the_stored_names_and_cover() {
     let mut history = History::default();
     history.record_play(remote(ContextKind::Playlist, "p"), 1);
     history.record_listen(vec![remote(ContextKind::Playlist, "p")], 2);
-    let home = home_dto(history.home_rows(SourceKind::Navidrome), None, &covers);
+    let home = home_dto(history.home_rows(&nd()), None, &covers);
     assert_eq!(home.recent[0].name, "Name p");
     assert!(
         home.recent[0]
@@ -420,7 +457,7 @@ fn navidrome_cards_use_the_stored_names_and_cover() {
     // Local rows without a library resolve to nothing.
     history.record_play(local_folder_context(&[]), 3);
     assert!(
-        home_dto(history.home_rows(SourceKind::Local), None, &covers)
+        home_dto(history.home_rows(&Scope::Local), None, &covers)
             .recent
             .is_empty()
     );
@@ -457,4 +494,41 @@ fn local_daily_picks_are_stable_for_a_day_and_change_with_it() {
     // Fewer albums than picks: all of them.
     browse.replace_library(Some(library(3)));
     assert_eq!(picks("2026-11-06").len(), 3);
+}
+
+#[test]
+fn server_ids_are_stable_hashes_and_scope_the_history() {
+    let id = server();
+    assert_eq!(id, server_id_of("https://music.example/", "listener"));
+    assert_eq!(id.len(), 16);
+    assert!(!id.contains("music") && !id.contains("listener"));
+    assert_ne!(id, server_id_of("https://music.example/", "other"));
+    assert_ne!(id, server_id_of("https://music2.example/", "listener"));
+    let mut history = History::default();
+    history.record_play(remote(ContextKind::Album, "a"), 1);
+    history.record_listen(vec![remote(ContextKind::Playlist, "p")], 2);
+    let other = Scope::Navidrome(server_id_of("https://other.example/", "listener"));
+    assert!(history.recent(&other, 10).is_empty());
+    assert!(history.home_rows(&other).most_played.is_empty());
+    assert_eq!(history.recent(&nd(), 10).len(), 1);
+    assert_eq!(history.home_rows(&nd()).most_played.len(), 1);
+    // The same album id on two servers is two contexts.
+    history.record_listen(
+        vec![Context {
+            server: Some(server_id_of("https://other.example/", "listener")),
+            ..remote(ContextKind::Playlist, "p")
+        }],
+        3,
+    );
+    assert_eq!(history.counts_len(), 2);
+    // A Navidrome context without a server is never recorded.
+    let before = history.revision();
+    history.record_play(
+        Context {
+            server: None,
+            ..remote(ContextKind::Album, "b")
+        },
+        4,
+    );
+    assert_eq!(history.revision(), before);
 }

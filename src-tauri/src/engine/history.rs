@@ -9,7 +9,7 @@ use super::*;
 use crate::browse::dto::LocalContextDto;
 use crate::dto::{NamedContextDto, PlayContextDto};
 use crate::history::{
-    self, Context, ContextKind, DailyAlbum, History, HistoryFile, HomeRows, SourceKind,
+    self, Context, ContextKind, DailyAlbum, History, HistoryFile, HomeRows, Scope, SourceKind,
 };
 
 /// The listen counted for the history (any source).
@@ -82,16 +82,39 @@ impl Engine {
     pub(super) fn handle_history_msg(&mut self, msg: HistoryMsg, now: Instant) {
         match msg {
             HistoryMsg::Home(source, reply) => {
-                let _ = reply.send(self.history.home_rows(source));
+                let rows = self
+                    .scope(source)
+                    .map(|scope| self.history.home_rows(&scope))
+                    .unwrap_or_default();
+                let _ = reply.send(rows);
             }
             HistoryMsg::Daily(date, reply) => {
-                let _ = reply.send(self.history.daily(&date).map(<[_]>::to_vec));
+                let picks = self
+                    .server
+                    .as_deref()
+                    .and_then(|server| self.history.daily(&date, server))
+                    .map(<[_]>::to_vec);
+                let _ = reply.send(picks);
             }
             HistoryMsg::SetDaily(date, albums, reply) => {
-                let picks = self.history.set_daily(date, albums);
+                // Fetched with the current client (a result of an older
+                // one is dropped as stale before it gets here).
+                let picks = match self.server.clone() {
+                    Some(server) => self.history.set_daily(date, server, albums),
+                    None => Vec::new(),
+                };
                 self.history_changed(now);
                 let _ = reply.send(picks);
             }
+        }
+    }
+
+    /// The part of the history `source` shows: the local library's, or the
+    /// current server's (none without a server).
+    pub fn scope(&self, source: SourceKind) -> Option<Scope> {
+        match source {
+            SourceKind::Local => Some(Scope::Local),
+            SourceKind::Navidrome => self.server.clone().map(Scope::Navidrome),
         }
     }
 
@@ -196,6 +219,7 @@ impl Engine {
                     });
                 Context {
                     source: SourceKind::Navidrome,
+                    server: self.server.clone(),
                     kind,
                     id: named.id,
                     name: named.name.unwrap_or_default(),
@@ -247,6 +271,7 @@ impl Engine {
         match &track.source {
             TrackSource::Navidrome { .. } => Context {
                 source: SourceKind::Navidrome,
+                server: self.server.clone(),
                 kind: ContextKind::Album,
                 id: track.album_id.clone()?,
                 name: track.album.clone().unwrap_or_default(),

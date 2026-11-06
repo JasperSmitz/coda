@@ -12,7 +12,10 @@
 //! folder paths), not by library ids, which change with every scan; they
 //! are resolved against the current library when shown, and skipped when
 //! they are gone. Navidrome contexts keep the server's ids and `coverArt`
-//! id. The file never holds stream URLs, credentials or cover tokens.
+//! id, and the server they came from ([`server_id`]: a hash of the
+//! server's address and user name), so another server never shows them;
+//! the Daily Picks are cached per server too. The file never holds stream
+//! URLs, credentials, server addresses or cover tokens.
 //!
 //! Bounded: the last [`MAX_PLAYS`] context plays, listen counts for at
 //! most [`MAX_COUNTS`] contexts (the least recently heard dropped first).
@@ -49,6 +52,8 @@ const FILE_VERSION: u32 = 1;
 const MAX_TEXT: usize = 256;
 /// Ids (a folder path can be long) are refused beyond this.
 const MAX_ID: usize = 4096;
+/// Servers whose Daily Picks are cached at once.
+const MAX_DAILY_SERVERS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,10 +71,54 @@ pub enum ContextKind {
     Folder,
 }
 
+/// A Navidrome server's identity in the history: FNV-1a (64 bit, hex) of
+/// its base URL and user name. Stable across runs; reveals neither.
+pub fn server_id(client: &coda_core::navidrome::Client) -> String {
+    server_id_of(client.base_url().as_str(), client.username())
+}
+
+pub fn server_id_of(base_url: &str, username: &str) -> String {
+    format!("{:016x}", seed(&format!("{base_url}\n{username}")))
+}
+
+fn valid_server(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Which part of the history a view reads: the local library's, or one
+/// Navidrome server's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Scope {
+    Local,
+    /// A [`server_id`].
+    Navidrome(String),
+}
+
+impl Scope {
+    pub fn source(&self) -> SourceKind {
+        match self {
+            Self::Local => SourceKind::Local,
+            Self::Navidrome(_) => SourceKind::Navidrome,
+        }
+    }
+
+    pub fn holds(&self, context: &Context) -> bool {
+        match self {
+            Self::Local => context.source == SourceKind::Local,
+            Self::Navidrome(server) => {
+                context.source == SourceKind::Navidrome
+                    && context.server.as_deref() == Some(server.as_str())
+            }
+        }
+    }
+}
+
 /// What identifies a context across runs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContextKey {
     pub source: SourceKind,
+    /// Navidrome: the [`server_id`]; local: `None`.
+    pub server: Option<String>,
     pub kind: ContextKind,
     /// Navidrome: the server's id. Local: a stable key ([`local_album_key`],
     /// [`local_artist_key`], the playlist name, the folder path joined by
@@ -82,6 +131,9 @@ pub struct ContextKey {
 #[serde(rename_all = "camelCase")]
 pub struct Context {
     pub source: SourceKind,
+    /// Navidrome: the [`server_id`] it came from (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub kind: ContextKind,
     pub id: String,
     pub name: String,
@@ -96,6 +148,7 @@ impl Context {
     pub fn key(&self) -> ContextKey {
         ContextKey {
             source: self.source,
+            server: self.server.clone(),
             kind: self.kind,
             id: self.id.clone(),
         }
@@ -115,8 +168,17 @@ impl Context {
         self.cover_art = self
             .cover_art
             .filter(|c| !c.is_empty() && c.chars().count() <= MAX_TEXT && !c.contains('\0'));
-        if self.source == SourceKind::Local {
-            self.cover_art = None;
+        match self.source {
+            SourceKind::Local => {
+                self.cover_art = None;
+                self.server = None;
+            }
+            // From no known server (or an older file): never shown.
+            SourceKind::Navidrome => {
+                if !self.server.as_deref().is_some_and(valid_server) {
+                    return None;
+                }
+            }
         }
         Some(self)
     }
@@ -164,6 +226,8 @@ pub struct DailyAlbum {
 pub struct Daily {
     /// The local calendar day, `YYYY-MM-DD`.
     pub date: String,
+    /// The [`server_id`] they were drawn from.
+    pub server: String,
     pub albums: Vec<DailyAlbum>,
 }
 
@@ -176,8 +240,9 @@ pub struct HistoryFile {
     pub plays: Vec<Played>,
     #[serde(default)]
     pub counts: Vec<Count>,
+    /// The latest Daily Picks per server (at most [`MAX_DAILY_SERVERS`]).
     #[serde(default)]
-    pub daily: Option<Daily>,
+    pub dailies: Vec<Daily>,
 }
 
 /// The history in memory. Every change bumps [`History::revision`].
@@ -186,7 +251,8 @@ pub struct History {
     /// Oldest first.
     plays: VecDeque<Played>,
     counts: HashMap<ContextKey, Count>,
-    daily: Option<Daily>,
+    /// Oldest first, one per server.
+    dailies: Vec<Daily>,
     revision: u64,
 }
 
@@ -216,7 +282,7 @@ pub fn unix_now() -> u64 {
 }
 
 fn sanitize_daily(daily: Daily) -> Option<Daily> {
-    if !valid_date(&daily.date) {
+    if !valid_date(&daily.date) || !valid_server(&daily.server) {
         return None;
     }
     let albums = daily
@@ -227,6 +293,7 @@ fn sanitize_daily(daily: Daily) -> Option<Daily> {
         .collect();
     Some(Daily {
         date: daily.date,
+        server: daily.server,
         albums,
     })
 }
@@ -276,10 +343,17 @@ impl History {
                 },
             );
         }
+        let mut dailies: Vec<Daily> = Vec::new();
+        for daily in file.dailies.into_iter().filter_map(sanitize_daily) {
+            dailies.retain(|d| d.server != daily.server);
+            dailies.push(daily);
+        }
+        let excess = dailies.len().saturating_sub(MAX_DAILY_SERVERS);
+        dailies.drain(..excess);
         let mut history = Self {
             plays,
             counts,
-            daily: file.daily.and_then(sanitize_daily),
+            dailies,
             revision: 0,
         };
         history.trim_counts();
@@ -299,7 +373,7 @@ impl History {
             version: FILE_VERSION,
             plays: self.plays.iter().cloned().collect(),
             counts,
-            daily: self.daily.clone(),
+            dailies: self.dailies.clone(),
         }
     }
 
@@ -376,32 +450,27 @@ impl History {
         }
     }
 
-    /// The latest distinct contexts of `source`, newest first, at most
+    /// The latest distinct contexts in `scope`, newest first, at most
     /// `limit`.
-    pub fn recent(&self, source: SourceKind, limit: usize) -> Vec<Played> {
+    pub fn recent(&self, scope: &Scope, limit: usize) -> Vec<Played> {
         let mut seen = HashSet::new();
         self.plays
             .iter()
             .rev()
-            .filter(|p| p.context.source == source)
+            .filter(|p| scope.holds(&p.context))
             .filter(|p| seen.insert(p.context.key()))
             .take(limit)
             .cloned()
             .collect()
     }
 
-    /// The most listened contexts of `source` among `kinds`, most first
+    /// The most listened contexts in `scope` among `kinds`, most first
     /// (ties: the more recent), at most `limit`.
-    pub fn most_played(
-        &self,
-        source: SourceKind,
-        kinds: &[ContextKind],
-        limit: usize,
-    ) -> Vec<Count> {
+    pub fn most_played(&self, scope: &Scope, kinds: &[ContextKind], limit: usize) -> Vec<Count> {
         let mut counts: Vec<&Count> = self
             .counts
             .values()
-            .filter(|c| c.context.source == source && kinds.contains(&c.context.kind))
+            .filter(|c| scope.holds(&c.context) && kinds.contains(&c.context.kind))
             .collect();
         counts.sort_by(|a, b| {
             b.listens
@@ -412,34 +481,39 @@ impl History {
         counts.into_iter().take(limit).cloned().collect()
     }
 
-    /// The cached Navidrome picks of `date`.
-    pub fn daily(&self, date: &str) -> Option<&[DailyAlbum]> {
-        self.daily
-            .as_ref()
-            .filter(|d| d.date == date)
+    /// The cached picks of `server` for `date`.
+    pub fn daily(&self, date: &str, server: &str) -> Option<&[DailyAlbum]> {
+        self.dailies
+            .iter()
+            .find(|d| d.date == date && d.server == server)
             .map(|d| d.albums.as_slice())
     }
 
-    /// Caches the picks of `date`, unless that day already has some (the
-    /// first answer of the day stays). Returns the day's picks.
-    pub fn set_daily(&mut self, date: String, albums: Vec<DailyAlbum>) -> Vec<DailyAlbum> {
-        if let Some(albums) = self.daily(&date) {
+    /// Caches `server`'s picks of `date`, unless that day already has some
+    /// (the first answer of the day stays). Returns the day's picks.
+    pub fn set_daily(
+        &mut self,
+        date: String,
+        server: String,
+        albums: Vec<DailyAlbum>,
+    ) -> Vec<DailyAlbum> {
+        if let Some(albums) = self.daily(&date, &server) {
             return albums.to_vec();
         }
-        let Some(daily) = sanitize_daily(Daily { date, albums }) else {
+        let Some(daily) = sanitize_daily(Daily {
+            date,
+            server,
+            albums,
+        }) else {
             return Vec::new();
         };
         let albums = daily.albums.clone();
-        self.daily = Some(daily);
+        self.dailies.retain(|d| d.server != daily.server);
+        self.dailies.push(daily);
+        let excess = self.dailies.len().saturating_sub(MAX_DAILY_SERVERS);
+        self.dailies.drain(..excess);
         self.revision += 1;
         albums
-    }
-
-    /// Another server: its picks do not apply.
-    pub fn clear_daily(&mut self) {
-        if self.daily.take().is_some() {
-            self.revision += 1;
-        }
     }
 }
 
@@ -529,6 +603,7 @@ pub fn local_album_context(tags: &TagIndex, id: AlbumId) -> Context {
     let album = tags.album(id);
     Context {
         source: SourceKind::Local,
+        server: None,
         kind: ContextKind::Album,
         id: local_album_key(tags, id),
         name: album.name().to_owned(),
@@ -540,6 +615,7 @@ pub fn local_album_context(tags: &TagIndex, id: AlbumId) -> Context {
 pub fn local_artist_context(tags: &TagIndex, id: ArtistId) -> Context {
     Context {
         source: SourceKind::Local,
+        server: None,
         kind: ContextKind::Artist,
         id: local_artist_key(tags, id),
         name: tags.artist(id).name().to_owned(),
@@ -552,6 +628,7 @@ pub fn local_playlist_context(library: &Library, id: PlaylistId) -> Context {
     let name = library.playlist(id).name.clone();
     Context {
         source: SourceKind::Local,
+        server: None,
         kind: ContextKind::Playlist,
         id: name.clone(),
         name,
@@ -563,6 +640,7 @@ pub fn local_playlist_context(library: &Library, id: PlaylistId) -> Context {
 pub fn local_folder_context(path: &[String]) -> Context {
     Context {
         source: SourceKind::Local,
+        server: None,
         kind: ContextKind::Folder,
         id: if path.is_empty() {
             "/".to_owned()
@@ -751,16 +829,16 @@ pub struct HomeRows {
 
 impl History {
     /// More than shown: some local ones may no longer resolve.
-    pub fn home_rows(&self, source: SourceKind) -> HomeRows {
-        let kinds: &[ContextKind] = match source {
+    pub fn home_rows(&self, scope: &Scope) -> HomeRows {
+        let kinds: &[ContextKind] = match scope.source() {
             // Navidrome's most played albums come from the server
             // (`frequent`, built from scrobbles, the TUI's too).
             SourceKind::Navidrome => &[ContextKind::Playlist],
             SourceKind::Local => &[ContextKind::Album, ContextKind::Playlist],
         };
         HomeRows {
-            recent: self.recent(source, RECENT_SHOWN * 2),
-            most_played: self.most_played(source, kinds, MOST_SHOWN * 2),
+            recent: self.recent(scope, RECENT_SHOWN * 2),
+            most_played: self.most_played(scope, kinds, MOST_SHOWN * 2),
         }
     }
 }

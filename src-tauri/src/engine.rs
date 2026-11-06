@@ -198,6 +198,9 @@ pub struct Engine {
     heard: Option<history::Heard>,
     /// The context the queue was last played from.
     played_from: Option<history::PlayedFrom>,
+    /// The current server's identity in the history
+    /// (`history::server_id`).
+    server: Option<String>,
 }
 
 impl Engine {
@@ -250,6 +253,7 @@ impl Engine {
             history_save: history::HistorySave::default(),
             heard: None,
             played_from: None,
+            server: None,
         }
     }
 
@@ -289,6 +293,7 @@ impl Engine {
             }
         };
         self.browse.set_client(sources.client.clone());
+        self.server = sources.client.as_ref().map(crate::history::server_id);
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();

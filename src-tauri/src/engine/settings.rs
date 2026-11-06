@@ -57,12 +57,6 @@ impl Engine {
         let commands = match change {
             SettingsChange::Client { client, scrobble } => {
                 let connected = client.is_some();
-                if connected {
-                    // Another server (or the same one saved again): the
-                    // cached Daily Picks may name its albums no longer.
-                    self.history.clear_daily();
-                    self.history_changed(now);
-                }
                 let commands = self.swap_client(client, scrobble, now);
                 self.notify(
                     if connected {
@@ -121,6 +115,10 @@ impl Engine {
         // Browse commands use the new client; ids and results of the old
         // one are stale (a new client generation).
         self.browse.set_client(client.clone());
+        // The history shows this server's entries (and picks) only.
+        // A listen in progress keeps the contexts it started with (their
+        // server's).
+        self.server = client.as_ref().map(crate::history::server_id);
         self.sent_queue = None;
         self.problems.retain(|p| {
             !matches!(
