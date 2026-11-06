@@ -77,6 +77,10 @@
   --np-text-3: color-mix(in srgb, var(--np-text) 50%, transparent);
   --np-hover: color-mix(in srgb, var(--np-text) 8%, transparent);
   --np-surface-3: color-mix(in srgb, var(--np-text) 18%, transparent);
+  --np-border: color-mix(in srgb, var(--np-text) 12%, transparent);
+  --np-panel: color-mix(in srgb, var(--np-bg) 72%, transparent);
+  --np-menu: color-mix(in srgb, var(--np-text) 6%, var(--np-bg));
+  --np-panel-width: 360px;
 
   --font: system-ui, -apple-system, "Inter", "Cantarell", sans-serif;
   --text-body: 13px;

@@ -21,12 +21,14 @@ A calm, cover-first desktop music player. It should feel like a native app, not 
 │   Playlists│                                       │              │
 │ Settings   │                                       │              │
 ├────────────┴───────────────────────────────────────┴──────────────┤
-│ Now-playing bar: cover · title/artist · ⏮ ⏯ ⏭ · seek · repeat · vol │
+│ Now-playing bar: cover · title/artist · ⏮ ⏯ ⏭ / seek ⟳ · vol · queue│
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 - Sidebar ~220px, queue ~320px (collapsible), bar ~76px. Minimum window 900×600.
-- The full-screen **Now Playing** view (`f`) replaces the main view: large cover, title/artist/album, timeline, visualizer bars below; background a heavily blurred, darkened copy of the cover.
+- **Repeat** is an icon toggle right of the timeline's total time (in the bar and in Now Playing): off is a muted icon, all the accent icon, one the accent icon with a "1"; its tooltip names the current mode and the next. `r` cycles it too; there is no notice for it.
+- The **queue header** has icon buttons (with tooltips): Shuffle upcoming (shuffle), Save queue as playlist (playlist with a plus; only with Navidrome set up) and Clear queue (a broom; asks first).
+- **Now Playing** (`f`) is immersive: the sidebar, browse area, queue column and the bar are hidden; only the view remains. Large cover, title/artist/album, one timeline (repeat beside it), one transport row (previous / play-pause / next, volume on the right), visualizer bars and a small **Up next** card (cover, title, artist; clicking it opens the queue). Background a heavily blurred, darkened copy of the cover. Top right: a queue button and Close (Esc or `f`). The queue opens as a translucent ~360px side panel sliding in from the right (`q` or the queue button): the same queue (selection, drag-and-drop, header buttons), its open/closed state remembered apart from the main layout's. Wide windows make room for it; narrow ones let it overlay. All global shortcuts keep working.
 - Navigation keeps a back stack (Back with `Backspace`/`Alt+←`/mouse back button): Artists → Artist (albums) → Album (tracks).
 
 ## Visual language

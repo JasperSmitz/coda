@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { intent } from "../lib/ipc";
 import { formatTime } from "../lib/format";
-import type { Progress, Snapshot } from "../lib/types";
+import type { Progress, Repeat, Snapshot } from "../lib/types";
 import { useProgress } from "../state/store";
 import { Cover } from "./Cover";
 import { Slider } from "./Slider";
@@ -33,10 +33,9 @@ export function NowPlayingBar({
   nowPlayingOpen = false,
   onToggleNowPlaying,
 }: Props) {
-  const { playing, status, repeat } = snapshot;
+  const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
   const isPlaying = status === "playing" || status === "loading";
-  const repeatLabel = { off: "Repeat off", all: "Repeat all", one: "Repeat one" }[repeat];
 
   return (
     <footer className="bar">
@@ -102,20 +101,13 @@ export function NowPlayingBar({
             <NextIcon />
           </button>
         </div>
-        <SeekBar disabled={unavailable || !playing} />
+        <SeekBar
+          disabled={unavailable || !playing}
+          trailing={<RepeatButton repeat={snapshot.repeat} disabled={snapshot.phase !== "ready"} />}
+        />
       </div>
 
       <div className="bar-right">
-        <button
-          className={`icon-button ${repeat !== "off" ? "is-active" : ""}`}
-          onClick={() => intent({ type: "cycleRepeat" })}
-          disabled={snapshot.phase !== "ready"}
-          aria-label={repeatLabel}
-          aria-pressed={repeat !== "off"}
-          title={`${repeatLabel} (r)`}
-        >
-          {repeat === "one" ? <RepeatOneIcon /> : <RepeatIcon />}
-        </button>
         <VolumeControl volume={snapshot.volume} disabled={unavailable} />
         <button
           className={`icon-button ${queueOpen ? "is-active" : ""}`}
@@ -131,9 +123,34 @@ export function NowPlayingBar({
   );
 }
 
-/** Elapsed · seek slider · total. Shows the drag (then the target) until
- * the backend reports a position again. */
-export function SeekBar({ disabled }: { disabled: boolean }) {
+const REPEAT_LABEL: Record<Repeat, string> = {
+  off: "Repeat off",
+  all: "Repeat all",
+  one: "Repeat one",
+};
+const REPEAT_NEXT: Record<Repeat, Repeat> = { off: "all", all: "one", one: "off" };
+
+/** The repeat toggle beside a timeline: off (muted), all (accent), one
+ * (accent with a "1"). Clicking (or `r`) cycles off → all → one. */
+export function RepeatButton({ repeat, disabled }: { repeat: Repeat; disabled: boolean }) {
+  const label = `${REPEAT_LABEL[repeat]}; click for ${REPEAT_LABEL[REPEAT_NEXT[repeat]].toLowerCase()}`;
+  return (
+    <button
+      className={`icon-button repeat-button ${repeat !== "off" ? "is-active" : ""}`}
+      onClick={() => intent({ type: "cycleRepeat" })}
+      disabled={disabled}
+      aria-label={label}
+      title={`${label} (r)`}
+    >
+      {repeat === "one" ? <RepeatOneIcon /> : <RepeatIcon />}
+    </button>
+  );
+}
+
+/** Elapsed · seek slider · total (· `trailing`, e.g. the repeat button).
+ * Shows the drag (then the target) until the backend reports a position
+ * again. */
+export function SeekBar({ disabled, trailing }: { disabled: boolean; trailing?: ReactNode }) {
   const progress = useProgress();
   const [pending, setPending] = useState<{ ms: number; from: Progress } | null>(null);
   // A seek target stays shown until a newer progress report arrives.
@@ -144,7 +161,7 @@ export function SeekBar({ disabled }: { disabled: boolean }) {
   const shown = dragMs ?? position;
 
   return (
-    <div className="seek">
+    <div className={`seek ${trailing ? "has-trailing" : ""}`}>
       <span className="time">{formatTime(progress.positionMs == null ? null : shown)}</span>
       <Slider
         className="seek-slider"
@@ -162,12 +179,13 @@ export function SeekBar({ disabled }: { disabled: boolean }) {
         }}
       />
       <span className="time">{formatTime(progress.durationMs)}</span>
+      {trailing}
     </div>
   );
 }
 
 /** Volume slider; requests are sent at most once per animation frame. */
-function VolumeControl({ volume, disabled }: { volume: number; disabled: boolean }) {
+export function VolumeControl({ volume, disabled }: { volume: number; disabled: boolean }) {
   const [drag, setDrag] = useState<number | null>(null);
   const frame = useRef<number | null>(null);
   const latest = useRef(volume);

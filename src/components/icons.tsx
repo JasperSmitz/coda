@@ -155,3 +155,19 @@ export const BackIcon = (p: IconProps) => (
     <path d="M15 5l-7 7 7 7" />
   </Icon>
 );
+/** Save the queue as a playlist: the playlist lines with a plus. */
+export const PlaylistAddIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 6h11M4 11h11M4 16h6" />
+    <path d="M17.5 13v8M13.5 17h8" />
+  </Icon>
+);
+/** Clear the queue: a broom. */
+export const BroomIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M13 11l7.5-7.5" />
+    <path d="M11 9l4 4" />
+    <path d="M11 9l-6.5 4.5-1 7 7-1L15 13" />
+    <path d="M7 16.5l-1.5 3M10 17.5l-.8 1.8" />
+  </Icon>
+);
