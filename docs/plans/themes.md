@@ -28,3 +28,11 @@ Read first: `AGENTS.md`, `docs/DESIGN.md`, `docs/ARCHITECTURE.md`, `src/styles/t
 ## Acceptance
 - All checks in AGENTS.md pass; Rust tests for the parser (valid, malformed, oversized, overrides, palette refs), source merging, Ghostty config `theme` parsing (incl. light:/dark:), and the contrast adjustment; TS logic tested if a test runner exists, else keep it in small pure functions.
 - No window opened; add smoke steps. Update `docs/DESIGN.md` (theming section) and `docs/ARCHITECTURE.md`. Don't commit. Report to `/tmp/coda-app-themes-report.md`.
+
+## Addendum (owner): every colour a token, and editable colours
+- **No colour literals outside the token layer.** Components and stylesheets use only `var(--…)` tokens; the only hex/rgb values live in `tokens.css` (defaults) and in theme data. Add a check (a small script or test, e.g. a grep in `pnpm build`/a Rust or node test) that fails when a colour literal appears elsewhere in `src/`.
+- **Colour editor** in Settings → Appearance ("Customise colours"):
+  - Shows the active theme's base colours (background, foreground, accent, danger, selection, palette 0–15) **and** the derived tokens (surfaces 1–3, border, text-2, text-3, hover, selected, accent-text, visualizer, cover-placeholder colours), grouped and labelled in plain words ("Sidebar & panels", "Secondary text", …), each with a swatch, hex input and a native colour picker (`<input type=color>` is fine), plus "reset" per colour. Derived tokens show their computed value until overridden.
+  - Edits preview live. Saving creates or updates a **custom theme** (default name "<Theme> (custom)", renameable) written as a Ghostty-format file in `~/.config/coda-app/themes/` with the `coda-*` keys for overrides (add `coda-<token> = #rrggbb` keys for every overridable token), and selects it. The file stays usable in Ghostty for the base colours. Built-in and Ghostty-installed themes are never modified; editing one starts a custom copy.
+  - Custom themes can be renamed, duplicated and deleted (confirm) from the theme list; "Reveal themes folder" opens the folder in the file manager (needs `tauri-plugin-opener` with a scope limited to that folder, or do it from Rust).
+  - The contrast guard still applies to derived values, but **never** silently changes a colour the user set explicitly; instead show a small contrast warning next to it.
