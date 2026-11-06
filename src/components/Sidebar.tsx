@@ -1,7 +1,18 @@
 import type { ReactNode } from "react";
-import type { Snapshot } from "../lib/types";
+import type { Snapshot, SourceKind } from "../lib/types";
+import { bothConfigured, switchSource, useSources } from "../state/source";
 import type { ViewId } from "../views/viewList";
-import { AlbumIcon, ArtistIcon, FolderIcon, PlaylistIcon, SearchIcon, SettingsIcon } from "./icons";
+import {
+  AlbumIcon,
+  ArtistIcon,
+  FolderIcon,
+  HomeIcon,
+  LocalIcon,
+  PlaylistIcon,
+  SearchIcon,
+  ServerIcon,
+  SettingsIcon,
+} from "./icons";
 
 interface Props {
   /** The active entry (the navigation stack's root). */
@@ -25,7 +36,20 @@ function scanLine(snapshot: Snapshot | null): string | null {
   }
 }
 
+const SOURCE_NAME: Record<SourceKind, string> = { local: "Local", navidrome: "Navidrome" };
+/** Ctrl on Linux, Cmd on macOS (both work). */
+const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+
+/** The active source's status: the scan line or the connection dot. */
+function SourceStatus({ source, snapshot }: { source: SourceKind; snapshot: Snapshot | null }) {
+  if (source === "local") return <span className="nav-status">{scanLine(snapshot)}</span>;
+  const state = snapshot?.navidrome.state ?? "notConfigured";
+  return <span className={`connection connection-${state}`} title={state} />;
+}
+
 export function Sidebar({ view, onView, snapshot }: Props) {
+  const sources = useSources();
+  const source = sources.active;
   const item = (id: ViewId, label: string, icon: ReactNode) => (
     <li>
       <button
@@ -38,41 +62,47 @@ export function Sidebar({ view, onView, snapshot }: Props) {
       </button>
     </li>
   );
-  const navidrome = snapshot?.navidrome.state ?? "notConfigured";
-  // Sources that are not configured are hidden (once known).
-  const known = snapshot?.phase === "ready";
-  const showLocal = !known || snapshot.scan.state !== "noLibrary";
-  const showNavidrome = !known || navidrome !== "notConfigured";
+  const sourceButton = (kind: SourceKind, index: number, icon: ReactNode) => (
+    <button
+      role="radio"
+      aria-checked={source === kind}
+      className={`source-option ${source === kind ? "is-active" : ""}`}
+      onClick={() => switchSource(kind)}
+      title={`Browse ${kind === "local" ? "the local library" : "Navidrome"} (${MOD}${index})`}
+    >
+      {icon}
+      <span>{SOURCE_NAME[kind]}</span>
+    </button>
+  );
   return (
     <nav className="sidebar" aria-label="Library">
-      <ul>{item("search", "Search", <SearchIcon />)}</ul>
-      {showLocal && (
-        <div className="nav-group">
-          <div className="nav-heading">
-            <span>Local</span>
-            <span className="nav-status">{scanLine(snapshot)}</span>
+      {bothConfigured(sources) ? (
+        <div className="source-switch-group">
+          <div className="source-switch" role="radiogroup" aria-label="Source">
+            {sourceButton("local", 1, <LocalIcon size={15} />)}
+            {sourceButton("navidrome", 2, <ServerIcon size={15} />)}
           </div>
-          <ul>
-            {item("local-artists", "Artists", <ArtistIcon />)}
-            {item("local-albums", "Albums", <AlbumIcon />)}
-            {item("local-folders", "Folders", <FolderIcon />)}
-            {item("local-playlists", "Playlists", <PlaylistIcon />)}
-          </ul>
+          <div className="nav-heading source-status">
+            <span>{source === "local" ? "Local library" : "Server"}</span>
+            <SourceStatus source={source} snapshot={snapshot} />
+          </div>
+        </div>
+      ) : (
+        <div className="nav-heading">
+          <span>{SOURCE_NAME[source]}</span>
+          <SourceStatus source={source} snapshot={snapshot} />
         </div>
       )}
-      {showNavidrome && (
-        <div className="nav-group">
-          <div className="nav-heading">
-            <span>Navidrome</span>
-            <span className={`connection connection-${navidrome}`} title={navidrome} />
-          </div>
-          <ul>
-            {item("navidrome-artists", "Artists", <ArtistIcon />)}
-            {item("navidrome-albums", "Albums", <AlbumIcon />)}
-            {item("navidrome-playlists", "Playlists", <PlaylistIcon />)}
-          </ul>
-        </div>
-      )}
+      <ul>
+        {item("home", "Home", <HomeIcon />)}
+        {item("search", "Search", <SearchIcon />)}
+      </ul>
+      <ul>
+        {item("albums", "Albums", <AlbumIcon />)}
+        {item("artists", "Artists", <ArtistIcon />)}
+        {item("playlists", "Playlists", <PlaylistIcon />)}
+        {source === "local" && item("folders", "Folders", <FolderIcon />)}
+      </ul>
       <ul className="nav-bottom">{item("settings", "Settings", <SettingsIcon />)}</ul>
     </nav>
   );

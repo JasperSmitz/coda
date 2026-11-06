@@ -13,6 +13,7 @@ import type {
   ServerInput,
   Settings,
   Snapshot,
+  SourceKind,
   ThemeSummary,
   VisualizerFrame,
 } from "./types";
@@ -95,6 +96,14 @@ export const themeApi = {
   revealFolder: () => invoke<void>("theme_reveal_folder"),
   /** The native window's background behind the webview (`#rrggbb`). */
   windowBackground: (color: string) => invoke<void>("theme_window_background", { color }),
+};
+
+// ----- the browsed source (`settings.toml`) -----
+
+export const sourceApi = {
+  /** The saved choice, `null` if none was made yet. */
+  get: () => invoke<SourceKind | null>("ui_source_get"),
+  set: (source: SourceKind) => invoke<void>("ui_source_set", { source }),
 };
 
 /** A command's rejection as text. */

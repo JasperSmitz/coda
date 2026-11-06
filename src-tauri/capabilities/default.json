@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse, Navidrome playlist edits, appearance and themes) and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
+  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse and Home, Navidrome playlist edits, appearance and themes, the browsed source) and listening to the engine's events. Nothing else (no emit, menu, tray, path, window or webview APIs).",
   "windows": ["main"],
   "permissions": [
     "allow-intent",
@@ -48,6 +48,10 @@
     "allow-theme-delete",
     "allow-theme-reveal-folder",
     "allow-theme-window-background",
+    "allow-ui-source-get",
+    "allow-ui-source-set",
+    "allow-home-history",
+    "allow-home-daily-picks",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

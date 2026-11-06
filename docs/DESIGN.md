@@ -7,18 +7,15 @@ A calm, cover-first desktop music player. It should feel like a native app, not 
 ```text
 ┌────────────┬───────────────────────────────────────┬──────────────┐
 │ Sidebar    │ Main view                             │ Queue        │
-│            │                                       │ (toggle, q)  │
-│ Search     │  header: title, sort, actions         │              │
-│ Library    │  ─────────────────────────────        │ Now playing  │
-│  Local     │  album grid / track table / artist    │ Up next ...  │
-│   Artists  │  (scrolls on its own)                 │              │
-│   Albums   │                                       │              │
-│   Folders  │                                       │              │
-│   Playlists│                                       │              │
-│  Navidrome │                                       │              │
-│   Artists  │                                       │              │
-│   Albums   │                                       │              │
-│   Playlists│                                       │              │
+│[Local|Navi]│                                       │ (toggle, q)  │
+│ status     │  header: title, sort, actions         │              │
+│ Home       │  ─────────────────────────────        │ Now playing  │
+│ Search     │  Home rows / album grid / track table │ Up next ...  │
+│ Albums     │  (scrolls on its own)                 │              │
+│ Artists    │                                       │              │
+│ Playlists  │                                       │              │
+│ Folders    │  (Folders: local only)                │              │
+│            │                                       │              │
 │ Settings   │                                       │              │
 ├────────────┴───────────────────────────────────────┴──────────────┤
 │ Now-playing bar: cover · title/artist · ⏮ ⏯ ⏭ / seek ⟳ · vol · queue│
@@ -29,7 +26,9 @@ A calm, cover-first desktop music player. It should feel like a native app, not 
 - **Repeat** is an icon toggle right of the timeline's total time (in the bar and in Now Playing): off is a muted icon, all the accent icon, one the accent icon with a "1"; its tooltip names the current mode and the next. `r` cycles it too; there is no notice for it.
 - The **queue header** has icon buttons (with tooltips): Shuffle upcoming (shuffle), Save queue as playlist (playlist with a plus; only with Navidrome set up) and Clear queue (a broom; asks first).
 - **Now Playing** (`f`) is immersive: the sidebar, browse area, queue column and the bar are hidden; only the view remains. Large cover, title/artist/album, one timeline (repeat beside it), one transport row (previous / play-pause / next, volume on the right), visualizer bars and a small **Up next** card (cover, title, artist; clicking it opens the queue). Background a heavily blurred, darkened copy of the cover. Top right: a queue button and Close (Esc or `f`). The queue opens as a translucent ~360px side panel sliding in from the right (`q` or the queue button): the same queue (selection, drag-and-drop, header buttons), its open/closed state remembered apart from the main layout's. Wide windows make room for it; narrow ones let it overlay. All global shortcuts keep working.
-- Navigation keeps a back stack (Back with `Backspace`/`Alt+←`/mouse back button): Artists → Artist (albums) → Album (tracks).
+- **One source at a time**: a segmented switch "Local | Navidrome" (with icons) tops the sidebar when both are configured (`Ctrl/Cmd+1` Local, `Ctrl/Cmd+2` Navidrome); with one source there is no switch, only its name and status. Below it one set of entries for the active source: Home, Search, Albums, Artists, Playlists, Folders (local only); Settings at the bottom. The choice is saved in `~/.config/coda-app/settings.toml` (default: Navidrome if configured, else Local; a source that goes away falls back to the other). Search searches the active source, with a "Search … instead" link. The queue stays mixed; only browsing is per source, and "Go to album/artist" on a track of the other source switches first.
+- Navigation keeps a back stack **per source** (switching back shows where you were; Back with `Backspace`/`Alt+←`/mouse back button): Home → Artists → Artist (albums) → Album (tracks).
+- **Home** (each source's landing view): calm "Home" header, then rows of ~160px cards (cover, title, kind · artist), each row scrolling sideways with ‹ › buttons: Recently played (the latest distinct albums, artists, playlists, folders played as a context), Most played (Navidrome: the server's most played albums, then playlists by our listen counts; Local: albums and playlists by our counts), Recently added (Navidrome), Daily Picks (12 albums, the same all day, new at local midnight) with "Shuffle Daily Picks". Empty rows are hidden; a new user sees a one-line hint, Recently added and Daily Picks. Click/Enter opens a card, its hover ▶ button or Shift+Enter plays it; ←/→ move within a row, Tab between rows; `s` shuffles the Daily Picks.
 
 ## Visual language
 - Every colour is a theme token (see Theming). The default look, the built-in **Coda** theme: dark first (`#0f1012`-ish background, raised surfaces a few steps lighter); **Coda Light** for a light system appearance.
@@ -54,5 +53,5 @@ Terminal-style palettes, read straight from **Ghostty theme files**, so every th
 
 ## Interaction
 - Double-click or Enter on a track plays its context (album/playlist/list) from that track. Context menu: Play, Play next, Add to queue, Go to album, Go to artist, Add to playlist.
-- Keyboard (global, unless typing in an input): `Space` play/pause, `n`/`p` or `Ctrl+→/←` next/previous, `←/→` seek ∓5s, `+`/`-` volume, `r` repeat, `s` shuffle context, `q` toggle queue, `f` Now Playing, `/` or `Ctrl+F` search, `Esc` close overlay/back.
+- Keyboard (global, unless typing in an input): `Space` play/pause, `n`/`p` or `Ctrl+→/←` next/previous, `←/→` seek ∓5s, `+`/`-` volume, `r` repeat, `s` shuffle context, `q` toggle queue, `f` Now Playing, `/` or `Ctrl+F` search, `Ctrl/Cmd+1`/`2` Local/Navidrome, `Esc` close overlay/back.
 - Errors and notices (player messages, Navidrome failures) appear as small toasts bottom-right above the bar; persistent problems (mpv missing, Navidrome unreachable) as a banner in the main view.

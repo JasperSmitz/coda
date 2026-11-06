@@ -8,7 +8,8 @@ import { Toasts } from "./components/Toasts";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
-import { nav, routeFor, routeSource, sourceReplaced, useNav, viewFor } from "./state/nav";
+import { nav, routeFor, sourceReplaced, useNav, viewFor } from "./state/nav";
+import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
 import { startTheme } from "./state/theme";
 import type { ViewId } from "./views/viewList";
@@ -72,32 +73,30 @@ function useBrowseGenerations(snapshot: Snapshot | null) {
 }
 
 /**
- * Keeps the stack on a configured source: when the root's source is not
- * set up (no music folder, or no server; both hidden in the sidebar), the
- * other source's artists are shown instead, e.g. at startup or after
- * settings or onboarding changed the sources.
+ * Tells the source store which sources are configured, so the shown one
+ * is always set up: when the chosen source is not (no music folder, or no
+ * server; e.g. at startup or after settings or onboarding changed the
+ * sources), the other one is shown.
  */
-function useConfiguredRoot(snapshot: Snapshot | null) {
-  const stack = useNav();
-  const root = routeSource(stack[0].route);
+function useConfiguredSources(snapshot: Snapshot | null) {
   const ready = snapshot?.phase === "ready";
   const local = ready && snapshot.scan.state !== "noLibrary";
   const server = ready && snapshot.navidrome.state !== "notConfigured";
   useEffect(() => {
-    if (!ready) return;
-    if (root === "local" && !local && server) nav.root(routeFor("navidrome-artists"));
-    else if (root === "navidrome" && !server && local) nav.root(routeFor("local-artists"));
-  }, [ready, root, local, server]);
+    if (ready) setConfigured(local, server);
+  }, [ready, local, server]);
 }
 
 export default function App() {
   useEffect(() => connect(), []);
   useEffect(() => startTheme(), []);
+  useEffect(() => startSources(), []);
+  const sources = useSources();
   const { snapshot, queue } = useAppState();
   const stack = useNav();
   const top = stack[stack.length - 1];
   const view = viewFor(stack[0].route);
-  useConfiguredRoot(snapshot);
+  useConfiguredSources(snapshot);
   useBrowseGenerations(snapshot);
   const [layoutQueueOpen, toggleLayoutQueue] = useStoredFlag(QUEUE_OPEN_KEY, true);
   const [npQueueOpen, toggleNpQueue] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
@@ -106,7 +105,7 @@ export default function App() {
   const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
   const showView = (next: ViewId) => {
     setNowPlaying(false);
-    nav.root(routeFor(next));
+    nav.root(routeFor(next, sources.active));
   };
   // Any navigation (a sidebar entry, Go to album from Now Playing, search)
   // shows the browse view again.
@@ -183,8 +182,10 @@ export default function App() {
         {snapshot ? (
           <>
             <Banner problems={snapshot.problems} />
-            {/* Sources are known once started. */}
-            {snapshot.phase !== "starting" && <BrowseView entry={top} snapshot={snapshot} />}
+            {/* Sources are known once started (and the saved choice read). */}
+            {snapshot.phase !== "starting" && sources.loaded && sources.configured && (
+              <BrowseView entry={top} snapshot={snapshot} />
+            )}
           </>
         ) : null}
         {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}

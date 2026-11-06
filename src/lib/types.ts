@@ -109,7 +109,14 @@ export type Intent =
   | { type: "removeEntry"; key: string }
   | { type: "clearQueue" }
   | { type: "setVisualizerVisible"; visible: boolean }
-  | { type: "playTracks"; tracks: TrackRef[]; start?: number | null; shuffle?: boolean }
+  | {
+      type: "playTracks";
+      tracks: TrackRef[];
+      start?: number | null;
+      shuffle?: boolean;
+      /** The view it plays from, for the play history (Home). */
+      context?: PlayContext | null;
+    }
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number }
   | { type: "shuffleLibrary" }
@@ -120,6 +127,22 @@ export type Intent =
   | { type: "playNextEntries"; keys: string[] }
   | { type: "shuffleUpcoming" }
   | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean };
+
+/**
+ * What a play intent plays from (`PlayContextDto`): an album, artist or
+ * playlist by the id the view has (local ids of the current library), or
+ * a local folder. Navidrome contexts also say how to show them.
+ */
+export type PlayContext =
+  | {
+      kind: "album" | "artist" | "playlist";
+      source: SourceKind;
+      id: string;
+      name?: string | null;
+      subtitle?: string | null;
+      coverUrl?: string | null;
+    }
+  | { kind: "folder"; path: string[] };
 
 /** A local context the engine resolves and plays itself. */
 export type LocalContext = { kind: "folder"; path: string[] } | { kind: "artist"; id: string };
@@ -207,6 +230,32 @@ export type AlbumSort = "name" | "artist" | "newest" | "frequent" | "recent" | "
 export interface BrowseError {
   kind: "notConfigured" | "stale" | "notFound" | "failed";
   message: string;
+}
+
+// ----- Home (src-tauri/src/history.rs) -----
+
+export type ContextKind = "album" | "artist" | "playlist" | "folder";
+
+/** One Home card: a context from the play history, resolved now. */
+export interface HomeItem {
+  source: SourceKind;
+  kind: ContextKind;
+  /** The id to open or play it by (a folder: its path joined by `/`). */
+  id: string;
+  /** Folders only. */
+  path: string[] | null;
+  name: string;
+  subtitle: string | null;
+  /** Albums: the artist, when known. */
+  artistId: string | null;
+  coverUrl: string | null;
+  /** Most played: listens counted. */
+  listens: number | null;
+}
+
+export interface HomeHistory {
+  recent: HomeItem[];
+  mostPlayed: HomeItem[];
 }
 
 // ----- Playlist edits (src-tauri/src/playlists/dto.rs) -----
@@ -307,6 +356,8 @@ export interface AppearancePrefs {
   /** Accent override (`#rrggbb`) by theme name. */
   accents: Record<string, string>;
   visualizer: VisualizerColors;
+  /** The browsed source (kept by the backend; see `sourceApi`). */
+  source?: SourceKind | null;
 }
 
 export interface Appearance {

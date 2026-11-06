@@ -7,6 +7,7 @@ import { AlbumsView } from "./AlbumsView";
 import { ArtistView } from "./ArtistView";
 import { ArtistsView } from "./ArtistsView";
 import { FolderView } from "./FolderView";
+import { HomeView } from "./HomeView";
 import { PlaylistView, PlaylistsView } from "./PlaylistsView";
 import { SearchView } from "./SearchView";
 import { SettingsView } from "./SettingsView";
@@ -15,8 +16,10 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
   const { route } = entry;
   // Keyed by entry: a pushed view starts fresh, Back restores the old one.
   switch (route.kind) {
+    case "home":
+      return <HomeView key={entry.id} entry={entry} source={route.source} />;
     case "search":
-      return <SearchView key={entry.id} entry={entry} query={route.query} />;
+      return <SearchView key={entry.id} entry={entry} source={route.source} query={route.query} />;
     case "artists":
       return <ArtistsView key={entry.id} entry={entry} source={route.source} />;
     case "albums":

@@ -1,4 +1,4 @@
-# Smoke checks (manual): M1 foundation, M3 queue and playlists, M4 experience
+# Smoke checks (manual): M1 foundation, M3 queue and playlists, M4 experience, feedback round 1 (source switch, Home)
 
 Run from the repo root: `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
 
@@ -111,7 +111,7 @@ Same setup as above. A configured music folder and Navidrome server make every s
 ### Errors and states
 46. Stop the Navidrome server and open Navidrome → Artists: loading skeleton, then "Could not load" with Retry; start the server and Retry loads.
 47. Light and dark themes: skeletons, tiles, rows, menus and notes are readable in both; focus rings visible when tabbing through the album grid and lists.
-48. Settings → change the music folder, or save/disconnect the server, while a browse view of that source is open: the view returns to its list root and reloads (no stale ids); a cached Navidrome list is not shown again after a server change. With only one source configured, the sidebar shows only that one and a hidden source's view switches to the other source's artists.
+48. Settings → change the music folder, or save/disconnect the server, while a browse view of that source is open: that source's views return to its Home and reload (no stale ids); a cached Navidrome list is not shown again after a server change. With only one source configured, the sidebar shows only that one, and the other source (if it was shown) falls back to this one (H3).
 49. Now Playing open: Backspace/Escape/Alt+← close it (the browse stack stays); `/` closes it and opens Search; Go to album/artist or a sidebar entry also closes it.
 
 ## Review fixes
@@ -126,3 +126,18 @@ Same setup as above. A configured music folder and Navidrome server make every s
 56. Stop the server, then use an album's menu → Play (or Navidrome Albums → Shuffle): a toast "Could not play: …" appears. Change the music folder in Settings while an artist page is open and press Play at once: no silent failure (the view reloads with a toast).
 57. Navidrome Albums sorted "Random": keep scrolling; more pages keep loading even when a page repeats albums, until the end.
 58. During a scan, open the context menu on a track of an album being scanned and wait: when the list refreshes, the menu still acts on the same track (or closes if it disappeared); the selection stays on its track.
+
+## One source at a time, Home (feedback round 1, slice B)
+Config: `~/.config/coda-app/settings.toml` (`source = …`); history: `~/.local/state/coda/coda-app/history.json`.
+H1. Both sources configured: the sidebar starts with a "Local | Navidrome" switch (icons), then Home, Search, Albums, Artists, Playlists (and Folders only on Local), Settings at the bottom; no source appears twice. First run (no `source` in settings.toml): Navidrome is shown.
+H2. Click Local (or Ctrl/Cmd+1), open an artist → album; switch to Navidrome (Ctrl/Cmd+2), open something else; switch back: the local album is shown again, and Back walks the local stack. Quit and relaunch: the last chosen source is shown (settings.toml has `source = "local"`/`"navidrome"`; theme settings unchanged).
+H3. Only one source configured: no switch, just its name with the scan line or connection dot; Ctrl/Cmd+1/2 for the missing source does nothing. Disconnect the server in Settings while Navidrome is shown: Local is shown and Settings stays open; reconnect: Navidrome comes back (it was the saved choice).
+H4. `/` on Local searches the local library only; "Search Navidrome instead" switches and searches Navidrome for the same text (and back).
+H5. The queue still mixes both: enqueue a local album and a Navidrome album, both play. On a local track in the queue, while Navidrome is shown, right-click → Go to album: the sidebar switches to Local and opens the album.
+H6. Home is the landing view of each source. New user (move history.json away): a one-line hint, Recently added (Navidrome) and Daily Picks; no empty rows.
+H7. Play an album, a playlist, an artist (Play) and, on Local, a folder (Play, or a track in it): each appears at the front of Home → Recently played (newest first, no duplicates). A search result track or Shuffle all adds nothing.
+H8. Listen to a track for more than half its length (or 4 minutes): after returning to Home, its album (Local: and the playlist it was played from) shows in Most played with the count. Navidrome's Most played starts with the server's most played albums (TUI listening counts too) followed by playlists.
+H9. Daily Picks: 12 albums; reopen Home and relaunch the app: the same picks all day; after local midnight (or with the clock moved a day on) they change at the next Home visit. "Shuffle Daily Picks" (or `s` on Home) queues all picks' tracks shuffled.
+H10. Rows: ‹ › scroll a row; Tab moves between rows, ←/→ between cards (no seeking), Home/End to the ends, Enter opens, Shift+Enter or the hover ▶ plays. Artist cards are round. Light and dark themes look right.
+H11. Put garbage in history.json (or `mkfifo` it while the app is closed) and launch: the app starts at once with an empty history, the old file is now `history.json.bad`; play something and quit: a new history.json is written. history.json contains no `http`, `coda://` or password.
+H12. Per server: note Home on Navidrome, then in Settings connect another server (or the same server as another user): its Home shows none of the first server's Recently/Most played or Daily Picks. Connect the first one again the same day: its history and the same Daily Picks come back. history.json holds no server URL or user name (only 16-hex `server` ids).

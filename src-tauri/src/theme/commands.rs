@@ -84,7 +84,10 @@ pub async fn appearance_set(
     prefs: Prefs,
 ) -> Result<AppearanceDto> {
     change(&appearance, move |_, current| {
+        // The browsed source is not an appearance setting.
+        let source = current.source;
         *current = prefs;
+        current.source = source;
         Ok(())
     })
     .await
@@ -208,4 +211,35 @@ pub async fn theme_reveal_folder(appearance: State<'_, Appearance>) -> Result<()
         Ok(())
     })
     .await?
+}
+
+/// The source the sidebar browses, as saved (`null`: never chosen).
+#[tauri::command]
+pub async fn ui_source_get(
+    appearance: State<'_, Appearance>,
+) -> Result<Option<crate::history::SourceKind>> {
+    Ok(appearance.state.lock().await.0.source)
+}
+
+/// Saves the source the sidebar browses (the file's other settings stay).
+#[tauri::command]
+pub async fn ui_source_set(
+    appearance: State<'_, Appearance>,
+    source: crate::history::SourceKind,
+) -> Result<()> {
+    let mut state = appearance.state.lock().await;
+    if state.0.source == Some(source) {
+        return Ok(());
+    }
+    let Some(path) = appearance.prefs_path.clone() else {
+        return Err("There is no config folder; set HOME or XDG_CONFIG_HOME".into());
+    };
+    let (mut next, bad) = state.clone();
+    next.source = Some(source);
+    let saved = next.clone();
+    blocking(move || prefs::save(&path, &saved, bad))
+        .await?
+        .map_err(|e| format!("Could not save the settings: {e}"))?;
+    *state = (next, false);
+    Ok(())
 }

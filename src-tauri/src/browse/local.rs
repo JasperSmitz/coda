@@ -22,7 +22,7 @@ fn u32_count(n: usize) -> Option<u32> {
     Some(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-fn first_track_cover(
+pub(crate) fn first_track_cover(
     library: &Library,
     tracks: &[TrackId],
     covers: &CoverService,
@@ -31,7 +31,7 @@ fn first_track_cover(
     covers.url_for_key(CoverKey::Local(path.to_path_buf()))
 }
 
-fn album_dto(view: &LocalView<'_>, id: AlbumId, covers: &CoverService) -> AlbumDto {
+pub(crate) fn album_dto(view: &LocalView<'_>, id: AlbumId, covers: &CoverService) -> AlbumDto {
     let tags = view.library.tags();
     let album = tags.album(id);
     let artist = tags.artist(album.artist());
@@ -69,14 +69,14 @@ fn tracks_dto(view: &LocalView<'_>, ids: &[TrackId], covers: &CoverService) -> V
         .collect()
 }
 
-fn artist_id(view: &LocalView<'_>, id: &str) -> Result<ArtistId, BrowseError> {
+pub(crate) fn artist_id(view: &LocalView<'_>, id: &str) -> Result<ArtistId, BrowseError> {
     let n = parse_local_id(id, view.generation)?;
     ((n as usize) < view.library.tags().artists().len())
         .then_some(ArtistId(n))
         .ok_or_else(|| BrowseError::not_found("Artist"))
 }
 
-fn album_id(view: &LocalView<'_>, id: &str) -> Result<AlbumId, BrowseError> {
+pub(crate) fn album_id(view: &LocalView<'_>, id: &str) -> Result<AlbumId, BrowseError> {
     let n = parse_local_id(id, view.generation)?;
     // Album ids are dense: every album appears in each order once.
     ((n as usize) < view.library.tags().albums(AlbumOrder::Name).len())
@@ -84,7 +84,7 @@ fn album_id(view: &LocalView<'_>, id: &str) -> Result<AlbumId, BrowseError> {
         .ok_or_else(|| BrowseError::not_found("Album"))
 }
 
-fn playlist_id(view: &LocalView<'_>, id: &str) -> Result<PlaylistId, BrowseError> {
+pub(crate) fn playlist_id(view: &LocalView<'_>, id: &str) -> Result<PlaylistId, BrowseError> {
     let n = parse_local_id(id, view.generation)?;
     ((n as usize) < view.library.playlists().len())
         .then_some(PlaylistId(n))

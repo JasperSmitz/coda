@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ui-source-set"
+description = "Enables the ui_source_set command without any pre-configured scope."
+commands.allow = ["ui_source_set"]
+
+[[permission]]
+identifier = "deny-ui-source-set"
+description = "Denies the ui_source_set command without any pre-configured scope."
+commands.deny = ["ui_source_set"]

@@ -72,6 +72,8 @@ enum Msg {
     Settings(SettingsChange, oneshot::Sender<Result<(), String>>),
     /// The playlist editor's requests (see [`playlists`]).
     Playlist(PlaylistMsg),
+    /// The Home commands' requests (see [`history`]).
+    History(HistoryMsg),
 }
 
 /// The way in: cheap to clone, used by Tauri commands and the exit hook.
@@ -189,6 +191,16 @@ pub struct Engine {
     /// (`engine/library.rs`).
     music_dir: Option<PathBuf>,
     library_ops: Vec<library::LibraryOp>,
+    // Play history (see [`history`]).
+    history: crate::history::History,
+    history_save: history::HistorySave,
+    /// The listen counted for the history (every source).
+    heard: Option<history::Heard>,
+    /// The context the queue was last played from.
+    played_from: Option<history::PlayedFrom>,
+    /// The current server's identity in the history
+    /// (`history::server_id`).
+    server: Option<String>,
 }
 
 impl Engine {
@@ -237,6 +249,11 @@ impl Engine {
             rescan: None,
             music_dir: None,
             library_ops: Vec::new(),
+            history: crate::history::History::default(),
+            history_save: history::HistorySave::default(),
+            heard: None,
+            played_from: None,
+            server: None,
         }
     }
 
@@ -276,6 +293,7 @@ impl Engine {
             }
         };
         self.browse.set_client(sources.client.clone());
+        self.server = sources.client.as_ref().map(crate::history::server_id);
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
         self.scrobbling = sources.scrobble && self.client.is_some();
@@ -376,12 +394,26 @@ impl Engine {
                 tracks,
                 start,
                 shuffle,
-            } => self.play_tracks(tracks, start, shuffle, now),
+                context,
+            } => {
+                let commands = self.play_tracks(tracks, start, shuffle, now);
+                if !commands.is_empty() {
+                    let context = context.and_then(|c| self.play_context(c));
+                    self.played_context(context, now);
+                }
+                commands
+            }
             Intent::Enqueue { tracks, next } => {
                 self.enqueue(tracks, next, now);
                 Vec::new()
             }
-            Intent::ShuffleLibrary => self.shuffle_library(now),
+            Intent::ShuffleLibrary => {
+                let commands = self.shuffle_library(now);
+                if !commands.is_empty() {
+                    self.played_context(None, now);
+                }
+                commands
+            }
             Intent::MoveEntries { keys, before } => self.move_entries(&keys, before.as_deref()),
             Intent::RemoveEntries { keys } => self.remove_entries(&keys),
             Intent::PlayNextEntries { keys } => self.play_next_entries(&keys, now),
@@ -390,7 +422,14 @@ impl Engine {
                 context,
                 start,
                 shuffle,
-            } => self.play_local(context, start, shuffle, now),
+            } => {
+                let played = self.local_context(&context);
+                let commands = self.play_local(context, start, shuffle, now);
+                if !commands.is_empty() {
+                    self.played_context(played, now);
+                }
+                commands
+            }
             Intent::SetVisualizerVisible { .. } | Intent::DismissNotice { .. } => Vec::new(),
         };
         let mut commands = self.dispatch(commands, now);
@@ -632,9 +671,11 @@ impl Engine {
         let commands = self.player.handle_event(event);
         if let Some(load) = started {
             self.listen_started(load);
+            self.heard_started(load);
         }
         if let Some(position) = position {
             self.listen_progressed(position);
+            self.heard_progressed(position, now);
         }
         self.dispatch(commands, now)
     }
@@ -651,6 +692,7 @@ impl Engine {
         {
             self.listen = None;
         }
+        self.heard_ended();
         for message in self.player.take_messages() {
             self.notify(message, now);
         }
@@ -1182,6 +1224,7 @@ struct Io<S> {
     scrobbler: Option<Scrobbler>,
     scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
     saver: Saver,
+    history: history::HistorySaver,
 }
 
 impl<S: Sink> Io<S> {
@@ -1239,6 +1282,7 @@ where
             path: None,
             in_flight: None,
         },
+        history: history::HistorySaver::new(),
     };
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1291,6 +1335,7 @@ where
                     apply_settings_io(&mut engine, &mut io);
                 }
                 Some(Msg::Playlist(msg)) => engine.handle_playlist_msg(msg, Instant::now()),
+                Some(Msg::History(msg)) => engine.handle_history_msg(msg, Instant::now()),
                 None => break None,
             },
             event = next_playback(&mut io.playback), if io.playback.is_some() => match event {
@@ -1330,6 +1375,7 @@ where
                 let now = Instant::now();
                 engine.tick(now);
                 io.saver.poll(&mut engine, now);
+                io.history.poll(&mut engine, now);
             }
         }
         // Visualizer frames go out at once; the rest is coalesced by the
@@ -1358,7 +1404,14 @@ where
             }
         }
     }
-    io.saver.finish(&mut engine).await;
+    // The history's exit write runs alongside the session's (same bound).
+    let history = io.history.finish(&mut engine);
+    let history = async {
+        if tokio::time::timeout(SAVE_TIMEOUT, history).await.is_err() {
+            tracing::warn!("play history save did not finish in time");
+        }
+    };
+    tokio::join!(io.saver.finish(&mut engine), history);
     io.scan = None;
     io.scrobbler = None;
     if let Some(playback) = io.playback.take() {
@@ -1376,12 +1429,15 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
         sources,
         playback,
         restored,
+        history,
     } = started;
     let (handle, problem) = match playback {
         Ok(handle) => (Some(handle), None),
         Err(problem) => (None, Some(problem)),
     };
     io.saver.path = restored.save_path.clone();
+    io.history.path = history.path;
+    engine.set_history(history.history);
     io.playback = handle;
     let commands = engine.start(sources, problem, restored, now);
     io.send(commands);
@@ -1406,7 +1462,9 @@ pub use settings::SettingsChange;
 use settings::{ClientChange, apply_settings_io};
 
 mod context;
+mod history;
 mod library;
+pub use history::HistoryMsg;
 
 #[cfg(test)]
 mod tests;

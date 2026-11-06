@@ -15,7 +15,7 @@ import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { isRemoveKey } from "../lib/keys";
-import { playTracks, useShuffleContext } from "../lib/play";
+import { playlistContext, playTracks, useShuffleContext } from "../lib/play";
 import {
   createPlaylistFlow,
   deletePlaylistFlow,
@@ -230,9 +230,11 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const detail = load.data;
   const tracks = detail?.tracks ?? [];
   useScroll(scroller, entry, tracks.length > 0);
-  useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true) : null);
-
   const title = renamed ?? (detail?.playlist.name || hint?.name || name);
+  const cover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? tracks[0]?.coverUrl ?? null;
+  const context = playlistContext(source, { id, name: title, coverUrl: cover });
+  useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
+
   // The detail has no name (`getPlaylist` sends none here): use the shown one.
   const playlist: Playlist | null = detail ? { ...detail.playlist, name: title } : null;
   const editable = canEdit && playlist !== null && playlist.editable;
@@ -270,7 +272,6 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
     const outcome = await deletePlaylistFlow(playlist);
     if (outcome?.status === "done") nav.back();
   };
-  const cover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? tracks[0]?.coverUrl ?? null;
   return (
     <section className="view">
       <ViewHeader
@@ -287,8 +288,8 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
         actions={
           <>
             <PlayButtons
-              onPlay={() => playTracks(tracks)}
-              onShuffle={() => playTracks(tracks, undefined, true)}
+              onPlay={() => playTracks(tracks, undefined, false, context)}
+              onShuffle={() => playTracks(tracks, undefined, true, context)}
               disabled={tracks.length === 0}
             />
             {editable && (
@@ -350,6 +351,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
             hidden={detail.hidden}
             scroller={scroller}
             label={`Tracks of ${title}`}
+            context={context}
           />
         ) : (
           tracks.length > 0 && (
@@ -359,6 +361,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
               showAlbum
               showArtist
               label={`Tracks of ${title}`}
+              context={context}
             />
           )
         )}

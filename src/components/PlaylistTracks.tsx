@@ -21,7 +21,7 @@ import {
   songIds,
   useEditsRunning,
 } from "../lib/playlists";
-import type { Hidden, Playlist, Track } from "../lib/types";
+import type { Hidden, PlayContext, Playlist, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -37,6 +37,8 @@ interface Props {
   hidden: Hidden;
   scroller: RefObject<HTMLElement | null>;
   label: string;
+  /** The playlist, for the play history. */
+  context?: PlayContext | null;
 }
 
 const plural = (n: number, noun: string) => `${n.toLocaleString()} ${n === 1 ? noun : `${noun}s`}`;
@@ -49,7 +51,7 @@ export function moveOrder(order: number[], moved: Set<number>, gap: number): num
   return [...before, ...block, ...after];
 }
 
-export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Props) {
+export function PlaylistTracks({ playlist, tracks, hidden, scroller, label, context }: Props) {
   const { snapshot } = useAppState();
   const locked = snapshot?.phase !== "ready";
   const disabled = locked || snapshot.status === "unavailable";
@@ -175,7 +177,7 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label }: Pr
   };
 
   const play = (at: number) => {
-    if (!disabled) playTracks(shown, at);
+    if (!disabled) playTracks(shown, at, false, context);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
