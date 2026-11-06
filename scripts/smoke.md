@@ -3,7 +3,7 @@
 Run from the repo root: `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
 
 ## Startup
-0. While "Starting…" (e.g. during a keychain prompt) the transport, repeat, Clear and remove controls are disabled.
+0. While "Starting…" (e.g. during a keychain prompt) the transport, repeat, Clear (broom) and remove controls are disabled.
 1. With your normal Coda config: the window opens at once ("Starting…" only if the password/keychain is slow), sidebar shows "Scanning… N" then "N tracks"; Navidrome dot turns green; a toast "Library scan complete: …" appears and fades after ~5 s.
 2. First run: with no GUI session yet (`~/.local/state/coda/coda-app/session.json` absent), the TUI's queue (`~/.local/state/coda/state.json`) is imported once, paused. Check the TUI's file is unchanged (`shasum` before/after). After step "Queue" below, quit and relaunch: the GUI's own queue comes back, **paused/stopped, not playing**; the TUI's queue is not imported again.
 3. Without config: see "Onboarding" below.
@@ -15,21 +15,21 @@ For now a queue comes from a restored GUI session. To seed one, copy the TUI's s
 5. Space plays/pauses; the play button and the queue's equaliser glyph follow. `n`/`p` and Ctrl+→/← skip; `p` after 3 s restarts the track.
 6. Seek bar: drag the thumb → elapsed time follows the drag; release → playback jumps there. ←/→ seek ∓5 s. Click on the bar seeks.
 7. Volume slider drag and `+`/`-` change the volume, also while stopped: the slider stays where it was dropped (no snapping back), the next track plays at that volume, and it is restored after a relaunch.
-8. `r` cycles Repeat off → all → one (toast + icon; repeat-one shows a "1").
+8. The repeat button right of the timeline's total time (and `r`) cycles Repeat off → all → one: muted icon → accent icon → accent icon with a "1"; the tooltip names the mode and the next one; **no toast**. The mode is restored after a relaunch.
 9. Local and Navidrome tracks in one queue both play; the cover shows in the bar (placeholder initials when there is none). Gapless: two consecutive tracks of a gapless album play without a gap.
 
 ## Queue
 10. `q` (and the bar's queue button) toggles the panel; the choice survives a relaunch.
 11. Double-click an entry plays it; click selects; ↑/↓ move, Enter plays, Delete (fn+⌫) or Cmd+⌫ removes; plain ⌫ (Backspace) is Back and removes nothing; hover shows ×; right-click → Play / Remove. Removing the playing entry moves on to the next.
-12. Clear asks first (Cancel/Esc keeps everything); Clear in the dialog empties the queue and stops playback.
+12. The queue header shows three icon buttons with tooltips: Shuffle upcoming, Save queue as playlist (playlist + plus; only with Navidrome set up), Clear queue (broom). Clear asks first (Cancel/Esc keeps everything); Clear in the dialog empties the queue and stops playback.
 
 ## Queue editing (M3)
 Q1. Multi-select: click, Shift-click (range), Cmd-click (macOS) / Ctrl-click (Linux) toggles; Shift+↑/↓ extends; Cmd/Ctrl+A selects all. The header says "N of M tracks selected". Delete or Cmd+⌫ removes the whole selection (plain ⌫ goes Back, the queue is untouched); if it held the playing track, the next *remaining* track plays (no blip of a removed one).
 Q2. Drag one entry (or a selection) up and down: an amber line shows the drop gap, dragged rows dim; near the top/bottom edge the list autoscrolls (try a queue of a few hundred tracks); Esc during the drag cancels; release drops there. The playing entry keeps playing; drag the track after the playing one elsewhere and let the current one end: the new next one follows gaplessly (check the log for `SetNext`).
 Q3. Alt+↑/↓ moves the selection one place (a scattered selection becomes one block).
 Q4. Right-click → "Play N tracks next" puts them right after the current entry; "Remove N tracks"; "Add to playlist…" (Navidrome tracks only).
-Q5. Shuffle: the entries after the current one are shuffled (toast "Shuffled N upcoming entries"); the current and earlier ones stay.
-Q6. Save… (Navidrome configured, queue with Navidrome tracks): the dialog suggests `Queue <today>` and says how many local tracks are left out; Enter saves → toast "Created … with N songs (…)"; the playlist appears in Navidrome → Playlists (also in Navidrome's web UI). With only local tracks the button is disabled.
+Q5. Shuffle upcoming (the shuffle icon in the queue header): the entries after the current one are shuffled (toast "Shuffled N upcoming entries"); the current and earlier ones stay.
+Q6. Save queue as playlist (the playlist-plus icon; Navidrome configured, queue with Navidrome tracks): the dialog suggests `Queue <today>` and says how many local tracks are left out; Enter saves → toast "Created … with N songs (…)"; the playlist appears in Navidrome → Playlists (also in Navidrome's web UI). With only local tracks the button is disabled.
 
 ## Playlists (M3, Navidrome)
 P1. Playlists → "New playlist…" → name → Create: toast, the list reloads with it. A blank name cannot be submitted; Esc cancels.
@@ -55,7 +55,10 @@ P9. Keyboard only: every dialog takes Enter/Esc, Tab stays inside it, focus retu
 16. Resize to the minimum 900×600: nothing overlaps; long titles ellipsize.
 
 ## Now Playing (`f`)
-17. `f` (or a click on the bar's cover) opens the Now Playing view: large cover over a blurred, darkened copy, title, artist — album, timeline (seekable), prev/play/next, visualizer bars and "Up next: …" (or "End of queue"). `f` or Esc (or Close) returns to the previous view; picking a sidebar entry closes it too.
+17. `f` (or a click on the bar's cover) opens the Now Playing view and **only** it: no sidebar, browse area, queue column or bottom bar. Large cover over a blurred, darkened copy, title, artist — album, ONE timeline (seekable) with the repeat button beside it, ONE row prev/play/next with volume on the right, visualizer bars and an "Up next" card (cover, title, artist) or "End of queue". `f`, Esc or the × button (top right) returns to the previous view with the normal layout (queue column as before). The window can still be dragged by its title bar and the macOS traffic lights work.
+17a. In Now Playing, `q` or the queue button (top right) slides the queue in from the right as a translucent card; clicking the Up next card opens it too (the card hides while it is open). In the panel: click/Shift/Cmd-select, drag to reorder, double-click plays, Delete removes, right-click menu (dark, readable in a light theme too), the header's Shuffle / Save / Clear buttons (Clear's dialog appears over the view). Close the view with the panel open, open it again: the panel is still open; the main layout's queue column kept its own state (toggle each, relaunch: both remembered).
+17b. Resize: at the minimum 900×600 the cover shrinks and the content stacks; the panel overlays the content. On a wide window (≥1180px) the content moves left to make room. With Reduce motion on, the panel appears without sliding.
+17c. Shortcuts in Now Playing: Space, n/p, ←/→, +/-, `r` (repeat button follows, no toast), `q`, Esc, `f`. Toasts appear bottom-right (no bar below them).
 18. Visualizer: bars move with the music, fall smoothly to silence within ~1 s after pause. In the log, `SetVisualizer(true)` is only sent while the view is open; minimise the window (or switch to another macOS Space) → readings stop, restore → they resume. With "Reduce motion" on (macOS Accessibility / GNOME), the bars update a few times a second instead of animating.
 19. Nothing playing: "Nothing playing", no visualizer.
 

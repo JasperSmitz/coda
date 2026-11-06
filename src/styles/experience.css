@@ -218,9 +218,6 @@
   position: relative;
   flex: 1;
   min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
   /* Always dark over the blurred cover, whatever the theme. */
   background: var(--np-bg);
@@ -228,13 +225,11 @@
   --text-2: var(--np-text-2);
   --text-3: var(--np-text-3);
   --hover: var(--np-hover);
+  --selected: var(--np-surface-3);
   --surface-3: var(--np-surface-3);
+  --border: var(--np-border);
   --text: var(--np-text);
   --bg: var(--np-bg);
-}
-
-.now-playing.is-empty {
-  background: var(--bg);
 }
 
 .now-playing-backdrop {
@@ -254,13 +249,25 @@
   background: var(--np-scrim);
 }
 
+/* The cover and controls, centred in the room the queue panel leaves. */
+.now-playing-main {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  transition: right var(--motion) ease-out;
+}
+
 .now-playing-content {
   position: relative;
   display: flex;
   align-items: center;
   gap: clamp(24px, 4vw, 56px);
   width: min(1100px, 100%);
-  padding: 32px clamp(24px, 4vw, 48px);
+  margin: auto;
+  padding: 48px clamp(24px, 4vw, 48px) 32px;
 }
 
 .now-playing-cover {
@@ -303,7 +310,20 @@
   max-width: none;
 }
 
+/* Transport in the middle, volume on the right. */
+.now-playing-transport {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.now-playing-transport .volume {
+  justify-self: end;
+}
+
 .now-playing-controls {
+  grid-column: 2;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -319,6 +339,10 @@
   height: 52px;
 }
 
+.now-playing-nothing {
+  position: relative;
+}
+
 .visualizer {
   width: 100%;
   height: clamp(60px, 14vh, 140px);
@@ -331,21 +355,102 @@
 }
 
 .now-playing-next {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.now-playing-next.is-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 8px;
+  border-radius: var(--radius);
+  background: var(--np-hover);
+  text-align: left;
+  transition: background var(--motion-fast);
+}
+
+.now-playing-next.is-card:hover {
+  background: var(--np-surface-3);
+}
+
+.now-playing-next-cover {
+  width: 40px;
+  height: 40px;
+}
+
+.now-playing-next-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.now-playing-next-text .eyebrow {
+  margin-bottom: 0;
+}
+
+.now-playing-next-title,
+.now-playing-next-artist {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.now-playing-next .eyebrow {
-  display: inline;
-  margin-right: 6px;
+.now-playing-next-artist {
+  color: var(--text-2);
+  font-size: var(--text-small);
 }
 
-.now-playing-close {
+.now-playing-toolbar {
   position: absolute;
-  top: 14px;
-  right: 16px;
-  color: var(--text-2);
+  top: 12px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+}
+
+/* The queue as a translucent card sliding in from the right. */
+.now-playing-queue {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  bottom: 12px;
+  width: min(var(--np-panel-width), calc(100% - 24px));
+  display: flex;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--np-panel);
+  border: 1px solid var(--np-border);
+  box-shadow: var(--shadow-big);
+  backdrop-filter: blur(24px);
+  animation: np-panel-in var(--motion) ease-out;
+}
+
+.now-playing-queue .queue {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border-left: 0;
+}
+
+/* Menus inside the view stay on the view's dark colours. */
+.now-playing .context-menu {
+  background: var(--np-menu);
+  border-color: var(--np-border);
+}
+
+@keyframes np-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+/* Wide windows make room for the panel; narrow ones let it overlay. */
+@media (min-width: 1180px) {
+  .now-playing.has-queue .now-playing-main {
+    right: calc(var(--np-panel-width) + 12px);
+  }
 }
 
 @media (max-width: 1000px), (max-height: 640px) {
@@ -361,13 +466,36 @@
     height: min(30vh, 60vw);
   }
 
-  .now-playing-controls {
-    justify-content: center;
+  .now-playing-next {
+    align-self: center;
+  }
+}
+
+/* With the panel open in a mid-size window, stack the content too. */
+@media (min-width: 1180px) and (max-width: 1500px) {
+  .now-playing.has-queue .now-playing-content {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+
+  .now-playing.has-queue .now-playing-cover {
+    align-self: center;
+    width: min(30vh, 40vw);
+    height: min(30vh, 40vw);
+  }
+
+  .now-playing.has-queue .now-playing-next {
+    align-self: center;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .now-playing-backdrop {
     transform: none;
+  }
+
+  .now-playing-queue {
+    animation: none;
   }
 }

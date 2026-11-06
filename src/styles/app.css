@@ -17,6 +17,17 @@
     "bar bar bar";
 }
 
+/* Now Playing (`f`): nothing but the view. */
+.app.is-immersive {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "main";
+}
+
+.app.is-immersive .toasts {
+  bottom: 16px;
+}
+
 /* ----- buttons ----- */
 
 .icon-button {
@@ -486,6 +497,16 @@
 
 .seek .time:first-child {
   text-align: right;
+}
+
+/* With the repeat button after the total time. */
+.seek.has-trailing {
+  grid-template-columns: 44px minmax(0, 1fr) 44px 32px;
+  max-width: 600px;
+}
+
+.repeat-button {
+  margin-left: -4px;
 }
 
 .bar-right {

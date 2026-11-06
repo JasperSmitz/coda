@@ -19,13 +19,34 @@ import { NowPlayingView } from "./views/NowPlayingView";
 import { Onboarding } from "./views/Onboarding";
 
 const QUEUE_OPEN_KEY = "coda.queueOpen";
+/** The Now Playing view's queue panel, remembered apart from the layout's. */
+const NP_QUEUE_OPEN_KEY = "coda.nowPlayingQueueOpen";
 
-function loadQueueOpen(): boolean {
+function loadFlag(key: string, fallback: boolean): boolean {
   try {
-    return localStorage.getItem(QUEUE_OPEN_KEY) !== "false";
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value === "true";
   } catch {
-    return true;
+    return fallback;
   }
+}
+
+/** A remembered open/closed flag. */
+function useStoredFlag(key: string, fallback: boolean): [boolean, () => void] {
+  const [open, setOpen] = useState(() => loadFlag(key, fallback));
+  const toggle = useCallback(
+    () =>
+      setOpen((was) => {
+        try {
+          localStorage.setItem(key, String(!was));
+        } catch {
+          // Not saved; harmless.
+        }
+        return !was;
+      }),
+    [key],
+  );
+  return [open, toggle];
 }
 
 /**
@@ -77,7 +98,8 @@ export default function App() {
   const view = viewFor(stack[0].route);
   useConfiguredSources(snapshot);
   useBrowseGenerations(snapshot);
-  const [queueOpen, setQueueOpen] = useState(loadQueueOpen);
+  const [layoutQueueOpen, toggleLayoutQueue] = useStoredFlag(QUEUE_OPEN_KEY, true);
+  const [npQueueOpen, toggleNpQueue] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
   const [nowPlaying, setNowPlaying] = useState(false);
   const toggleNowPlaying = useCallback(() => setNowPlaying((open) => !open), []);
   const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
@@ -88,15 +110,9 @@ export default function App() {
   // Any navigation (a sidebar entry, Go to album from Now Playing, search)
   // shows the browse view again.
   useEffect(() => setNowPlaying(false), [top]);
-  const toggleQueue = () =>
-    setQueueOpen((open) => {
-      try {
-        localStorage.setItem(QUEUE_OPEN_KEY, String(!open));
-      } catch {
-        // Not saved; harmless.
-      }
-      return !open;
-    });
+  // Now Playing hides the rest of the window; `q` toggles its own panel.
+  const immersive = nowPlaying && snapshot !== null;
+  const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -126,13 +142,44 @@ export default function App() {
     );
   }
 
+  const queuePanel = snapshot && (
+    <QueuePanel
+      queue={queue}
+      currentKey={snapshot.currentKey}
+      playingKey={snapshot.playingKey}
+      status={snapshot.status}
+      disabled={!ready}
+      locked={!started}
+      serverConfigured={snapshot.navidrome.state !== "notConfigured"}
+    />
+  );
+
+  if (immersive && snapshot) {
+    return (
+      <div className="app is-immersive">
+        <main className="main">
+          <NowPlayingView
+            snapshot={snapshot}
+            queue={queue}
+            onClose={closeNowPlaying}
+            queueOpen={npQueueOpen}
+            onToggleQueue={toggleNpQueue}
+            queuePanel={queuePanel}
+          />
+          {snapshot.phase === "starting" && <div className="starting secondary">Starting…</div>}
+        </main>
+        <Toasts notices={snapshot.notices} />
+        <DialogHost />
+      </div>
+    );
+  }
+
+  const queueOpen = layoutQueueOpen;
   return (
     <div className={`app ${queueOpen ? "queue-open" : ""}`}>
       <Sidebar view={view} onView={showView} snapshot={snapshot} />
       <main className="main">
-        {snapshot && nowPlaying ? (
-          <NowPlayingView snapshot={snapshot} queue={queue} onClose={closeNowPlaying} />
-        ) : snapshot ? (
+        {snapshot ? (
           <>
             <Banner problems={snapshot.problems} />
             {/* Sources are known once started (and the saved choice read). */}
@@ -143,23 +190,12 @@ export default function App() {
         ) : null}
         {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
       </main>
-      {queueOpen && snapshot && (
-        <QueuePanel
-          queue={queue}
-          currentKey={snapshot.currentKey}
-          playingKey={snapshot.playingKey}
-          status={snapshot.status}
-          disabled={!ready}
-          locked={!started}
-          serverConfigured={snapshot.navidrome.state !== "notConfigured"}
-        />
-      )}
+      {queueOpen && queuePanel}
       {snapshot && (
         <NowPlayingBar
           snapshot={snapshot}
           queueOpen={queueOpen}
-          onToggleQueue={toggleQueue}
-          nowPlayingOpen={nowPlaying}
+          onToggleQueue={toggleLayoutQueue}
           onToggleNowPlaying={toggleNowPlaying}
         />
       )}

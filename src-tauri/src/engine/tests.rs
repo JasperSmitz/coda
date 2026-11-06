@@ -595,17 +595,29 @@ fn progress_is_sent_when_it_changes_at_most_every_interval() {
 
 #[test]
 fn notices_expire_and_can_be_dismissed() {
-    let fixture = Fixture::new(&["a.flac"]);
-    let (mut engine, now) = started(&fixture, &["a.flac"], Some(0));
-    engine.handle_intent(Intent::CycleRepeat, now);
+    let fixture = Fixture::new(&["a.flac", "b.flac", "c.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac", "b.flac", "c.flac"], Some(0));
+    engine.handle_intent(Intent::ShuffleUpcoming, now);
     let notices = engine.full_snapshot().notices;
     assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].text, "Repeat all");
+    assert_eq!(notices[0].text, "Shuffled 2 upcoming entries");
     engine.handle_intent(Intent::DismissNotice { id: notices[0].id }, now);
     assert!(engine.full_snapshot().notices.is_empty());
-    engine.handle_intent(Intent::CycleRepeat, now);
+    engine.handle_intent(Intent::ShuffleUpcoming, now);
     engine.tick(now + NOTICE_TTL);
     assert!(engine.full_snapshot().notices.is_empty());
+}
+
+#[test]
+fn cycling_repeat_changes_the_mode_without_a_notice() {
+    let fixture = Fixture::new(&["a.flac"]);
+    let (mut engine, now) = started(&fixture, &["a.flac"], Some(0));
+    for expected in [RepeatDto::All, RepeatDto::One, RepeatDto::Off] {
+        engine.handle_intent(Intent::CycleRepeat, now);
+        let snapshot = engine.full_snapshot();
+        assert_eq!(snapshot.repeat, expected);
+        assert!(snapshot.notices.is_empty(), "{:?}", snapshot.notices);
+    }
 }
 
 #[test]

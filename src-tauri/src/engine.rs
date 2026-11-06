@@ -371,7 +371,9 @@ impl Engine {
             Intent::SeekBy { seconds } => self.player.seek_relative(seconds),
             Intent::SetVolume { volume } => self.player.set_volume(volume),
             Intent::CycleRepeat => {
-                self.player.cycle_repeat();
+                // The repeat button shows the mode; no "Repeat …" notice
+                // (the player's `cycle_repeat` would post one).
+                self.player.set_repeat(self.player.repeat().next());
                 Vec::new()
             }
             Intent::PlayEntry { key } => match self.entry_id(&key) {
