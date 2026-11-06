@@ -12,6 +12,7 @@ pub mod commands;
 pub mod cover;
 pub mod dto;
 pub mod engine;
+pub mod history;
 pub mod media;
 pub mod playlists;
 pub mod settings;
@@ -274,7 +275,11 @@ pub fn run() {
             theme::commands::theme_duplicate,
             theme::commands::theme_delete,
             theme::commands::theme_reveal_folder,
-            theme::commands::theme_window_background
+            theme::commands::theme_window_background,
+            theme::commands::ui_source_get,
+            theme::commands::ui_source_set,
+            history::commands::home_history,
+            history::commands::home_daily_picks
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

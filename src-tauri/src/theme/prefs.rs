@@ -1,6 +1,7 @@
 //! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
 //! from Coda's shared `config.toml`: the theme mode and names, accent
-//! overrides per theme and the visualizer's colours. Written atomically;
+//! overrides per theme, the visualizer's colours, and the source the
+//! sidebar browses. Written atomically;
 //! an unreadable or invalid file means the defaults (and is kept as
 //! `settings.toml.bad` when it is next replaced).
 
@@ -50,6 +51,11 @@ pub struct Prefs {
     /// Accent override by theme name (`#rrggbb`).
     pub accents: BTreeMap<String, String>,
     pub visualizer: VisualizerColors,
+    /// The source the sidebar browses (`None`: Navidrome if configured,
+    /// else local). Changed only by `ui_source_set`; `appearance_set`
+    /// keeps it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::history::SourceKind>,
 }
 
 impl Default for Prefs {
@@ -61,6 +67,7 @@ impl Default for Prefs {
             dark_theme: DEFAULT_DARK.into(),
             accents: BTreeMap::new(),
             visualizer: VisualizerColors::Accent,
+            source: None,
         }
     }
 }
@@ -187,11 +194,28 @@ mod tests {
             mode: Mode::Ghostty,
             theme: "Kanso Zen".into(),
             visualizer: VisualizerColors::Palette,
+            source: Some(crate::history::SourceKind::Local),
             ..Prefs::default()
         };
         prefs.accents.insert("Kanso Zen".into(), "#112233".into());
         save(&path, &prefs, false).unwrap();
         assert_eq!(load(Some(&path)), (prefs, false));
+    }
+
+    #[test]
+    fn the_source_is_optional_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "source = \"navidrome\"\n").unwrap();
+        assert_eq!(
+            load(Some(&path)).0.source,
+            Some(crate::history::SourceKind::Navidrome)
+        );
+        // Unset: not written at all.
+        save(&path, &Prefs::default(), false).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("source"));
+        std::fs::write(&path, "source = \"web\"\n").unwrap();
+        assert_eq!(load(Some(&path)), (Prefs::default(), true));
     }
 
     #[test]

@@ -248,6 +248,40 @@ pub struct VisualizerDto {
     pub bands: [Option<f32>; coda_core::playback::VISUALIZER_BANDS],
 }
 
+/// A context play's descriptor from the UI (`playTracks`' `context`): the
+/// view it plays from, for the play history.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PlayContextDto {
+    Album(NamedContextDto),
+    Artist(NamedContextDto),
+    Playlist(NamedContextDto),
+    /// A local folder (names from the music root).
+    Folder {
+        path: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedContextDto {
+    pub source: crate::history::SourceKind,
+    /// A local id of the current library, or the server's id.
+    pub id: String,
+    /// Navidrome: what to show (local names come from the library).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    /// Navidrome: the cover URL the UI was given for it.
+    #[serde(default)]
+    pub cover_url: Option<String>,
+}
+
 /// What the UI asks the engine to do (the `intent` command's argument),
 /// tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -291,6 +325,10 @@ pub enum Intent {
         start: Option<usize>,
         #[serde(default)]
         shuffle: bool,
+        /// The album, artist, playlist or folder it plays from, for the
+        /// play history (Home).
+        #[serde(default)]
+        context: Option<PlayContextDto>,
     },
     /// Add `tracks` at the end, or after the current entry when `next`.
     Enqueue {
@@ -448,6 +486,7 @@ mod tests {
                     tracks: vec![],
                     start: None,
                     shuffle: false,
+                    context: None,
                 },
             ),
             (

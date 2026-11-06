@@ -13,7 +13,7 @@ import {
   type RefObject,
 } from "react";
 import { browse } from "../lib/browse";
-import { enqueue, playFrom, playTracks } from "../lib/play";
+import { albumContext, enqueue, playFrom, playTracks } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav } from "../state/nav";
 import { useAppState } from "../state/store";
@@ -211,13 +211,28 @@ export function AlbumGrid({
             {
               label: "Play",
               disabled,
-              action: () => playFrom(async () => playTracks(await tracksOf(menu.album))),
+              action: () =>
+                playFrom(async () =>
+                  playTracks(
+                    await tracksOf(menu.album),
+                    undefined,
+                    false,
+                    albumContext(source, menu.album),
+                  ),
+                ),
             },
             {
               label: "Shuffle",
               disabled,
               action: () =>
-                playFrom(async () => playTracks(await tracksOf(menu.album), undefined, true)),
+                playFrom(async () =>
+                  playTracks(
+                    await tracksOf(menu.album),
+                    undefined,
+                    true,
+                    albumContext(source, menu.album),
+                  ),
+                ),
             },
             {
               label: "Play next",

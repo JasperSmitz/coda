@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-home-daily-picks"
+description = "Enables the home_daily_picks command without any pre-configured scope."
+commands.allow = ["home_daily_picks"]
+
+[[permission]]
+identifier = "deny-home-daily-picks"
+description = "Denies the home_daily_picks command without any pre-configured scope."
+commands.deny = ["home_daily_picks"]

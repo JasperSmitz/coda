@@ -57,6 +57,12 @@ impl Engine {
         let commands = match change {
             SettingsChange::Client { client, scrobble } => {
                 let connected = client.is_some();
+                if connected {
+                    // Another server (or the same one saved again): the
+                    // cached Daily Picks may name its albums no longer.
+                    self.history.clear_daily();
+                    self.history_changed(now);
+                }
                 let commands = self.swap_client(client, scrobble, now);
                 self.notify(
                     if connected {

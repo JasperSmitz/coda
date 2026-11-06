@@ -49,6 +49,11 @@ fn main() {
         "theme_delete",
         "theme_reveal_folder",
         "theme_window_background",
+        // The browsed source (settings.toml) and the Home view.
+        "ui_source_get",
+        "ui_source_set",
+        "home_history",
+        "home_daily_picks",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

@@ -1,12 +1,23 @@
 // Playing in context: thin helpers over the `playTracks` / `enqueue`
-// intents, the shuffle-context hook for `s`, and track navigation.
+// intents, the shuffle-context hook for `s`, and track navigation. A play
+// from a view names its context (album, artist, playlist, folder) for the
+// play history behind Home.
 
 import { useEffect, useRef } from "react";
-import { nav } from "../state/nav";
+import { nav, type Route } from "../state/nav";
+import { switchSource } from "../state/source";
 import { showUiNotice } from "../state/uiNotices";
 import { browse, clearBrowseCache, toBrowseError } from "./browse";
 import { intent } from "./ipc";
-import type { LocalContext, SourceKind, Track } from "./types";
+import type {
+  Album,
+  Artist,
+  LocalContext,
+  PlayContext,
+  Playlist,
+  SourceKind,
+  Track,
+} from "./types";
 
 /**
  * Runs a play action that first loads from the library or server, and
@@ -31,9 +42,54 @@ export function playLocal(context: LocalContext, shuffle: boolean, start?: numbe
   intent({ type: "playLocal", context, start: start ?? null, shuffle });
 }
 
-export function playTracks(tracks: Track[], start?: number, shuffle = false) {
+export function playTracks(
+  tracks: Track[],
+  start?: number,
+  shuffle = false,
+  context?: PlayContext | null,
+) {
   if (tracks.length === 0) return;
-  intent({ type: "playTracks", tracks, start: start ?? null, shuffle });
+  intent({ type: "playTracks", tracks, start: start ?? null, shuffle, context: context ?? null });
+}
+
+// ----- contexts for the play history -------------------------------------
+
+export function albumContext(
+  source: SourceKind,
+  album: Pick<Album, "id" | "name" | "artist" | "coverUrl">,
+): PlayContext {
+  return {
+    kind: "album",
+    source,
+    id: album.id,
+    name: album.name,
+    subtitle: album.artist,
+    coverUrl: album.coverUrl,
+  };
+}
+
+export function artistContext(
+  source: SourceKind,
+  artist: Pick<Artist, "id" | "name" | "coverUrl">,
+): PlayContext {
+  return { kind: "artist", source, id: artist.id, name: artist.name, coverUrl: artist.coverUrl };
+}
+
+export function playlistContext(
+  source: SourceKind,
+  playlist: Pick<Playlist, "id" | "name" | "coverUrl">,
+): PlayContext {
+  return {
+    kind: "playlist",
+    source,
+    id: playlist.id,
+    name: playlist.name,
+    coverUrl: playlist.coverUrl,
+  };
+}
+
+export function folderContext(path: string[]): PlayContext {
+  return { kind: "folder", path };
 }
 
 export function enqueue(tracks: Track[], next: boolean) {
@@ -75,9 +131,16 @@ export function canGoToArtist(track: Track): boolean {
   return track.artistId !== null;
 }
 
+/** Opens `route`, on its own source's stack (switching source first). */
+export function openRoute(route: Route & { source: SourceKind }) {
+  if (route.source !== nav.source()) switchSource(route.source);
+  // The switch is refused for a source that is not configured.
+  if (route.source === nav.source()) nav.push(route);
+}
+
 export function goToAlbum(track: Track) {
   if (track.albumId === null) return;
-  nav.push({
+  openRoute({
     kind: "album",
     source: sourceOf(track),
     id: track.albumId,
@@ -87,7 +150,7 @@ export function goToAlbum(track: Track) {
 
 export function goToArtist(track: Track) {
   if (track.artistId === null) return;
-  nav.push({
+  openRoute({
     kind: "artist",
     source: sourceOf(track),
     id: track.artistId,

@@ -624,3 +624,57 @@
   color: var(--accent-text);
   outline: none;
 }
+
+/* ----- source switch (both sources configured) ----- */
+
+.source-switch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--surface-3);
+}
+
+.source-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  min-width: 0;
+  padding: 0 6px;
+  border-radius: var(--radius-small);
+  color: var(--text-2);
+  font-size: var(--text-small);
+  font-weight: 550;
+  transition:
+    background var(--motion-fast),
+    color var(--motion-fast);
+}
+
+.source-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-option:hover {
+  color: var(--text);
+}
+
+.source-option.is-active {
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.source-status {
+  padding-bottom: 0;
+}

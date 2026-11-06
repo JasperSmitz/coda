@@ -1,14 +1,16 @@
-// Navigation: a back stack of routes (DESIGN.md: Artists → Artist →
-// Album). The sidebar resets the stack to one of its roots; views push.
-// Each entry remembers its scroll position, so Back returns to the same
-// place.
+// Navigation: one back stack of routes per source (DESIGN.md: Home →
+// Artists → Artist → Album). The sidebar resets the active source's stack
+// to one of its roots; views push. Switching the source shows the other
+// stack where it was left. Each entry remembers its scroll position, so
+// Back returns to the same place.
 
 import { useSyncExternalStore } from "react";
 import type { Album, AlbumSort, LocalAlbumOrder, Playlist, SourceKind } from "../lib/types";
 import type { ViewId } from "../views/viewList";
 
 export type Route =
-  | { kind: "search"; query: string }
+  | { kind: "home"; source: SourceKind }
+  | { kind: "search"; source: SourceKind; query: string }
   | { kind: "artists"; source: SourceKind }
   | { kind: "albums"; source: "local"; order: LocalAlbumOrder }
   | { kind: "albums"; source: "navidrome"; sort: AlbumSort }
@@ -30,30 +32,42 @@ export interface Entry {
 let nextId = 1;
 const entry = (route: Route): Entry => ({ id: nextId++, route, scrollTop: 0 });
 
-let stack: Entry[] = [entry({ kind: "artists", source: "local" })];
+const home = (source: SourceKind): Entry => entry({ kind: "home", source });
+
+let active: SourceKind = "local";
+const stacks: Record<SourceKind, Entry[]> = {
+  local: [home("local")],
+  navidrome: [home("navidrome")],
+};
 const listeners = new Set<() => void>();
 
-function set(next: Entry[]) {
-  stack = next;
+function notify() {
   listeners.forEach((l) => l());
 }
 
+function set(next: Entry[], source: SourceKind = active) {
+  stacks[source] = next;
+  if (source === active) notify();
+}
+
+const stack = () => stacks[active];
+
 export const nav = {
   push(route: Route) {
-    set([...stack, entry(route)]);
+    set([...stack(), entry(route)]);
   },
   /** Replaces the top route (e.g. a new sort), keeping the stack. */
   replace(route: Route) {
-    set([...stack.slice(0, -1), entry(route)]);
+    set([...stack().slice(0, -1), entry(route)]);
   },
   /** Shows the top route again from scratch (reloads it). */
   reload() {
-    nav.replace(stack[stack.length - 1].route);
+    nav.replace(nav.top().route);
   },
   /** Back; the root stays. Returns `false` at the root. */
   back(): boolean {
-    if (stack.length <= 1) return false;
-    set(stack.slice(0, -1));
+    if (stack().length <= 1) return false;
+    set(stack().slice(0, -1));
     return true;
   },
   /** A sidebar destination: a new stack with `route` at its root. */
@@ -61,16 +75,35 @@ export const nav = {
     set([entry(route)]);
   },
   /** Opens search, or focuses it if it is already the top view. */
-  search() {
-    const top = stack[stack.length - 1].route;
-    if (top.kind === "search") {
+  search(query = "") {
+    const top = nav.top().route;
+    if (top.kind === "search" && query === "") {
       document.querySelector<HTMLInputElement>(".search-input")?.focus();
       return;
     }
-    nav.push({ kind: "search", query: "" });
+    nav.push({ kind: "search", source: active, query });
   },
   top(): Entry {
-    return stack[stack.length - 1];
+    const s = stack();
+    return s[s.length - 1];
+  },
+  /** The source whose stack is shown. */
+  source(): SourceKind {
+    return active;
+  },
+  /**
+   * Shows `source`'s stack (where it was left). Callers go through
+   * `state/source.ts`, which also saves the choice. `keepSettings`: if
+   * Settings was shown, it stays shown (a source disconnected there).
+   */
+  setSource(source: SourceKind, keepSettings = false) {
+    if (source === active) return;
+    const settings = nav.top().route.kind === "settings";
+    active = source;
+    if (keepSettings && settings && nav.top().route.kind !== "settings") {
+      stacks[source] = [...stacks[source], entry({ kind: "settings" })];
+    }
+    notify();
   },
 };
 
@@ -81,16 +114,16 @@ function subscribe(listener: () => void) {
   };
 }
 
+/** The active source's stack. */
 export function useNav(): Entry[] {
-  return useSyncExternalStore(subscribe, () => stack);
+  return useSyncExternalStore(subscribe, stack);
 }
 
-/** The source a route reads (`null`: none or both). */
+/** The source a route reads (`null`: none). */
 export function routeSource(route: Route): SourceKind | null {
   switch (route.kind) {
     case "folder":
       return "local";
-    case "search":
     case "settings":
       return null;
     default:
@@ -100,58 +133,53 @@ export function routeSource(route: Route): SourceKind | null {
 
 /**
  * The library or server was replaced (settings): every view of that
- * source (and search) holds stale ids, so the stack restarts at its root,
- * which reloads.
+ * source holds stale ids, so its stack restarts at Home, which reloads.
  */
 export function sourceReplaced(source: SourceKind) {
-  const affected = stack.some((e) => {
-    const s = routeSource(e.route);
-    return s === source || e.route.kind === "search";
-  });
-  if (affected) nav.root(stack[0].route);
+  set([home(source)], source);
 }
 
-/** The sidebar's routes. */
-export function routeFor(view: ViewId): Route {
+/** The sidebar's routes, for the active source. */
+export function routeFor(view: ViewId, source: SourceKind): Route {
   switch (view) {
+    case "home":
+      return { kind: "home", source };
     case "search":
-      return { kind: "search", query: "" };
-    case "local-artists":
-      return { kind: "artists", source: "local" };
-    case "local-albums":
-      return { kind: "albums", source: "local", order: "name" };
-    case "local-folders":
+      return { kind: "search", source, query: "" };
+    case "artists":
+      return { kind: "artists", source };
+    case "albums":
+      return source === "local"
+        ? { kind: "albums", source, order: "name" }
+        : { kind: "albums", source, sort: "name" };
+    case "folders":
       return { kind: "folder", path: [] };
-    case "local-playlists":
-      return { kind: "playlists", source: "local" };
-    case "navidrome-artists":
-      return { kind: "artists", source: "navidrome" };
-    case "navidrome-albums":
-      return { kind: "albums", source: "navidrome", sort: "name" };
-    case "navidrome-playlists":
-      return { kind: "playlists", source: "navidrome" };
+    case "playlists":
+      return { kind: "playlists", source };
     case "settings":
       return { kind: "settings" };
   }
 }
 
 /** The sidebar entry a route belongs to (the stack's root decides). */
-export function viewFor(route: Route): ViewId | null {
+export function viewFor(route: Route): ViewId {
   switch (route.kind) {
+    case "home":
+      return "home";
     case "search":
       return "search";
     case "settings":
       return "settings";
     case "folder":
-      return "local-folders";
+      return "folders";
     case "artists":
     case "artist":
-      return route.source === "local" ? "local-artists" : "navidrome-artists";
+      return "artists";
     case "albums":
     case "album":
-      return route.source === "local" ? "local-albums" : "navidrome-albums";
+      return "albums";
     case "playlists":
     case "playlist":
-      return route.source === "local" ? "local-playlists" : "navidrome-playlists";
+      return "playlists";
   }
 }

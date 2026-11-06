@@ -1,11 +1,12 @@
 // Navigation keys (DESIGN.md): Back with Backspace, Alt+←, Escape or the
 // mouse back button; `/` or Ctrl+F search; `s` shuffles the shown
-// context. Ignored while typing in a text field (Escape there leaves the
+// context; Ctrl/Cmd+1 and +2 switch to the local library and Navidrome. Ignored while typing in a text field (Escape there leaves the
 // field first).
 
 import { useEffect, useRef } from "react";
 import { shuffleContext } from "../lib/play";
 import { nav } from "../state/nav";
+import { switchSource } from "../state/source";
 import { isTyping } from "./useShortcuts";
 
 interface Options {
@@ -40,6 +41,15 @@ export function useBrowseKeys({ enabled, active, onBack }: Options) {
       const typing = isTyping(e.target);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && !e.altKey) {
         search();
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.key === "1" || e.key === "2")
+      ) {
+        // Shows the other stack; an overlay (Now Playing) closes with it.
+        state.current.onBack?.();
+        switchSource(e.key === "1" ? "local" : "navidrome");
       } else if (e.altKey && e.key === "ArrowLeft" && !typing) {
         back();
       } else if (typing) {

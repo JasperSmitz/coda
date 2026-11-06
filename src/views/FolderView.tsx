@@ -9,7 +9,7 @@ import { FolderIcon } from "../components/icons";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
-import { playLocal, useShuffleContext } from "../lib/play";
+import { folderContext, playLocal, useShuffleContext } from "../lib/play";
 import { nav, type Entry } from "../state/nav";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
@@ -98,6 +98,7 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
             showArtist
             showAlbum
             label={`Tracks in ${title}`}
+            context={folderContext(path)}
           />
         )}
       </div>

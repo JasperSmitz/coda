@@ -155,3 +155,30 @@ export const BackIcon = (p: IconProps) => (
     <path d="M15 5l-7 7 7 7" />
   </Icon>
 );
+export const ForwardIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 5l7 7-7 7" />
+  </Icon>
+);
+export const HomeIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 10.5L12 4l8 6.5" />
+    <path d="M6.5 9v10.5h11V9" />
+    <path d="M10 19.5v-5h4v5" />
+  </Icon>
+);
+/** The local library (this computer). */
+export const LocalIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.5" y="5" width="17" height="11" rx="1.5" />
+    <path d="M9 19.5h6M12 16v3.5" />
+  </Icon>
+);
+/** A Navidrome server. */
+export const ServerIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="4" y="4.5" width="16" height="6" rx="1.5" />
+    <rect x="4" y="13.5" width="16" height="6" rx="1.5" />
+    <path d="M7.5 7.5h.01M7.5 16.5h.01" strokeWidth={2.6} />
+  </Icon>
+);

@@ -8,7 +8,7 @@ import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
-import { playFrom, playLocal, playTracks, useShuffleContext } from "../lib/play";
+import { artistContext, playFrom, playLocal, playTracks, useShuffleContext } from "../lib/play";
 import type { SourceKind } from "../lib/types";
 import type { Entry } from "../state/nav";
 import { PlayButtons, SOURCE_LABEL, ViewHeader, plural } from "./common";
@@ -31,18 +31,24 @@ export function ArtistView({ entry, source, id, name }: Props) {
   const albums = load.data?.albums ?? [];
   useScroll(scroller, entry, albums.length > 0);
 
-  // Local: the engine resolves the artist (no track list over IPC).
+  const artist = load.data?.artist;
+  const title = artist?.name || name;
+  const cover = artist?.coverUrl ?? albums[0]?.coverUrl ?? null;
+
+  // Local: the engine resolves the artist (no track list over IPC) and
+  // records it in the play history itself.
   const play = (shuffle: boolean) =>
     source === "local"
       ? playLocal({ kind: "artist", id }, shuffle)
       : playFrom(async () =>
-          playTracks(await browse.navidromeArtistTracks(id), undefined, shuffle),
+          playTracks(
+            await browse.navidromeArtistTracks(id),
+            undefined,
+            shuffle,
+            artistContext(source, { id, name: title, coverUrl: cover }),
+          ),
         );
   useShuffleContext(load.state === "ready" && albums.length > 0 ? () => play(true) : null);
-
-  const artist = load.data?.artist;
-  const title = artist?.name || name;
-  const cover = artist?.coverUrl ?? albums[0]?.coverUrl ?? null;
   const tracks = artist?.trackCount;
   return (
     <section className="view">

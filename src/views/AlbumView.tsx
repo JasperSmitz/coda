@@ -8,7 +8,7 @@ import { TrackTable } from "../components/TrackTable";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
-import { playTracks, useShuffleContext } from "../lib/play";
+import { albumContext, playTracks, useShuffleContext } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { PlayButtons, SOURCE_LABEL, summary, ViewHeader } from "./common";
@@ -31,8 +31,6 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const tracks = load.data?.tracks ?? [];
   useScroll(scroller, entry, tracks.length > 0);
-  useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true) : null);
-
   // The listing's data first (it knows the year), the album's own after.
   const loaded = load.data?.album;
   const album: Album | undefined = loaded
@@ -46,6 +44,13 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
   const mixed = new Set(tracks.map((t) => t.artist)).size > 1;
   const artistId = album?.artistId ?? null;
   const artistName = album?.artist ?? null;
+  const context = albumContext(source, {
+    id,
+    name: title,
+    artist: artistName,
+    coverUrl: album?.coverUrl ?? null,
+  });
+  useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
 
   return (
     <section className="view">
@@ -62,8 +67,8 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
         }
         actions={
           <PlayButtons
-            onPlay={() => playTracks(tracks)}
-            onShuffle={() => playTracks(tracks, undefined, true)}
+            onPlay={() => playTracks(tracks, undefined, false, context)}
+            onShuffle={() => playTracks(tracks, undefined, true, context)}
             disabled={tracks.length === 0}
           />
         }
@@ -100,6 +105,7 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
             showArtist={mixed}
             discs
             label={`Tracks of ${title}`}
+            context={context}
           />
         )}
       </div>

@@ -1,6 +1,7 @@
-// Search (`/` or Ctrl+F): a debounced query against each configured
-// source, results grouped by source into artists, albums and tracks.
-// Enter on a track plays the source's matching tracks from it.
+// Search (`/` or Ctrl+F): a debounced query against the active source,
+// results grouped into artists, albums and tracks, with a link to search
+// the other source instead. Enter on a track plays the matching tracks
+// from it.
 
 import { useEffect, useRef, useState } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
@@ -13,14 +14,27 @@ import { browse } from "../lib/browse";
 import { playTracks, useShuffleContext } from "../lib/play";
 import type { SearchResults, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
-import { useAppState } from "../state/store";
+import { bothConfigured, switchSource, useSources } from "../state/source";
 import { openArtist } from "./ArtistsView";
 import { SOURCE_LABEL, ViewHeader, plural } from "./common";
 
 const DEBOUNCE_MS = 250;
 
-export function SearchView({ entry, query }: { entry: Entry; query: string }) {
-  const { snapshot } = useAppState();
+interface Props {
+  entry: Entry;
+  source: SourceKind;
+  query: string;
+}
+
+/** Searches the other source for `query` (on its own stack). */
+function searchOther(source: SourceKind, query: string) {
+  switchSource(source);
+  if (nav.source() === source) nav.search(query);
+}
+
+export function SearchView({ entry, source, query }: Props) {
+  const sources = useSources();
+  const other: SourceKind = source === "local" ? "navidrome" : "local";
   const [text, setText] = useState(query);
   const [submitted, setSubmitted] = useState(query.trim());
   const input = useRef<HTMLInputElement>(null);
@@ -34,25 +48,21 @@ export function SearchView({ entry, query }: { entry: Entry; query: string }) {
     const timer = window.setTimeout(() => {
       setSubmitted(text.trim());
       // Remember the query on this entry, so Back returns to it.
-      if (entry.route.kind === "search") entry.route = { kind: "search", query: text };
+      if (entry.route.kind === "search") entry.route = { kind: "search", source, query: text };
     }, DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [text, entry]);
-
-  const sources: SourceKind[] = [];
-  if (snapshot && snapshot.scan.state !== "noLibrary") sources.push("local");
-  if (snapshot && snapshot.navidrome.state !== "notConfigured") sources.push("navidrome");
+  }, [text, entry, source]);
 
   return (
     <section className="view">
-      <ViewHeader title="Search">
+      <ViewHeader eyebrow={SOURCE_LABEL[source]} title="Search">
         <div className="search-box">
           <SearchIcon size={16} />
           <input
             ref={input}
             className="search-input"
             type="search"
-            placeholder="Artists, albums, tracks"
+            placeholder={`Artists, albums, tracks in ${source === "local" ? "the local library" : "Navidrome"}`}
             value={text}
             spellCheck={false}
             onChange={(e) => setText(e.target.value)}
@@ -66,25 +76,22 @@ export function SearchView({ entry, query }: { entry: Entry; query: string }) {
             aria-label="Search"
           />
         </div>
+        {bothConfigured(sources) && (
+          <button
+            className="link-button search-other"
+            onClick={() => searchOther(other, text.trim())}
+          >
+            Search {other === "navidrome" ? "Navidrome" : "the local library"} instead
+          </button>
+        )}
       </ViewHeader>
       <div className="view-body" ref={scroller}>
         {submitted === "" ? (
           <Empty title="Search your music">
-            Type to search{" "}
-            {sources.map((s) => SOURCE_LABEL[s].toLowerCase()).join(" and ") || "your library"}.
+            Type to search {source === "local" ? "the local library" : "Navidrome"}.
           </Empty>
-        ) : sources.length === 0 ? (
-          <Empty title="Nothing to search">No music folder or server is configured.</Empty>
         ) : (
-          sources.map((source) => (
-            <SourceResults
-              key={source}
-              source={source}
-              query={submitted}
-              scroller={scroller}
-              only={sources.length === 1}
-            />
-          ))
+          <SourceResults key={source} source={source} query={submitted} scroller={scroller} />
         )}
       </div>
     </section>
@@ -95,22 +102,16 @@ function SourceResults({
   source,
   query,
   scroller,
-  only,
 }: {
   source: SourceKind;
   query: string;
   scroller: React.RefObject<HTMLDivElement | null>;
-  only: boolean;
 }) {
   const load = useLoad<SearchResults>(() => browse.search(source, query), `${source}:${query}`);
   const results = load.data;
   const tracks = results?.tracks ?? [];
-  // `s` shuffles the first source's tracks.
-  useShuffleContext(
-    tracks.length > 0 && (only || source === "local")
-      ? () => playTracks(tracks, undefined, true)
-      : null,
-  );
+  // `s` shuffles the matching tracks.
+  useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true) : null);
 
   const empty =
     results &&
@@ -119,7 +120,6 @@ function SourceResults({
     results.tracks.length === 0;
   return (
     <section className="search-section">
-      {!only && <h2 className="section-title">{SOURCE_LABEL[source]}</h2>}
       {load.state === "loading" && <SkeletonRows count={5} />}
       {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
       {empty && <p className="secondary search-none">No matches for “{query}”.</p>}

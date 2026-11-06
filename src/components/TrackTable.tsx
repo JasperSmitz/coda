@@ -16,7 +16,7 @@ import {
 } from "react";
 import { formatTime } from "../lib/format";
 import { playTracks, sameTrack } from "../lib/play";
-import type { Track } from "../lib/types";
+import type { PlayContext, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import type { MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -73,6 +73,8 @@ interface Props {
   discs?: boolean;
   /** Plays the list from `index` (default: `playTracks(tracks, index)`). */
   onPlay?: (index: number) => void;
+  /** What the list is (album, playlist, folder), for the play history. */
+  context?: PlayContext | null;
   label: string;
 }
 
@@ -99,6 +101,7 @@ export function TrackTable({
   showArtist = false,
   discs = false,
   onPlay,
+  context,
   label,
 }: Props) {
   const { snapshot } = useAppState();
@@ -154,7 +157,7 @@ export function TrackTable({
   const play = (index: number) => {
     if (disabled) return;
     if (onPlay) onPlay(index);
-    else playTracks(tracks, index);
+    else playTracks(tracks, index, false, context);
   };
 
   const rowOf = (index: number) => rows.findIndex((r) => r.kind === "track" && r.index === index);

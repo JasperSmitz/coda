@@ -169,15 +169,21 @@ impl CoverService {
         cover_url: &str,
         size: CoverSize,
     ) -> Option<Arc<cover::CoverImage>> {
-        let token = cover_url.rsplit('/').next()?;
-        let token = u64::from_str_radix(token, 16)
-            .ok()
-            .filter(|_| token.len() == 16)?;
-        let key = self.registry.get(token)?;
+        let key = self.key_for_url(cover_url)?;
         match self.load(&key, size).await {
             Outcome::Art(image) => Some(image),
             Outcome::NoArt | Outcome::Failed => None,
         }
+    }
+
+    /// The key behind a cover URL this service handed out, if it is still
+    /// known (the play history keeps a Navidrome context's `coverArt` id).
+    pub fn key_for_url(&self, cover_url: &str) -> Option<CoverKey> {
+        let token = cover_url.rsplit('/').next()?;
+        let token = u64::from_str_radix(token, 16)
+            .ok()
+            .filter(|_| token.len() == 16)?;
+        self.registry.get(token)
     }
 
     async fn load(&self, key: &CoverKey, size: CoverSize) -> Outcome {

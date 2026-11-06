@@ -11,6 +11,7 @@ import type {
   ArtistDetail,
   BrowseError,
   Folder,
+  HomeHistory,
   LocalAlbumOrder,
   Playlist,
   PlaylistDetail,
@@ -119,6 +120,16 @@ export const browse = {
 
   randomSongs(): Promise<Track[]> {
     return call("navidrome_random_songs");
+  },
+
+  /** Recently / most played contexts of a source (never cached). */
+  homeHistory(source: SourceKind): Promise<HomeHistory> {
+    return call("home_history", { source });
+  },
+
+  /** The Daily Picks of the local calendar day `date` (`YYYY-MM-DD`). */
+  dailyPicks(source: SourceKind, date: string): Promise<Album[]> {
+    return call("home_daily_picks", { source, date });
   },
 
   search(source: SourceKind, query: string): Promise<SearchResults> {
