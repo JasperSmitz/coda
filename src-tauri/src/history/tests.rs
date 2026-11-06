@@ -1,7 +1,7 @@
 //! Play history: recording rules, bounds, persistence (atomic, FIFO-safe,
 //! corrupt files set aside), local keys and their resolution, Daily Picks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -262,21 +262,77 @@ fn a_missing_file_is_an_empty_history_that_saves() {
     assert!(load(None).path.is_none());
 }
 
+/// The file `load` set aside (`history.json.bad.<time>`), taken away.
+fn take_aside(dir: &Path) -> Option<String> {
+    let entry = std::fs::read_dir(dir).unwrap().flatten().find(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("history.json.bad.")
+    })?;
+    let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+    std::fs::remove_file(entry.path()).unwrap();
+    Some(text)
+}
+
 #[test]
 fn a_corrupt_file_is_set_aside_and_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.json");
-    for bad in ["not json", "{\"version\": 99}", "{\"plays\": 3}"] {
+    for bad in ["not json", "{\"version\": 0}", "{\"plays\": 3}"] {
         std::fs::write(&path, bad).unwrap();
         let loaded = load(Some(path.clone()));
         assert_eq!(loaded.path.as_ref(), Some(&path), "{bad}");
         assert_eq!(loaded.history.plays().count(), 0);
         assert!(!path.exists(), "moved aside: {bad}");
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("history.json.bad")).unwrap(),
-            bad
-        );
+        assert_eq!(take_aside(dir.path()).as_deref(), Some(bad));
     }
+}
+
+#[test]
+fn a_newer_or_too_large_file_is_kept_and_not_saved_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.json");
+    let newer = "{\"version\": 99, \"plays\": \"something new\"}";
+    std::fs::write(&path, newer).unwrap();
+    let loaded = load(Some(path.clone()));
+    assert!(loaded.path.is_none(), "not saved this run");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    assert!(take_aside(dir.path()).is_none());
+
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(MAX_FILE_BYTES + 1).unwrap();
+    let loaded = load(Some(path.clone()));
+    assert!(loaded.path.is_none());
+    assert!(path.exists());
+    assert!(take_aside(dir.path()).is_none());
+}
+
+#[test]
+fn a_saved_history_never_exceeds_what_load_accepts() {
+    let mut file = HistoryFile {
+        version: 1,
+        ..HistoryFile::default()
+    };
+    for i in 0..200u64 {
+        file.counts.push(Count {
+            context: remote(ContextKind::Album, &format!("c{i}")),
+            listens: 1,
+            last: 1000 - i,
+        });
+        file.plays.push(Played {
+            context: remote(ContextKind::Album, &format!("p{i}")),
+            at: i,
+        });
+    }
+    let whole = bounded_bytes(&file, u64::MAX).unwrap();
+    let max = whole.len() as u64 / 3;
+    let bytes = bounded_bytes(&file, max).unwrap();
+    assert!(bytes.len() as u64 <= max);
+    let saved: HistoryFile = serde_json::from_slice(&bytes).unwrap();
+    // The most recent counts and the newest plays stay.
+    assert!(!saved.counts.is_empty() && !saved.plays.is_empty());
+    assert_eq!(saved.counts[0].context.id, "c0");
+    assert_eq!(saved.plays.last().unwrap().context.id, "p199");
 }
 
 #[test]
@@ -289,7 +345,11 @@ fn a_fifo_is_never_opened_for_reading() {
     // Would block forever on a plain open (no writer).
     let loaded = load(Some(path.clone()));
     assert_eq!(loaded.history.plays().count(), 0);
-    assert!(dir.path().join("history.json.bad").exists());
+    assert!(std::fs::read_dir(dir.path()).unwrap().flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("history.json.bad.")
+    }));
     assert!(!path.exists());
 }
 
@@ -491,6 +551,19 @@ fn local_daily_picks_are_stable_for_a_day_and_change_with_it() {
     }));
     browse.replace_library(Some(reversed));
     assert_eq!(picks("2026-11-06"), today);
+    // One more album: the picks change at most where it outranks one.
+    let mut grown = library(40);
+    grown.extend([local_track("Band 9/Extra/1.flac", "Band 9", "Extra")]);
+    browse.replace_library(Some(grown));
+    let after = picks("2026-11-06");
+    assert_eq!(after.len(), DAILY_PICKS);
+    let kept = after.iter().filter(|name| today.contains(name)).count();
+    assert!(kept >= DAILY_PICKS - 1, "{today:?} -> {after:?}");
+    assert!(
+        after
+            .iter()
+            .all(|name| today.contains(name) || name == "Extra")
+    );
     // Fewer albums than picks: all of them.
     browse.replace_library(Some(library(3)));
     assert_eq!(picks("2026-11-06").len(), 3);

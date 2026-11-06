@@ -6,7 +6,7 @@
 import { useEffect, useRef } from "react";
 import { shuffleContext } from "../lib/play";
 import { nav } from "../state/nav";
-import { switchSource } from "../state/source";
+import { canSwitch, switchSource } from "../state/source";
 import { isTyping } from "./useShortcuts";
 
 interface Options {
@@ -47,9 +47,11 @@ export function useBrowseKeys({ enabled, active, onBack }: Options) {
         !e.shiftKey &&
         (e.key === "1" || e.key === "2")
       ) {
-        // Shows the other stack; an overlay (Now Playing) closes with it.
-        state.current.onBack?.();
-        switchSource(e.key === "1" ? "local" : "navidrome");
+        // Shows the other stack; an overlay (Now Playing) closes with it,
+        // but only when the shown source actually changes.
+        const source = e.key === "1" ? "local" : "navidrome";
+        if (canSwitch(source)) state.current.onBack?.();
+        switchSource(source);
       } else if (e.altKey && e.key === "ArrowLeft" && !typing) {
         back();
       } else if (typing) {

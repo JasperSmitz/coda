@@ -8,7 +8,7 @@ use tauri::State;
 
 use super::{
     DAILY_PICKS, HomeDto, HomeRows, SourceKind, daily_album, daily_album_dto, home_dto,
-    local_daily_picks, valid_date,
+    local_daily_picks, server_id, valid_date,
 };
 use crate::browse::BrowseHandle;
 use crate::browse::dto::{AlbumDto, BrowseError, BrowseErrorKind};
@@ -80,18 +80,36 @@ pub async fn daily_picks(
                 .await
         }
         SourceKind::Navidrome => {
-            let cached = engine.daily_picks(date.clone()).await.map_err(gone)?;
+            let (client, _) = browse.client()?;
+            let cached = engine
+                .daily_picks(date.clone(), server_id(&client))
+                .await
+                .map_err(gone)?;
             let albums = match cached.filter(|albums| !albums.is_empty()) {
                 Some(albums) => albums,
                 None => {
-                    let page =
-                        browse
-                            .fetch(|c| async move {
-                                c.album_list(AlbumSort::Random, 0, DAILY_PICKS).await
-                            })
-                            .await?;
+                    // The server id goes with the fetch, so the picks are
+                    // cached under the server they came from (or dropped).
+                    let (server, page) = browse
+                        .fetch(|c| {
+                            let server = server_id(&c);
+                            async move {
+                                let page = c.album_list(AlbumSort::Random, 0, DAILY_PICKS).await?;
+                                Ok((server, page))
+                            }
+                        })
+                        .await?;
                     let albums = page.albums.into_iter().map(daily_album).collect();
-                    engine.set_daily_picks(date, albums).await.map_err(gone)?
+                    engine
+                        .set_daily_picks(date, server, albums)
+                        .await
+                        .map_err(gone)?
+                        .ok_or_else(|| {
+                            BrowseError::new(
+                                BrowseErrorKind::Stale,
+                                "The server connection changed; reload",
+                            )
+                        })?
                 }
             };
             Ok(albums

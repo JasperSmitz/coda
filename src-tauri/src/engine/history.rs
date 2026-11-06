@@ -37,10 +37,18 @@ pub(crate) struct HistorySave {
 pub enum HistoryMsg {
     /// The Home rows of a source (unresolved).
     Home(SourceKind, oneshot::Sender<HomeRows>),
-    /// The cached Navidrome Daily Picks of a date.
-    Daily(String, oneshot::Sender<Option<Vec<DailyAlbum>>>),
-    /// Caches a date's picks; answers the day's picks (the first stay).
-    SetDaily(String, Vec<DailyAlbum>, oneshot::Sender<Vec<DailyAlbum>>),
+    /// The cached Navidrome Daily Picks of a date and server (none
+    /// unless it is the current server).
+    Daily(String, String, oneshot::Sender<Option<Vec<DailyAlbum>>>),
+    /// Caches a date's picks fetched from a server; answers the day's
+    /// picks (the first stay), or `None` when that server is no longer
+    /// the current one.
+    SetDaily(
+        String,
+        String,
+        Vec<DailyAlbum>,
+        oneshot::Sender<Option<Vec<DailyAlbum>>>,
+    ),
 }
 
 impl EngineHandle {
@@ -61,16 +69,22 @@ impl EngineHandle {
             .await
     }
 
-    pub async fn daily_picks(&self, date: String) -> Result<Option<Vec<DailyAlbum>>, EngineGone> {
-        self.history_request(|tx| HistoryMsg::Daily(date, tx)).await
+    pub async fn daily_picks(
+        &self,
+        date: String,
+        server: String,
+    ) -> Result<Option<Vec<DailyAlbum>>, EngineGone> {
+        self.history_request(|tx| HistoryMsg::Daily(date, server, tx))
+            .await
     }
 
     pub async fn set_daily_picks(
         &self,
         date: String,
+        server: String,
         albums: Vec<DailyAlbum>,
-    ) -> Result<Vec<DailyAlbum>, EngineGone> {
-        self.history_request(|tx| HistoryMsg::SetDaily(date, albums, tx))
+    ) -> Result<Option<Vec<DailyAlbum>>, EngineGone> {
+        self.history_request(|tx| HistoryMsg::SetDaily(date, server, albums, tx))
             .await
     }
 }
@@ -88,21 +102,19 @@ impl Engine {
                     .unwrap_or_default();
                 let _ = reply.send(rows);
             }
-            HistoryMsg::Daily(date, reply) => {
-                let picks = self
-                    .server
-                    .as_deref()
-                    .and_then(|server| self.history.daily(&date, server))
+            HistoryMsg::Daily(date, server, reply) => {
+                let picks = (self.server.as_deref() == Some(server.as_str()))
+                    .then(|| self.history.daily(&date, &server))
+                    .flatten()
                     .map(<[_]>::to_vec);
                 let _ = reply.send(picks);
             }
-            HistoryMsg::SetDaily(date, albums, reply) => {
-                // Fetched with the current client (a result of an older
-                // one is dropped as stale before it gets here).
-                let picks = match self.server.clone() {
-                    Some(server) => self.history.set_daily(date, server, albums),
-                    None => Vec::new(),
-                };
+            HistoryMsg::SetDaily(date, server, albums, reply) => {
+                // `server` is the one the albums were fetched from. The
+                // client may have changed since the fetch's own staleness
+                // check, so check again here, where `self.server` changes.
+                let picks = (self.server.as_deref() == Some(server.as_str()))
+                    .then(|| self.history.set_daily(date, server, albums));
                 self.history_changed(now);
                 let _ = reply.send(picks);
             }
@@ -129,6 +141,8 @@ impl Engine {
     }
 
     pub(super) fn history_changed(&mut self, now: Instant) {
+        // The snapshot carries the revision (Home reloads its rows).
+        self.dirty = true;
         if self.history.revision() != self.history_save.saved && self.history_save.due.is_none() {
             self.history_save.due = Some(now + SAVE_DEBOUNCE);
         }
@@ -266,9 +280,12 @@ impl Engine {
 
     // ----- listens ------------------------------------------------------
 
-    /// The album context of `track`, for its listen count.
-    fn album_context(&self, track: &Track) -> Option<Context> {
+    /// The album context of a queue entry, for its listen count. None for
+    /// a Navidrome entry queued before the last server change (its album
+    /// id is another server's).
+    fn album_context(&self, entry: QueueEntryId, track: &Track) -> Option<Context> {
         match &track.source {
+            TrackSource::Navidrome { .. } if self.other_server_entries.contains(&entry) => None,
             TrackSource::Navidrome { .. } => Context {
                 source: SourceKind::Navidrome,
                 server: self.server.clone(),
@@ -299,7 +316,10 @@ impl Engine {
         let Some(entry) = self.player.queue().current_entry() else {
             return;
         };
-        let mut contexts: Vec<Context> = self.album_context(&entry.track).into_iter().collect();
+        let mut contexts: Vec<Context> = self
+            .album_context(entry.id, &entry.track)
+            .into_iter()
+            .collect();
         if let Some(from) = &self.played_from
             && from.entries.contains(&entry.id)
         {

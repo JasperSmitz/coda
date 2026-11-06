@@ -118,7 +118,21 @@ impl Engine {
         // The history shows this server's entries (and picks) only.
         // A listen in progress keeps the contexts it started with (their
         // server's).
-        self.server = client.as_ref().map(crate::history::server_id);
+        let server = client.as_ref().map(crate::history::server_id);
+        let queue = self.player.queue();
+        if server != self.server {
+            // Remote entries queued so far belong to the old server.
+            self.other_server_entries.extend(
+                queue
+                    .entries()
+                    .iter()
+                    .filter(|e| matches!(e.track.source, TrackSource::Navidrome { .. }))
+                    .map(|e| e.id),
+            );
+        }
+        self.other_server_entries
+            .retain(|id| queue.position(*id).is_some());
+        self.server = server;
         self.sent_queue = None;
         self.problems.retain(|p| {
             !matches!(

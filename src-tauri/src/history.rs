@@ -28,7 +28,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId, TagIndex};
 use coda_core::library::{Library, PlaylistId};
-use coda_core::queue::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::browse::dto::AlbumDto;
@@ -72,7 +71,9 @@ pub enum ContextKind {
 }
 
 /// A Navidrome server's identity in the history: FNV-1a (64 bit, hex) of
-/// its base URL and user name. Stable across runs; reveals neither.
+/// its base URL (normalised by the client) and user name. Stable across
+/// runs; neither is stored in plain text, though a known server's id can
+/// be confirmed by hashing (it is not a secret).
 pub fn server_id(client: &coda_core::navidrome::Client) -> String {
     server_id_of(client.base_url().as_str(), client.username())
 }
@@ -547,8 +548,32 @@ pub fn load(path: Option<PathBuf>) -> Loaded {
             tracing::warn!(error = %kind, "the play history could not be read; not saving it this run");
             return Loaded::default();
         }
+        // This build never writes a file this large (see `save`): a newer
+        // build's, kept as it is.
+        Err(fsio::ReadError::TooLarge(_)) => {
+            tracing::warn!(
+                "the play history is too large to read; keeping it, not saving this run"
+            );
+            return Loaded::default();
+        }
         Err(error) => Err(error.to_string()),
     };
+    /// Just the version, read before the rest.
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    if let Ok(t) = &text
+        && let Ok(Version { version }) = serde_json::from_str::<Version>(t)
+        && version > FILE_VERSION
+    {
+        // Written by a newer build: not corrupt, so keep it untouched.
+        tracing::warn!(
+            version,
+            "the play history is from a newer version; keeping it, not saving this run"
+        );
+        return Loaded::default();
+    }
     let parsed = text.and_then(|t| {
         let file: HistoryFile = serde_json::from_str(&t).map_err(|e| e.to_string())?;
         if file.version != FILE_VERSION {
@@ -562,8 +587,9 @@ pub fn load(path: Option<PathBuf>) -> Loaded {
             path: Some(path),
         },
         Err(error) => {
-            tracing::warn!(%error, "the play history is not valid; set aside as history.json.bad");
-            if let Err(error) = std::fs::rename(&path, path.with_extension("json.bad")) {
+            tracing::warn!(%error, "the play history is not valid; set aside as history.json.bad.<time>");
+            let aside = path.with_extension(format!("json.bad.{}", unix_now()));
+            if let Err(error) = std::fs::rename(&path, aside) {
                 tracing::warn!(error = %error.kind(), "could not set the play history aside; not saving it this run");
                 return Loaded::default();
             }
@@ -575,10 +601,38 @@ pub fn load(path: Option<PathBuf>) -> Loaded {
     }
 }
 
-/// Writes `file` atomically (a temporary file renamed over the old one).
+/// Writes `file` atomically (a temporary file renamed over the old one),
+/// never larger than `load` accepts.
 pub fn save(path: &Path, file: &HistoryFile) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(file).map_err(std::io::Error::other)?;
-    fsio::write_atomic(path, &bytes)
+    fsio::write_atomic(path, &bounded_bytes(file, MAX_FILE_BYTES)?)
+}
+
+/// `file` as JSON within `max` bytes: while too large, the least recently
+/// heard half of the counts and the oldest half of the plays are left out.
+fn bounded_bytes(file: &HistoryFile, max: u64) -> std::io::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(file).map_err(std::io::Error::other)?;
+    if bytes.len() as u64 <= max {
+        return Ok(bytes);
+    }
+    let mut trimmed = file.clone();
+    while bytes.len() as u64 > max {
+        if trimmed.counts.is_empty() && trimmed.plays.is_empty() {
+            trimmed.dailies.clear();
+        }
+        // Counts are most recent first, plays oldest first.
+        trimmed.counts.truncate(trimmed.counts.len() / 2);
+        trimmed.plays.drain(..trimmed.plays.len().div_ceil(2));
+        bytes = serde_json::to_vec(&trimmed).map_err(std::io::Error::other)?;
+        if trimmed.counts.is_empty() && trimmed.plays.is_empty() && trimmed.dailies.is_empty() {
+            break;
+        }
+    }
+    tracing::warn!(
+        counts = trimmed.counts.len(),
+        plays = trimmed.plays.len(),
+        "the play history was too large to save whole; the oldest entries were left out"
+    );
+    Ok(bytes)
 }
 
 // ----- local keys and resolution ----------------------------------------
@@ -887,28 +941,31 @@ fn seed(date: &str) -> u64 {
     h
 }
 
-/// The day's local picks: [`DAILY_PICKS`] albums drawn with the date as
-/// the seed, over the albums in a stable order (their keys), so the
-/// picks stay the same all day and across restarts while the library
-/// does.
+/// The day's local picks: the [`DAILY_PICKS`] albums whose keys rank
+/// lowest under a hash seeded by the date. Each album's rank depends only
+/// on the date and its own key, never on scan order or on the other
+/// albums, so the picks stay the same all day and across restarts, and a
+/// library edit changes them only where an added album outranks one or a
+/// picked album goes away.
 pub fn local_daily_picks(view: &LocalView<'_>, date: &str, covers: &CoverService) -> Vec<AlbumDto> {
     let tags = view.library.tags();
-    let mut albums: Vec<(String, AlbumId)> = tags
+    let mut albums: Vec<(u64, String, AlbumId)> = tags
         .albums(AlbumOrder::Name)
         .iter()
-        .map(|id| (local_album_key(tags, *id), *id))
+        .map(|id| {
+            let key = local_album_key(tags, *id);
+            (seed(&format!("{date}\n{key}")), key, *id)
+        })
         .collect();
-    albums.sort();
-    let mut rng = Rng::from_seed(seed(date));
     let picks = DAILY_PICKS.min(albums.len());
-    for i in 0..picks {
-        let j = i + rng.below(albums.len() - i);
-        albums.swap(i, j);
+    if picks < albums.len() {
+        albums.select_nth_unstable(picks);
+        albums.truncate(picks);
     }
+    albums.sort();
     albums
         .into_iter()
-        .take(picks)
-        .map(|(_, id)| local::album_dto(view, id, covers))
+        .map(|(_, _, id)| local::album_dto(view, id, covers))
         .collect()
 }
 

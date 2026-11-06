@@ -214,6 +214,11 @@
   filter: brightness(1.1);
 }
 
+/* Focused as a whole when it opens (a landing spot for Tab, not a control). */
+.now-playing:focus {
+  outline: none;
+}
+
 .now-playing {
   position: relative;
   flex: 1;
@@ -433,10 +438,12 @@
   border-left: 0;
 }
 
-/* Menus inside the view stay on the view's dark colours. */
-.now-playing .context-menu {
+/* Menus opened from the view stay on the view's dark colours (the menu
+   is portaled to <body>, so it cannot inherit them from .now-playing). */
+.context-menu.is-immersive {
   background: var(--np-menu);
   border-color: var(--np-border);
+  color: var(--np-text);
 }
 
 @keyframes np-panel-in {

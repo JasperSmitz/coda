@@ -219,6 +219,9 @@ pub struct Snapshot {
     /// Browse generations: a change means browse ids and cached answers
     /// of that source are stale (reload).
     pub browse: BrowseGenerationsDto,
+    /// The play history's revision: a change means Home's history rows
+    /// (Recently played, Most played) may have changed (reload them).
+    pub history_revision: u64,
 }
 
 /// The library and Navidrome client generations (see `browse`).
@@ -553,6 +556,7 @@ mod tests {
                 library: 2,
                 server: 1,
             },
+            history_revision: 3,
         };
         let value = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(value["browse"], json!({"library": 2, "server": 1}));
@@ -568,13 +572,14 @@ mod tests {
         assert_eq!(value["problems"][0]["kind"], "mpvMissing");
         assert_eq!(value["notices"][0], json!({"id": 1, "text": "Repeat all"}));
         assert_eq!(value["visualizerAvailable"], true);
+        assert_eq!(value["historyRevision"], 3);
         let keys: Vec<&str> = value
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 15, "{keys:?}");
+        assert_eq!(keys.len(), 16, "{keys:?}");
     }
 
     #[test]

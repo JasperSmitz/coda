@@ -22,6 +22,7 @@ import {
 } from "../lib/play";
 import type { Album, ContextKind, HomeItem, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useAppState } from "../state/store";
 import { SOURCE_LABEL, ViewHeader, useCanPlay } from "./common";
 
 /** Cards per server row (the first page holds more). */
@@ -354,15 +355,31 @@ const none = <T,>(): Promise<T[]> => Promise.resolve([]);
 
 export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }) {
   const version = useLibraryVersion();
-  const refresh = source === "local" ? version : null;
+  const { snapshot } = useAppState();
+  const historyRevision = snapshot?.historyRevision ?? 0;
   const today = useToday();
   const canPlay = useCanPlay();
   const scroller = useRef<HTMLDivElement>(null);
-  const history = useLoad(() => browse.homeHistory(source), `history:${source}`, refresh);
+  // Local rows resolve against the library (reload as it changes); both
+  // sources reload when the history changes (a play from a card here).
+  const history = useLoad(
+    () => browse.homeHistory(source),
+    `history:${source}`,
+    source === "local" ? `${version}|${historyRevision}` : historyRevision,
+  );
+  // Local picks wait for the scan: drawn over a growing album set they
+  // would change every refresh. They reload only once a scan has finished
+  // (new library generation, so the shown ids stay valid).
+  const waitForScan = source === "local" && snapshot?.scan.state === "scanning";
+  const settled = `${version}|${snapshot?.browse.library ?? 0}`;
+  const [picksVersion, setPicksVersion] = useState(settled);
+  useEffect(() => {
+    if (!waitForScan) setPicksVersion(settled);
+  }, [waitForScan, settled]);
   const picks = useLoad(
-    () => browse.dailyPicks(source, today),
+    () => (waitForScan ? Promise.resolve(null) : browse.dailyPicks(source, today)),
     `picks:${source}:${today}`,
-    refresh,
+    source === "local" ? picksVersion : null,
   );
   // Navidrome only: the server's lists (built from scrobbles, the TUI's too).
   const frequent = useLoad(
@@ -395,6 +412,7 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
   const fresh = history.state === "ready" && recent.length === 0 && most.length === 0;
   const nothing =
     ready &&
+    !waitForScan &&
     frequent.state !== "loading" &&
     newest.state !== "loading" &&
     recent.length === 0 &&
@@ -421,13 +439,16 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
           showKind={source === "navidrome" || most.some((c) => c.kind !== "album")}
         />
         <CardRow title="Recently added" cards={added} />
+        {waitForScan && daily.length === 0 && (
+          <p className="secondary home-hint">Daily Picks are drawn once the library scan is done.</p>
+        )}
         <CardRow
           title="Daily Picks"
           cards={daily}
           actions={
             <button
               className="button home-shuffle"
-              disabled={!canPlay}
+              disabled={!canPlay || pickAlbums.length === 0}
               onClick={() => shufflePicks(source, pickAlbums)}
               title="Shuffle Daily Picks (s)"
             >

@@ -39,15 +39,15 @@ export function effectiveSource(
 function update(next: Partial<Sources>, fallback = false) {
   const merged = { ...state, ...next };
   merged.active = effectiveSource(saved, merged.configured);
-  nav.setSource(merged.active, fallback);
-  if (
+  const changed =
     merged.active !== state.active ||
     merged.loaded !== state.loaded ||
-    merged.configured !== state.configured
-  ) {
-    state = merged;
-    listeners.forEach((l) => l());
-  }
+    merged.configured !== state.configured;
+  // The new state first, so whatever nav's listeners render reads the
+  // source that goes with the new stack.
+  if (changed) state = merged;
+  nav.setSource(merged.active, fallback);
+  if (changed) listeners.forEach((l) => l());
 }
 
 /** Reads the saved choice once (call at startup). */
@@ -66,6 +66,12 @@ export function setConfigured(local: boolean, navidrome: boolean) {
   const c = state.configured;
   if (c && c.local === local && c.navidrome === navidrome) return;
   update({ configured: { local, navidrome } }, true);
+}
+
+/** Picking `source` would change the source shown. */
+export function canSwitch(source: SourceKind): boolean {
+  if (state.configured && !state.configured[source]) return false;
+  return state.active !== source;
 }
 
 /** The user picks a source (sidebar, Ctrl/Cmd+1/2, Go to album…). */

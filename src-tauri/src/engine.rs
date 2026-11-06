@@ -12,7 +12,7 @@
 //! re-announces the gapless next track after queue edits); the UI never
 //! sends raw playback commands.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -201,6 +201,9 @@ pub struct Engine {
     /// The current server's identity in the history
     /// (`history::server_id`).
     server: Option<String>,
+    /// Navidrome entries queued before the last server change: from
+    /// another server, so their albums are not counted for this one.
+    other_server_entries: HashSet<QueueEntryId>,
 }
 
 impl Engine {
@@ -254,6 +257,7 @@ impl Engine {
             heard: None,
             played_from: None,
             server: None,
+            other_server_entries: HashSet::new(),
         }
     }
 
@@ -1011,6 +1015,7 @@ impl Engine {
                 library: self.browse.library_generation(),
                 server: self.browse.client_generation(),
             },
+            history_revision: self.history.revision(),
         }
     }
 

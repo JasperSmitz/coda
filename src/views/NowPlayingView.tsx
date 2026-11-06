@@ -90,6 +90,14 @@ export function NowPlayingView({
   const isPlaying = status === "playing" || status === "loading";
   useVisualizerReadings(snapshot.visualizerAvailable && playing != null);
   const panel = useRef<HTMLDivElement>(null);
+  const view = useRef<HTMLElement>(null);
+
+  // The browse view (and the element focused in it) went away: give the
+  // view the focus, so Tab continues from here (and Escape still closes).
+  useEffect(() => {
+    const focused = document.activeElement;
+    if (!focused || focused === document.body || !focused.isConnected) view.current?.focus();
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -117,6 +125,8 @@ export function NowPlayingView({
 
   return (
     <section
+      ref={view}
+      tabIndex={-1}
       className={`now-playing ${playing ? "" : "is-empty"} ${queueOpen ? "has-queue" : ""}`}
       aria-label="Now Playing"
     >

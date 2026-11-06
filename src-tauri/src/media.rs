@@ -531,6 +531,7 @@ mod tests {
                 library: 1,
                 server: 1,
             },
+            history_revision: 0,
         }
     }
 

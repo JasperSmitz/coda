@@ -113,6 +113,7 @@ export default function App() {
   // Now Playing hides the rest of the window; `q` toggles its own panel.
   const immersive = nowPlaying && snapshot !== null;
   const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
+  useFocusAfterNowPlaying(immersive);
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -203,4 +204,25 @@ export default function App() {
       <DialogHost />
     </div>
   );
+}
+
+/**
+ * Closing Now Playing remounts the browse view, so the element focused
+ * before it opened is gone: focus the bar's Now Playing button (or the
+ * browse view's first tabbable element), unless something else (search,
+ * a view) has taken the focus already.
+ */
+function useFocusAfterNowPlaying(immersive: boolean) {
+  const was = useRef(immersive);
+  useEffect(() => {
+    const closed = was.current && !immersive;
+    was.current = immersive;
+    if (!closed) return;
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (!lost) return;
+    const target =
+      document.querySelector<HTMLElement>(".bar-cover-button:not(:disabled)") ??
+      document.querySelector<HTMLElement>('.main [tabindex="0"], .main button:not(:disabled)');
+    target?.focus();
+  }, [immersive]);
 }

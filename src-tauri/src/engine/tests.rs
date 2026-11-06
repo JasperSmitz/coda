@@ -1943,6 +1943,62 @@ fn the_history_is_saved_after_a_debounce_and_at_exit() {
 }
 
 #[test]
+fn listens_of_entries_queued_before_a_server_change_are_not_counted_for_the_new_one() {
+    use crate::history::{ContextKey, ContextKind, SourceKind};
+    let (mut engine, now) = navidrome_engine();
+    let revision = engine.full_snapshot().history_revision;
+    engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![album_ref("s1", "al-1"), album_ref("s2", "al-2")],
+            start: None,
+            shuffle: false,
+            context: None,
+        },
+        now,
+    );
+    let other = Client::new(
+        url::Url::parse("http://127.0.0.1:9/").unwrap(),
+        "someone-else".into(),
+        Password::new("secret".into()),
+    )
+    .unwrap();
+    engine
+        .apply_settings(
+            SettingsChange::Client {
+                client: Some(other),
+                scrobble: false,
+            },
+            now,
+        )
+        .unwrap();
+    let server = engine.server.clone();
+    let key = |id: &str| ContextKey {
+        source: SourceKind::Navidrome,
+        server: server.clone(),
+        kind: ContextKind::Album,
+        id: id.into(),
+    };
+    // Queued with the first server: its album id is not this server's.
+    let commands = engine.handle_intent(Intent::Next, now);
+    listen_half(&mut engine, loads(&commands)[0], now);
+    assert_eq!(engine.history().counts_len(), 0);
+    // Queued after the change: counted.
+    engine.handle_intent(
+        Intent::Enqueue {
+            tracks: vec![album_ref("s3", "al-3")],
+            next: true,
+        },
+        now,
+    );
+    let commands = engine.handle_intent(Intent::Next, now);
+    listen_half(&mut engine, loads(&commands)[0], now);
+    assert_eq!(engine.history().count(&key("al-3")).unwrap().listens, 1);
+    // The snapshot tells the UI the history changed.
+    let snapshot = engine.take_snapshot_event().unwrap();
+    assert!(snapshot.history_revision > revision);
+}
+
+#[test]
 fn history_and_daily_picks_are_kept_per_server() {
     use crate::history::{Scope, SourceKind};
     let (mut engine, now) = navidrome_engine();
@@ -1957,7 +2013,7 @@ fn history_and_daily_picks_are_kept_per_server() {
     };
     let (tx, _rx) = oneshot::channel();
     engine.handle_history_msg(
-        HistoryMsg::SetDaily("2026-11-06".into(), vec![album], tx),
+        HistoryMsg::SetDaily("2026-11-06".into(), first.clone(), vec![album], tx),
         now,
     );
     engine.handle_intent(
@@ -1982,7 +2038,8 @@ fn history_and_daily_picks_are_kept_per_server() {
     };
     let daily = |engine: &mut Engine| {
         let (tx, mut rx) = oneshot::channel();
-        engine.handle_history_msg(HistoryMsg::Daily("2026-11-06".into(), tx), now);
+        let server = engine.server.clone().unwrap_or_default();
+        engine.handle_history_msg(HistoryMsg::Daily("2026-11-06".into(), server, tx), now);
         rx.try_recv().unwrap()
     };
     assert_eq!(rows(&mut engine).recent.len(), 1);
@@ -2008,6 +2065,23 @@ fn history_and_daily_picks_are_kept_per_server() {
     engine.apply_settings(change(Some(other)), now).unwrap();
     assert_ne!(engine.server.as_deref(), Some(first.as_str()));
     assert!(rows(&mut engine).recent.is_empty());
+    assert!(daily(&mut engine).is_none());
+    // Picks fetched from the first server that arrive after the switch
+    // are refused, not cached under this one.
+    let late = crate::history::DailyAlbum {
+        id: "al-late".into(),
+        name: "Late".into(),
+        artist: None,
+        artist_id: None,
+        year: None,
+        cover_art: None,
+    };
+    let (tx, mut rx) = oneshot::channel();
+    engine.handle_history_msg(
+        HistoryMsg::SetDaily("2026-11-06".into(), first.clone(), vec![late], tx),
+        now,
+    );
+    assert!(rx.try_recv().unwrap().is_none());
     assert!(daily(&mut engine).is_none());
 
     // Back to the first: its history and today's picks again.

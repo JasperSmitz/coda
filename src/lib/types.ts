@@ -84,6 +84,8 @@ export interface Snapshot {
   visualizerAvailable: boolean;
   /** Browse generations: a change makes that source's ids and cached answers stale. */
   browse: { library: number; server: number };
+  /** The play history's revision: a change means Home's history rows may have changed. */
+  historyRevision: number;
 }
 
 export interface Progress {
