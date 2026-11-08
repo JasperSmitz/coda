@@ -1,0 +1,260 @@
+/* Settings → Appearance: theme picker, accent, colour editor. Tokens only. */
+
+.button-small {
+  height: 26px;
+  padding: 0 10px;
+  font-size: var(--text-small);
+}
+
+.appearance-modes,
+.appearance-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+.appearance-slots {
+  display: flex;
+  gap: 8px;
+}
+
+.appearance-slot {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-2);
+}
+
+.appearance-slot.is-current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.appearance-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.appearance-actions {
+  flex-wrap: wrap;
+}
+
+/* ----- theme list ----- */
+
+.theme-picker {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.settings input.theme-search {
+  height: 34px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 12px;
+  background: var(--surface-1);
+  color: var(--text);
+}
+
+.theme-search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.theme-list {
+  position: relative;
+  overflow-y: auto;
+  outline: none;
+}
+
+.theme-list:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.theme-list[aria-disabled="true"] {
+  opacity: 0.6;
+}
+
+.theme-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+}
+
+.theme-row.is-active {
+  background: var(--selected);
+}
+
+.theme-row.is-selected .theme-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.theme-swatches {
+  display: inline-flex;
+  gap: 3px;
+  padding: 4px 5px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--border);
+  flex: none;
+}
+
+.theme-swatch {
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+}
+
+.theme-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-small);
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-3);
+}
+
+.theme-badge-custom {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.theme-check {
+  width: 14px;
+  flex: none;
+  color: var(--accent);
+}
+
+.theme-empty {
+  padding: 12px;
+}
+
+/* ----- accent ----- */
+
+.accent-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.accent-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--border);
+}
+
+.accent-swatch.is-current {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.settings input.color-hex {
+  width: 104px;
+  height: 26px;
+  padding: 0 8px;
+  font-size: var(--text-small);
+}
+
+.settings input.color-hex.is-invalid {
+  border-color: var(--danger);
+}
+
+.color-warning {
+  color: var(--danger);
+  font-size: var(--text-small);
+}
+
+/* ----- colour editor ----- */
+
+.color-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.color-editor-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  background: var(--bg);
+}
+
+.color-editor-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.color-editor-name input {
+  flex: 1;
+  max-width: 320px;
+}
+
+.color-group {
+  margin: 0;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.color-group legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+.color-row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto 32px auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+}
+
+.color-row.is-edited .color-label {
+  font-weight: 600;
+}
+
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--border);
+}
+
+.color-picker {
+  width: 32px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface-1);
+}

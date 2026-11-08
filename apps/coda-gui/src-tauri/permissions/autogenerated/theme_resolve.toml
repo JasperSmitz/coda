@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-theme-resolve"
+description = "Enables the theme_resolve command without any pre-configured scope."
+commands.allow = ["theme_resolve"]
+
+[[permission]]
+identifier = "deny-theme-resolve"
+description = "Denies the theme_resolve command without any pre-configured scope."
+commands.deny = ["theme_resolve"]

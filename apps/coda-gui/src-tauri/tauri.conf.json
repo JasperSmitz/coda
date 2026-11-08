@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Coda",
+  "version": "0.1.0",
+  "identifier": "nl.jaspersmitz.coda",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Coda",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' coda: http://coda.localhost data:",
+        "font-src": "'self'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'",
+        "connect-src": "ipc: http://ipc.localhost"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' coda: http://coda.localhost data:",
+        "font-src": "'self'",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'",
+        "connect-src": "ipc: http://ipc.localhost ws://localhost:1420"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "appimage",
+      "rpm",
+      "app",
+      "dmg"
+    ],
+    "publisher": "Jasper Smitz",
+    "copyright": "Copyright (c) 2026 Jasper Smitz",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "category": "Music",
+    "shortDescription": "A music player for local files and Navidrome",
+    "longDescription": "Coda is a desktop music player for your local music library and a personal Navidrome server, with gapless playback through mpv, a play queue shared with the Coda terminal player, and keyboard-first controls. It needs mpv installed.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "mpv"
+        ],
+        "section": "sound"
+      },
+      "rpm": {
+        "depends": [
+          "mpv"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

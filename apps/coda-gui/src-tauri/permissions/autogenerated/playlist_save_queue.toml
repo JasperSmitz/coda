@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-playlist-save-queue"
+description = "Enables the playlist_save_queue command without any pre-configured scope."
+commands.allow = ["playlist_save_queue"]
+
+[[permission]]
+identifier = "deny-playlist-save-queue"
+description = "Denies the playlist_save_queue command without any pre-configured scope."
+commands.deny = ["playlist_save_queue"]
