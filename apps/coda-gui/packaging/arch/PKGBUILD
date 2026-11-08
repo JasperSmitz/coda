@@ -1,0 +1,70 @@
+# Maintainer: Jasper Smitz
+#
+# Builds Coda App from a local git checkout (no network source for the app
+# itself; cargo and pnpm still download dependencies in prepare()).
+#
+#   cd apps/coda-gui/packaging/arch
+#   makepkg -si                        # builds tag coda-gui-v$pkgver of the monorepo checkout four levels up
+#   _ref=branch=main makepkg -si       # or a branch / commit (_ref=commit=<sha>)
+#   _repo=/path/to/coda makepkg -si
+#
+# The checkout is the Coda monorepo; the app lives in apps/coda-gui and its
+# Cargo workspace (and target/) is at the repo root.
+#
+# makepkg clones the checkout's *committed* state, so uncommitted changes are
+# not included.
+
+pkgname=coda-app
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A desktop music player for local files and Navidrome (Tauri GUI for Coda)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/JasperSmitz/coda-app'
+license=('MIT')
+# mpv is not linked but run as a process; namcap cannot see that.
+depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2' 'libsoup3' 'dbus'
+         'hicolor-icon-theme' 'libgcc' 'glibc' 'mpv')
+makedepends=('git' 'cargo' 'nodejs' 'pnpm')
+optdepends=('gnome-keyring: store the Navidrome password (or another Secret Service provider such as KWallet)')
+options=('!lto')
+source=("$pkgname::git+file://${_repo:-$(realpath "$startdir/../../../..")}#${_ref:-tag=coda-gui-v$pkgver}")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname/apps/coda-gui"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  pnpm install --frozen-lockfile
+}
+
+build() {
+  cd "$pkgname/apps/coda-gui"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/$pkgname/target"
+  # `tauri build` builds the frontend (beforeBuildCommand) and the binary
+  # with the custom-protocol feature; packaging is done below, not by Tauri.
+  # `release-gui` (root Cargo.toml) is the app's release profile: LTO and
+  # panic = "abort".
+  pnpm tauri build --no-bundle -- --frozen --profile release-gui
+}
+
+check() {
+  cd "$pkgname/apps/coda-gui"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/$pkgname/target"
+  cargo test --frozen -p coda-app -p coda-core
+}
+
+package() {
+  cd "$pkgname/apps/coda-gui"
+  install -Dm755 "$srcdir/$pkgname/target/release-gui/coda-app" "$pkgdir/usr/bin/coda-app"
+  install -Dm644 packaging/linux/coda-app.desktop "$pkgdir/usr/share/applications/coda-app.desktop"
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/coda-app.png"
+  install -Dm644 src-tauri/icons/64x64.png "$pkgdir/usr/share/icons/hicolor/64x64/apps/coda-app.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/coda-app.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/coda-app.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/coda-app.png"
+  install -Dm644 src-tauri/icons/source/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/coda-app.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

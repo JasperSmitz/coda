@@ -1,0 +1,147 @@
+name: Coda GUI Release
+
+# Pushing a tag such as `coda-gui-v0.1.0` builds Coda App's bundles (Linux
+# deb, AppImage and rpm; macOS dmg) from apps/coda-gui and creates a *draft*
+# GitHub release to review and publish by hand. (`v*` tags release the TUI,
+# see release.yml.)
+#
+# The bundles are built with the `release-gui` Cargo profile (root
+# Cargo.toml): LTO and `panic = "abort"`, which the app's panic hook relies on.
+on:
+  push:
+    tags: ['coda-gui-v*.*.*']
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Check the version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: apps/coda-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tag matches tauri.conf.json, Cargo.toml and package.json
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          npm_version=$(jq -r .version package.json)
+          if [ "$TAG" != "coda-gui-v$version" ] || [ "$cargo_version" != "$version" ] || [ "$npm_version" != "$version" ]; then
+            echo "::error::Tag $TAG, tauri.conf.json $version, Cargo.toml $cargo_version and package.json $npm_version must agree"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: prepare
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            bundles: deb,appimage,rpm
+          - os: ubuntu-24.04-arm
+            bundles: deb,appimage,rpm
+          - os: macos-latest
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/coda-gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf file rpm
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-10-16)
+        with:
+          toolchain: stable
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.8.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # No build cache here: a release is built from a clean slate.
+      - run: pnpm install --frozen-lockfile
+      - name: Build the bundles
+        env:
+          BUNDLES: ${{ matrix.bundles }}
+        run: pnpm tauri build --bundles "$BUNDLES" -- --locked --profile release-gui
+      - name: Collect and checksum
+        run: |
+          # The workspace target dir is at the repo root.
+          mkdir -p "$GITHUB_WORKSPACE/dist-release"
+          find ../../target/release-gui/bundle \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.dmg' \) \
+            -exec cp {} "$GITHUB_WORKSPACE/dist-release/" \;
+          cd "$GITHUB_WORKSPACE/dist-release"
+          ls -l
+          for f in *; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  publish:
+    name: Create a draft release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the checksums
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum -c -- ./*.sha256
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Linux: `.deb` (Debian/Ubuntu), `.rpm` and `.AppImage`; Arch users build with `apps/coda-gui/packaging/arch/PKGBUILD`. macOS: `.dmg`. Coda needs [mpv](https://mpv.io) installed. The macOS app is not signed or notarised: if macOS says it is damaged or can't be verified, run `xattr -dr com.apple.quarantine /Applications/Coda.app` once.
+          NOTES
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --latest=false \
+            --title "Coda App $VERSION" \
+            --notes-file notes.md

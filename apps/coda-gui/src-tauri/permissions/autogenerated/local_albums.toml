@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-albums"
+description = "Enables the local_albums command without any pre-configured scope."
+commands.allow = ["local_albums"]
+
+[[permission]]
+identifier = "deny-local-albums"
+description = "Denies the local_albums command without any pre-configured scope."
+commands.deny = ["local_albums"]

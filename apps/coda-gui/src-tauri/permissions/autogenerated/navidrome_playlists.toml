@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-playlists"
+description = "Enables the navidrome_playlists command without any pre-configured scope."
+commands.allow = ["navidrome_playlists"]
+
+[[permission]]
+identifier = "deny-navidrome-playlists"
+description = "Denies the navidrome_playlists command without any pre-configured scope."
+commands.deny = ["navidrome_playlists"]

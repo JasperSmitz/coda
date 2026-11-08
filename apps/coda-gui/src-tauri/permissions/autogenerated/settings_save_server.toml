@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-settings-save-server"
+description = "Enables the settings_save_server command without any pre-configured scope."
+commands.allow = ["settings_save_server"]
+
+[[permission]]
+identifier = "deny-settings-save-server"
+description = "Denies the settings_save_server command without any pre-configured scope."
+commands.deny = ["settings_save_server"]

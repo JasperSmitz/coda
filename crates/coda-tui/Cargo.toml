@@ -1,0 +1,44 @@
+[package]
+name = "coda-tui"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "A keyboard-first terminal music player"
+license = "MIT"
+publish = false
+
+[lib]
+name = "coda_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coda"
+path = "src/main.rs"
+
+[dependencies]
+coda-core.workspace = true
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures-util = "0.3.34"
+getrandom.workspace = true
+libc.workspace = true
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "sync", "fs", "signal"] }
+tracing.workspace = true
+unicode-width = "0.2.2"
+
+[features]
+# Replaces the OS credential store with an in-memory one, for pty smoke
+# runs that must not touch the real keychain. Never enable in a release.
+mock-secret-store = ["coda-core/mock-secret-store"]
+
+[dev-dependencies]
+# `SecretStore::mock()` for the tests' own stores. Not `mock-secret-store`:
+# Cargo unifies dev-dependency features into the `coda` binary that
+# `cargo test` builds (and leaves in target/), which must keep the OS
+# keychain.
+coda-core = { workspace = true, features = ["test-util"] }
+image = { workspace = true, features = ["png"] }
+serde_json.workspace = true
+tempfile.workspace = true
+url.workspace = true
+wiremock.workspace = true

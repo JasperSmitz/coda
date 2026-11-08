@@ -1,0 +1,55 @@
+[package]
+name = "coda-core"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Coda's shared, UI-free music engine: queue, mpv playback, Navidrome, library"
+license = "MIT"
+publish = false
+
+[lib]
+name = "coda_core"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "env"] }
+getrandom.workspace = true
+# Cover art decoding (M9): JPEG, PNG and WebP only, pure Rust, no rayon.
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
+keyring-core = "1.0.1"
+libc.workspace = true
+lofty = "0.25.4"
+md5 = "0.8.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "sync", "fs", "signal"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "std"] }
+url.workspace = true
+walkdir = "2.5.0"
+
+# OS credential store backends for `keyring-core` (ADR 0004). Only
+# `src/secret_store.rs` uses them.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+# Pure-Rust D-Bus (zbus) and crypto: no libdbus headers or OpenSSL needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
+
+[features]
+# Replaces the OS credential store with an in-memory one, for pty smoke
+# runs that must not touch the real keychain. Never enable in a release.
+mock-secret-store = []
+# Test support for crates that depend on coda-core: makes
+# `SecretStore::mock()` available. Unlike `mock-secret-store` it does not
+# change `SecretStore::system()`, so a binary built with it (e.g. by
+# `cargo test` through feature unification) still uses the OS store.
+test-util = []
+
+[dev-dependencies]
+wiremock.workspace = true

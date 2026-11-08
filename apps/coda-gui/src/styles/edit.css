@@ -1,0 +1,213 @@
+/* M3: dialogs, multi-select, drag-and-drop and playlist edit controls. */
+
+/* ----- dialogs ----- */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--backdrop);
+  animation: dialog-fade var(--motion) ease-out;
+}
+
+.dialog {
+  width: min(420px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px 16px;
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  animation: dialog-in var(--motion) ease-out;
+}
+
+.dialog-title {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.dialog-message {
+  color: var(--text-2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.dialog-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-2);
+  font-size: var(--text-small);
+}
+
+.dialog-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text);
+}
+
+.dialog-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.dialog-note {
+  margin-top: 6px;
+  font-size: var(--text-small);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.dialog form .dialog-actions {
+  margin-top: 16px;
+}
+
+@keyframes dialog-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+/* ----- playlist picker ----- */
+
+.dialog-picker {
+  width: min(460px, 100%);
+}
+
+.picker-list {
+  min-height: 120px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-small);
+  cursor: default;
+}
+
+.picker-row.is-selected {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.picker-row.is-selected .secondary {
+  color: inherit;
+}
+
+.picker-new {
+  font-weight: 600;
+}
+
+.picker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-status {
+  padding: 10px;
+  font-size: var(--text-small);
+}
+
+/* ----- queue and playlist lists ----- */
+
+.panel-actions {
+  display: flex;
+  gap: 2px;
+}
+
+/* The keyboard cursor among several selected rows. */
+.queue-list:focus-visible .queue-row.is-cursor,
+.track-rows:focus-visible .track-row.is-cursor {
+  box-shadow: inset 0 0 0 1px var(--text-3);
+}
+
+.queue-row.is-dragged,
+.track-row.is-dragged {
+  opacity: 0.4;
+}
+
+.queue-list.is-dragging,
+.track-rows.is-dragging {
+  cursor: grabbing;
+}
+
+.queue-list.is-dragging .queue-row:hover,
+.track-rows.is-dragging .track-row:hover {
+  background: transparent;
+}
+
+.queue-list.is-dragging .queue-row.is-selected,
+.track-rows.is-dragging .track-row.is-selected {
+  background: var(--selected);
+}
+
+.drop-line {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.track-table.is-saving .track-rows {
+  opacity: 0.75;
+}
+
+/* ----- playlist views ----- */
+
+.inline-note {
+  margin-bottom: 12px;
+  font-size: var(--text-small);
+}
+
+.playlist-more {
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+}
+
+.playlist-row:hover .playlist-more,
+.playlist-row.is-selected .playlist-more {
+  opacity: 1;
+}
+
+.dialog:focus {
+  outline: none;
+}

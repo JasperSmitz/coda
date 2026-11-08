@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-intent"
+description = "Enables the intent command without any pre-configured scope."
+commands.allow = ["intent"]
+
+[[permission]]
+identifier = "deny-intent"
+description = "Denies the intent command without any pre-configured scope."
+commands.deny = ["intent"]

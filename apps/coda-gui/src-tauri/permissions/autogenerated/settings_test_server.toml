@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-settings-test-server"
+description = "Enables the settings_test_server command without any pre-configured scope."
+commands.allow = ["settings_test_server"]
+
+[[permission]]
+identifier = "deny-settings-test-server"
+description = "Denies the settings_test_server command without any pre-configured scope."
+commands.deny = ["settings_test_server"]

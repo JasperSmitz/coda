@@ -1,0 +1,37 @@
+[package]
+name = "coda-app"
+version = "0.1.0"
+description = "Coda: a desktop music player for local files and Navidrome"
+authors = ["Jasper Smitz"]
+edition = "2024"
+rust-version = "1.89"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "coda_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tracing.workspace = true
+coda-core.workspace = true
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+tempfile.workspace = true
+toml = { workspace = true, features = ["display"] }
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }
+url.workspace = true
+wiremock.workspace = true

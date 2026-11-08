@@ -1,0 +1,508 @@
+/* Now Playing view, settings, onboarding (the experience slice). */
+
+:root {
+  --field-bg: var(--surface-1);
+}
+
+/* ----- buttons and fields ----- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  color: var(--text);
+  white-space: nowrap;
+  transition: background var(--motion-fast);
+}
+
+.button:not(:disabled):hover {
+  background: color-mix(in srgb, var(--surface-3) 80%, var(--text) 20%);
+}
+
+.button-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.button-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text) 12%);
+}
+
+.button-danger {
+  background: var(--danger);
+  color: var(--danger-text);
+}
+
+.button-danger:not(:disabled):hover {
+  background: var(--danger);
+}
+
+.server-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  max-width: 520px;
+}
+
+.server-fields label {
+  color: var(--text-2);
+}
+
+.server-fields input,
+.settings input[type="text"] {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--field-bg);
+  color: var(--text);
+}
+
+.server-fields input:focus-visible {
+  border-color: var(--accent);
+}
+
+.server-test {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+}
+
+.field-status-ok {
+  color: var(--accent);
+}
+
+.field-status-failed {
+  color: var(--danger);
+}
+
+.mono {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* ----- settings ----- */
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  max-width: 760px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-section h2,
+.onboarding-step h2 {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-form > .settings-actions {
+  max-width: 520px;
+  justify-content: flex-end;
+}
+
+.settings-check {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  line-height: 1.5;
+}
+
+.settings-check input {
+  accent-color: var(--accent);
+}
+
+.settings-status {
+  color: var(--text-2);
+}
+
+.settings-status-error {
+  color: var(--danger);
+}
+
+.settings-footnote {
+  font-size: var(--text-small);
+}
+
+/* ----- onboarding ----- */
+
+.onboarding {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  overflow-y: auto;
+  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%);
+}
+
+.onboarding-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: min(560px, 100%);
+  padding: 32px;
+  border-radius: 10px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  line-height: 1.5;
+}
+
+.onboarding-card h1 {
+  font-size: var(--text-title);
+  font-weight: 650;
+}
+
+.onboarding-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ----- now playing ----- */
+
+.bar-cover-button {
+  flex: none;
+  border-radius: var(--radius);
+}
+
+.bar-cover-button:not(:disabled):hover .bar-cover {
+  filter: brightness(1.1);
+}
+
+/* Focused as a whole when it opens (a landing spot for Tab, not a control). */
+.now-playing:focus {
+  outline: none;
+}
+
+.now-playing {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  /* Always dark over the blurred cover, whatever the theme. */
+  background: var(--np-bg);
+  color: var(--np-text);
+  --text-2: var(--np-text-2);
+  --text-3: var(--np-text-3);
+  --hover: var(--np-hover);
+  --selected: var(--np-surface-3);
+  --surface-3: var(--np-surface-3);
+  --border: var(--np-border);
+  --text: var(--np-text);
+  --bg: var(--np-bg);
+}
+
+.now-playing-backdrop {
+  position: absolute;
+  inset: -10%;
+  width: 120%;
+  height: 120%;
+  object-fit: cover;
+  filter: blur(60px) saturate(1.3);
+  opacity: 0.85;
+  transform: scale(1.1);
+}
+
+.now-playing-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--np-scrim);
+}
+
+/* The cover and controls, centred in the room the queue panel leaves. */
+.now-playing-main {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  transition: right var(--motion) ease-out;
+}
+
+.now-playing-content {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: clamp(24px, 4vw, 56px);
+  width: min(1100px, 100%);
+  margin: auto;
+  padding: 48px clamp(24px, 4vw, 48px) 32px;
+}
+
+.now-playing-cover {
+  width: min(44vh, 40vw, 440px);
+  height: min(44vh, 40vw, 440px);
+  border-radius: 10px;
+  box-shadow: var(--shadow-big);
+}
+
+.now-playing-info {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.now-playing-title {
+  font-size: clamp(22px, 2.6vw, 32px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.now-playing-subtitle {
+  color: var(--text-2);
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.now-playing-timeline .seek {
+  width: 100%;
+  max-width: none;
+}
+
+/* Transport in the middle, volume on the right. */
+.now-playing-transport {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.now-playing-transport .volume {
+  justify-self: end;
+}
+
+.now-playing-controls {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.now-playing-controls .icon-button {
+  width: 40px;
+  height: 40px;
+}
+
+.now-playing-controls .now-playing-play {
+  width: 52px;
+  height: 52px;
+}
+
+.now-playing-nothing {
+  position: relative;
+}
+
+.visualizer {
+  width: 100%;
+  height: clamp(60px, 14vh, 140px);
+  margin-top: 8px;
+  transition: opacity var(--motion);
+}
+
+.visualizer.is-idle {
+  opacity: 0.55;
+}
+
+.now-playing-next {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.now-playing-next.is-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 8px;
+  border-radius: var(--radius);
+  background: var(--np-hover);
+  text-align: left;
+  transition: background var(--motion-fast);
+}
+
+.now-playing-next.is-card:hover {
+  background: var(--np-surface-3);
+}
+
+.now-playing-next-cover {
+  width: 40px;
+  height: 40px;
+}
+
+.now-playing-next-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.now-playing-next-text .eyebrow {
+  margin-bottom: 0;
+}
+
+.now-playing-next-title,
+.now-playing-next-artist {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.now-playing-next-artist {
+  color: var(--text-2);
+  font-size: var(--text-small);
+}
+
+.now-playing-toolbar {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+}
+
+/* The queue as a translucent card sliding in from the right. */
+.now-playing-queue {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  bottom: 12px;
+  width: min(var(--np-panel-width), calc(100% - 24px));
+  display: flex;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--np-panel);
+  border: 1px solid var(--np-border);
+  box-shadow: var(--shadow-big);
+  backdrop-filter: blur(24px);
+  animation: np-panel-in var(--motion) ease-out;
+}
+
+.now-playing-queue .queue {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border-left: 0;
+}
+
+/* Menus opened from the view stay on the view's dark colours (the menu
+   is portaled to <body>, so it cannot inherit them from .now-playing). */
+.context-menu.is-immersive {
+  background: var(--np-menu);
+  border-color: var(--np-border);
+  color: var(--np-text);
+}
+
+@keyframes np-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+/* Wide windows make room for the panel; narrow ones let it overlay. */
+@media (min-width: 1180px) {
+  .now-playing.has-queue .now-playing-main {
+    right: calc(var(--np-panel-width) + 12px);
+  }
+}
+
+@media (max-width: 1000px), (max-height: 640px) {
+  .now-playing-content {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+
+  .now-playing-cover {
+    align-self: center;
+    width: min(30vh, 60vw);
+    height: min(30vh, 60vw);
+  }
+
+  .now-playing-next {
+    align-self: center;
+  }
+}
+
+/* With the panel open in a mid-size window, stack the content too. */
+@media (min-width: 1180px) and (max-width: 1500px) {
+  .now-playing.has-queue .now-playing-content {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+
+  .now-playing.has-queue .now-playing-cover {
+    align-self: center;
+    width: min(30vh, 40vw);
+    height: min(30vh, 40vw);
+  }
+
+  .now-playing.has-queue .now-playing-next {
+    align-self: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .now-playing-backdrop {
+    transform: none;
+  }
+
+  .now-playing-queue {
+    animation: none;
+  }
+}

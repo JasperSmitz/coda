@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-settings-disconnect"
+description = "Enables the settings_disconnect command without any pre-configured scope."
+commands.allow = ["settings_disconnect"]
+
+[[permission]]
+identifier = "deny-settings-disconnect"
+description = "Denies the settings_disconnect command without any pre-configured scope."
+commands.deny = ["settings_disconnect"]
