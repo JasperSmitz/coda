@@ -20,6 +20,7 @@ import type { PlayContext, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import type { MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
+import { TrackAlbum, TrackArtist } from "./NameLink";
 import { Equalizer } from "./QueuePanel";
 import { TrackMenu } from "./TrackMenu";
 
@@ -348,11 +349,9 @@ const TrackRow = memo(function TrackRow({
       </span>
       <span className="track-text">
         <span className="track-title">{track.title}</span>
-        {showArtist && (
-          <span className="track-artist secondary">{track.artist ?? "Unknown artist"}</span>
-        )}
+        {showArtist && <TrackArtist track={track} className="track-artist secondary" />}
       </span>
-      {showAlbum && <span className="track-album secondary">{track.album ?? ""}</span>}
+      {showAlbum && <TrackAlbum track={track} className="track-album secondary" />}
       <span className="track-duration time secondary">{formatTime(track.durationMs)}</span>
       <button
         className="icon-button track-more"

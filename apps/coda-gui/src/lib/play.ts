@@ -131,11 +131,38 @@ export function canGoToArtist(track: Track): boolean {
   return track.artistId !== null;
 }
 
+/**
+ * A shown artist name may be a link to `artistId`'s page: the id is the
+ * song's artist on Navidrome, but the album artist for local tracks (the
+ * tags), so a local track links its artist only when that is the same name
+ * (or there is no album artist). The menu's "Go to artist" uses
+ * `canGoToArtist` (it names no artist).
+ */
+export function canLinkArtist(track: Track): boolean {
+  if (!canGoToArtist(track) || !track.artist?.trim()) return false;
+  if (track.source.kind !== "local") return true;
+  const fold = (s: string) => s.trim().toLocaleLowerCase();
+  const albumArtist = track.albumArtist?.trim();
+  return !albumArtist || fold(albumArtist) === fold(track.artist);
+}
+
 /** Opens `route`, on its own source's stack (switching source first). */
 export function openRoute(route: Route & { source: SourceKind }) {
   if (route.source !== nav.source()) switchSource(route.source);
   // The switch is refused for a source that is not configured.
-  if (route.source === nav.source()) nav.push(route);
+  if (route.source !== nav.source()) return;
+  // Already shown (an album's own link inside it): no duplicate entry.
+  const top = nav.top().route;
+  if (
+    "id" in top &&
+    "id" in route &&
+    top.kind === route.kind &&
+    top.source === route.source &&
+    top.id === route.id
+  ) {
+    return;
+  }
+  nav.push(route);
 }
 
 export function goToAlbum(track: Track) {
@@ -154,7 +181,11 @@ export function goToArtist(track: Track) {
     kind: "artist",
     source: sourceOf(track),
     id: track.artistId,
-    name: track.albumArtist ?? track.artist ?? "Artist",
+    // Navidrome: the id is the song's artist; local: the album artist.
+    name:
+      (track.source.kind === "navidrome"
+        ? (track.artist ?? track.albumArtist)
+        : (track.albumArtist ?? track.artist)) ?? "Artist",
   });
 }
 

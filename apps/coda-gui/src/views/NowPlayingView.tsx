@@ -9,6 +9,7 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { Cover } from "../components/Cover";
+import { ArtistAlbumLine } from "../components/NameLink";
 import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBar";
 import { Visualizer } from "../components/Visualizer";
 import {
@@ -154,7 +155,11 @@ export function NowPlayingView({
               <h1 className="now-playing-title" title={playing.title}>
                 {playing.title}
               </h1>
-              {subtitle && <div className="now-playing-subtitle">{subtitle}</div>}
+              {subtitle && (
+                <div className="now-playing-subtitle">
+                  <ArtistAlbumLine track={playing} onGo={onClose} />
+                </div>
+              )}
               <div className="now-playing-timeline">
                 <SeekBar
                   disabled={unavailable}

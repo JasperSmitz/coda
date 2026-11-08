@@ -45,6 +45,29 @@
   color: var(--accent);
 }
 
+/* A clickable artist or album name (components/NameLink). */
+.name-link:hover {
+  color: var(--accent);
+}
+
+/*
+ * Keyboard focus (the bar, Now Playing): their lines clip overflow, so
+ * the global ring (2px outside) would be cut off. An inset ring plus the
+ * accent colour stays inside the text's own box; no layout change.
+ */
+.name-link:focus-visible {
+  color: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* In a row or card line: only the text is the target, still truncated. */
+.name-link.in-row {
+  align-self: flex-start;
+  justify-self: start;
+  max-width: 100%;
+}
+
 .tag {
   padding: 1px 6px;
   border-radius: var(--radius-small);
@@ -425,6 +448,11 @@
 
 .album-sub {
   font-size: var(--text-small);
+}
+
+/* The artist line as a link, outside the card's button (the button's gap). */
+.card-sub-link {
+  margin-top: 2px;
 }
 
 .album-more {

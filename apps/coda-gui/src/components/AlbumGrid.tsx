@@ -13,13 +13,14 @@ import {
   type RefObject,
 } from "react";
 import { browse } from "../lib/browse";
-import { albumContext, enqueue, playFrom, playTracks } from "../lib/play";
+import { albumContext, enqueue, openRoute, playFrom, playTracks } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav } from "../state/nav";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuState } from "./ContextMenu";
 import { Cover } from "./Cover";
 import { MoreIcon } from "./icons";
+import { NameLink } from "./NameLink";
 
 const TILE = 180;
 const GAP = 22;
@@ -197,6 +198,7 @@ export function AlbumGrid({
               top={row * rowHeight}
               size={tile}
               hideArtist={hideArtist}
+              source={source}
               onOpen={() => openAlbum(source, album)}
               onMenu={(x, y) => setMenu({ x, y, key: album.id, album })}
             />
@@ -272,6 +274,7 @@ interface TileProps {
   top: number;
   size: number;
   hideArtist: boolean;
+  source: SourceKind;
   onOpen: () => void;
   onMenu: (x: number, y: number) => void;
 }
@@ -283,6 +286,7 @@ const AlbumTile = memo(function AlbumTile({
   top,
   size,
   hideArtist,
+  source,
   onOpen,
   onMenu,
 }: TileProps) {
@@ -292,6 +296,9 @@ const AlbumTile = memo(function AlbumTile({
       ? String(album.year)
       : ""
     : (album.artist ?? "Unknown artist");
+  // A known artist is a link below the button (no button in a button).
+  const artistId = hideArtist ? null : album.artistId;
+  const artist = album.artist;
   return (
     <div className="album-tile" role="listitem" style={{ left, top, width: size }}>
       <button
@@ -308,10 +315,31 @@ const AlbumTile = memo(function AlbumTile({
         <span className="album-title" style={{ maxWidth: cover }}>
           {album.name}
         </span>
-        <span className="album-sub secondary" style={{ maxWidth: cover }}>
-          {sub}
-        </span>
+        {(artistId === null || !artist) && (
+          <span className="album-sub secondary" style={{ maxWidth: cover }}>
+            {sub}
+          </span>
+        )}
       </button>
+      {artistId !== null && artist && (
+        <div
+          className="album-sub card-sub-link secondary"
+          style={{ maxWidth: cover }}
+          title={album.name}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onMenu(e.clientX, e.clientY);
+          }}
+        >
+          <NameLink
+            inRow
+            label={`Go to artist ${artist}`}
+            onGo={() => openRoute({ kind: "artist", source, id: artistId, name: artist })}
+          >
+            {artist}
+          </NameLink>
+        </div>
+      )}
       <button
         className="icon-button album-more"
         tabIndex={-1}

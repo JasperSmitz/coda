@@ -25,6 +25,7 @@ import type { Hidden, PlayContext, Playlist, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
+import { TrackAlbum, TrackArtist } from "./NameLink";
 import { Equalizer } from "./QueuePanel";
 
 const ROW = 36;
@@ -381,9 +382,9 @@ const Row = memo(function Row({
       <span className="track-no">{playing ? <Equalizer animated={animated} /> : at + 1}</span>
       <span className="track-text">
         <span className="track-title">{track.title}</span>
-        <span className="track-artist secondary">{track.artist ?? "Unknown artist"}</span>
+        <TrackArtist track={track} className="track-artist secondary" />
       </span>
-      <span className="track-album secondary">{track.album ?? ""}</span>
+      <TrackAlbum track={track} className="track-album secondary" />
       <span className="track-duration time secondary">{formatTime(track.durationMs)}</span>
       <button
         className="icon-button track-more"

@@ -17,6 +17,7 @@ import type { QueueItem, Status } from "../lib/types";
 import { confirm } from "../state/dialogs";
 import { BroomIcon, CloseIcon, PlaylistAddIcon, ShuffleIcon } from "./icons";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
+import { TrackArtist } from "./NameLink";
 
 const ROW = 36;
 const OVERSCAN = 8;
@@ -428,7 +429,7 @@ const QueueRow = memo(function QueueRow({
       </span>
       <span className="queue-text">
         <span className="queue-title">{track.title}</span>
-        <span className="queue-artist secondary">{track.artist ?? "Unknown artist"}</span>
+        <TrackArtist track={track} className="queue-artist secondary" />
       </span>
       <span className="queue-duration time secondary">{formatTime(track.durationMs)}</span>
       {onRemove && (
