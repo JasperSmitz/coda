@@ -3,10 +3,13 @@
 # Builds Coda App from a local git checkout (no network source for the app
 # itself; cargo and pnpm still download dependencies in prepare()).
 #
-#   cd packaging/arch
-#   makepkg -si                        # builds tag v$pkgver of the checkout two levels up
+#   cd apps/coda-gui/packaging/arch
+#   makepkg -si                        # builds tag coda-gui-v$pkgver of the monorepo checkout four levels up
 #   _ref=branch=main makepkg -si       # or a branch / commit (_ref=commit=<sha>)
-#   _repo=/path/to/coda-app makepkg -si
+#   _repo=/path/to/coda makepkg -si
+#
+# The checkout is the Coda monorepo; the app lives in apps/coda-gui and its
+# Cargo workspace (and target/) is at the repo root.
 #
 # makepkg clones the checkout's *committed* state, so uncommitted changes are
 # not included.
@@ -24,35 +27,37 @@ depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2' 'libsoup3' 'dbus'
 makedepends=('git' 'cargo' 'nodejs' 'pnpm')
 optdepends=('gnome-keyring: store the Navidrome password (or another Secret Service provider such as KWallet)')
 options=('!lto')
-source=("$pkgname::git+file://${_repo:-$(realpath "$startdir/../..")}#${_ref:-tag=v$pkgver}")
+source=("$pkgname::git+file://${_repo:-$(realpath "$startdir/../../../..")}#${_ref:-tag=coda-gui-v$pkgver}")
 sha256sums=('SKIP')
 
 prepare() {
-  cd "$pkgname"
+  cd "$pkgname/apps/coda-gui"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
   pnpm install --frozen-lockfile
 }
 
 build() {
-  cd "$pkgname"
+  cd "$pkgname/apps/coda-gui"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR="$srcdir/$pkgname/target"
   # `tauri build` builds the frontend (beforeBuildCommand) and the binary
   # with the custom-protocol feature; packaging is done below, not by Tauri.
-  pnpm tauri build --no-bundle -- --frozen
+  # `release-gui` (root Cargo.toml) is the app's release profile: LTO and
+  # panic = "abort".
+  pnpm tauri build --no-bundle -- --frozen --profile release-gui
 }
 
 check() {
-  cd "$pkgname"
+  cd "$pkgname/apps/coda-gui"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR="$srcdir/$pkgname/target"
-  cargo test --frozen --workspace
+  cargo test --frozen -p coda-app -p coda-core
 }
 
 package() {
-  cd "$pkgname"
-  install -Dm755 target/release/coda-app "$pkgdir/usr/bin/coda-app"
+  cd "$pkgname/apps/coda-gui"
+  install -Dm755 "$srcdir/$pkgname/target/release-gui/coda-app" "$pkgdir/usr/bin/coda-app"
   install -Dm644 packaging/linux/coda-app.desktop "$pkgdir/usr/share/applications/coda-app.desktop"
   install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/coda-app.png"
   install -Dm644 src-tauri/icons/64x64.png "$pkgdir/usr/share/icons/hicolor/64x64/apps/coda-app.png"

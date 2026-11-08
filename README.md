@@ -33,7 +33,7 @@ sudo apt install mpv      # Debian/Ubuntu
 brew install mpv          # macOS (Homebrew)
 
 # Build and install Coda (puts `coda` in ~/.cargo/bin)
-cargo install --path .
+cargo install --path crates/coda-tui
 ```
 
 ### Install a release

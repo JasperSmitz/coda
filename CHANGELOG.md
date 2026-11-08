@@ -4,6 +4,9 @@ All notable changes to Coda are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Changed
+- The repository is now a Cargo workspace with the TUI in `crates/coda-tui` (package `coda-tui`); log targets in `coda.log` are now `coda_tui::…` instead of `coda_player::…` (adjust any `CODA_LOG=coda_player=…` filter).
+
 ## [1.0.0] - 2026-11-03
 
 The first release: a keyboard-first terminal music player for local files and a Navidrome server, with one queue for both. Playback runs through mpv.

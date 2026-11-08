@@ -4,12 +4,10 @@
 use std::error::Error as _;
 use std::time::Duration;
 
-use coda_player::model::{MAX_METADATA_CHARS, TrackSource, UNKNOWN_TITLE};
-use coda_player::navidrome::api::MAX_PLAYLIST_ENTRIES;
-use coda_player::navidrome::client::{
-    self, MAX_BODY_BYTES, MAX_PLAYLIST_BODY_BYTES, parse_base_url,
-};
-use coda_player::navidrome::{AlbumSort, Client, Error, Password, UNKNOWN_ARTIST};
+use coda_tui::model::{MAX_METADATA_CHARS, TrackSource, UNKNOWN_TITLE};
+use coda_tui::navidrome::api::MAX_PLAYLIST_ENTRIES;
+use coda_tui::navidrome::client::{self, MAX_BODY_BYTES, MAX_PLAYLIST_BODY_BYTES, parse_base_url};
+use coda_tui::navidrome::{AlbumSort, Client, Error, Password, UNKNOWN_ARTIST};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -497,7 +495,7 @@ async fn scrobble_sends_id_submission_and_time() {
 
 #[tokio::test]
 async fn scrobbler_sends_in_order_and_reports_only_the_first_failure() {
-    use coda_player::navidrome::scrobble::{ScrobbleRequest, Scrobbler};
+    use coda_tui::navidrome::scrobble::{ScrobbleRequest, Scrobbler};
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -568,7 +566,7 @@ async fn scrobbler_sends_in_order_and_reports_only_the_first_failure() {
 
 #[tokio::test]
 async fn scrobbler_drops_requests_beyond_its_queue() {
-    use coda_player::navidrome::scrobble::{QUEUE_CAPACITY, ScrobbleRequest, Scrobbler};
+    use coda_tui::navidrome::scrobble::{QUEUE_CAPACITY, ScrobbleRequest, Scrobbler};
 
     let server = MockServer::start().await;
     // Slow enough that every request below is sent while the first one is

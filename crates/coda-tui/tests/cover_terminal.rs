@@ -227,12 +227,12 @@ fn pty_child() {
 /// key reader with the late-reply filter (unless `CODA_PTY_NO_FILTER`),
 /// recording keys until `y` or 4 s.
 fn keys_child(result: &Path) {
-    use coda_player::ui::cover::LateReplyFilter;
+    use coda_tui::ui::cover::LateReplyFilter;
     use crossterm::event::{self, Event, KeyCode};
     let previous = std::panic::take_hook();
     let mut terminal = ratatui::try_init().unwrap();
-    coda_player::app::install_panic_hook(previous);
-    let detection = coda_player::app::detect_graphics(&mut terminal);
+    coda_tui::app::install_panic_hook(previous);
+    let detection = coda_tui::app::detect_graphics(&mut terminal);
     let mut filter = LateReplyFilter::new(detection.late, Instant::now());
     let mut stdout = io::stdout();
     stdout.write_all(READY).unwrap();
@@ -274,11 +274,11 @@ fn keys_child(result: &Path) {
 
 /// Shows a Kitty image as the app does, then panics on the UI thread.
 fn panic_child() {
-    use coda_player::cover::CoverImage;
-    use coda_player::ui::cover::{ArtFrame, ArtPainter, Graphics};
+    use coda_tui::cover::CoverImage;
+    use coda_tui::ui::cover::{ArtFrame, ArtPainter, Graphics};
     let previous = std::panic::take_hook();
     let _terminal = ratatui::try_init().unwrap();
-    coda_player::app::install_panic_hook(previous);
+    coda_tui::app::install_panic_hook(previous);
     let mut painter = ArtPainter::new(Graphics::Kitty { cell: (16, 34) }, 0x0B_0000);
     let image = CoverImage::new(4, 4, vec![200; 48]).unwrap();
     painter.prepare(Some(ArtFrame {

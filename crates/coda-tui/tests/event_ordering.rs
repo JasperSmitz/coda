@@ -18,15 +18,15 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use coda_player::model::{Track, TrackMetadata};
-use coda_player::playback::mpv::protocol::MpvCommand;
-use coda_player::playback::mpv::state::{
+use coda_tui::model::{Track, TrackMetadata};
+use coda_tui::playback::mpv::protocol::MpvCommand;
+use coda_tui::playback::mpv::state::{
     IDLE_PROPERTY, MpvState, OutgoingRequest, Output, POSITION_INTERVAL,
 };
-use coda_player::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackTarget};
-use coda_player::player::{NO_PLAYABLE_TRACKS, PlaybackStatus, Player, PlayerCommand, RepeatMode};
-use coda_player::queue::QueueEntryId;
-use coda_player::resolve::resolve_command;
+use coda_tui::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackTarget};
+use coda_tui::player::{NO_PLAYABLE_TRACKS, PlaybackStatus, Player, PlayerCommand, RepeatMode};
+use coda_tui::queue::QueueEntryId;
+use coda_tui::resolve::resolve_command;
 use serde_json::json;
 
 struct Sim {

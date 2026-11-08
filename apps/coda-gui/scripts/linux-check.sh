@@ -5,26 +5,28 @@
 #   scripts/linux-check.sh --bundle   # additionally a release deb + AppImage (+ rpm)
 #   scripts/linux-check.sh --shell    # an interactive shell in the container
 #
-# The repo is mounted read-write at /work. Cargo's registry, the Linux target
-# dir and node_modules are named Docker volumes, so macOS and Linux build
-# output (and native node modules) never mix.
+# The whole monorepo is mounted read-write at /work (the Cargo workspace is
+# at its root) and the commands run in /work/apps/coda-gui. Cargo's registry,
+# the Linux target dir and node_modules are named Docker volumes, so macOS and
+# Linux build output (and native node modules) never mix.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+repo="$(cd "$root/../.." && pwd)"
 image="coda-app-linux-dev"
 mode="${1:-check}"
 
 docker build -t "$image" -f "$root/docker/linux-dev.Dockerfile" "$root/docker"
 
 run=(docker run --rm
-  -v "$root:/work"
+  -v "$repo:/work"
   -v coda-app-cargo-registry:/usr/local/cargo/registry
   -v coda-app-cargo-git:/usr/local/cargo/git
   -v coda-app-linux-target:/cargo-target
-  -v coda-app-node-modules:/work/node_modules
+  -v coda-app-node-modules:/work/apps/coda-gui/node_modules
   -v coda-app-pnpm-store:/root/.local/share/pnpm/store
   -e CI=true
-  -w /work)
+  -w /work/apps/coda-gui)
 
 if [ "$mode" = "--shell" ]; then
   exec "${run[@]}" -it "$image" bash
@@ -42,18 +44,18 @@ bundle=0
   step "pnpm install"; pnpm install --frozen-lockfile
   step "pnpm build";   pnpm build
   step "cargo fmt";    cargo fmt --all -- --check
-  step "cargo clippy"; cargo clippy --locked --workspace --all-targets -- -D warnings
-  step "cargo test";   cargo test --locked --workspace
+  step "cargo clippy"; cargo clippy --locked -p coda-app -p coda-core --all-targets -- -D warnings
+  step "cargo test";   cargo test --locked -p coda-app -p coda-core
   # Some mpv tests use the default audio output of mpv; with no sound card,
   # PulseAudio falls back to a null sink (as in the Coda CI).
   step "pulseaudio"; pulseaudio --start --exit-idle-time=-1 && pactl info | grep -E "Server Name|Default Sink"
-  step "cargo test (ignored, needs mpv)"; cargo test --locked --workspace -- --ignored
+  step "cargo test (ignored, needs mpv)"; cargo test --locked -p coda-app -p coda-core -- --ignored
   step "tauri build --debug --no-bundle"; pnpm tauri build --debug --no-bundle
   file "$CARGO_TARGET_DIR/debug/coda-app"
   if [ "$BUNDLE" = 1 ]; then
-    step "tauri build (release bundles)"; pnpm tauri build --bundles deb,appimage,rpm
-    ls -l "$CARGO_TARGET_DIR"/release/bundle/*/
-    for d in "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb; do dpkg-deb --info "$d"; dpkg-deb --contents "$d"; done
+    step "tauri build (release bundles)"; pnpm tauri build --bundles deb,appimage,rpm -- --profile release-gui
+    ls -l "$CARGO_TARGET_DIR"/release-gui/bundle/*/
+    for d in "$CARGO_TARGET_DIR"/release-gui/bundle/deb/*.deb; do dpkg-deb --info "$d"; dpkg-deb --contents "$d"; done
   fi
   step "all Linux checks passed"
 '

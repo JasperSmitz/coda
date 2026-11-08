@@ -7,10 +7,10 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use coda_player::library::m3u::PlaylistFile;
-use coda_player::library::scan::{self, ScanEvent};
-use coda_player::library::tree::LibraryTree;
-use coda_player::model::{MAX_METADATA_CHARS, Track};
+use coda_tui::library::m3u::PlaylistFile;
+use coda_tui::library::scan::{self, ScanEvent};
+use coda_tui::library::tree::LibraryTree;
+use coda_tui::model::{MAX_METADATA_CHARS, Track};
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor, TagExt};
 use lofty::tag::{ItemKey, Tag, TagType};
@@ -383,7 +383,7 @@ fn playlists_follow_the_audio_rules_and_come_after_every_track() {
 
 #[test]
 fn a_playlist_entry_through_a_symlinked_folder_is_missing() {
-    use coda_player::library::Library;
+    use coda_tui::library::Library;
     let (_guard, root) = root();
     let (_outside_guard, outside) = self::root();
     touch(&root.join("real/x.mp3"));

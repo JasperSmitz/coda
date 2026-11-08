@@ -6,15 +6,15 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use coda_player::model::{Track, TrackMetadata};
-use coda_player::navidrome;
-use coda_player::playback::mpv::{self, MpvOptions};
-use coda_player::playback::{
+use coda_tui::model::{Track, TrackMetadata};
+use coda_tui::navidrome;
+use coda_tui::playback::mpv::{self, MpvOptions};
+use coda_tui::playback::{
     EndReason, LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle, PlaybackTarget,
     ShutdownOutcome, VisualizerFrame,
 };
-use coda_player::player::{PlaybackStatus, Player, PlayerCommand};
-use coda_player::resolve;
+use coda_tui::player::{PlaybackStatus, Player, PlayerCommand};
+use coda_tui::resolve;
 use tokio::time::timeout;
 
 const STEP: Duration = Duration::from_secs(5);

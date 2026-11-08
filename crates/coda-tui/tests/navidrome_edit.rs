@@ -1,12 +1,12 @@
 //! Navidrome playlist writes and edit jobs against a local `wiremock`
 //! server. No test contacts a real server.
 
-use coda_player::navidrome::browse::Generation;
-use coda_player::navidrome::client::{
+use coda_tui::navidrome::browse::Generation;
+use coda_tui::navidrome::client::{
     MAX_GET_URL_BYTES, MAX_POST_BODY_BYTES, Transport, parse_base_url,
 };
-use coda_player::navidrome::edit::{self, EditId, EditOp, EditRequest, EditResult};
-use coda_player::navidrome::{Client, Error, Hidden, Password};
+use coda_tui::navidrome::edit::{self, EditId, EditOp, EditRequest, EditResult};
+use coda_tui::navidrome::{Client, Error, Hidden, Password};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};

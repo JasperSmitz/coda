@@ -1,7 +1,8 @@
 name: Release
 
-# Pushing a tag such as `v1.0.0` builds Coda for Linux and macOS and
-# publishes a GitHub release. See docs/RELEASING.md.
+# Pushing a tag such as `v1.0.0` builds Coda (the TUI, crates/coda-tui) for
+# Linux and macOS and publishes a GitHub release. See docs/RELEASING.md.
+# The GUI is released by coda-gui-release.yml from `coda-gui-v*` tags.
 on:
   push:
     tags: ['v*.*.*']
@@ -37,7 +38,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "coda-player") | .version')
+            | jq -r '.packages[] | select(.name == "coda-tui") | .version')
           if [ -z "$version" ]; then
             echo "::error::Could not read the version from Cargo.toml"
             exit 1
@@ -113,7 +114,7 @@ jobs:
           targets: ${{ matrix.target }}
       # No build cache here: a release is built from a clean slate.
       - name: Build
-        run: cargo build --release --locked --target "$TARGET"
+        run: cargo build --release --locked -p coda-tui --target "$TARGET"
       - name: Check the binary
         env:
           NATIVE: ${{ matrix.native }}

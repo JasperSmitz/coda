@@ -6,14 +6,14 @@
 use std::error::Error as _;
 use std::sync::Arc;
 
-use coda_player::cover::cache::{DiskCache, large_dir};
-use coda_player::cover::{
+use coda_tui::cover::cache::{DiskCache, large_dir};
+use coda_tui::cover::{
     COVER_SIZE, CoverKey, CoverRequest, CoverRequestId, CoverSize, LARGE_COVER_SIZE, Outcome,
     spawn_load,
 };
-use coda_player::navidrome::browse::Generation;
-use coda_player::navidrome::client::{MAX_COVER_BYTES, parse_base_url};
-use coda_player::navidrome::{Client, Error, Password};
+use coda_tui::navidrome::browse::Generation;
+use coda_tui::navidrome::client::{MAX_COVER_BYTES, parse_base_url};
+use coda_tui::navidrome::{Client, Error, Password};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, RgbImage};
@@ -264,8 +264,8 @@ async fn responses_are_classified_by_their_bytes() {
 
     let webp_bytes = client.cover_art("webp", 256).await.unwrap();
     assert_eq!(
-        coda_player::cover::sniff(&webp_bytes.bytes),
-        Some(coda_player::cover::Format::WebP)
+        coda_tui::cover::sniff(&webp_bytes.bytes),
+        Some(coda_tui::cover::Format::WebP)
     );
     let placeholder = client.cover_art("placeholder", 256).await.unwrap();
     assert!(placeholder.no_store);

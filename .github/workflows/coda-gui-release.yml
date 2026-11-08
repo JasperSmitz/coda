@@ -1,11 +1,15 @@
-name: Release
+name: Coda GUI Release
 
-# Pushing a tag such as `v0.1.0` builds Coda App's bundles (Linux deb,
-# AppImage and rpm; macOS dmg) and creates a *draft* GitHub release to review
-# and publish by hand.
+# Pushing a tag such as `coda-gui-v0.1.0` builds Coda App's bundles (Linux
+# deb, AppImage and rpm; macOS dmg) from apps/coda-gui and creates a *draft*
+# GitHub release to review and publish by hand. (`v*` tags release the TUI,
+# see release.yml.)
+#
+# The bundles are built with the `release-gui` Cargo profile (root
+# Cargo.toml): LTO and `panic = "abort"`, which the app's panic hook relies on.
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['coda-gui-v*.*.*']
 
 # Nothing by default; each job asks for what it needs.
 permissions: {}
@@ -25,6 +29,9 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: apps/coda-gui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,7 +44,7 @@ jobs:
           version=$(jq -r .version src-tauri/tauri.conf.json)
           cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
           npm_version=$(jq -r .version package.json)
-          if [ "$TAG" != "v$version" ] || [ "$cargo_version" != "$version" ] || [ "$npm_version" != "$version" ]; then
+          if [ "$TAG" != "coda-gui-v$version" ] || [ "$cargo_version" != "$version" ] || [ "$npm_version" != "$version" ]; then
             echo "::error::Tag $TAG, tauri.conf.json $version, Cargo.toml $cargo_version and package.json $npm_version must agree"
             exit 1
           fi
@@ -59,6 +66,9 @@ jobs:
           - os: macos-latest
             bundles: app,dmg
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/coda-gui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,13 +94,14 @@ jobs:
       - name: Build the bundles
         env:
           BUNDLES: ${{ matrix.bundles }}
-        run: pnpm tauri build --bundles "$BUNDLES" -- --locked
+        run: pnpm tauri build --bundles "$BUNDLES" -- --locked --profile release-gui
       - name: Collect and checksum
         run: |
-          mkdir -p dist-release
-          find target/release/bundle \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.dmg' \) \
-            -exec cp {} dist-release/ \;
-          cd dist-release
+          # The workspace target dir is at the repo root.
+          mkdir -p "$GITHUB_WORKSPACE/dist-release"
+          find ../../target/release-gui/bundle \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.dmg' \) \
+            -exec cp {} "$GITHUB_WORKSPACE/dist-release/" \;
+          cd "$GITHUB_WORKSPACE/dist-release"
           ls -l
           for f in *; do
             if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
@@ -125,11 +136,12 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat > notes.md <<'NOTES'
-          Linux: `.deb` (Debian/Ubuntu), `.rpm` and `.AppImage`; Arch users build with `packaging/arch/PKGBUILD`. macOS: `.dmg`. Coda needs [mpv](https://mpv.io) installed. The macOS app is not signed or notarised: if macOS says it is damaged or can't be verified, run `xattr -dr com.apple.quarantine /Applications/Coda.app` once.
+          Linux: `.deb` (Debian/Ubuntu), `.rpm` and `.AppImage`; Arch users build with `apps/coda-gui/packaging/arch/PKGBUILD`. macOS: `.dmg`. Coda needs [mpv](https://mpv.io) installed. The macOS app is not signed or notarised: if macOS says it is damaged or can't be verified, run `xattr -dr com.apple.quarantine /Applications/Coda.app` once.
           NOTES
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --draft \
+            --latest=false \
             --title "Coda App $VERSION" \
             --notes-file notes.md

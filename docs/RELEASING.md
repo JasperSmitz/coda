@@ -9,7 +9,7 @@ A release is made by pushing a version tag. The `Release` workflow (`.github/wor
 Nothing is published to crates.io (`publish = false`).
 
 ## Steps
-1. **Bump the version** in `Cargo.toml`, then run `cargo build` so `Cargo.lock` follows (the workflow builds with `--locked`).
+1. **Bump the version** in `crates/coda-tui/Cargo.toml`, then run `cargo build -p coda-tui` so `Cargo.lock` follows (the workflow builds with `--locked`).
 2. **Update `CHANGELOG.md`:** move the entries from `[Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section, written for users, and update the links at the bottom.
 3. **Merge** to `main` through a pull request, with CI green.
 4. **Tag** the merge commit on `main`:

@@ -14,14 +14,14 @@ use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use coda_player::app;
-use coda_player::config::{self, Cli, Config, ConfigError, Env, PASSWORD_COMMAND_TIMEOUT};
-use coda_player::navidrome;
-use coda_player::onboarding::Outcome;
-use coda_player::playback;
-use coda_player::session;
-use coda_player::settings;
-use coda_player::setup;
+use coda_tui::app;
+use coda_tui::config::{self, Cli, Config, ConfigError, Env, PASSWORD_COMMAND_TIMEOUT};
+use coda_tui::navidrome;
+use coda_tui::onboarding::Outcome;
+use coda_tui::playback;
+use coda_tui::session;
+use coda_tui::settings;
+use coda_tui::setup;
 use tracing::{Level, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
@@ -190,7 +190,7 @@ async fn run() -> ExitCode {
 
     let covers = app::CoverConfig {
         enabled: config.cover_art,
-        cache_dir: coda_player::cover::cache::cache_dir(
+        cache_dir: coda_tui::cover::cache::cache_dir(
             std::env::var_os("XDG_CACHE_HOME"),
             std::env::var_os("HOME"),
         ),
@@ -383,8 +383,8 @@ mod tests {
             tracing::info!(target: "reqwest::connect", "info secret-host");
             tracing::debug!(target: "rustls::client", "tls secret-host");
             tracing::warn!(target: "hyper_util::client", "warn kept");
-            tracing::info!(target: "coda_player::app", "app info");
-            tracing::debug!(target: "coda_player::app", "app debug");
+            tracing::info!(target: "coda_tui::app", "app info");
+            tracing::debug!(target: "coda_tui::app", "app debug");
         });
         String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
     }
@@ -422,6 +422,6 @@ mod tests {
         assert!(is_clamped("zbus::connection"));
         assert!(!is_clamped("hyperion"));
         assert!(!is_clamped("h2o::x"));
-        assert!(!is_clamped("coda_player"));
+        assert!(!is_clamped("coda_tui"));
     }
 }

@@ -5,11 +5,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use coda_player::navidrome::browse::{
+use coda_tui::navidrome::browse::{
     Content, FetchRequest, FetchResponse, RequestId, Resource, spawn_fetch,
 };
-use coda_player::navidrome::client::parse_base_url;
-use coda_player::navidrome::{AlbumSort, Client, Error, Password};
+use coda_tui::navidrome::client::parse_base_url;
+use coda_tui::navidrome::{AlbumSort, Client, Error, Password};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use wiremock::matchers::{method, path, query_param};

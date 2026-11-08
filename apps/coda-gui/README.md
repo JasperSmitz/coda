@@ -28,8 +28,8 @@ Build the bundles (see Development for the build dependencies):
 
 ```sh
 pnpm install
-pnpm tauri build --bundles deb,appimage,rpm
-# target/release/bundle/deb/Coda_<version>_<arch>.deb (depends on mpv), .../appimage/, .../rpm/
+pnpm tauri build --bundles deb,appimage,rpm -- --profile release-gui
+# ../../target/release-gui/bundle/deb/Coda_<version>_<arch>.deb (depends on mpv), .../appimage/, .../rpm/
 ```
 
 ### macOS
@@ -37,7 +37,7 @@ pnpm tauri build --bundles deb,appimage,rpm
 ```sh
 brew install mpv
 pnpm install
-pnpm tauri build --bundles app,dmg   # target/release/bundle/macos/Coda.app and dmg/Coda_<version>_aarch64.dmg
+pnpm tauri build --bundles app,dmg -- --profile release-gui   # ../../target/release-gui/bundle/macos/Coda.app and dmg/Coda_<version>_aarch64.dmg
 ```
 
 The app is not signed or notarised. A `Coda.app` copied from a dmg downloaded in a browser is quarantined and macOS says it "is damaged" or "can't be verified"; remove the flag once: `xattr -dr com.apple.quarantine /Applications/Coda.app`. Alternatively, open it once, then choose **Open Anyway** in System Settings → Privacy & Security. A build made on your own Mac is not quarantined.

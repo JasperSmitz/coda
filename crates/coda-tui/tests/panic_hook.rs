@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use coda_player::app::install_panic_hook;
+use coda_tui::app::install_panic_hook;
 
 #[test]
 fn only_ui_thread_panics_reach_the_previous_hook() {

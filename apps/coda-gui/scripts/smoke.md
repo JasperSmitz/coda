@@ -1,14 +1,14 @@
 # Smoke checks (manual): M1 foundation, M3 queue and playlists, M4 experience, feedback round 1 (source switch, Home)
 
-Run from the repo root: `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
+Run from `apps/coda-gui` (the Cargo target dir is at the monorepo root, `../../target`): `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
 
 ## Startup
 0. While "Starting…" (e.g. during a keychain prompt) the transport, repeat, Clear (broom) and remove controls are disabled.
 1. With your normal Coda config: the window opens at once ("Starting…" only if the password/keychain is slow), sidebar shows "Scanning… N" then "N tracks"; Navidrome dot turns green; a toast "Library scan complete: …" appears and fades after ~5 s.
 2. First run: with no GUI session yet (`~/.local/state/coda/coda-app/session.json` absent), the TUI's queue (`~/.local/state/coda/state.json`) is imported once, paused. Check the TUI's file is unchanged (`shasum` before/after). After step "Queue" below, quit and relaunch: the GUI's own queue comes back, **paused/stopped, not playing**; the TUI's queue is not imported again.
 3. Without config: see "Onboarding" below.
-4. Without mpv: `PATH=/usr/bin:/bin target/debug/coda-app` with mpv only in `/opt/homebrew/bin` or `/usr/local/bin` → it is found there and plays (mpv discovery). With mpv not installed anywhere (or renamed) → red banner "mpv was not found…"; controls are disabled.
-4a. `CODA_MUSIC_DIR=~/SomeOtherMusic target/debug/coda-app` → that folder is scanned instead of the config's; Settings says CODA_MUSIC_DIR is used and the folder button is disabled.
+4. Without mpv: `PATH=/usr/bin:/bin ../../target/debug/coda-app` with mpv only in `/opt/homebrew/bin` or `/usr/local/bin` → it is found there and plays (mpv discovery). With mpv not installed anywhere (or renamed) → red banner "mpv was not found…"; controls are disabled.
+4a. `CODA_MUSIC_DIR=~/SomeOtherMusic ../../target/debug/coda-app` → that folder is scanned instead of the config's; Settings says CODA_MUSIC_DIR is used and the folder button is disabled.
 
 ## Playback (needs a queue; browse arrives in M2)
 For now a queue comes from a restored GUI session. To seed one, copy the TUI's session once: `cp ~/.local/state/coda/state.json ~/.local/state/coda/coda-app/session.json` (while the GUI is not running), then launch.
@@ -77,7 +77,7 @@ P9. Keyboard only: every dialog takes Enter/Esc, Tab stays inside it, focus retu
 29. Run the TUI afterwards: it starts with the same folder/server (shared config).
 
 ## Onboarding
-30. `CODA_CONFIG=/tmp/coda-empty/config.toml target/debug/coda-app` (folder absent) → the "Welcome to Coda" screen instead of the shell. Choose… a folder → Continue → the shell appears and the folder scans; `/tmp/coda-empty/config.toml` holds `music_dir`.
+30. `CODA_CONFIG=/tmp/coda-empty/config.toml ../../target/debug/coda-app` (folder absent) → the "Welcome to Coda" screen instead of the shell. Choose… a folder → Continue → the shell appears and the folder scans; `/tmp/coda-empty/config.toml` holds `music_dir`.
 31. Same with only "Connect a Navidrome server": Test connection, Continue → the shell appears, Navidrome connects; a wrong password shows the error and stays on the screen.
 
 ## Window
