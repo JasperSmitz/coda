@@ -4,9 +4,9 @@ Status: MVP built (M0–M4), awaiting the owner's first hands-on smoke test; Lin
 
 ## Stack (decided)
 - **Tauri 2** desktop shell (system webview: WebKitGTK 4.1 on Linux, WKWebView on macOS).
-- **Rust backend** in `src-tauri/`, on `crates/coda-core`: Coda's engine, vendored (Coda stays TUI-only and is never modified).
+- **Rust backend** in `src-tauri/`, on Coda's shared engine `coda-core` (`crates/coda-core` at the monorepo root, also used by the terminal player).
 - **React 19 + TypeScript + Vite** frontend in `src/`.
-- Playback stays **mpv via Coda's IPC backend**; mpv must be on `PATH` (as for the TUI).
+- Playback stays **mpv via Coda's IPC backend**; mpv is looked up on `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin` (the TUI uses `PATH` only).
 
 ## Architecture (proposed)
 
@@ -25,8 +25,8 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 
 ## Milestones
 
-### M0 — Engine vendored (done)
-- `crates/coda-core`: Coda's UI-free modules without `app`/`setup`/`ui`/`main`, plus `Player::seek_absolute`, public `Player::set_volume`, `logging`, `setup_actions` (Navidrome save/ping) and a config bootstrap. 532 unit + integration tests pass.
+### M0 — Engine vendored (done; since the monorepo migration the shared `crates/coda-core` at the repository root)
+- `coda-core`: Coda's UI-free modules without `app`/`setup`/`ui`/`main`, plus `Player::seek_absolute`, public `Player::set_volume`, `logging`, `setup_actions` (Navidrome save/ping) and a config bootstrap. 532 unit + integration tests pass.
 
 ### M1 — A window that plays the queue (done)
 - Backend: config load, logging, Navidrome client, mpv backend, session restore (never auto-plays), engine actor, debounced session save, final save + mpv shutdown on quit.

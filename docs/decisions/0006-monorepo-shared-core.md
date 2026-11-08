@@ -1,0 +1,34 @@
+# ADR 0006 — One repository, one shared engine, two frontends
+
+- **Status:** Accepted (2026-11-08; migration brief `docs/plans/monorepo-migration.md`, log `docs/MIGRATION_LOG.md`)
+- **Context:**
+  - The desktop app (coda-app, Tauri) lived in its own repository with a vendored copy of Coda's UI-free modules (`crates/coda-core`).
+  - That copy had grown into a strict superset of the TUI's engine: additions for the GUI and robustness fixes (mpv cleanup on drop and parent death, mpv lookup outside `PATH`). Nothing in the TUI was missing from it.
+  - Two copies of the queue, player, mpv and Navidrome code would drift.
+- **Decision:**
+  - The two projects form one repository and one Cargo workspace with one `Cargo.lock`:
+    - `crates/coda-core`: the engine, lib `coda_core`;
+    - `crates/coda-tui`: package `coda-tui`, binary `coda`;
+    - `apps/coda-gui`: the Tauri app, package `coda-app`, imported with its history through `git subtree`.
+  - The GUI's copy became the authoritative core, and the TUI's duplicate modules were deleted.
+  - Dependency rule: core depends on no frontend or UI toolkit, and the frontends never depend on each other.
+  - Business logic goes into core; what stays in a frontend is listed in `docs/ARCHITECTURE.md` (Workspace).
+- **Alternatives:**
+  - **Keep two repositories and sync the vendored copy:** that is the drift this ends.
+  - **A git dependency on a separate core repository:** three repositories, and cross-cutting changes need coordinated releases.
+  - **Rewrite the core:** unnecessary, since the existing copy was already the superset.
+- **Consequences:**
+  - **Release profiles:** `panic` cannot differ per package within one profile.
+    - The TUI keeps the default `release` profile, which unwinds; its Drop guards restore the terminal.
+    - The GUI builds with `[profile.release-gui]`: LTO, `codegen-units = 1`, `strip`, and `panic = "abort"`, which its mpv-killing panic hook relies on. Tauri's CLI honours it through `pnpm tauri build … -- --profile release-gui`.
+    - A plain `pnpm tauri build` silently gets the unwinding, non-LTO profile; every scripted release path passes the flag.
+  - **Tag namespaces:** `v*.*.*` releases the TUI (`release.yml`). `coda-gui-v*.*.*` creates a draft GUI release (`coda-gui-release.yml`, `--latest=false`). Both workflows had used `v*`.
+  - **mpv lookup:** the TUI keeps looking for mpv on `PATH` only (`mpv::spawn(MpvOptions::default())`); a terminal has the user's `PATH`, and its CLI tests rely on this. The GUI uses `playback::spawn_backend`, which also looks in `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin` for desktop launchers with a minimal `PATH`.
+  - **Behaviour the TUI gained from core:** `+`/`-` while stopped set the preferred volume (CHANGELOG); mpv is terminated when a `PlaybackHandle` is dropped without shutdown and, on Linux, when the process dies.
+  - **Accepted exception:** `clap` stays in core because `config::Cli` (the TUI's command line, with `CODA_MUSIC_DIR` handling) is parsed there. The GUI fills `Cli` by hand and never parses arguments. Moving it is possible later, if core must become clap-free.
+  - **Test features:** `mock-secret-store` (pty smoke builds) must not be enabled through a dev-dependency, because Cargo unifies it into the binary `cargo test` leaves in `target/`. Other crates' tests use `test-util`, which only exposes `SecretStore::mock()` (LESSONS).
+  - **One lock file:** the TUI's dependencies moved to the GUI's already-locked patch and minor versions.
+  - **CI:**
+    - The TUI CI checks `coda-tui` and `coda-core` without the Tauri system libraries.
+    - The GUI CI checks `coda-app` and `coda-core` with them, from `apps/coda-gui`.
+    - The two use separate concurrency groups and cache keys.

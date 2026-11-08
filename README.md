@@ -2,7 +2,13 @@
 
 A keyboard-first terminal music player for your local files and a personal [Navidrome](https://www.navidrome.org) (Subsonic/OpenSubsonic) server, with one queue for both. Written in Rust; playback through [mpv](https://mpv.io).
 
-**Status:** 1.0. Milestones M1–M10 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`CHANGELOG.md`](CHANGELOG.md).
+This repository holds one engine and two frontends that use it:
+- **`coda`**, the terminal player (this README);
+- **Coda App**, a desktop app built with Tauri ([`apps/coda-gui/README.md`](apps/coda-gui/README.md)).
+
+They share the config file and the Navidrome password in the OS keychain; each keeps its own session.
+
+**Status:** the terminal player is at 1.0. Milestones M1–M10 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Features
 - **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks. "Shuffle all" plays your whole library.
@@ -33,7 +39,7 @@ sudo apt install mpv      # Debian/Ubuntu
 brew install mpv          # macOS (Homebrew)
 
 # Build and install Coda (puts `coda` in ~/.cargo/bin)
-cargo install --path crates/coda-tui
+cargo install --locked --path crates/coda-tui
 ```
 
 ### Install a release
@@ -51,6 +57,37 @@ mkdir -p ~/.local/bin && install -m 755 coda-$v-$t/coda ~/.local/bin/   # or any
 ```
 
 **Linux:** the binaries are built on Ubuntu 24.04 (glibc 2.39). If one does not start on an older system, build from source.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `crates/coda-core` | The engine (lib `coda_core`): queue, player, mpv playback, local library, Navidrome client, session, config, cover art, setup and settings state. No UI code. |
+| `crates/coda-tui` | The terminal player: package `coda-tui`, binary `coda` (Ratatui + Crossterm). |
+| `apps/coda-gui` | The desktop app: React + TypeScript in `src/`, the Tauri backend (package `coda-app`) in `src-tauri/`. |
+
+One Cargo workspace and one `Cargo.lock` at the root. The frontends depend on `coda-core` and never on each other. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Building from source
+Each frontend builds on its own.
+
+**Terminal player** (needs only Rust and mpv):
+
+```sh
+cargo run -p coda-tui -- ~/Music              # run from the checkout
+cargo install --locked --path crates/coda-tui # install `coda` to ~/.cargo/bin
+```
+
+**Desktop app** (also needs Node 22+, pnpm and the [Tauri prerequisites](https://tauri.app/start/prerequisites/); on Linux e.g. `webkit2gtk-4.1`):
+
+```sh
+cd apps/coda-gui
+pnpm install
+pnpm tauri dev                                              # run in development
+pnpm tauri build --no-bundle -- --profile release-gui       # release binary: ../../target/release-gui/coda-app
+```
+
+Release builds of the app use the `release-gui` Cargo profile (LTO, `panic = "abort"`, which its mpv cleanup relies on); always pass `-- --profile release-gui`. Bundles (deb, AppImage, rpm, dmg) and the Arch package are described in [`apps/coda-gui/README.md`](apps/coda-gui/README.md).
 
 ## Getting started
 
@@ -142,7 +179,8 @@ cover_art = true           # cover art in the bar and on the Now playing screen 
 
 ## More detail
 - [`docs/USAGE.md`](docs/USAGE.md): the details of setup, settings, the keychain, playlist editing (including how Navidrome-hidden entries are handled), the local playlist rules, and limits.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how Coda is built.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): how Coda is built (workspace, engine, terminal frontend).
+- [`apps/coda-gui/README.md`](apps/coda-gui/README.md): the desktop app.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): what's done and what's next.
 - [`CHANGELOG.md`](CHANGELOG.md): what changed in each release; [`docs/RELEASING.md`](docs/RELEASING.md): how to make one.
 

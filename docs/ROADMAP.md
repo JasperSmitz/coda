@@ -98,7 +98,7 @@ Brief: `docs/plans/release-1.0.md`. Version 1.0.0 covers M1–M10; what it conta
 
 ### After 1.0
 - Endless play and autoplay.
-- Split `src/app.rs` (move its inline tests to `src/app/tests.rs` first).
+- Split `crates/coda-tui/src/app.rs` (move its inline tests to `crates/coda-tui/src/app/tests.rs` first).
 - Narrow `pub` to `pub(crate)` for items that are not API (see `docs/LESSONS.md`).
 - Move `setup::Reply` and `ping` to a neutral module.
 - A test that compares the help overlay with the keymap table.

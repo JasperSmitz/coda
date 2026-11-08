@@ -46,9 +46,18 @@ Brief: `docs/plans/monorepo-migration.md`. Branch: `monorepo-migration`. Newest 
 - pty smoke (silent FLAC fixtures, temp HOME/XDG, mock-secret-store build): launch, scan, `-` while stopped, play, pause, seek, next, `+`, Now playing, visualizer toggle, artist→album→track navigation, quit → exit 0, terminal restored, no mpv left. Visualizer bars not visible (digital silence).
 - Review: 1 blocking (feature unification, fixed), 2 low (CHANGELOG log targets, CI coverage — fixed), 2 nits (fixed / this entry).
 
+## Phase 4 — consolidation and docs
+- `[workspace.dependencies]` for crates used by 2+ members; Cargo.lock and resolved feature graphs unchanged (compared per package).
+- Boundary checks clean: core has no UI crates; `cargo tree -i` shows neither frontend in the other's graph; no source references across frontends.
+- Docs: root README (layout, building/running each frontend), root AGENTS.md rewritten for the monorepo (dependency rule, where code belongs, frontend-specific list, features, profiles, tags, per-package checks), GUI AGENTS.md trimmed to a GUI contract, both ARCHITECTURE files, GUI PLAN/README, `apps/coda-gui/scripts/smoke.md` owner hand-off checklist, ADR 0006, LESSONS entry (dev-dependency feature unification). `coda-app` gained `rust-version = "1.89"`.
+- Verified: fmt; clippy ±all-features; workspace tests 1211/37; `--ignored` 37/37; `cargo build --workspace`; `cargo build --release -p coda-tui`; `pnpm build`, `check:colors`; `tauri build --no-bundle --profile release-gui`; TUI pty smoke; documented commands run (not `pnpm tauri dev`).
+- Final whole-branch review: 0 blocking. History verified (`git log --follow` reaches original commits of both repos; all 268 coda-app files accounted for); no secrets in the diff. Doc nits fixed. Finding: the GUI engine still duplicates the TUI's scrobble policy and "Shuffle all" orchestration (inherited from coda-app) → Phase 5.
+- Environment note: core tests that write a few MB can fail with `QuotaExceeded` when `/tmp` (tmpfs with quota) is full; set `TMPDIR` elsewhere.
+
 ## Phases
 - [x] Plan (04e04d8), import (1dc4bce)
 - [x] Phase 1 — workspace layout
 - [x] Phase 2 — promote coda-core
 - [x] Phase 3 — TUI consumes coda-core
-- [ ] Phase 4 — consolidation, docs, verification
+- [x] Phase 4 — consolidation, docs, verification
+- [ ] Phase 5 — move remaining duplicated orchestration (scrobble policy, shuffle all) into core

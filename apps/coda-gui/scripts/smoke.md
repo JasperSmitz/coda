@@ -1,6 +1,30 @@
-# Smoke checks (manual): M1 foundation, M3 queue and playlists, M4 experience, feedback round 1 (source switch, Home)
+# Smoke checks (manual, owner): Coda App at runtime
 
-Run from `apps/coda-gui` (the Cargo target dir is at the monorepo root, `../../target`): `pnpm tauri dev` (or `pnpm build && cargo run -p coda-app`). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). Before and after, `pgrep -l mpv` to count mpv processes (a running Coda TUI has its own).
+Agents cannot open windows or play audio on the owner's desktop, so these checks are the owner's. Start with the hand-off list below; the numbered sections after it are the detailed checks per feature (M1 foundation, M2 browse, M3 queue and playlists, M4 experience, feedback round 1).
+
+## Setup (from the monorepo)
+
+```sh
+cd apps/coda-gui                     # in the Coda repository
+pnpm install --frozen-lockfile
+pgrep -x mpv                         # note any mpv already running (e.g. a terminal `coda`)
+pnpm tauri dev                       # debug build; or a release-like binary:
+# pnpm tauri build --no-bundle -- --profile release-gui && ../../target/release-gui/coda-app
+```
+
+The Cargo target dir is at the repository root (`../../target`); a debug binary with the frontend embedded is `../../target/debug/coda-app` after `pnpm tauri build --debug --no-bundle` (items below that start it directly with environment variables use it). Log: `~/.local/state/coda/coda-app/coda-app.log` (or `$XDG_STATE_HOME/coda/coda-app/`). The config (`~/.config/coda/config.toml`), the keychain entry and the cover cache are shared with the terminal player; the GUI's session and history are its own (`…/coda/coda-app/`).
+
+## Hand-off checklist
+- [ ] **Launch:** the window opens; the sidebar shows the scan count, and the Navidrome dot turns green when a server is configured. The log has no errors.
+- [ ] **Navigation:** Local → Artists → an artist → an album; Back returns; Albums grid, Folders and Playlists open; `/` searches (items 33–45).
+- [ ] **Local playback:** double-click or Enter on a local track plays it; the bar shows the title, the cover and a moving timeline; gapless between tracks of one album (items 5, 9).
+- [ ] **Navidrome:** Settings → Navidrome → Edit…/Connect: a wrong password shows an error, the right one "Connected"; a Navidrome album plays (stream) and appears in the queue next to local tracks (items 9, 25, 37).
+- [ ] **Queue:** add, play next, reorder by drag, remove, clear (asks first), shuffle upcoming (items 10–12, Q1–Q5).
+- [ ] **Controls and seek:** Space, `n`/`p`, ←/→ (∓5 s), drag and click on the seek bar, volume slider and `+`/`-` (also while stopped), repeat `r` (items 5–8).
+- [ ] **Visualizer:** `f` opens Now Playing; bars move with the music and fall to rest on pause (item 18).
+- [ ] **Artwork:** covers in the bar, queue, album grid and Now Playing; Settings → Cover art off shows placeholders, on brings them back (items 9, 27).
+- [ ] **Settings persistence:** change the music folder, cover art or scrobbling, quit, relaunch: the settings, the queue, the volume and the window size are restored (items 7, 13, 23–27, 32).
+- [ ] **Quit, no mpv left:** close the window while playing: the app exits within ~2 s and `pgrep -x mpv` shows nothing new (also after `kill -TERM`, and on Linux `kill -KILL`, items 13–14b).
 
 ## Startup
 0. While "Starting…" (e.g. during a keychain prompt) the transport, repeat, Clear (broom) and remove controls are disabled.
@@ -44,9 +68,9 @@ P10. Start an add, and while it runs disconnect the server in Settings and queue
 P9. Keyboard only: every dialog takes Enter/Esc, Tab stays inside it, focus returns to the list afterwards; Space/n/p do nothing while a dialog is open.
 
 ## Quit
-13. Close the window (and separately, Cmd+Q on macOS / the WM close on Linux): the app exits within ~2 s; `pgrep -l mpv` shows no new mpv; relaunch restores the queue and position-free current track.
+13. Close the window (and separately, Cmd+Q on macOS / the WM close on Linux): the app exits within ~2 s; `pgrep -x mpv` shows no new mpv; relaunch restores the queue and position-free current track.
 14. Change something (e.g. `r`) and quit within 2 s: the change is still restored (final save).
-14a. Signals: while playing, `kill -TERM <coda-app pid>` (also try `-HUP`, and Ctrl-C in the `pnpm tauri dev` terminal): music stops, the app exits within ~2 s, `pgrep -l mpv` shows no new mpv, and the queue is restored on relaunch. A second Ctrl-C while quitting exits at once (mpv still terminated).
+14a. Signals: while playing, `kill -TERM <coda-app pid>` (also try `-HUP`, and Ctrl-C in the `pnpm tauri dev` terminal): music stops, the app exits within ~2 s, `pgrep -x mpv` shows no new mpv, and the queue is restored on relaunch. A second Ctrl-C while quitting exits at once (mpv still terminated).
 14b. Linux only: `kill -KILL <coda-app pid>` while playing: mpv stops too (parent-death signal).
 14c. Quit while startup is slow (e.g. a `password_command` that waits on pinentry, or an unanswered macOS keychain prompt): close the window during the prompt; within ~3 s the app exits and no mpv is left.
 

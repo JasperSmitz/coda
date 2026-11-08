@@ -1,6 +1,6 @@
 # Coda App
 
-A desktop music player for your local files and a personal [Navidrome](https://www.navidrome.org) server: the GUI sibling of [Coda](https://github.com/JasperSmitz/coda). Built with Tauri 2, a Rust backend on Coda's engine, and a React frontend. Linux and macOS.
+A desktop music player for your local files and a personal [Navidrome](https://www.navidrome.org) server: the desktop frontend of [Coda](../../README.md), in the same repository as the terminal player. Built with Tauri 2, a Rust backend on Coda's shared engine (`crates/coda-core`), and a React frontend. Linux and macOS.
 
 **Status:** early development, see [`docs/PLAN.md`](docs/PLAN.md).
 
@@ -12,7 +12,7 @@ Coda plays through [mpv](https://mpv.io), which must be installed (it is looked 
 
 ### Arch Linux
 
-Build a package from a checkout with the included PKGBUILD. It builds the committed tag `v<version>` of the checkout it sits in (set `_ref=branch=main` or `_ref=commit=<sha>` for something else):
+Build a package from a checkout with the included PKGBUILD. It builds the committed tag `coda-gui-v<version>` of the repository it sits in (set `_ref=branch=main` or `_ref=commit=<sha>` for something else):
 
 ```sh
 sudo pacman -S --needed base-devel git rust nodejs pnpm   # rustup works instead of rust
@@ -51,7 +51,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Checks (the Rust build embeds `dist/`, so build the frontend first):
+Checks (the Rust build embeds `dist/`, so build the frontend first; the cargo commands cover the whole workspace, TUI included):
 
 ```sh
 pnpm build
@@ -60,6 +60,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                 # add `-- --ignored` for the tests that start mpv
 ```
 
-`scripts/linux-check.sh` runs all of these, plus `pnpm tauri build --debug --no-bundle`, in a Debian container (`docker/linux-dev.Dockerfile`), with the Linux target dir, cargo registry and `node_modules` in Docker volumes so they never mix with the host's. `scripts/linux-check.sh --bundle` also builds the release deb, AppImage and rpm; `--shell` opens a shell in the container.
+`scripts/linux-check.sh` runs these for `coda-app` and `coda-core` (not the TUI), plus `pnpm tauri build --debug --no-bundle`, in a Debian container (`docker/linux-dev.Dockerfile`), with the Linux target dir, cargo registry and `node_modules` in Docker volumes so they never mix with the host's. `scripts/linux-check.sh --bundle` also builds the release deb, AppImage and rpm; `--shell` opens a shell in the container.
 
 The icon set comes from `src-tauri/icons/source/icon.svg`: `pnpm tauri icon src-tauri/icons/source/icon.svg` (then delete the generated `android/` and `ios/` folders).

@@ -1,15 +1,15 @@
 # Coda App — Agent Operating Contract
 
 ## Project
-Coda App (`coda-app`) is a desktop GUI for [Coda](../coda), the Rust music player for local files and a Navidrome server. It is a **native desktop app built with Tauri 2**, not a web application: no hosted pages, no server, no browser tab. Linux (Arch, the owner's main desktop) and macOS are supported; Windows is out of scope.
+Coda App (package `coda-app`) is the desktop frontend of Coda, the Rust music player for local files and a Navidrome server. It is a **native desktop app built with Tauri 2**, not a web application: no hosted pages, no server, no browser tab. Linux (Arch, the owner's main desktop) and macOS are supported; Windows is out of scope.
 
-The engine is `crates/coda-core` (lib `coda_core`): a **copy of Coda's UI-free library** (queue, player, gapless mpv playback, Navidrome client, local library scan, session, cover art, visualizer data, credentials), vendored from `../coda` at its local `gui-core` branch (ffd5c6d). **Coda itself stays a pure TUI project: never modify, branch or push `../coda`.** It may be read for reference (e.g. `../coda/src/app.rs` shows how the TUI drives the engine). Change `coda-core` here when the GUI needs it; never reimplement in the app what `coda-core` already does.
+It lives in the Coda monorepo. The root `AGENTS.md` applies (roles, workflow, the dependency rule, verification); this file adds what is specific to the GUI. The engine is `crates/coda-core` at the repository root (lib `coda_core`), shared with the terminal player in `crates/coda-tui`. Change `coda-core` (with core tests, keeping the TUI building) when the GUI needs engine behaviour; never reimplement in the app what `coda-core` already does, and never depend on `coda-tui`.
 
-## Layout
-- `Cargo.toml`: workspace (`src-tauri`, `crates/coda-core`).
-- `crates/coda-core/`: the engine (see above). Keep its tests passing; add tests for what you add.
-- `src-tauri/`: the Tauri backend. Owns one engine actor and exposes Tauri commands and events.
+## Layout (paths relative to `apps/coda-gui/`)
+- `src-tauri/`: the Tauri backend (`coda-app`, lib `coda_app_lib`), a member of the root Cargo workspace. Owns one engine actor and exposes Tauri commands and events.
 - `src/`: the React + TypeScript frontend (Vite). Draws state and sends intents. No business logic that the backend already owns.
+- `scripts/`: `check-colors.mjs` (no colour values outside the token layer), `linux-check.sh` (Docker build and checks), `smoke.md` (the owner's runtime checklist).
+- `packaging/`: the Arch PKGBUILD and the Linux desktop entry. CI: `.github/workflows/coda-gui-ci.yml` and `coda-gui-release.yml` at the repository root.
 - `docs/DESIGN.md`: the look and layout. `docs/PLAN.md`: milestones and acceptance criteria. `docs/ARCHITECTURE.md`: what actually exists (label proposals as such).
 
 ## Architecture rules
@@ -27,11 +27,12 @@ The engine is `crates/coda-core` (lib `coda_core`): a **copy of Coda's UI-free l
 - Light and dark themes from the same tokens.
 
 ## Workflow
-- Same roles as Coda: owner approves scope; the architect (main session) writes briefs, delegates to implementer/reviewer agents (herdr `hc` templates), resolves findings and reports.
+- Same roles as the root `AGENTS.md`: owner approves scope; the architect (main session) writes briefs, delegates to implementer/reviewer agents, resolves findings and reports.
 - Small vertical slices per milestone in `docs/PLAN.md`. Don't commit or push unless asked; the architect may commit an approved slice once review findings are resolved and checks pass. Never push without a request.
 
 ## Verification
-- `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` (from the repo root; tests needing mpv are `#[ignore]`d, run them with `-- --ignored`)
-- `pnpm build` (runs `tsc` strict + Vite) and `pnpm lint` once a linter exists.
-- Run the app with `pnpm tauri dev` only when the owner asks or for a hand-off script; agents must not open GUI windows on the owner's desktop unprompted. Backend logic is tested without a window.
+- Rust, from the repository root: `cargo fmt --all -- --check`, `cargo clippy -p coda-app -p coda-core --all-targets -- -D warnings`, `cargo test -p coda-app -p coda-core` (mpv tests are `#[ignore]`d: add `-- --ignored`), or the workspace-wide commands from the root `AGENTS.md`. The Rust build embeds `dist/`, so run `pnpm build` first.
+- Frontend, from `apps/coda-gui`: `pnpm install --frozen-lockfile`, `pnpm build` (runs the colour check, `tsc` strict and Vite) and `pnpm check:colors`.
+- Release binary: `pnpm tauri build --no-bundle -- --locked --profile release-gui` (output in `../../target/release-gui/`). Never a release build without `--profile release-gui`: the default `release` profile unwinds, and the panic hook relies on `panic = "abort"` to take mpv down.
+- Run the app with `pnpm tauri dev` only when the owner asks or for a hand-off script; agents must not open GUI windows on the owner's desktop unprompted. Backend logic is tested without a window; runtime checks are handed to the owner (`scripts/smoke.md`).
 - Report commands actually run; never claim a check passed without running it.
