@@ -8,8 +8,9 @@ on:
 permissions:
   contents: read
 
-# The GUI (apps/coda-gui) has its own workflow, coda-gui-ci.yml; the Rust
-# steps here build only the TUI package, so they need no Tauri system libraries.
+# The GUI (apps/coda-gui) has its own workflow, coda-gui-ci.yml. The Rust
+# steps here build the TUI and the engine it uses (coda-core, whose tests
+# guard the TUI's playback), so they need no Tauri system libraries.
 
 # A new push to a pull request cancels its older runs; runs on main finish.
 concurrency:
@@ -54,11 +55,11 @@ jobs:
       # `--all-features` swaps in test-only backends (the mock secret store),
       # so the default build is linted on its own too.
       - name: clippy (all features)
-        run: cargo clippy --locked -p coda-tui --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p coda-tui -p coda-core --all-targets --all-features -- -D warnings
       - name: clippy (default features)
-        run: cargo clippy --locked -p coda-tui --all-targets -- -D warnings
+        run: cargo clippy --locked -p coda-tui -p coda-core --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked -p coda-tui --all-targets
+        run: cargo test --locked -p coda-tui -p coda-core --all-targets
       - name: build
         run: cargo build --locked -p coda-tui
 
@@ -75,7 +76,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v0-coda-tui
-      - run: cargo check --locked -p coda-tui --all-targets
+      - run: cargo check --locked -p coda-tui -p coda-core --all-targets
 
   mpv:
     name: mpv tests (ubuntu-latest)
@@ -103,4 +104,4 @@ jobs:
           pactl info
       - run: mpv --version
       - name: test (ignored, needs mpv)
-        run: cargo test --locked -p coda-tui --all-targets -- --ignored
+        run: cargo test --locked -p coda-tui -p coda-core --all-targets -- --ignored

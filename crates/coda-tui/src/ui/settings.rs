@@ -10,10 +10,10 @@ use ratatui::Frame;
 use ratatui::style::{Color, Style};
 
 use crate::app::Connection;
-use crate::config::MusicDirArg;
-use crate::secret_store::STORE_NAME;
-use crate::settings::{Busy, FormKind, Navidrome, Settings};
 use crate::ui::onboarding::{Panel, draw_panel, server_form};
+use coda_core::config::MusicDirArg;
+use coda_core::secret_store::STORE_NAME;
+use coda_core::settings::{Busy, FormKind, Navidrome, Settings};
 
 /// Draws the overlay over the whole frame. `connection` is the current
 /// client's last observed state; `spinner` any counter that advances.
@@ -122,9 +122,9 @@ fn form(settings: &Settings, kind: FormKind, spinner: usize, width: usize) -> Pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::navidrome::client::parse_base_url;
-    use crate::onboarding::Input;
-    use crate::settings::{Context, Request, Response};
+    use coda_core::navidrome::client::parse_base_url;
+    use coda_core::onboarding::Input;
+    use coda_core::settings::{Context, Request, Response};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::Instant;

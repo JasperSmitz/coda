@@ -7,7 +7,7 @@
 //!
 //! The player emits loads in terms of a track's source; [`App`] resolves
 //! each into a backend target (a local file, or a stream URL signed by the
-//! Navidrome client) just before it leaves, see [`crate::resolve`]. A load
+//! Navidrome client) just before it leaves, see [`coda_core::resolve`]. A load
 //! that cannot be resolved is fed back to the player as a failed track, so
 //! the queue advances exactly as for a missing file.
 //!
@@ -64,35 +64,36 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::cover::{self, CoverRequest, CoverResponse, CoverSize, Covers, cache::DiskCache};
-use crate::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
-use crate::library::scan::{self, ScanEvent};
-use crate::library::search::{self, SearchResults};
-use crate::library::{Library, MAX_PLAYLISTS};
-use crate::line_input::LineInput;
-use crate::model::Track;
-use crate::model::TrackSource;
-use crate::navidrome;
-use crate::navidrome::Hidden;
-use crate::navidrome::browse::{
+use crate::ui::cover::{ArtPainter, LateReplyFilter, TermEnv};
+use crate::ui::{help, keymap, render};
+use coda_core::cover::{self, CoverRequest, CoverResponse, CoverSize, Covers, cache::DiskCache};
+use coda_core::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
+use coda_core::library::scan::{self, ScanEvent};
+use coda_core::library::search::{self, SearchResults};
+use coda_core::library::{Library, MAX_PLAYLISTS};
+use coda_core::line_input::LineInput;
+use coda_core::model::Track;
+use coda_core::model::TrackSource;
+use coda_core::model::thousands;
+use coda_core::navidrome;
+use coda_core::navidrome::Hidden;
+use coda_core::navidrome::browse::{
     self, Browser, FetchRequest, FetchResponse, Generation, JobOutcome, MAX_CONCURRENT_FETCHES,
     Removal, SaveOrder, UNSAVED_ORDER,
 };
-use crate::navidrome::edit::{EditId, EditRequest, EditResponse};
-use crate::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
-use crate::now_playing::NowPlaying;
-use crate::onboarding::Input;
-use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
-use crate::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
-use crate::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
-use crate::resolve;
-use crate::secret_store::{SecretError, SecretStore};
-use crate::session::{self, Session};
-use crate::settings::{self, Change, Settings};
-use crate::setup::{self, Reply, SaveNavidrome};
-use crate::ui::cover::{ArtPainter, LateReplyFilter, TermEnv};
-use crate::ui::{help, keymap, render};
-use crate::visualizer::Meter;
+use coda_core::navidrome::edit::{EditId, EditRequest, EditResponse};
+use coda_core::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use coda_core::now_playing::NowPlaying;
+use coda_core::onboarding::Input;
+use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
+use coda_core::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
+use coda_core::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
+use coda_core::resolve;
+use coda_core::secret_store::{SecretError, SecretStore};
+use coda_core::session::{self, Session};
+use coda_core::settings::{self, Change, Settings};
+use coda_core::setup_actions::{self, Reply, SaveNavidrome};
+use coda_core::visualizer::Meter;
 
 /// Redraw interval when nothing else changes (progress, status expiry).
 pub const TICK: Duration = Duration::from_millis(250);
@@ -1327,7 +1328,7 @@ impl App {
     pub fn handle_visualizer(
         &mut self,
         load: LoadId,
-        frame: &crate::playback::VisualizerFrame,
+        frame: &coda_core::playback::VisualizerFrame,
         now: Instant,
     ) -> bool {
         // The load heard: during a gapless change, the previous track's
@@ -2477,8 +2478,6 @@ pub fn count(n: usize, noun: &str) -> String {
     format!("{} {noun}{plural}", thousands(n))
 }
 
-pub use crate::model::thousands;
-
 // ----- terminal lifecycle and event loop -------------------------------
 
 /// Runs the TUI until the user quits, a terminating signal arrives, or a
@@ -3076,7 +3075,7 @@ impl SettingsIo {
         use settings::{NO_CONFIG_LOCATION, Request, Response};
         self.writes.retain(|write| !write.is_finished());
         fn interrupted<T>() -> Result<T, String> {
-            Err(setup::INTERRUPTED.to_owned())
+            Err(setup_actions::INTERRUPTED.to_owned())
         }
         let open_store = self.open_store;
         match request {
@@ -3089,7 +3088,7 @@ impl SettingsIo {
                     },
                 );
                 tokio::spawn(async move {
-                    let result = setup::ping(server).await;
+                    let result = setup_actions::ping(server).await;
                     reply.send(Response::Pinged { id, result });
                 });
             }
@@ -3137,7 +3136,7 @@ impl SettingsIo {
                     return;
                 };
                 self.writes.push(tokio::task::spawn_blocking(move || {
-                    let result = setup::save_navidrome(
+                    let result = setup_actions::save_navidrome(
                         &path,
                         SaveNavidrome::Remove,
                         open_store,
@@ -3168,7 +3167,7 @@ impl SettingsIo {
 /// `[navidrome]` (keeping the folder and `scrobble`). Blocking.
 fn save_server(
     path: &Path,
-    server: crate::onboarding::Server,
+    server: coda_core::onboarding::Server,
     open_store: fn() -> Result<SecretStore, SecretError>,
     previous_account: Option<&str>,
 ) -> Result<settings::Saved, String> {
@@ -3181,7 +3180,7 @@ fn save_server(
         tracing::warn!(detail = %error.detail(), "settings: could not set up the client");
         "Could not set up the Navidrome client".to_owned()
     })?;
-    let scrobble = setup::save_navidrome(
+    let scrobble = setup_actions::save_navidrome(
         path,
         SaveNavidrome::Server(server),
         open_store,
@@ -3191,10 +3190,10 @@ fn save_server(
     Ok(settings::Saved { client, scrobble })
 }
 
-fn save_message(error: crate::onboarding::SaveError) -> String {
+fn save_message(error: coda_core::onboarding::SaveError) -> String {
     match error {
-        crate::onboarding::SaveError::Keychain(message)
-        | crate::onboarding::SaveError::Config(message) => message,
+        coda_core::onboarding::SaveError::Keychain(message)
+        | coda_core::onboarding::SaveError::Config(message) => message,
     }
 }
 
@@ -3464,11 +3463,22 @@ async fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::browse as local;
-    use crate::line_input::MAX_QUERY_CHARS;
-    use crate::model::TrackMetadata;
-    use crate::playback::LoadId;
-    use crate::playback::{EndReason, PlaybackTarget};
+
+    /// The raw signed URL of a stream target, read the one way core allows:
+    /// through the mpv protocol encoder.
+    use coda_core::navidrome::Password;
+
+    fn stream_url(url: &coda_core::playback::StreamUrl) -> url::Url {
+        use coda_core::playback::mpv::protocol::{MpvCommand, encode_request};
+        let line = encode_request(0, &MpvCommand::LoadStream { url: url.clone() });
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        url::Url::parse(request["command"][1].as_str().unwrap()).unwrap()
+    }
+    use coda_core::library::browse as local;
+    use coda_core::line_input::MAX_QUERY_CHARS;
+    use coda_core::model::TrackMetadata;
+    use coda_core::playback::LoadId;
+    use coda_core::playback::{EndReason, PlaybackTarget};
 
     #[test]
     fn only_a_literal_panic_message_reaches_the_log() {
@@ -3525,7 +3535,7 @@ mod tests {
                     ..
                 },
             ] => {
-                let url = url::Url::parse(url.expose()).unwrap();
+                let url = stream_url(url);
                 assert_eq!(url.path(), "/nd/rest/stream");
                 url.query_pairs()
                     .find(|(k, _)| k == "id")
@@ -3577,7 +3587,10 @@ mod tests {
             app.status(now),
             Some("Could not play Remote r1: Navidrome is not configured")
         );
-        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Loading);
+        assert_eq!(
+            app.player.status(),
+            coda_core::player::PlaybackStatus::Loading
+        );
         // Two in a row: the remote run is skipped in one pass to the next
         // local entry.
         let load = load_id(&commands);
@@ -3594,7 +3607,10 @@ mod tests {
             app.status(now),
             Some("Navidrome is not configured; skipped 1 remote track")
         );
-        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Loading);
+        assert_eq!(
+            app.player.status(),
+            coda_core::player::PlaybackStatus::Loading
+        );
     }
 
     #[test]
@@ -3604,7 +3620,10 @@ mod tests {
         app.focus = Focus::Queue;
         let commands = press(&mut app, &[Action::Activate], now);
         assert_eq!(commands, [PlaybackCommand::Stop]);
-        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        assert_eq!(
+            app.player.status(),
+            coda_core::player::PlaybackStatus::Stopped
+        );
         assert!(
             app.status(now)
                 .unwrap()
@@ -3941,6 +3960,19 @@ mod tests {
     }
 
     #[test]
+    fn volume_keys_while_stopped_change_the_preferred_volume() {
+        let (mut app, now) = app_with(&["1.flac"]);
+        assert_eq!(
+            press(&mut app, &[Action::VolumeDown], now),
+            [PlaybackCommand::SetVolume(95)]
+        );
+        assert_eq!(app.player().volume(), 95);
+        assert_eq!(app.player().status(), PlaybackStatus::Stopped);
+        let session = app.take_final_save().expect("volume changed");
+        assert_eq!(session.volume, 95);
+    }
+
+    #[test]
     fn transport_actions_map_to_player_intents() {
         let (mut app, now) = app_with(&["1.flac", "2.flac"]);
         press(
@@ -4089,8 +4121,8 @@ mod tests {
 
     // ----- Navidrome browsing ------------------------------------------
 
-    use crate::navidrome::browse::{Content, Load, Resource};
-    use crate::navidrome::{Album, Artist, SearchResults};
+    use coda_core::navidrome::browse::{Content, Load, Resource};
+    use coda_core::navidrome::{Album, Artist, SearchResults};
 
     // ----- play in context (M7 slice 1) ------------------------------------
 
@@ -4944,6 +4976,7 @@ mod tests {
 
     fn artist(id: &str) -> Artist {
         Artist {
+            cover_art: None,
             id: id.into(),
             name: format!("Artist {id}"),
             album_count: Some(2),
@@ -4952,6 +4985,8 @@ mod tests {
 
     fn album(id: &str) -> Album {
         Album {
+            cover_art: None,
+            artist_id: None,
             id: id.into(),
             name: format!("Album {id}"),
             artist: Some("Someone".into()),
@@ -5248,7 +5283,7 @@ mod tests {
         );
         // The last completed job reports; a single track is named.
         assert_eq!(app.status(now), Some("Added Remote z1"));
-        assert!(app.player().status() == crate::player::PlaybackStatus::Stopped);
+        assert!(app.player().status() == coda_core::player::PlaybackStatus::Stopped);
         assert_eq!(browser(&app).pending_jobs(), 0);
         // Cached now: an album enqueues at once.
         press(&mut app, &[Action::Activate], now);
@@ -5376,7 +5411,7 @@ mod tests {
     }
 
     fn local_playlist(name: &str, rels: &[&str], unresolved: usize) -> ScanEvent {
-        ScanEvent::Playlist(crate::library::m3u::PlaylistFile {
+        ScanEvent::Playlist(coda_core::library::m3u::PlaylistFile {
             path: format!("{ROOT}/{name}.m3u").into(),
             name: name.into(),
             entries: rels.iter().map(|r| format!("{ROOT}/{r}").into()).collect(),
@@ -6421,7 +6456,7 @@ mod tests {
     #[test]
     fn repeat_one_reloads_are_scrobbled_again() {
         let (mut app, now) = scrobble_app(vec![timed_remote("a", 40)]);
-        app.player.set_repeat(crate::player::RepeatMode::One);
+        app.player.set_repeat(coda_core::player::RepeatMode::One);
         let mut commands = press(&mut app, &[Action::Activate], now);
         for _ in 0..2 {
             let load = started(&mut app, &commands, now);
@@ -6487,10 +6522,10 @@ mod tests {
         *load
     }
 
-    fn reading(value: f32) -> crate::playback::VisualizerFrame {
-        crate::playback::VisualizerFrame {
+    fn reading(value: f32) -> coda_core::playback::VisualizerFrame {
+        coda_core::playback::VisualizerFrame {
             levels: [value; 2],
-            bands: [Some(value); crate::playback::VISUALIZER_BANDS],
+            bands: [Some(value); coda_core::playback::VISUALIZER_BANDS],
         }
     }
 
@@ -6704,7 +6739,10 @@ mod tests {
                 app.handle_playback_event(PlaybackEvent::TrackEnded { load, reason }, now);
             assert!(commands.is_empty());
         }
-        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        assert_eq!(
+            app.player.status(),
+            coda_core::player::PlaybackStatus::Stopped
+        );
         // Clearing an empty queue does nothing.
         assert!(press(&mut app, &[Action::ClearQueue], now).is_empty());
     }
@@ -6740,13 +6778,13 @@ mod tests {
         let mut app = App::with_sources(Some(ROOT.into()), Some(client()));
         let now = Instant::now();
         press(&mut app, &[Action::CycleRepeat], now);
-        assert_eq!(app.player.repeat(), crate::player::RepeatMode::All);
+        assert_eq!(app.player.repeat(), coda_core::player::RepeatMode::All);
         assert_eq!(app.status(now), Some("Repeat all"));
         app.focus = Focus::Queue;
         press(&mut app, &[Action::CycleRepeat], now);
-        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+        assert_eq!(app.player.repeat(), coda_core::player::RepeatMode::One);
         press(&mut app, &[Action::ToggleHelp, Action::CycleRepeat], now);
-        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+        assert_eq!(app.player.repeat(), coda_core::player::RepeatMode::One);
         press(
             &mut app,
             &[
@@ -6758,7 +6796,7 @@ mod tests {
         );
         assert!(app.input_open());
         press(&mut app, &[Action::CycleRepeat], now);
-        assert_eq!(app.player.repeat(), crate::player::RepeatMode::One);
+        assert_eq!(app.player.repeat(), coda_core::player::RepeatMode::One);
     }
 
     #[test]
@@ -6776,7 +6814,7 @@ mod tests {
         assert_eq!(app.take_due_save(t0 + SAVE_DEBOUNCE), None);
         let session = app.take_due_save(t1 + SAVE_DEBOUNCE).expect("due");
         assert_eq!(session.tracks.len(), 1);
-        assert_eq!(session.repeat, crate::player::RepeatMode::All);
+        assert_eq!(session.repeat, coda_core::player::RepeatMode::All);
         assert_eq!(app.take_due_save(t1 + SAVE_DEBOUNCE * 2), None, "taken");
         assert_eq!(app.take_final_save(), None, "already saved");
 
@@ -6811,7 +6849,7 @@ mod tests {
         let (mut app, now) = app_with(&[]);
         let session = Session {
             volume: 60,
-            repeat: crate::player::RepeatMode::All,
+            repeat: coda_core::player::RepeatMode::All,
             current: Some(2),
             tracks: vec![track("a.flac"), remote("r1"), track("c.flac")],
             visualizer: false,
@@ -6819,7 +6857,10 @@ mod tests {
         let commands = app.restore_session(session, now);
         assert_eq!(commands, [PlaybackCommand::SetVolume(60)]);
         assert_eq!(app.queue_selected(), 2);
-        assert_eq!(app.player.status(), crate::player::PlaybackStatus::Stopped);
+        assert_eq!(
+            app.player.status(),
+            coda_core::player::PlaybackStatus::Stopped
+        );
         assert_eq!(app.status(now), Some("Restored queue: 3 tracks"));
         assert_eq!(app.take_due_save(now + SAVE_DEBOUNCE), None);
         assert_eq!(app.take_final_save(), None);
@@ -6862,7 +6903,7 @@ mod tests {
 
     #[test]
     fn adds_beyond_the_queue_cap_are_reported() {
-        use crate::queue::MAX_QUEUE_LEN;
+        use coda_core::queue::MAX_QUEUE_LEN;
         let (mut app, now) = app_with(&["dir/a.flac", "dir/b.flac", "dir/c.flac"]);
         let filler: Vec<Track> = (0..MAX_QUEUE_LEN - 1)
             .map(|i| track(&format!("f/{i}.flac")))
@@ -7329,11 +7370,7 @@ mod tests {
                     target: PlaybackTarget::Stream(url),
                     ..
                 },
-            ] => url::Url::parse(url.expose())
-                .unwrap()
-                .host_str()
-                .unwrap()
-                .to_owned(),
+            ] => stream_url(url).host_str().unwrap().to_owned(),
             other => panic!("expected a single stream Load, got {other:?}"),
         }
     }
@@ -7492,7 +7529,7 @@ mod tests {
             PlaybackCommand::SetNext { next, .. } => {
                 Some(next.as_ref().map(|(_, target)| match target {
                     PlaybackTarget::Stream(url) => {
-                        let url = url::Url::parse(url.expose()).unwrap();
+                        let url = stream_url(url);
                         let id = url
                             .query_pairs()
                             .find(|(k, _)| k == "id")
@@ -7862,8 +7899,8 @@ mod tests {
         Ok(STORE.get_or_init(SecretStore::mock).clone())
     }
 
-    fn server(url: &str, username: &str, password: &str) -> crate::onboarding::Server {
-        crate::onboarding::Server {
+    fn server(url: &str, username: &str, password: &str) -> coda_core::onboarding::Server {
+        coda_core::onboarding::Server {
             url: navidrome::client::parse_base_url(url).unwrap(),
             username: username.into(),
             password: navidrome::Password::new(password.into()),
@@ -7878,7 +7915,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_saves_keep_other_settings_and_replace_the_account() {
-        use crate::config::{Cli, Config, Env, PasswordSource};
+        use coda_core::config::{Cli, Config, Env, PasswordSource};
         let dir = tempfile::tempdir().unwrap();
         let music = dir.path().join("music");
         std::fs::create_dir(&music).unwrap();
@@ -7933,7 +7970,7 @@ mod tests {
             panic!()
         };
         assert_eq!(account, "you@new.example:8443");
-        assert_eq!(store.get(account).unwrap().expose(), "new-pw");
+        assert_eq!(store.get(account).unwrap(), Password::new("new-pw".into()));
         assert_eq!(store.get("me@old.example"), Err(SecretError::Missing));
         // The previous file was backed up.
         let backups = std::fs::read_dir(path.parent().unwrap())
@@ -8019,8 +8056,8 @@ mod tests {
             Err(SecretError::Missing)
         );
         assert_eq!(
-            store().unwrap().get("me@old.example").unwrap().expose(),
-            "old"
+            store().unwrap().get("me@old.example").unwrap(),
+            Password::new("old".into())
         );
         // Without a config location nothing is attempted.
         let mut nowhere = SettingsIo::new(None, store);
@@ -8156,7 +8193,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_from_not_configured_writes_navidrome_next_to_the_folder() {
-        use crate::config::{Cli, Config, Env, PasswordSource};
+        use coda_core::config::{Cli, Config, Env, PasswordSource};
         fn store() -> Result<SecretStore, SecretError> {
             static STORE: std::sync::OnceLock<SecretStore> = std::sync::OnceLock::new();
             Ok(STORE.get_or_init(SecretStore::mock).clone())
@@ -8197,7 +8234,10 @@ mod tests {
             panic!()
         };
         assert_eq!(account, "me@127.0.0.1:4533");
-        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw");
+        assert_eq!(
+            store().unwrap().get(account).unwrap(),
+            Password::new("pw".into())
+        );
         // The hand-written file was backed up; Coda's own is not, so a
         // second save adds no backup.
         let backups = || {
@@ -8223,7 +8263,10 @@ mod tests {
         )
         .await;
         assert_eq!(backups(), 1);
-        assert_eq!(store().unwrap().get(account).unwrap().expose(), "pw2");
+        assert_eq!(
+            store().unwrap().get(account).unwrap(),
+            Password::new("pw2".into())
+        );
     }
 
     #[tokio::test]
@@ -8257,21 +8300,24 @@ mod tests {
             panic!("{response:?}");
         };
         assert!(
-            message.contains(crate::config_writer::NO_SOURCE_LEFT),
+            message.contains(coda_core::config_writer::NO_SOURCE_LEFT),
             "{message}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-        assert_eq!(store().unwrap().get("me@h.example").unwrap().expose(), "pw");
+        assert_eq!(
+            store().unwrap().get("me@h.example").unwrap(),
+            Password::new("pw".into())
+        );
     }
 
     // ----- Navidrome playlist editing ------------------------------------
 
-    use crate::navidrome::browse::{
+    use coda_core::navidrome::browse::{
         INCOMPLETE_PLAYLIST, MODIFIED, READ_ONLY_FLAGGED, READ_ONLY_OTHER, READ_ONLY_UNKNOWN,
         STALE_PLAYLIST,
     };
-    use crate::navidrome::edit::{EditOp, EditResult};
-    use crate::navidrome::{Access, Playlist, PlaylistSongs};
+    use coda_core::navidrome::edit::{EditOp, EditResult};
+    use coda_core::navidrome::{Access, Playlist, PlaylistSongs};
 
     fn owned_by(owner: Option<&str>, readonly: bool) -> Access {
         Access {
@@ -8284,6 +8330,7 @@ mod tests {
     /// in another case).
     fn own(id: &str, name: &str) -> Playlist {
         Playlist {
+            cover_art: None,
             id: id.into(),
             name: name.into(),
             song_count: None,
@@ -9014,7 +9061,9 @@ mod tests {
 
     // ----- review follow-up: drafts, picker, quitting, serialisation -----
 
-    use crate::navidrome::browse::{LAST_SONG, ORDER_DISCARDED, SAVING_ORDER, WAITING_FOR_EDIT};
+    use coda_core::navidrome::browse::{
+        LAST_SONG, ORDER_DISCARDED, SAVING_ORDER, WAITING_FOR_EDIT,
+    };
 
     #[test]
     fn esc_during_a_save_is_refused_and_only_that_save_ends_the_draft() {
@@ -9051,7 +9100,7 @@ mod tests {
         answer_edit(
             &mut app,
             &EditRequest {
-                id: crate::navidrome::edit::EditId(save.id.0 + 7),
+                id: coda_core::navidrome::edit::EditId(save.id.0 + 7),
                 ..save.clone()
             },
             EditResult::Done { created: None },
@@ -9415,7 +9464,7 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(150));
         assert!(matches!(
             rx.try_recv().unwrap().result,
-            crate::navidrome::edit::EditResult::Done { .. }
+            coda_core::navidrome::edit::EditResult::Done { .. }
         ));
         // A hung one is not.
         let server = edit_server(Duration::from_secs(10)).await;

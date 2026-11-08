@@ -5,7 +5,8 @@ All notable changes to Coda are recorded here. The format follows [Keep a Change
 ## [Unreleased]
 
 ### Changed
-- The repository is now a Cargo workspace with the TUI in `crates/coda-tui` (package `coda-tui`); log targets in `coda.log` are now `coda_tui::…` instead of `coda_player::…` (adjust any `CODA_LOG=coda_player=…` filter).
+- The repository is now a Cargo workspace with the TUI in `crates/coda-tui` (package `coda-tui`); log targets in `coda.log` are now `coda_core::…` (the engine) and `coda_tui::…` (the terminal UI) instead of `coda_player::…`; `CODA_LOG=coda_core=debug,coda_tui=debug` replaces `coda_player=debug`.
+- `+` and `-` now work while nothing is playing: they change the volume the next track starts at (and that is saved), instead of doing nothing.
 
 ## [1.0.0] - 2026-11-03
 

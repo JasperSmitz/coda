@@ -23,7 +23,7 @@ use crate::secret_store::{self, SecretError, SecretStore};
 /// Sends `fallback` unless [`Reply::send`] was called: a request whose
 /// task panics or is cancelled still answers (LESSONS.md, "Every spawned
 /// request must answer exactly once"). Also used by the app's settings.
-pub(crate) struct Reply<R> {
+pub struct Reply<R> {
     tx: mpsc::UnboundedSender<R>,
     fallback: Option<R>,
 }
@@ -31,14 +31,14 @@ pub(crate) struct Reply<R> {
 impl<R> Reply<R> {
     /// Built before spawning, so a task dropped before its first poll
     /// still answers.
-    pub(crate) fn new(tx: &mpsc::UnboundedSender<R>, fallback: R) -> Self {
+    pub fn new(tx: &mpsc::UnboundedSender<R>, fallback: R) -> Self {
         Self {
             tx: tx.clone(),
             fallback: Some(fallback),
         }
     }
 
-    pub(crate) fn send(mut self, response: R) {
+    pub fn send(mut self, response: R) {
         self.fallback = None;
         let _ = self.tx.send(response);
     }

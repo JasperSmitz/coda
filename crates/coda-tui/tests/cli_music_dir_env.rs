@@ -2,7 +2,7 @@
 //! of its own, with a single test, because it changes the process
 //! environment.
 
-use coda_tui::config::{Cli, MUSIC_DIR_ENV, MusicDirArg};
+use coda_core::config::{Cli, MUSIC_DIR_ENV, MusicDirArg};
 
 #[test]
 fn music_dir_from_the_environment_is_reported_as_such() {

@@ -12,11 +12,11 @@ use ratatui::layout::{Position, Rect, Size};
 
 use super::*;
 use crate::app::Action;
-use crate::cover::{CoverImage, CoverResponse, Outcome};
-use crate::library::scan::ScanEvent;
-use crate::model::{Track, TrackMetadata};
-use crate::playback::{PlaybackCommand, PlaybackEvent};
 use crate::ui::cover::{Graphics, PLACEHOLDER, RESIZE_SETTLE};
+use coda_core::cover::{CoverImage, CoverResponse, Outcome};
+use coda_core::library::scan::ScanEvent;
+use coda_core::model::{Track, TrackMetadata};
+use coda_core::playback::{PlaybackCommand, PlaybackEvent};
 
 const GHOSTTY: Graphics = Graphics::Kitty { cell: (16, 34) };
 
@@ -171,7 +171,7 @@ fn playing(now: Instant) -> (App, LoadId, LoadId) {
     (app, load, next)
 }
 
-use crate::playback::LoadId;
+use coda_core::playback::LoadId;
 
 fn cover(shade: u8) -> Arc<CoverImage> {
     Arc::new(CoverImage::new(8, 8, [shade, 40, 200].repeat(64)).unwrap())
@@ -183,7 +183,7 @@ fn answer_cover(app: &mut App, outcome: Outcome) {
     answer(app, requests, outcome);
 }
 
-fn answer(app: &mut App, requests: Vec<crate::cover::CoverRequest>, outcome: Outcome) {
+fn answer(app: &mut App, requests: Vec<coda_core::cover::CoverRequest>, outcome: Outcome) {
     for request in requests {
         app.handle_cover_response(CoverResponse {
             id: request.id,
@@ -386,9 +386,9 @@ fn visualizer_only_redraws_write_no_image_bytes() {
     let area = view.visualizer_area.unwrap();
     for i in 0..30 {
         let level = (i % 10) as f32 / 10.0;
-        let frame = crate::playback::VisualizerFrame {
+        let frame = coda_core::playback::VisualizerFrame {
             levels: [level, level],
-            bands: [Some(level); crate::playback::VISUALIZER_BANDS],
+            bands: [Some(level); coda_core::playback::VISUALIZER_BANDS],
         };
         app.handle_visualizer(load, &frame, now + Duration::from_millis(33 * i));
         redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
@@ -556,7 +556,7 @@ fn no_art_or_a_slow_cover_removes_the_previous_one() {
         full(&mut terminal, &mut app, &mut view, now);
         assert!(kitty_commands(&capture.take()).is_empty());
         if slow {
-            app.tick(Instant::now() + crate::cover::LINGER);
+            app.tick(Instant::now() + coda_core::cover::LINGER);
         } else {
             answer(&mut app, requests, Outcome::NoArt);
         }
@@ -705,7 +705,7 @@ fn the_large_cover_replaces_the_small_one_once() {
     let (mut app, _, _) = playing(now);
     app.handle_action(Action::ToggleNowPlaying, now);
     let small = app.take_cover_requests();
-    assert_eq!(small[0].size, crate::cover::CoverSize::Small);
+    assert_eq!(small[0].size, coda_core::cover::CoverSize::Small);
     answer(&mut app, small, Outcome::Art(big_cover(256)));
     let mut view = view(GHOSTTY);
     let (mut terminal, capture) = terminal(100, 30);
@@ -721,7 +721,7 @@ fn the_large_cover_replaces_the_small_one_once() {
     assert!(view.large_cover_useful);
     app.set_large_cover_useful(view.large_cover_useful);
     let large = app.take_cover_requests();
-    assert_eq!(large[0].size, crate::cover::CoverSize::Large);
+    assert_eq!(large[0].size, coda_core::cover::CoverSize::Large);
     answer(&mut app, large, Outcome::Art(big_cover(1024)));
     full(&mut terminal, &mut app, &mut view, now);
     let bytes = capture.take();
@@ -886,9 +886,9 @@ fn visualizer_only_redraws_on_the_screen_write_no_image_bytes() {
     );
     for i in 0..30 {
         let level = (i % 10) as f32 / 10.0;
-        let frame = crate::playback::VisualizerFrame {
+        let frame = coda_core::playback::VisualizerFrame {
             levels: [level, level],
-            bands: [Some(level); crate::playback::VISUALIZER_BANDS],
+            bands: [Some(level); coda_core::playback::VISUALIZER_BANDS],
         };
         app.handle_visualizer(load, &frame, now + Duration::from_millis(33 * i));
         redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();

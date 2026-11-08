@@ -274,7 +274,7 @@ fn keys_child(result: &Path) {
 
 /// Shows a Kitty image as the app does, then panics on the UI thread.
 fn panic_child() {
-    use coda_tui::cover::CoverImage;
+    use coda_core::cover::CoverImage;
     use coda_tui::ui::cover::{ArtFrame, ArtPainter, Graphics};
     let previous = std::panic::take_hook();
     let _terminal = ratatui::try_init().unwrap();

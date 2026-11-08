@@ -8,12 +8,12 @@ use ratatui::style::Color;
 
 use super::*;
 use crate::app::{Action, Focus};
-use crate::cover::{CoverImage, CoverResponse, Outcome};
-use crate::library::scan::ScanEvent;
-use crate::model::{Track, TrackMetadata};
-use crate::playback::{LoadId, PlaybackCommand, PlaybackEvent};
 use crate::ui::cover::Graphics;
 use crate::ui::render::{ViewState, draw};
+use coda_core::cover::{CoverImage, CoverResponse, Outcome};
+use coda_core::library::scan::ScanEvent;
+use coda_core::model::{Track, TrackMetadata};
+use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent};
 
 const HALF: Graphics = Graphics::HalfBlocks;
 const GHOSTTY: Graphics = Graphics::Kitty { cell: (9, 19) };
@@ -502,7 +502,7 @@ fn a_queue_change_shows_up_next_until_the_tick_after_four_seconds() {
     app.handle_action(Action::CycleRepeat, now);
     app.follow_now_playing(now);
     assert!(shows(&app, now));
-    let later = now + crate::now_playing::UP_NEXT_FLASH;
+    let later = now + coda_core::now_playing::UP_NEXT_FLASH;
     assert!(app.tick(later), "the tick that hides it redraws");
     assert!(!shows(&app, later));
 }
@@ -522,7 +522,7 @@ fn the_volume_and_repeat_sit_dim_beside_the_timeline() {
     assert_eq!(style_at(&buffer, row, "Vol"), DIM);
     // The timeline does not move when the volume goes.
     let start = line.find("0:00").unwrap();
-    let gone = now + crate::now_playing::VOLUME_SHOWN;
+    let gone = now + coda_core::now_playing::VOLUME_SHOWN;
     app.tick(gone);
     let lines = self::lines(&render(&app, &mut ViewState::default(), 100, 24, gone));
     let (_, line) = line_with(&lines, "1:40");
@@ -564,17 +564,17 @@ fn a_stopped_track_shows_with_a_dim_timeline() {
     let now = Instant::now();
     let mut app = App::new("/music".into());
     app.restore_session(
-        crate::session::Session {
+        coda_core::session::Session {
             tracks: vec![track("1.flac", "Kept", Some("Artist"), None)],
             current: Some(0),
-            ..crate::session::Session::default()
+            ..coda_core::session::Session::default()
         },
         now,
     );
     app.handle_action(Action::ToggleNowPlaying, now);
     assert_eq!(
         app.player().status(),
-        crate::player::PlaybackStatus::Stopped
+        coda_core::player::PlaybackStatus::Stopped
     );
     let buffer = render(&app, &mut ViewState::default(), 80, 24, now);
     let lines = lines(&buffer);
@@ -608,9 +608,9 @@ fn the_visualizer_is_wide_tall_dim_and_redrawn_on_its_own() {
     let now = Instant::now();
     let (mut app, load) = two_tracks(now);
     app.handle_action(Action::ToggleVisualizer, now);
-    let frame = crate::playback::VisualizerFrame {
+    let frame = coda_core::playback::VisualizerFrame {
         levels: [1.0, 1.0],
-        bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+        bands: [Some(1.0); coda_core::playback::VISUALIZER_BANDS],
     };
     let mut view = ViewState::default();
     let buffer = render(&app, &mut view, 120, 40, now);
@@ -640,9 +640,9 @@ fn loud_screen(now: Instant) -> App {
     let (mut app, load) = two_tracks(now);
     answer_covers(&mut app, cover(256));
     app.handle_action(Action::ToggleVisualizer, now);
-    let frame = crate::playback::VisualizerFrame {
+    let frame = coda_core::playback::VisualizerFrame {
         levels: [1.0, 1.0],
-        bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+        bands: [Some(1.0); coda_core::playback::VISUALIZER_BANDS],
     };
     assert!(app.handle_visualizer(load, &frame, now));
     app
@@ -921,7 +921,7 @@ fn the_screen_cover_is_the_large_one_once_it_has_loaded() {
     // Small first, shown meanwhile.
     let small = app.take_cover_requests();
     assert_eq!(small.len(), 1);
-    assert_eq!(small[0].size, crate::cover::CoverSize::Small);
+    assert_eq!(small[0].size, coda_core::cover::CoverSize::Small);
     app.handle_cover_response(CoverResponse {
         id: small[0].id,
         generation: small[0].generation,

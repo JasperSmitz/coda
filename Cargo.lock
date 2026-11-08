@@ -783,31 +783,20 @@ dependencies = [
 name = "coda-tui"
 version = "1.0.0"
 dependencies = [
- "apple-native-keyring-store",
- "clap",
+ "coda-core",
  "crossterm",
  "futures-util",
  "getrandom 0.4.3",
  "image",
- "keyring-core",
  "libc",
- "lofty",
- "md5",
  "ratatui",
- "reqwest",
- "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
- "toml 1.2.0+spec-1.1.0",
  "tracing",
- "tracing-subscriber",
  "unicode-width",
  "url",
- "walkdir",
  "wiremock",
- "zbus-secret-service-keyring-store",
 ]
 
 [[package]]

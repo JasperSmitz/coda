@@ -38,7 +38,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use crate::cover::CoverImage;
+use coda_core::cover::CoverImage;
 
 /// How long [`detect`] waits for the terminal's replies (Ghostty answers in
 /// well under a millisecond).

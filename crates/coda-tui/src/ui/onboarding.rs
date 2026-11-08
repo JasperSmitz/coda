@@ -15,12 +15,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::MusicDirArg;
-use crate::onboarding::{
+use crate::ui::render::{DIM_TEXT, fit, fit_tail};
+use coda_core::config::MusicDirArg;
+use coda_core::onboarding::{
     Busy, Field, Input, Onboarding, SaveError, Screen, ServerForm, leftover_overrides_message,
     navidrome_blocked_message,
 };
-use crate::ui::render::{DIM_TEXT, fit, fit_tail};
 
 const MAX_WIDTH: u16 = 76;
 const MAX_HEIGHT: u16 = 18;
@@ -446,7 +446,7 @@ fn build(setup: &Onboarding, view: &View, width: usize) -> Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::onboarding::{Request, Response};
+    use coda_core::onboarding::{Request, Response};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -653,7 +653,7 @@ mod tests {
 
     fn redo_setup() -> Onboarding {
         Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 music_dir: Some("~/Music".into()),
                 url: Some("https://nd.example/".into()),
                 username: Some("me".into()),
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn env_overrides_block_the_server_and_offer_keeping_it() {
         let mut setup = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 music_dir: Some("/m".into()),
                 url: Some("https://nd.example/".into()),
                 username: Some("me".into()),
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn plaintext_password_backup_and_hidden_values_are_explained() {
         let mut setup = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 music_dir: Some("/m\u{7}".into()),
                 url: Some("https://nd.example/".into()),
                 username: Some("x".repeat(300)),
@@ -846,7 +846,7 @@ mod tests {
         // Values only from outside the file: nothing to back up, and the
         // first-run welcome.
         let setup = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 music_override: Some(MusicDirArg::Argument),
                 ..Default::default()
             },
@@ -858,7 +858,7 @@ mod tests {
         setup.handle_input(Input::Enter);
         assert_eq!(setup.music_input(), "~/Music", "the first-run suggestion");
         let mut setup = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 file_has_content: false,
                 music_dir: Some("/m".into()),
                 ..Default::default()
@@ -891,7 +891,7 @@ mod tests {
 #[cfg(test)]
 mod hint_tests {
     use super::*;
-    use crate::onboarding::Request;
+    use coda_core::onboarding::Request;
 
     /// Every non-saving screen offers Ctrl-C, and no hint is cut off in
     /// an 80-column terminal.
@@ -927,7 +927,7 @@ mod hint_tests {
         let Some(Request::Ping { id, .. }) = setup.take_requests().pop() else {
             panic!()
         };
-        setup.handle_response(crate::onboarding::Response::Pinged { id, result: Ok(()) });
+        setup.handle_response(coda_core::onboarding::Response::Pinged { id, result: Ok(()) });
         seen.push(hints(&setup));
         for hint in &seen {
             assert!(hint.contains("Ctrl-C"), "{hint}");
@@ -950,7 +950,7 @@ mod hint_tests {
             }
         };
         let mut setup = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 music_override: Some(MusicDirArg::Argument),
                 navidrome_overrides: vec![
                     "CODA_NAVIDROME_URL",
@@ -984,11 +984,11 @@ mod hint_tests {
         let Some(Request::Ping { id, .. }) = setup.take_requests().pop() else {
             panic!()
         };
-        setup.handle_response(crate::onboarding::Response::Pinged { id, result: Ok(()) });
+        setup.handle_response(coda_core::onboarding::Response::Pinged { id, result: Ok(()) });
         check(&setup);
         // The blocked question, with the longest message.
         let mut blocked = Onboarding::redo(
-            crate::onboarding::Redo {
+            coda_core::onboarding::Redo {
                 navidrome_overrides: vec!["CODA_NAVIDROME_URL", "CODA_NAVIDROME_USER"],
                 has_navidrome: true,
                 music_dir: Some("/m".into()),

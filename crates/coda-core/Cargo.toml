@@ -45,6 +45,11 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rus
 # Replaces the OS credential store with an in-memory one, for pty smoke
 # runs that must not touch the real keychain. Never enable in a release.
 mock-secret-store = []
+# Test support for crates that depend on coda-core: makes
+# `SecretStore::mock()` available. Unlike `mock-secret-store` it does not
+# change `SecretStore::system()`, so a binary built with it (e.g. by
+# `cargo test` through feature unification) still uses the OS store.
+test-util = []
 
 [dev-dependencies]
 wiremock = "0.6.5"

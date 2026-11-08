@@ -7,7 +7,7 @@
 //!   with the repeat mark and a passing volume right-aligned on its row, a
 //!   blank row, the timeline and the visualizer's bars, both as wide as
 //!   the column, and a dim Next up line when it is due
-//!   ([`crate::now_playing`]). Cover and column form one block, centred
+//!   ([`coda_core::now_playing`]). Cover and column form one block, centred
 //!   on the screen.
 //! - **Stacked** (narrow or tall windows, or no cover): the cover, the
 //!   title with album · artist under it, the visualizer, the timeline and
@@ -32,11 +32,11 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
-use crate::player::{PlaybackStatus, RepeatMode};
 use crate::ui::cover::{ArtFrame, ArtPainter, DIACRITICS};
 use crate::ui::render::{
     TIMELINE_LEFT, TIMELINE_PLAYED, VISUALIZER_MIN_SCREEN, draw_visualizer, fit, format_time,
 };
+use coda_core::player::{PlaybackStatus, RepeatMode};
 
 /// A cover smaller than this many rows is left out (the bar already shows
 /// one that size).

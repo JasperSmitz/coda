@@ -20,15 +20,16 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, Connection, Focus, LocalSearch, NAVIDROME_NOT_CONFIGURED, NO_LOCAL_LIBRARY,
-    PRESS_ENTER_TO_CONNECT, ScanState, Source, count, thousands,
+    PRESS_ENTER_TO_CONNECT, ScanState, Source, count,
 };
-use crate::library::browse::{Row as LocalRow, View as LocalView};
-use crate::library::{Library, LocalPlaylist};
-use crate::model::Track;
-use crate::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
-use crate::player::{PlaybackStatus, RepeatMode};
 use crate::ui::cover::{ArtFrame, ArtPainter, Graphics, RESIZE_SETTLE, area_pixels};
 use crate::ui::{help, now_playing, settings};
+use coda_core::library::browse::{Row as LocalRow, View as LocalView};
+use coda_core::library::{Library, LocalPlaylist};
+use coda_core::model::Track;
+use coda_core::model::thousands;
+use coda_core::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
+use coda_core::player::{PlaybackStatus, RepeatMode};
 
 /// Below this width only the focused panel is shown.
 pub const NARROW_WIDTH: u16 = 60;
@@ -46,7 +47,7 @@ pub const VISUALIZER_MIN_SCREEN: (u16, u16) = (20, 16);
 /// Bands at their narrowest: one column each, one apart.
 const NARROW_BANDS_WIDTH: u16 = 13;
 /// From this visualizer width the bars spread across the area, more of
-/// them than there are bands ([`crate::visualizer::spread_bands`]).
+/// them than there are bands ([`coda_core::visualizer::spread_bands`]).
 const WIDE_VISUALIZER: u16 = 42;
 /// The level meter is left out when it would be narrower than this.
 const MIN_METER_WIDTH: u16 = 6;
@@ -105,7 +106,7 @@ pub struct ViewState {
     last_size: Option<(u16, u16)>,
     resized_at: Option<Instant>,
     /// The last full draw showed the Now playing screen's cover with Kitty
-    /// graphics in an area of more than [`crate::cover::COVER_SIZE`]
+    /// graphics in an area of more than [`coda_core::cover::COVER_SIZE`]
     /// pixels: only then is a large cover worth loading.
     pub large_cover_useful: bool,
 }
@@ -193,7 +194,7 @@ where
             let cover = now_playing::layout_for(main_area(screen), app, Some(painter)).cover;
             view.large_cover_useful = cover.is_some_and(|cover| {
                 let (width, height) = area_pixels(cover.width, cover.height, cell);
-                width.max(height) > crate::cover::COVER_SIZE
+                width.max(height) > coda_core::cover::COVER_SIZE
             });
         }
         painter.prepare_at(art_frame(screen, app, painter), resizing);
@@ -1230,7 +1231,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
     let (levels, bands) = if live {
         (meter.levels(), meter.bands())
     } else {
-        ([0.0; 2], [Some(0.0); crate::playback::VISUALIZER_BANDS])
+        ([0.0; 2], [Some(0.0); coda_core::playback::VISUALIZER_BANDS])
     };
 
     // On the Now playing screen: the bars only, no level meter, dim grey.
@@ -1239,7 +1240,7 @@ pub fn draw_visualizer(buffer: &mut Buffer, app: &App, area: Rect) {
         return;
     };
     let values = if layout.spread {
-        crate::visualizer::spread_bands(&bands, layout.bars.len())
+        coda_core::visualizer::spread_bands(&bands, layout.bars.len())
     } else {
         bands.to_vec()
     };
@@ -1311,10 +1312,10 @@ struct VisualizerLayout {
 /// - Wider: the meter takes what the old three-column bands left it (13
 ///   columns at 42, growing to [`WIDEST_METER`]), and the bars fill the
 ///   rest: about 2.5 columns each plus a one-column gap, at least one per
-///   band and at most [`crate::visualizer::MAX_BARS`], their widths
+///   band and at most [`coda_core::visualizer::MAX_BARS`], their widths
 ///   differing by at most one column so they reach the meter's gap.
 fn visualizer_layout(width: u16, meter: bool) -> Option<VisualizerLayout> {
-    let bands = crate::playback::VISUALIZER_BANDS as u16;
+    let bands = coda_core::playback::VISUALIZER_BANDS as u16;
     if width < NARROW_BANDS_WIDTH {
         return None;
     }
@@ -1344,11 +1345,11 @@ fn visualizer_layout(width: u16, meter: bool) -> Option<VisualizerLayout> {
 
 /// Bars spread over `bars_width` columns: about 2.5 columns each plus a
 /// one-column gap, at least one per band and at most
-/// [`crate::visualizer::MAX_BARS`], their widths differing by at most
+/// [`coda_core::visualizer::MAX_BARS`], their widths differing by at most
 /// one column so they fill it exactly.
 fn spread_bars(bars_width: u16) -> VisualizerLayout {
-    let bands = crate::playback::VISUALIZER_BANDS as u16;
-    let max_bars = crate::visualizer::MAX_BARS as u16;
+    let bands = coda_core::playback::VISUALIZER_BANDS as u16;
+    let max_bars = coda_core::visualizer::MAX_BARS as u16;
     // In u32: a huge width must not overflow.
     let count =
         ((u32::from(bars_width) + 1) * 2 / 7).clamp(u32::from(bands), u32::from(max_bars)) as u16;
@@ -1522,10 +1523,10 @@ mod art_tests;
 mod tests {
     use super::*;
     use crate::app::Action;
-    use crate::library::scan::ScanEvent;
-    use crate::model::{Track, TrackMetadata};
-    use crate::playback::{PlaybackCommand, PlaybackEvent};
     use crate::ui::help;
+    use coda_core::library::scan::ScanEvent;
+    use coda_core::model::{Track, TrackMetadata};
+    use coda_core::playback::{PlaybackCommand, PlaybackEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1562,7 +1563,7 @@ mod tests {
         assert_eq!(app.library_path(), [] as [String; 0]);
         assert!(matches!(
             app.local_browser().current(),
-            crate::library::browse::View::Folder(_)
+            coda_core::library::browse::View::Folder(_)
         ));
     }
 
@@ -1581,10 +1582,10 @@ mod tests {
     #[test]
     fn navidrome_only_shows_no_local_library_and_ping_status() {
         let now = Instant::now();
-        let client = crate::navidrome::Client::new(
-            crate::navidrome::client::parse_base_url("https://h.example").unwrap(),
+        let client = coda_core::navidrome::Client::new(
+            coda_core::navidrome::client::parse_base_url("https://h.example").unwrap(),
             "u".into(),
-            crate::navidrome::Password::new("p".into()),
+            coda_core::navidrome::Password::new("p".into()),
         )
         .unwrap();
         let mut app = App::with_sources(None, Some(client));
@@ -1601,7 +1602,7 @@ mod tests {
         app.handle_navidrome_ping(Ok(()), now);
         let screen = render(&app, 100, 20, now);
         assert!(screen.contains("Navidrome connected"), "{screen}");
-        app.handle_navidrome_ping(Err(crate::navidrome::Error::Auth), now);
+        app.handle_navidrome_ping(Err(coda_core::navidrome::Error::Auth), now);
         let screen = render(&app, 100, 20, now);
         assert!(
             screen.contains("Navidrome: authentication failed"),
@@ -1711,7 +1712,7 @@ mod tests {
 
     /// An app playing one track with the visualizer shown and fed
     /// `frame` twice (so the smoothed bars are near it).
-    fn visualizer_app(frame: crate::playback::VisualizerFrame, now: Instant) -> App {
+    fn visualizer_app(frame: coda_core::playback::VisualizerFrame, now: Instant) -> App {
         let mut app = App::new("/music".into());
         app.handle_scan_event(
             ScanEvent::Batch(vec![tagged("song.flac", "Song", "Artist", 100)]),
@@ -1730,10 +1731,10 @@ mod tests {
         app
     }
 
-    fn loud() -> crate::playback::VisualizerFrame {
-        crate::playback::VisualizerFrame {
+    fn loud() -> coda_core::playback::VisualizerFrame {
+        coda_core::playback::VisualizerFrame {
             levels: [1.0, 0.5],
-            bands: [Some(1.0); crate::playback::VISUALIZER_BANDS],
+            bands: [Some(1.0); coda_core::playback::VISUALIZER_BANDS],
         }
     }
 
@@ -1954,8 +1955,8 @@ mod tests {
     }
 
     /// A reading with a shape: a peak at 400 Hz and nothing at 16 kHz.
-    fn shaped() -> crate::playback::VisualizerFrame {
-        crate::playback::VisualizerFrame {
+    fn shaped() -> coda_core::playback::VisualizerFrame {
+        coda_core::playback::VisualizerFrame {
             levels: [1.0, 0.5],
             bands: [
                 Some(0.2),
@@ -2119,7 +2120,7 @@ mod tests {
             let mut last = terminal.backend().buffer().clone();
             let mut quiet = loud();
             quiet.levels = [0.0, 0.0];
-            quiet.bands = [Some(0.0); crate::playback::VISUALIZER_BANDS];
+            quiet.bands = [Some(0.0); coda_core::playback::VISUALIZER_BANDS];
             let load = app.player().current_load().unwrap();
             assert!(app.handle_visualizer(load, &quiet, later));
             redraw_visualizer(&mut terminal, &mut last, &app, area).unwrap();
@@ -2147,7 +2148,7 @@ mod tests {
         app.handle_action(Action::CloseHelp, now);
         app.handle_action(Action::OpenSettings, now);
         assert!(!drawn(&app, 80, 24, now).1.visualizer_drawable);
-        app.handle_settings_input(crate::onboarding::Input::Esc, now);
+        app.handle_settings_input(coda_core::onboarding::Input::Esc, now);
         assert!(!app.settings_open());
         app.handle_action(Action::OpenSearch, now);
         assert!(app.input_open());
@@ -2595,7 +2596,11 @@ mod tests {
         // Maximum-length (as capped at ingestion), mostly zero-width names.
         let hostile: Vec<String> = hostile_inputs()
             .into_iter()
-            .map(|s| s.chars().take(crate::model::MAX_METADATA_CHARS).collect())
+            .map(|s| {
+                s.chars()
+                    .take(coda_core::model::MAX_METADATA_CHARS)
+                    .collect()
+            })
             .collect();
         let mut app = queue_app(10_000, |i| hostile[i % hostile.len()].clone(), now);
         for _ in 0..9_990 {
@@ -2727,6 +2732,8 @@ mod tests {
             song_artist: false,
         };
         let mut album = Album {
+            cover_art: None,
+            artist_id: None,
             id: "k".into(),
             name: "Kind of Blue".into(),
             artist: Some("Miles Davis".into()),
@@ -2868,14 +2875,14 @@ mod tests {
 
     // ----- Navidrome ---------------------------------------------------
 
-    use crate::navidrome::browse::{Content, FetchRequest, FetchResponse};
-    use crate::navidrome::{Album, Artist, SearchResults};
+    use coda_core::navidrome::browse::{Content, FetchRequest, FetchResponse};
+    use coda_core::navidrome::{Album, Artist, SearchResults};
 
-    fn nav_client() -> crate::navidrome::Client {
-        crate::navidrome::Client::new(
-            crate::navidrome::client::parse_base_url("https://secret-host.example/nd").unwrap(),
+    fn nav_client() -> coda_core::navidrome::Client {
+        coda_core::navidrome::Client::new(
+            coda_core::navidrome::client::parse_base_url("https://secret-host.example/nd").unwrap(),
             "u".into(),
-            crate::navidrome::Password::new("p".into()),
+            coda_core::navidrome::Password::new("p".into()),
         )
         .unwrap()
     }
@@ -2896,7 +2903,7 @@ mod tests {
     fn answer(
         app: &mut App,
         request: &FetchRequest,
-        result: Result<Content, crate::navidrome::Error>,
+        result: Result<Content, coda_core::navidrome::Error>,
     ) {
         app.handle_fetch_response(
             FetchResponse {
@@ -2911,6 +2918,7 @@ mod tests {
 
     fn nav_artist(id: &str, name: &str) -> Artist {
         Artist {
+            cover_art: None,
             id: id.into(),
             name: name.into(),
             album_count: Some(3),
@@ -2976,6 +2984,8 @@ mod tests {
             &mut app,
             &albums,
             Ok(Content::Albums(vec![Album {
+                cover_art: None,
+                artist_id: None,
                 id: "k".into(),
                 name: "Kind of Blue".into(),
                 artist: Some("Miles Davis".into()),
@@ -2993,8 +3003,8 @@ mod tests {
     fn navidrome_errors_render_inline_without_urls() {
         let now = Instant::now();
         let (mut app, request) = nav_app();
-        answer(&mut app, &request, Err(crate::navidrome::Error::Auth));
-        app.handle_navidrome_ping(Err(crate::navidrome::Error::Auth), now);
+        answer(&mut app, &request, Err(coda_core::navidrome::Error::Auth));
+        app.handle_navidrome_ping(Err(coda_core::navidrome::Error::Auth), now);
         let screen = render(&app, 100, 14, now);
         assert!(
             screen.contains("Error: authentication failed (R to retry)"),
@@ -3008,7 +3018,7 @@ mod tests {
         answer(
             &mut app,
             &retry,
-            Err(crate::navidrome::Error::Server {
+            Err(coda_core::navidrome::Error::Server {
                 code: 0,
                 message: format!("\u{1b}[2J{}", "❤️".repeat(200)),
             }),
@@ -3081,6 +3091,8 @@ mod tests {
             Ok(Content::Search(SearchResults {
                 artists: vec![nav_artist("1", "Blue Note Band")],
                 albums: vec![Album {
+                    cover_art: None,
+                    artist_id: None,
                     id: "b".into(),
                     name: "Blue Train".into(),
                     artist: Some("John Coltrane".into()),
@@ -3134,6 +3146,8 @@ mod tests {
             &mut app,
             &albums,
             Ok(Content::Albums(vec![Album {
+                cover_art: None,
+                artist_id: None,
                 id: "x".into(),
                 name: "X".into(),
                 artist: None,
@@ -3276,7 +3290,7 @@ mod tests {
 
     #[test]
     fn local_home_lists_and_playlists_render() {
-        use crate::library::m3u::PlaylistFile;
+        use coda_core::library::m3u::PlaylistFile;
         let now = Instant::now();
         let mut app = App::new("/music".into());
         app.handle_scan_event(
@@ -3421,7 +3435,7 @@ mod tests {
 
     #[test]
     fn empty_local_lists_explain_themselves() {
-        use crate::library::m3u::PlaylistFile;
+        use coda_core::library::m3u::PlaylistFile;
         let now = Instant::now();
         let mut app = App::new("/music".into());
         local_press(&mut app, &[Action::Down, Action::Activate], now);
@@ -3514,8 +3528,8 @@ mod tests {
 
     // ----- Navidrome Home, playlists and album lists ---------------------
 
-    use crate::navidrome::browse::Resource as Res;
-    use crate::navidrome::{AlbumPage, AlbumSort, Playlist};
+    use coda_core::navidrome::browse::Resource as Res;
+    use coda_core::navidrome::{AlbumPage, AlbumSort, Playlist};
 
     /// Navidrome only, connected, on Home, with Playlists (the entry
     /// below "Shuffle all") selected.
@@ -3534,6 +3548,8 @@ mod tests {
 
     fn nav_album(id: &str, name: &str, artist: &str) -> Album {
         Album {
+            cover_art: None,
+            artist_id: None,
             id: id.into(),
             name: name.into(),
             artist: Some(artist.into()),
@@ -3566,6 +3582,7 @@ mod tests {
             &request,
             Ok(Content::Playlists(vec![
                 Playlist {
+                    cover_art: None,
                     id: "p1".into(),
                     name: "Road Trip".into(),
                     song_count: Some(12),
@@ -3573,6 +3590,7 @@ mod tests {
                     access: Default::default(),
                 },
                 Playlist {
+                    cover_art: None,
                     id: "p2".into(),
                     name: "\u{202E}Huge\u{1b}[2J".into(),
                     song_count: Some(u32::MAX),
@@ -3580,6 +3598,7 @@ mod tests {
                     access: Default::default(),
                 },
                 Playlist {
+                    cover_art: None,
                     id: "p3".into(),
                     name: "Bare".into(),
                     song_count: None,
@@ -3674,7 +3693,7 @@ mod tests {
         assert!(screen.contains("> Record 493 — Band"), "{screen}");
         assert!(screen.contains("Loading more…"), "{screen}");
         assert_eq!(view.remote_rows, 6, "the footer takes a row");
-        answer(&mut app, &more, Err(crate::navidrome::Error::Http(500)));
+        answer(&mut app, &more, Err(coda_core::navidrome::Error::Http(500)));
         draw_to(&mut terminal, &app, &mut view, now);
         let screen = buffer_text(&terminal);
         assert!(
@@ -3701,6 +3720,7 @@ mod tests {
             &mut app,
             &lists,
             Ok(Content::Playlists(vec![Playlist {
+                cover_art: None,
                 id: "big".into(),
                 name: "Big".into(),
                 song_count: Some(10_000),
@@ -3735,13 +3755,19 @@ mod tests {
         assert!(keys.contains(&"R / o"), "{keys:?}");
     }
 
-    fn nav_playlist(id: &str, name: &str, owner: &str, songs: u32) -> crate::navidrome::Playlist {
-        crate::navidrome::Playlist {
+    fn nav_playlist(
+        id: &str,
+        name: &str,
+        owner: &str,
+        songs: u32,
+    ) -> coda_core::navidrome::Playlist {
+        coda_core::navidrome::Playlist {
+            cover_art: None,
             id: id.into(),
             name: name.into(),
             song_count: Some(songs),
             duration: None,
-            access: crate::navidrome::Access {
+            access: coda_core::navidrome::Access {
                 owner: Some(owner.into()),
                 readonly: false,
             },
@@ -3749,7 +3775,7 @@ mod tests {
     }
 
     /// Navidrome only, in the Playlists list holding `lists`.
-    fn nav_playlists(lists: Vec<crate::navidrome::Playlist>) -> App {
+    fn nav_playlists(lists: Vec<coda_core::navidrome::Playlist>) -> App {
         let mut app = nav_home();
         press(&mut app, &[Action::Activate]);
         let request = app.take_fetch_requests().remove(0);
@@ -3799,7 +3825,11 @@ mod tests {
         assert!(screen.contains("Add Miles to"), "{screen}");
         assert!(screen.contains(NEW_PLAYLIST_ROW), "{screen}");
         assert!(screen.contains("Loading your playlists…"), "{screen}");
-        answer(&mut app, &lists, Err(crate::navidrome::Error::Http(503)));
+        answer(
+            &mut app,
+            &lists,
+            Err(coda_core::navidrome::Error::Http(503)),
+        );
         let screen = render(&app, 80, 24, now);
         assert!(
             screen.contains("Could not load playlists: server returned HTTP 503"),
@@ -3854,13 +3884,13 @@ mod tests {
         press(&mut app, &[Action::Open]);
         let request = app.take_fetch_requests().remove(0);
         let songs = |owner: &str| {
-            Content::PlaylistSongs(crate::navidrome::PlaylistSongs {
+            Content::PlaylistSongs(coda_core::navidrome::PlaylistSongs {
                 tracks: vec![
                     nav_track("s1", "One", "Band", 60),
                     nav_track("s2", "Two", "Band", 60),
                 ],
                 served: 2,
-                access: crate::navidrome::Access {
+                access: coda_core::navidrome::Access {
                     owner: Some(owner.into()),
                     readonly: false,
                 },
@@ -3884,7 +3914,7 @@ mod tests {
         press(&mut app, &[Action::Remove]);
         let screen = render(&app, 100, 24, now);
         assert!(
-            screen.contains(crate::navidrome::browse::READ_ONLY_OTHER),
+            screen.contains(coda_core::navidrome::browse::READ_ONLY_OTHER),
             "{screen}"
         );
         assert!(!screen.contains("(modified)"), "{screen}");

@@ -145,7 +145,7 @@ impl SecretStore {
     }
 
     /// A fresh, empty in-memory store (`keyring-core`'s mock store).
-    #[cfg(any(test, feature = "mock-secret-store"))]
+    #[cfg(any(test, feature = "mock-secret-store", feature = "test-util"))]
     pub fn mock() -> Self {
         let store = keyring_core::mock::Store::new().expect("the mock store cannot fail");
         Self { inner: store }
