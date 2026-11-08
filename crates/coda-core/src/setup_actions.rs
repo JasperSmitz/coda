@@ -3,7 +3,8 @@
 //! folder check, the ping with a temporary client, and the saves
 //! (keychain first, then config; [`save`] for the setup, [`save_navidrome`]
 //! for the settings). Blocking functions run on blocking threads; the
-//! callers (`setup`, `app`, `cover`) spawn them.
+//! callers (the frontends' setup and settings code, and `cover`) spawn
+//! them.
 //!
 //! The log records only kinds and outcomes: never the URL, host,
 //! username, folder or password.

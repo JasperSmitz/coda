@@ -2,9 +2,8 @@
 name = "coda-core"
 version = "1.0.0"
 edition = "2024"
-# Vendored from ../coda (gui-core, ffd5c6d). Coda itself stays TUI-only; this copy evolves for the GUI.
 rust-version = "1.89"
-description = "Coda's music engine (vendored from coda-player): queue, mpv playback, Navidrome, library"
+description = "Coda's shared, UI-free music engine: queue, mpv playback, Navidrome, library"
 license = "MIT"
 publish = false
 

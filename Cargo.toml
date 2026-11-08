@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/coda-tui",
-    "apps/coda-gui/crates/coda-core",
+    "crates/coda-core",
     "apps/coda-gui/src-tauri",
 ]
 

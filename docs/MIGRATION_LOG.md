@@ -27,9 +27,17 @@ Brief: `docs/plans/monorepo-migration.md`. Branch: `monorepo-migration`. Newest 
 - Review: 0 blocking, 6 low. Fixed: shared rust-cache keys, `--latest=false`, CHANGELOG note, this log. Deferred to Phase 4: stale `coda-player` in AGENTS.md/ARCHITECTURE.md and workspace-wide commands in AGENTS.md.
 - Not verified: Rust 1.89 MSRV (no rustup; CI msrv job), actionlint, makepkg, Docker linux-check, macOS, GUI at runtime.
 
+## Phase 2 — promote coda-core
+- `git mv apps/coda-gui/crates/coda-core crates/coda-core`; src-tauri path dep updated; "vendored" wording removed, crate docs describe the shared engine. No code change; lock unchanged.
+- Boundary: `cargo tree -p coda-core -e normal --target all` has no ratatui/crossterm/tauri/souvlaki/wry/webkit/gtk/unicode-width.
+- Visibility changes the TUI needs (e.g. `setup_actions::Reply`) moved to Phase 3, where the compiler names exactly what is needed.
+- Accepted exception for now: `clap` stays in core for `config::Cli` (the TUI's argv; the GUI builds `Cli` by hand). Revisit in Phase 4.
+- Verified: fmt; clippy (±all-features); core 660 passed/30 ignored standalone; workspace 1853/67; core `--ignored` 30/30; `cargo build -p coda-app`; `pnpm build`.
+- Review: 0 blocking; doc nits fixed (lib.rs module list, CI comment).
+
 ## Phases
 - [x] Plan (04e04d8), import (1dc4bce)
 - [x] Phase 1 — workspace layout
-- [ ] Phase 2 — promote coda-core
+- [x] Phase 2 — promote coda-core
 - [ ] Phase 3 — TUI consumes coda-core
 - [ ] Phase 4 — consolidation, docs, verification

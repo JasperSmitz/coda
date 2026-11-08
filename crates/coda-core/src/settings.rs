@@ -1,8 +1,8 @@
 //! The in-app Settings overlay (`O`) as pure state: [`Input`]s and driver
 //! [`Response`]s go in, [`Request`]s (ping, save, disconnect) and
 //! [`Change`]s (a new Navidrome client, or none) come out. No I/O and no
-//! Ratatui: the app's event loop performs the requests
-//! (`crate::app`), `crate::ui::settings` draws the overlay.
+//! UI toolkit: the frontend's event loop performs the requests and the
+//! frontend draws the overlay.
 //!
 //! The overlay shows the music folder and the Navidrome status. Who owns
 //! a setting decides what can be done with it:

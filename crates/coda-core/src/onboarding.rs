@@ -1,7 +1,7 @@
 //! First-run setup as a pure state machine: [`Input`]s and driver
 //! [`Response`]s go in, [`Request`]s (check a folder, ping a server,
-//! save) come out. No I/O, no Ratatui; the driver is `crate::setup`, the
-//! drawing `crate::ui::onboarding`.
+//! save) come out. No I/O, no UI toolkit; the frontend drives it and
+//! draws it.
 //!
 //! Screens, in order: welcome, local music folder (skippable), "Do you
 //! have a Navidrome server?" (Esc goes back to the folder), the server form

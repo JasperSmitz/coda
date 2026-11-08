@@ -8,8 +8,8 @@ on:
 permissions:
   contents: read
 
-# The GUI lives in apps/coda-gui; its Rust packages (coda-app and its
-# coda-core) are members of the root Cargo workspace. The TUI has ci.yml.
+# The GUI lives in apps/coda-gui; its Rust package (coda-app) and the shared
+# crates/coda-core are members of the root Cargo workspace. The TUI has ci.yml.
 
 # A new push to a pull request cancels its older runs; runs on main finish.
 concurrency:
