@@ -54,10 +54,17 @@ Brief: `docs/plans/monorepo-migration.md`. Branch: `monorepo-migration`. Newest 
 - Final whole-branch review: 0 blocking. History verified (`git log --follow` reaches original commits of both repos; all 268 coda-app files accounted for); no secrets in the diff. Doc nits fixed. Finding: the GUI engine still duplicates the TUI's scrobble policy and "Shuffle all" orchestration (inherited from coda-app) → Phase 5.
 - Environment note: core tests that write a few MB can fail with `QuotaExceeded` when `/tmp` (tmpfs with quota) is full; set `TMPDIR` elsewhere.
 
+## Phase 5 — remaining duplicated orchestration
+- Moved into core, both frontends call it: `navidrome::scrobble::Scrobbling` (now-playing/submit listen policy, client swap, first-failure flag; GUI's live toggle = `switch`), `queue::shuffle_all` + `shuffle_all_message`, `model::count`, `Player::play_tracks` (play-in-context: shuffle-with-first, cap, dropped count). Same RNG consumption as before.
+- Differences kept frontend-side on purpose: the GUI filters an out-of-range start before `play_tracks` (TUI starts are always in range); only the GUI toggles scrobbling live; "queue full" wording differs per frontend.
+- Deferred (needs an owner decision): a shared session-save schedule. The two debounces share `note_changes`/`take_due_save`, but the GUI retries failed saves with back-off and the TUI only at exit; unifying would change TUI behaviour. Also tiny/not worth it: `Queue::navidrome_song_ids` for "save queue as playlist".
+- Tests: core 660→674 (+14, mostly ported from the TUI's app tests), TUI 369 and GUI 182 unchanged in substance (call sites only); `--ignored` 37/37; TUI pty smoke (shuffle all, album shuffle/play, next, quit) with mpv `--ao=null`.
+- Review: 0 blocking; architecture docs updated, `play_tracks` doc clarified, `derive(Clone)` dropped.
+
 ## Phases
 - [x] Plan (04e04d8), import (1dc4bce)
 - [x] Phase 1 — workspace layout
 - [x] Phase 2 — promote coda-core
 - [x] Phase 3 — TUI consumes coda-core
 - [x] Phase 4 — consolidation, docs, verification
-- [ ] Phase 5 — move remaining duplicated orchestration (scrobble policy, shuffle all) into core
+- [x] Phase 5 — move remaining duplicated orchestration (scrobble policy, shuffle all) into core

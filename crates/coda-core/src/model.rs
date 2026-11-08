@@ -137,6 +137,12 @@ pub fn thousands(n: usize) -> String {
     out
 }
 
+/// `1 track`, `1,234 tracks`: `n` and `noun`, plural unless `n` is 1.
+pub fn count(n: usize, noun: &str) -> String {
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{} {noun}{plural}", thousands(n))
+}
+
 /// Upper bound on the length of metadata strings, in chars.
 pub const MAX_METADATA_CHARS: usize = 512;
 
@@ -169,6 +175,14 @@ fn file_stem(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_are_grouped_and_plural_unless_one() {
+        assert_eq!(count(0, "track"), "0 tracks");
+        assert_eq!(count(1, "track"), "1 track");
+        assert_eq!(count(2, "album"), "2 albums");
+        assert_eq!(count(1_234, "track"), "1,234 tracks");
+    }
 
     #[test]
     fn title_falls_back_to_file_stem() {

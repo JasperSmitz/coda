@@ -81,12 +81,8 @@ impl Engine {
             SettingsChange::Scrobble(on) => {
                 self.scrobble_setting = on;
                 let scrobbling = on && self.client.is_some();
-                if scrobbling != self.scrobbling {
-                    self.scrobbling = scrobbling;
-                    self.listen = None;
-                    self.scrobbles.clear();
-                    // A track already playing is not reported halfway.
-                    self.unscrobbled_load = self.player.current_load();
+                // A track already playing is not reported halfway.
+                if self.scrobbling.switch(scrobbling, &self.player) {
                     self.client_change = Some(ClientChange {
                         client: self.client.clone(),
                         scrobble: scrobbling,
@@ -149,20 +145,17 @@ impl Engine {
             message: None,
         };
         self.client = client;
-        self.listen = None;
-        self.unscrobbled_load = self.player.current_load();
-        self.scrobbles.clear();
-        self.scrobble_failure_shown = false;
         self.scrobble_setting = scrobble;
-        self.scrobbling = scrobble && self.client.is_some();
+        self.scrobbling
+            .client_replaced(scrobble && self.client.is_some(), &self.player);
         self.client_change = Some(ClientChange {
             client: self.client.clone(),
-            scrobble: self.scrobbling,
+            scrobble: self.scrobbling.enabled(),
             ping: true,
         });
         tracing::info!(
             navidrome = self.client.is_some(),
-            scrobble = self.scrobbling,
+            scrobble = self.scrobbling.enabled(),
             "navidrome client replaced"
         );
         // Stream URLs signed by the old client must not start playing: a

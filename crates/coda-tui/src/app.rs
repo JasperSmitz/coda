@@ -73,7 +73,6 @@ use coda_core::library::search::{self, SearchResults};
 use coda_core::library::{Library, MAX_PLAYLISTS};
 use coda_core::line_input::LineInput;
 use coda_core::model::Track;
-use coda_core::model::TrackSource;
 use coda_core::model::thousands;
 use coda_core::navidrome;
 use coda_core::navidrome::Hidden;
@@ -82,12 +81,12 @@ use coda_core::navidrome::browse::{
     Removal, SaveOrder, UNSAVED_ORDER,
 };
 use coda_core::navidrome::edit::{EditId, EditRequest, EditResponse};
-use coda_core::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use coda_core::navidrome::scrobble::{ScrobbleRequest, Scrobbler, Scrobbling};
 use coda_core::now_playing::NowPlaying;
 use coda_core::onboarding::Input;
 use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use coda_core::player::{PlaybackStatus, Player, PlayerCommand, QUEUE_FULL};
-use coda_core::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
+use coda_core::queue::{Placement, QueueEntryId, Rng, shuffle_all, shuffle_all_message};
 use coda_core::resolve;
 use coda_core::secret_store::{SecretError, SecretStore};
 use coda_core::session::{self, Session};
@@ -407,15 +406,10 @@ pub struct App {
     saved_revision: Option<u64>,
     /// When the debounced save is due.
     save_due: Option<Instant>,
-    /// Report Navidrome plays; only ever `true` with a client.
-    scrobbling: bool,
-    /// Listening progress of the current load, if it is a remote track
-    /// and scrobbling is on.
-    listen: Option<Listen>,
-    /// Scrobbles to send, in order; see [`App::take_scrobble_requests`].
-    scrobbles: Vec<ScrobbleRequest>,
-    /// A scrobble failure has been shown; later ones are only logged.
-    scrobble_failure_shown: bool,
+    /// Reporting Navidrome plays (only ever on with a client), the
+    /// current listen and the scrobbles to send; see
+    /// [`App::take_scrobble_requests`].
+    scrobbling: Scrobbling,
     /// The Settings overlay.
     settings: Settings,
     /// The current client's generation; fetch responses from another are
@@ -423,10 +417,6 @@ pub struct App {
     generation: Generation,
     /// A client swap the loop has not picked up yet.
     client_change: Option<ClientChange>,
-    /// The load current at the last client swap: resolved for the old
-    /// server, so it is never reported as a listen to the new one (it may
-    /// still be loading when the swap lands).
-    unscrobbled_load: Option<LoadId>,
     /// A first quit was refused while settings were being saved; the next
     /// one quits (the exit still waits, bounded, for the save).
     quit_armed: bool,
@@ -515,14 +505,10 @@ impl App {
             seen_revision: 0,
             saved_revision: Some(0),
             save_due: None,
-            scrobbling: navidrome_configured,
-            listen: None,
-            scrobbles: Vec::new(),
-            scrobble_failure_shown: false,
+            scrobbling: Scrobbling::new(navidrome_configured),
             settings,
             generation: Generation::default(),
             client_change: None,
-            unscrobbled_load: None,
             quit_armed: false,
             edit_quit_armed: false,
             edit_in_flight: false,
@@ -606,10 +592,8 @@ impl App {
     /// Turns scrobbling of Navidrome plays on or off (on by default when
     /// Navidrome is configured; it stays off without a client).
     pub fn set_scrobbling(&mut self, enabled: bool) {
-        self.scrobbling = enabled && self.navidrome.is_some();
-        if !self.scrobbling {
-            self.listen = None;
-        }
+        self.scrobbling
+            .set_enabled(enabled && self.navidrome.is_some());
     }
 
     /// Restores a saved session: the queue, its current entry (selected in
@@ -823,7 +807,7 @@ impl App {
 
     /// Scrobbles to send, in order.
     pub fn take_scrobble_requests(&mut self) -> Vec<ScrobbleRequest> {
-        std::mem::take(&mut self.scrobbles)
+        self.scrobbling.take_requests()
     }
 
     /// The next playlist edit to run (at most one at a time).
@@ -1378,11 +1362,11 @@ impl App {
             self.meter.hand_over(from, to);
         }
         if let Some(load) = started {
-            self.listen_started(load);
+            self.scrobbling.started(&self.player, load);
         }
 
         if let Some(position) = position {
-            self.listen_progressed(position);
+            self.scrobbling.progressed(&self.player, position);
         }
         let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
         self.after_player_call(now);
@@ -1392,62 +1376,8 @@ impl App {
     /// A scrobble failed. The first failure of the session is shown in the
     /// status line; the worker logs every failure.
     pub fn handle_scrobble_failure(&mut self, error: navidrome::Error, now: Instant) {
-        if !self.scrobble_failure_shown {
-            self.scrobble_failure_shown = true;
+        if self.scrobbling.failed() {
             self.set_status(format!("Navidrome scrobbling failed: {error}"), now);
-        }
-    }
-
-    /// The current load started: if it is a remote track, report it as
-    /// now playing and start counting what is listened to.
-    fn listen_started(&mut self, load: LoadId) {
-        if !self.scrobbling
-            || self.player.current_load() != Some(load)
-            || self.unscrobbled_load == Some(load)
-            || self.listen.as_ref().is_some_and(|l| l.load() == load)
-        {
-            return;
-        }
-        let song_id = match self.player.queue().current_entry().map(|e| &e.track.source) {
-            Some(TrackSource::Navidrome { song_id }) => song_id.clone(),
-            _ => return,
-        };
-        // Wall clock, not `Instant`: an `Instant` stops during system
-        // sleep, so it cannot be turned back into the date of the play.
-        let listen = Listen::new(load, song_id, SystemTime::now());
-        self.scrobbles.push(listen.now_playing());
-        self.listen = Some(listen);
-    }
-
-    /// A position report for the current load: submits the play once
-    /// enough of it was heard.
-    fn listen_progressed(&mut self, position: Duration) {
-        let status = self.player.status();
-        if !matches!(status, PlaybackStatus::Playing | PlaybackStatus::Paused) {
-            return;
-        }
-        let current_load = self.player.current_load();
-        // The server's duration first: it is what scrobble services judge
-        // by, and a stream's reported duration may be an estimate. A zero
-        // from the server means unknown, so mpv's value is used then.
-        let duration = self
-            .player
-            .queue()
-            .current_entry()
-            .and_then(|e| e.track.duration)
-            .filter(|d| !d.is_zero())
-            .or(self.player.duration());
-        let Some(listen) = self
-            .listen
-            .as_mut()
-            .filter(|l| Some(l.load()) == current_load)
-        else {
-            return;
-        };
-        if let Some(request) =
-            listen.on_position(position, status == PlaybackStatus::Paused, duration)
-        {
-            self.scrobbles.push(request);
         }
     }
 
@@ -1558,7 +1488,8 @@ impl App {
         // remote next track is announced again, signed by the new one (or
         // not at all without a client), and one mpv already opened but
         // nobody hears yet is loaded again. That load is resolved with the
-        // new client, so it is not the `unscrobbled_load` of the swap.
+        // new client, so it is still reported (only the load current at the
+        // swap is not).
         let commands = self.player.client_changed();
         self.dispatch(commands, now)
     }
@@ -1596,20 +1527,17 @@ impl App {
         }
         self.navidrome = client;
         self.connection = Connection::Connecting;
-        self.listen = None;
-        self.unscrobbled_load = self.player.current_load();
-        self.scrobbles.clear();
-        self.scrobble_failure_shown = false;
-        self.scrobbling = scrobble && self.navidrome.is_some();
+        self.scrobbling
+            .client_replaced(scrobble && self.navidrome.is_some(), &self.player);
         self.client_change = Some(ClientChange {
             generation: self.generation,
             client: self.navidrome.clone(),
-            scrobble: self.scrobbling,
+            scrobble: self.scrobbling.enabled(),
         });
         tracing::info!(
             generation = self.generation.0,
             navidrome = self.navidrome.is_some(),
-            scrobble = self.scrobbling,
+            scrobble = self.scrobbling.enabled(),
             "navidrome client replaced"
         );
     }
@@ -1777,13 +1705,7 @@ impl App {
             self.meter.reset();
         }
         // A new load, a stop or a backend exit ends the current listen.
-        if self
-            .listen
-            .as_ref()
-            .is_some_and(|l| Some(l.load()) != self.player.current_load())
-        {
-            self.listen = None;
-        }
+        self.scrobbling.player_changed(&self.player);
         if let Some(last) = self.player.take_messages().pop() {
             self.set_status(last, now);
         }
@@ -1910,9 +1832,7 @@ impl App {
             return Vec::new();
         }
         let all = self.library.tree().tracks();
-        let mut picked: Vec<usize> = (0..all.len()).collect();
-        sample(&mut picked, MAX_QUEUE_LEN, &mut self.rng);
-        let tracks: Vec<Track> = picked.into_iter().map(|i| all[i].clone()).collect();
+        let tracks = shuffle_all(all, &mut self.rng);
         let total = all.len();
         let dropped = self.local_replace_started(now);
         let (commands, text) = self.replace_queue_shuffled_all(tracks, total, partial);
@@ -1948,13 +1868,7 @@ impl App {
             partial,
             "queue replaced by shuffle all"
         );
-        let counts = if picked < total {
-            format!("{} of {}", thousands(picked), count(total, "track"))
-        } else {
-            count(picked, "track")
-        };
-        let scope = if partial { " scanned so far" } else { "" };
-        (commands, Some(format!("Shuffling all ({counts}{scope})")))
+        (commands, Some(shuffle_all_message(picked, total, partial)))
     }
 
     /// [`App::play_tracks`] without dropping a waiting play request.
@@ -1962,21 +1876,16 @@ impl App {
     fn replace_queue(
         &mut self,
         label: String,
-        mut tracks: Vec<Track>,
+        tracks: Vec<Track>,
         start: Option<usize>,
         shuffle: bool,
     ) -> (Vec<PlayerCommand>, Option<String>) {
         if tracks.is_empty() {
             return (Vec::new(), Some(format!("Nothing to play in {label}")));
         }
-        let from = if shuffle {
-            shuffle_with_first(&mut tracks, start, &mut self.rng);
-            0
-        } else {
-            start.unwrap_or(0)
-        };
-        let dropped = tracks.len().saturating_sub(MAX_QUEUE_LEN);
-        let commands = self.player.play_context(tracks, from);
+        let (commands, dropped) = self
+            .player
+            .play_tracks(tracks, start, shuffle, &mut self.rng);
         if commands.is_empty() {
             // Refused (playback unavailable); the player says why.
             return (commands, None);
@@ -2473,10 +2382,7 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 }
 
 /// `1 track`, `1,234 tracks`.
-pub fn count(n: usize, noun: &str) -> String {
-    let plural = if n == 1 { "" } else { "s" };
-    format!("{} {noun}{plural}", thousands(n))
-}
+pub use coda_core::model::count;
 
 // ----- terminal lifecycle and event loop -------------------------------
 
@@ -3476,9 +3382,10 @@ mod tests {
     }
     use coda_core::library::browse as local;
     use coda_core::line_input::MAX_QUERY_CHARS;
-    use coda_core::model::TrackMetadata;
+    use coda_core::model::{TrackMetadata, TrackSource};
     use coda_core::playback::LoadId;
     use coda_core::playback::{EndReason, PlaybackTarget};
+    use coda_core::queue::{MAX_QUEUE_LEN, shuffle_with_first};
 
     #[test]
     fn only_a_literal_panic_message_reaches_the_log() {
@@ -6487,7 +6394,7 @@ mod tests {
         // cannot be turned on.
         let (mut local, _) = app_with(&[]);
         local.set_scrobbling(true);
-        assert!(!local.scrobbling);
+        assert!(!local.scrobbling.enabled());
     }
 
     #[test]
@@ -7499,7 +7406,7 @@ mod tests {
         let change = app.take_client_change().unwrap();
         assert!(change.client.is_some());
         assert!(!change.scrobble);
-        assert!(!app.scrobbling);
+        assert!(!app.scrobbling.enabled());
     }
 
     #[test]

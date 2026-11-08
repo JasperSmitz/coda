@@ -13,7 +13,7 @@
 //! they were made. A change of the current entry, a shuffle or a clear
 //! forgets it (see [`Queue::next_anchor`]).
 
-use crate::model::Track;
+use crate::model::{Track, count, thousands};
 
 /// Upper bound on queue length, enforced where tracks are added (the
 /// player) and on restore.
@@ -361,6 +361,27 @@ pub fn sample<T>(items: &mut Vec<T>, k: usize, rng: &mut Rng) {
     items.truncate(k);
 }
 
+/// "Shuffle all": every track of `all` in random order; from a larger
+/// set, a uniformly random sample of [`MAX_QUEUE_LEN`] (the queue cap).
+pub fn shuffle_all(all: &[Track], rng: &mut Rng) -> Vec<Track> {
+    let mut picked: Vec<usize> = (0..all.len()).collect();
+    sample(&mut picked, MAX_QUEUE_LEN, rng);
+    picked.into_iter().map(|i| all[i].clone()).collect()
+}
+
+/// The status after "Shuffle all" queued `picked` tracks out of `total`:
+/// `Shuffling all (10,000 of 12,345 tracks)`. `partial`: the library was
+/// not completely scanned, so `total` is what was scanned so far.
+pub fn shuffle_all_message(picked: usize, total: usize, partial: bool) -> String {
+    let counts = if picked < total {
+        format!("{} of {}", thousands(picked), count(total, "track"))
+    } else {
+        count(picked, "track")
+    };
+    let scope = if partial { " scanned so far" } else { "" };
+    format!("Shuffling all ({counts}{scope})")
+}
+
 /// A small seeded PRNG (SplitMix64) for shuffling. Not cryptographic.
 #[derive(Debug, Clone)]
 pub struct Rng(u64);
@@ -401,6 +422,50 @@ mod tests {
 
     fn t(name: &str) -> Track {
         Track::local(format!("/m/{name}.flac").into(), TrackMetadata::default())
+    }
+
+    #[test]
+    fn shuffle_all_keeps_every_track_once_in_random_order() {
+        let all: Vec<Track> = (0..50).map(|i| t(&format!("{i:02}"))).collect();
+        let mut rng = Rng::from_seed(3);
+        let shuffled = shuffle_all(&all, &mut rng);
+        let names = |tracks: &[Track]| tracks.iter().map(|t| t.title.clone()).collect::<Vec<_>>();
+        assert_ne!(names(&shuffled), names(&all), "shuffled");
+        let mut sorted = names(&shuffled);
+        sorted.sort();
+        assert_eq!(sorted, names(&all), "every track once");
+        assert!(shuffle_all(&[], &mut rng).is_empty());
+    }
+
+    #[test]
+    fn shuffle_all_samples_a_library_over_the_queue_cap() {
+        let total = MAX_QUEUE_LEN + 5;
+        let all: Vec<Track> = (0..total).map(|i| t(&format!("{i:05}"))).collect();
+        let picked = shuffle_all(&all, &mut Rng::from_seed(11));
+        assert_eq!(picked.len(), MAX_QUEUE_LEN);
+        let mut names: Vec<String> = picked.iter().map(|t| t.title.clone()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), MAX_QUEUE_LEN, "no track twice");
+        let first_n: Vec<String> = (0..MAX_QUEUE_LEN).map(|i| format!("{i:05}")).collect();
+        assert_ne!(names, first_n, "a random sample, not the first tracks");
+    }
+
+    #[test]
+    fn shuffle_all_message_counts_the_sample_and_a_partial_scan() {
+        assert_eq!(
+            shuffle_all_message(MAX_QUEUE_LEN, MAX_QUEUE_LEN + 5, false),
+            "Shuffling all (10,000 of 10,005 tracks)"
+        );
+        assert_eq!(
+            shuffle_all_message(2, 2, true),
+            "Shuffling all (2 tracks scanned so far)"
+        );
+        assert_eq!(shuffle_all_message(1, 1, false), "Shuffling all (1 track)");
+        assert_eq!(
+            shuffle_all_message(3, 7, true),
+            "Shuffling all (3 of 7 tracks scanned so far)"
+        );
     }
 
     fn titles(q: &Queue) -> Vec<String> {

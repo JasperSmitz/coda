@@ -11,6 +11,7 @@ use crate::dto::{NamedContextDto, PlayContextDto};
 use crate::history::{
     self, Context, ContextKind, DailyAlbum, History, HistoryFile, HomeRows, Scope, SourceKind,
 };
+use coda_core::navidrome::scrobble::Listen;
 
 /// The listen counted for the history (any source).
 #[derive(Debug, Clone)]

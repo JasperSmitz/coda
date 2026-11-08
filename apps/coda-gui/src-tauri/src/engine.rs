@@ -19,12 +19,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use coda_core::library::Library;
 use coda_core::library::scan::{self, ScanEvent};
+use coda_core::model::count;
 use coda_core::model::{Track, TrackMetadata, TrackSource};
-use coda_core::navidrome::scrobble::{Listen, ScrobbleRequest, Scrobbler};
+use coda_core::navidrome::scrobble::{ScrobbleRequest, Scrobbler, Scrobbling};
 use coda_core::navidrome::{self, Client};
 use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
 use coda_core::player::{PlaybackStatus, Player, PlayerCommand, RepeatMode};
-use coda_core::queue::{MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_with_first};
+use coda_core::queue::{
+    MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_all, shuffle_all_message,
+};
 use coda_core::resolve;
 use coda_core::session::{self, Restored, Session};
 use tokio::sync::{mpsc, oneshot};
@@ -151,11 +154,9 @@ pub struct Engine {
     /// commands read) and the published Navidrome client.
     browse: BrowseHandle,
     scan: ScanState,
-    /// Report Navidrome plays (configured, and a client exists).
-    scrobbling: bool,
-    listen: Option<Listen>,
-    scrobbles: Vec<ScrobbleRequest>,
-    scrobble_failure_shown: bool,
+    /// Reporting Navidrome plays (configured, and a client exists), the
+    /// current listen and the scrobbles to send.
+    scrobbling: Scrobbling,
     /// A view showing the visualizer is visible.
     visualizer_visible: bool,
     /// What mpv was last told.
@@ -180,9 +181,6 @@ pub struct Engine {
     sent_queue: Option<Vec<QueueEntryId>>,
     sent_progress: Option<(ProgressDto, Instant)>,
     // Live settings (see [`settings`]).
-    /// The load playing when the client was swapped: its listen belonged
-    /// to the old server and is not reported to the new one.
-    unscrobbled_load: Option<LoadId>,
     /// The file's `scrobble` setting (scrobbling also needs a client).
     scrobble_setting: bool,
     client_change: Option<ClientChange>,
@@ -222,10 +220,7 @@ impl Engine {
             covers,
             browse,
             scan: ScanState::NoLibrary,
-            scrobbling: false,
-            listen: None,
-            scrobbles: Vec::new(),
-            scrobble_failure_shown: false,
+            scrobbling: Scrobbling::default(),
             visualizer_visible: false,
             visualizer_sent: false,
             visualizer_unavailable: false,
@@ -246,7 +241,6 @@ impl Engine {
             sent: None,
             sent_queue: None,
             sent_progress: None,
-            unscrobbled_load: None,
             scrobble_setting: false,
             client_change: None,
             rescan: None,
@@ -300,7 +294,8 @@ impl Engine {
         self.server = sources.client.as_ref().map(crate::history::server_id);
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
-        self.scrobbling = sources.scrobble && self.client.is_some();
+        self.scrobbling
+            .set_enabled(sources.scrobble && self.client.is_some());
         if let Some(dir) = sources.music_dir {
             self.replace_library(Some(dir), now);
             self.scan = ScanState::Scanning;
@@ -352,7 +347,7 @@ impl Engine {
     }
 
     pub fn scrobbling(&self) -> bool {
-        self.scrobbling
+        self.scrobbling.enabled()
     }
 
     // ----- intents -----------------------------------------------------
@@ -522,15 +517,7 @@ impl Engine {
         let rng = &mut self.rng;
         let picked = self.browse.read_library(|view| {
             let all = view?.library.tree().tracks();
-            let mut picked: Vec<usize> = (0..all.len()).collect();
-            sample(&mut picked, MAX_QUEUE_LEN, rng);
-            Some((
-                picked
-                    .into_iter()
-                    .map(|i| all[i].clone())
-                    .collect::<Vec<_>>(),
-                all.len(),
-            ))
+            Some((shuffle_all(all, rng), all.len()))
         });
         let Some((tracks, total)) = picked.filter(|(tracks, _)| !tracks.is_empty()) else {
             let note = if partial {
@@ -544,17 +531,7 @@ impl Engine {
         let shown = tracks.len();
         let commands = self.player.play_context(tracks, 0);
         if !commands.is_empty() {
-            let counts = if shown < total {
-                format!(
-                    "{} of {}",
-                    coda_core::model::thousands(shown),
-                    count(total, "track")
-                )
-            } else {
-                count(shown, "track")
-            };
-            let scope = if partial { " scanned so far" } else { "" };
-            self.notify(format!("Shuffling all ({counts}{scope})"), now);
+            self.notify(shuffle_all_message(shown, total, partial), now);
         }
         commands
     }
@@ -573,22 +550,19 @@ impl Engine {
         // The start's place among the tracks that resolved; a missing start
         // track starts at the next one that did.
         let start = start.map(|s| resolved.iter().take(s).filter(|t| t.is_some()).count());
-        let mut tracks: Vec<Track> = resolved.into_iter().flatten().collect();
+        let tracks: Vec<Track> = resolved.into_iter().flatten().collect();
         if tracks.is_empty() {
             if missing == 0 {
                 self.notify("Nothing to play", now);
             }
             return Vec::new();
         }
+        // A start past the end (it and every track after it missing)
+        // starts at the first track.
         let start = start.filter(|&s| s < tracks.len());
-        let from = if shuffle {
-            shuffle_with_first(&mut tracks, start, &mut self.rng);
-            0
-        } else {
-            start.unwrap_or(0)
-        };
-        let dropped = tracks.len().saturating_sub(MAX_QUEUE_LEN);
-        let commands = self.player.play_context(tracks, from);
+        let (commands, dropped) = self
+            .player
+            .play_tracks(tracks, start, shuffle, &mut self.rng);
         if !commands.is_empty() && dropped > 0 {
             self.notify(
                 format!(
@@ -674,11 +648,11 @@ impl Engine {
         };
         let commands = self.player.handle_event(event);
         if let Some(load) = started {
-            self.listen_started(load);
+            self.scrobbling.started(&self.player, load);
             self.heard_started(load);
         }
         if let Some(position) = position {
-            self.listen_progressed(position);
+            self.scrobbling.progressed(&self.player, position);
             self.heard_progressed(position, now);
         }
         self.dispatch(commands, now)
@@ -689,13 +663,7 @@ impl Engine {
     fn dispatch(&mut self, commands: Vec<PlayerCommand>, now: Instant) -> Vec<PlaybackCommand> {
         let commands = resolve::dispatch(&mut self.player, self.client.as_ref(), commands);
         // A new load, a stop or a backend exit ends the current listen.
-        if self
-            .listen
-            .as_ref()
-            .is_some_and(|l| Some(l.load()) != self.player.current_load())
-        {
-            self.listen = None;
-        }
+        self.scrobbling.player_changed(&self.player);
         self.heard_ended();
         for message in self.player.take_messages() {
             self.notify(message, now);
@@ -723,67 +691,15 @@ impl Engine {
         std::mem::take(&mut self.frames)
     }
 
-    // ----- scrobbling (ported from the TUI's `App`) --------------------
-
-    /// The current load started: a remote track is reported as now
-    /// playing, and its listening time counted.
-    fn listen_started(&mut self, load: LoadId) {
-        if !self.scrobbling
-            || self.player.current_load() != Some(load)
-            || self.unscrobbled_load == Some(load)
-            || self.listen.as_ref().is_some_and(|l| l.load() == load)
-        {
-            return;
-        }
-        let song_id = match self.player.queue().current_entry().map(|e| &e.track.source) {
-            Some(TrackSource::Navidrome { song_id }) => song_id.clone(),
-            _ => return,
-        };
-        // Wall clock: an `Instant` stops during sleep.
-        let listen = Listen::new(load, song_id, SystemTime::now());
-        self.scrobbles.push(listen.now_playing());
-        self.listen = Some(listen);
-    }
-
-    /// A position report for the current load: submits the play once
-    /// enough of it was heard.
-    fn listen_progressed(&mut self, position: Duration) {
-        let status = self.player.status();
-        if !matches!(status, PlaybackStatus::Playing | PlaybackStatus::Paused) {
-            return;
-        }
-        let current_load = self.player.current_load();
-        // The server's duration first (what scrobble services judge by);
-        // zero means unknown, then mpv's.
-        let duration = self
-            .player
-            .queue()
-            .current_entry()
-            .and_then(|e| e.track.duration)
-            .filter(|d| !d.is_zero())
-            .or(self.player.duration());
-        let Some(listen) = self
-            .listen
-            .as_mut()
-            .filter(|l| Some(l.load()) == current_load)
-        else {
-            return;
-        };
-        if let Some(request) =
-            listen.on_position(position, status == PlaybackStatus::Paused, duration)
-        {
-            self.scrobbles.push(request);
-        }
-    }
+    // ----- scrobbling (the rules are `coda_core`'s `Scrobbling`) -------
 
     pub fn take_scrobbles(&mut self) -> Vec<ScrobbleRequest> {
-        std::mem::take(&mut self.scrobbles)
+        self.scrobbling.take_requests()
     }
 
     /// The first scrobble failure of the run is shown; the worker logs all.
     pub fn handle_scrobble_failure(&mut self, error: navidrome::Error, now: Instant) {
-        if !self.scrobble_failure_shown {
-            self.scrobble_failure_shown = true;
+        if self.scrobbling.failed() {
             self.notify(format!("Navidrome scrobbling failed: {error}"), now);
         }
     }
@@ -1071,15 +987,6 @@ impl Engine {
 /// A Navidrome id from the UI: as bounded as the server's.
 fn valid_ref_id(id: &str) -> bool {
     !id.is_empty() && id.chars().count() <= 256
-}
-
-fn count(n: usize, noun: &str) -> String {
-    let n_text = coda_core::model::thousands(n);
-    if n == 1 {
-        format!("{n_text} {noun}")
-    } else {
-        format!("{n_text} {noun}s")
-    }
 }
 
 // ----- the loop ----------------------------------------------------------

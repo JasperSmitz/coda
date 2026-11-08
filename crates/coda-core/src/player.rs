@@ -42,7 +42,9 @@ use std::time::Duration;
 
 use crate::model::{Track, TrackSource};
 use crate::playback::{EndReason, LoadId, PlaybackCommand, PlaybackEvent};
-use crate::queue::{MAX_QUEUE_LEN, Placement, Queue, QueueEntry, QueueEntryId, Rng};
+use crate::queue::{
+    MAX_QUEUE_LEN, Placement, Queue, QueueEntry, QueueEntryId, Rng, shuffle_with_first,
+};
 
 /// `<` restarts the current track instead of going back when the position
 /// is beyond this.
@@ -438,6 +440,28 @@ impl Player {
             .map(|track| self.queue.append(track))
             .collect();
         self.user_load(ids[start - window.start])
+    }
+
+    /// Plays `tracks` as a context ([`Player::play_context`]): from
+    /// `start` (clamped to the last track; the first without one), or with
+    /// `shuffle` in random order, starting with the track at `start` if
+    /// given (an index out of range is then ignored). Returns the commands and how many tracks did
+    /// not fit in the queue (over [`MAX_QUEUE_LEN`]).
+    pub fn play_tracks(
+        &mut self,
+        mut tracks: Vec<Track>,
+        start: Option<usize>,
+        shuffle: bool,
+        rng: &mut Rng,
+    ) -> (Vec<PlayerCommand>, usize) {
+        let from = if shuffle {
+            shuffle_with_first(&mut tracks, start, rng);
+            0
+        } else {
+            start.unwrap_or(0)
+        };
+        let dropped = tracks.len().saturating_sub(MAX_QUEUE_LEN);
+        (self.play_context(tracks, from), dropped)
     }
 
     /// Enter on a queue entry: play it.
@@ -1892,6 +1916,50 @@ mod tests {
             MAX_QUEUE_LEN.to_string()
         );
         assert_eq!(p.queue().position(p.queue().current().unwrap()), Some(0));
+    }
+
+    #[test]
+    fn play_tracks_plays_from_the_start_or_shuffled_starting_with_it() {
+        let names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        let mut rng = Rng::from_seed(5);
+        let mut p = Player::new();
+        let (commands, dropped) = p.play_tracks(tracks(&names), Some(2), false, &mut rng);
+        assert_eq!(load_of(&commands).1, PathBuf::from("/m/C.flac"));
+        assert_eq!(dropped, 0);
+        assert_eq!(titles(&p), ["A", "B", "C*", "D", "E", "F", "G", "H"]);
+        let (commands, _) = p.play_tracks(tracks(&names), None, false, &mut rng);
+        assert_eq!(load_of(&commands).1, PathBuf::from("/m/A.flac"));
+        // Shuffled: the start track first, every track once.
+        let (commands, _) = p.play_tracks(tracks(&names), Some(5), true, &mut rng);
+        assert_eq!(load_of(&commands).1, PathBuf::from("/m/F.flac"));
+        let shuffled = titles(&p);
+        assert_eq!(shuffled[0], "F*");
+        assert_ne!(shuffled[1..], ["A", "B", "C", "D", "E", "G", "H"]);
+        let mut sorted: Vec<String> = shuffled.iter().map(|t| t.replace('*', "")).collect();
+        sorted.sort();
+        assert_eq!(sorted, names);
+        // Shuffled without a start (or one out of range): any first track.
+        for start in [None, Some(99)] {
+            let (commands, _) = p.play_tracks(tracks(&names), start, true, &mut rng);
+            assert_eq!(p.queue().position(p.queue().current().unwrap()), Some(0));
+            load_of(&commands);
+        }
+        // Empty: nothing.
+        assert_eq!(
+            p.play_tracks(Vec::new(), None, true, &mut rng),
+            (Vec::new(), 0)
+        );
+    }
+
+    #[test]
+    fn play_tracks_counts_what_did_not_fit() {
+        let mut p = Player::new();
+        let names: Vec<String> = (0..MAX_QUEUE_LEN + 3).map(|i| i.to_string()).collect();
+        let context: Vec<Track> = names.iter().map(|n| t(n)).collect();
+        let (commands, dropped) = p.play_tracks(context, Some(1), false, &mut Rng::from_seed(1));
+        assert_eq!(load_of(&commands).1, PathBuf::from("/m/1.flac"));
+        assert_eq!(dropped, 3);
+        assert_eq!(p.queue().len(), MAX_QUEUE_LEN);
     }
 
     #[test]
