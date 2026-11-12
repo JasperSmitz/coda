@@ -27,6 +27,7 @@ use url::{Host, Url};
 
 use super::api::{self, AUTH_ERROR_CODES, MAX_ALBUM_LIST_SIZE, RANDOM_SONGS_SIZE};
 use super::{Album, AlbumPage, AlbumSort, Artist, Playlist, PlaylistSongs, SearchResults};
+use crate::lyrics::{self, Lyrics};
 use crate::model::Track;
 use crate::playback::StreamUrl;
 
@@ -253,8 +254,18 @@ pub enum Transport {
     Get,
 }
 
+/// The OpenSubsonic extensions Coda uses that a server advertises
+/// (`getOpenSubsonicExtensions`); see [`Client::transport`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Extensions {
+    /// `formPost`: writes may be form POSTs.
+    form_post: bool,
+    /// `songLyrics`: `getLyricsBySongId`.
+    song_lyrics: bool,
+}
+
 /// Subsonic API client for one server. Cheap to clone (the HTTP client and
-/// the detected write transport are shared). `Debug` shows nothing but the
+/// the detected extensions are shared). `Debug` shows nothing but the
 /// type name.
 #[derive(Clone)]
 pub struct Client {
@@ -262,8 +273,8 @@ pub struct Client {
     username: String,
     password: Password,
     http: reqwest::Client,
-    /// Whether the server supports `formPost`, once known.
-    form_post: Arc<OnceCell<bool>>,
+    /// The extensions the server supports, once known.
+    extensions: Arc<OnceCell<Extensions>>,
 }
 
 impl std::fmt::Debug for Client {
@@ -306,7 +317,7 @@ impl Client {
             username,
             password,
             http,
-            form_post: Arc::new(OnceCell::new()),
+            extensions: Arc::new(OnceCell::new()),
         })
     }
 
@@ -531,36 +542,52 @@ impl Client {
     /// the last ones meaning a server without the endpoint. Anything else fails the write
     /// and is asked again next time.
     pub async fn transport(&self) -> Result<Transport, Error> {
-        let form_post = self
-            .form_post
-            .get_or_try_init(|| self.detect_form_post())
-            .await?;
-        Ok(if *form_post {
+        Ok(if self.extensions().await?.form_post {
             Transport::FormPost
         } else {
             Transport::Get
         })
     }
 
-    async fn detect_form_post(&self) -> Result<bool, Error> {
+    /// The server's extensions, asked once per client (clones share the
+    /// answer); only a definite answer is remembered (see
+    /// [`Self::transport`]).
+    async fn extensions(&self) -> Result<Extensions, Error> {
+        self.extensions
+            .get_or_try_init(|| self.detect_extensions())
+            .await
+            .copied()
+    }
+
+    async fn detect_extensions(&self) -> Result<Extensions, Error> {
         match self
             .get::<api::ExtensionsReply>("getOpenSubsonicExtensions", &[])
             .await
         {
             Ok(reply) => {
-                let form_post = reply
-                    .extensions
-                    .items
-                    .iter()
-                    .any(|e| e.name.as_deref() == Some("formPost"));
-                tracing::debug!(form_post, "navidrome write transport detected");
-                Ok(form_post)
+                let has = |name: &str| {
+                    reply
+                        .extensions
+                        .items
+                        .iter()
+                        .any(|e| e.name.as_deref() == Some(name))
+                };
+                let extensions = Extensions {
+                    form_post: has("formPost"),
+                    song_lyrics: has("songLyrics"),
+                };
+                tracing::debug!(
+                    form_post = extensions.form_post,
+                    song_lyrics = extensions.song_lyrics,
+                    "navidrome extensions detected"
+                );
+                Ok(extensions)
             }
             // The server answered that it has no such endpoint: a plain
             // Subsonic server. Remembered.
             Err(error @ (Error::Server { .. } | Error::Http(400 | 404 | 405 | 410 | 501))) => {
                 tracing::debug!(detail = %error.detail(), "no OpenSubsonic extensions; writes use GET");
-                Ok(false)
+                Ok(Extensions::default())
             }
             // Anything else (rejected credentials, a timeout, 408, 429, 5xx,
             // a redirect, an unreadable body) says nothing certain about
@@ -697,6 +724,68 @@ impl Client {
                 .and_then(|_| Err(Error::Decode(format!("{ENDPOINT}: not an image")))),
             Err(_) => Err(Error::Decode(format!("{ENDPOINT}: not an image"))),
         }
+    }
+
+    /// The lyrics of the song `song_id`, or `None` when the server has
+    /// none.
+    ///
+    /// With the OpenSubsonic `songLyrics` extension, `getLyricsBySongId`:
+    /// the first synced entry of `structuredLyrics` (start times in ms,
+    /// its `offset` applied), else the first with text; Subsonic error 70
+    /// (not found) is `None`. Without it, the classic `getLyrics` by
+    /// `artist` and `title` (usually plain text; LRC text is parsed as
+    /// such), asked only when there is an artist. Bodies are capped at
+    /// [`MAX_BODY_BYTES`] and parsed as untrusted (see
+    /// [`crate::lyrics`]). Extension detection is shared with
+    /// [`Self::transport`]; an uncertain detection fails this call.
+    pub async fn lyrics(
+        &self,
+        song_id: &str,
+        artist: Option<&str>,
+        title: &str,
+    ) -> Result<Option<Lyrics>, Error> {
+        if self.extensions().await?.song_lyrics {
+            let reply = match self
+                .get::<api::LyricsListReply>("getLyricsBySongId", &[("id", song_id)])
+                .await
+            {
+                Ok(reply) => reply,
+                Err(Error::Server { code: 70, .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let entries = reply
+                .lyrics_list
+                .map(|list| list.structured_lyrics)
+                .unwrap_or_default();
+            let mut first_with_text = None;
+            for entry in entries {
+                let synced = entry.synced == Some(true);
+                if let Some(lyrics) = entry.into_lyrics() {
+                    if synced {
+                        return Ok(Some(lyrics));
+                    }
+                    first_with_text.get_or_insert(lyrics);
+                }
+            }
+            return Ok(first_with_text);
+        }
+        let Some(artist) = artist.map(str::trim).filter(|a| !a.is_empty()) else {
+            tracing::debug!(song_id, "no songLyrics and no artist; lyrics not asked");
+            return Ok(None);
+        };
+        let reply = match self
+            .get::<api::LyricsReply>("getLyrics", &[("artist", artist), ("title", title)])
+            .await
+        {
+            Ok(reply) => reply,
+            Err(Error::Server { code: 70, .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(reply
+            .lyrics
+            .and_then(|raw| raw.value)
+            .map(|text| lyrics::parse(&text))
+            .filter(|lyrics| !lyrics.is_blank()))
     }
 
     /// A freshly signed stream URL for `song_id`. Pure apart from the salt.

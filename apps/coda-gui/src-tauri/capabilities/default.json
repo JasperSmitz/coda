@@ -52,6 +52,7 @@
     "allow-ui-source-set",
     "allow-home-history",
     "allow-home-daily-picks",
+    "allow-now-playing-lyrics",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

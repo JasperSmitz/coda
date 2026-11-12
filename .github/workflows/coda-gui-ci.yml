@@ -73,6 +73,11 @@ jobs:
       # `tsc` (strict) and Vite. The Rust build embeds `dist/`, so this runs first.
       - name: frontend (tsc + vite)
         run: pnpm build
+      # The colour check's self-test and the lyrics/progress logic tests
+      # (`node --test "scripts/*.test.mjs"`; the tests import `.ts` files through Node's
+      # type stripping, on by default since Node 22.18).
+      - name: frontend unit tests
+        run: pnpm check:colors
       - name: clippy
         run: cargo clippy --locked -p coda-app -p coda-core --all-targets -- -D warnings
       - name: test

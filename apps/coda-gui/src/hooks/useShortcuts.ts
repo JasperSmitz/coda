@@ -1,6 +1,6 @@
 // Global keyboard shortcuts (DESIGN.md), unless typing in a text field.
 // Space play/pause, n/p or Ctrl+→/← next/previous, ←/→ seek ∓5 s,
-// +/- volume, r repeat, q queue, f Now Playing.
+// +/- volume, r repeat, q queue, f Now Playing, l lyrics (Now Playing only).
 
 import { useEffect, useRef } from "react";
 import { intent } from "../lib/ipc";
@@ -26,6 +26,8 @@ interface Options {
   started: boolean;
   onToggleQueue: () => void;
   onToggleNowPlaying?: () => void;
+  /** Lyrics mode; only given while Now Playing is shown. */
+  onToggleLyrics?: () => void;
 }
 
 export function useShortcuts({
@@ -34,15 +36,24 @@ export function useShortcuts({
   started,
   onToggleQueue,
   onToggleNowPlaying,
+  onToggleLyrics,
 }: Options) {
   // Read through a ref so the listener is installed once.
-  const state = useRef({ volume, enabled, started, onToggleQueue, onToggleNowPlaying });
-  state.current = { volume, enabled, started, onToggleQueue, onToggleNowPlaying };
+  const state = useRef({
+    volume,
+    enabled,
+    started,
+    onToggleQueue,
+    onToggleNowPlaying,
+    onToggleLyrics,
+  });
+  state.current = { volume, enabled, started, onToggleQueue, onToggleNowPlaying, onToggleLyrics };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || isTyping(e.target) || e.metaKey || e.altKey) return;
-      const { volume, enabled, started, onToggleQueue, onToggleNowPlaying } = state.current;
+      const { volume, enabled, started, onToggleQueue, onToggleNowPlaying, onToggleLyrics } =
+        state.current;
       const ctrl = e.ctrlKey;
       let handled = true;
       if (ctrl) {
@@ -81,6 +92,10 @@ export function useShortcuts({
             break;
           case "f":
             if (onToggleNowPlaying) onToggleNowPlaying();
+            else handled = false;
+            break;
+          case "l":
+            if (onToggleLyrics) onToggleLyrics();
             else handled = false;
             break;
           default:

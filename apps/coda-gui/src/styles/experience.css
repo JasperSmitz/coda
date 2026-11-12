@@ -506,3 +506,197 @@
     animation: none;
   }
 }
+
+/* ----- lyrics mode (`l`) -----
+   The player stacks into a column on the left, the lyrics take the
+   middle, and the queue panel (when open) keeps the right: in wide
+   windows `.has-queue` already moves the main area left of it, narrower
+   ones let it overlay. The window's minimum width (900px) always leaves
+   room for the column beside the lyrics, so there is no stacked layout. */
+
+.now-playing.is-lyrics .now-playing-main {
+  display: grid;
+  grid-template-columns: clamp(300px, 24vw, 340px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  justify-content: stretch;
+  gap: clamp(24px, 3vw, 48px);
+  padding: 56px clamp(24px, 3vw, 40px) 24px;
+  overflow: hidden;
+}
+
+.now-playing.is-lyrics .now-playing-content {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: safe center;
+  gap: 18px;
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0 2px;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.now-playing.is-lyrics .now-playing-cover {
+  align-self: center;
+  flex: none;
+  width: min(100%, 40vh);
+  height: auto;
+  aspect-ratio: 1;
+}
+
+.now-playing.is-lyrics .now-playing-info {
+  flex: none;
+  gap: 10px;
+}
+
+.now-playing.is-lyrics .now-playing-title {
+  font-size: 22px;
+}
+
+.now-playing.is-lyrics .now-playing-subtitle {
+  font-size: 14px;
+}
+
+/* Transport on the left, volume on the right: the three-part grid does
+   not fit the column. */
+.now-playing.is-lyrics .now-playing-transport {
+  display: flex;
+  justify-content: space-between;
+}
+
+.now-playing.is-lyrics .now-playing-controls {
+  gap: 10px;
+}
+
+.now-playing.is-lyrics .volume-slider {
+  width: 72px;
+}
+
+.now-playing.is-lyrics .visualizer {
+  height: clamp(48px, 10vh, 96px);
+}
+
+.now-playing.is-lyrics .now-playing-next {
+  align-self: stretch;
+}
+
+.now-playing-lyrics {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.lyrics {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+.lyrics-message {
+  color: var(--text-3);
+  font-size: 15px;
+}
+
+/* The list scrolls across the whole middle; the text is at most ~40ch,
+   centred in it. Lines fade out at the top and bottom edges. */
+.lyrics-scroll {
+  /* Lines' offsetTop is measured from here (followScrollTop). */
+  position: relative;
+  align-self: stretch;
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  border-radius: var(--radius);
+  scrollbar-width: thin;
+  scrollbar-color: var(--np-border) transparent;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    var(--np-text) 10%,
+    var(--np-text) 88%,
+    transparent
+  );
+}
+
+.lyrics-lines {
+  max-width: 40ch;
+  margin: 0 auto;
+  padding: 30vh 8px 45vh;
+  font-size: clamp(20px, 1.9vw, 26px);
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.lyrics-scroll.is-plain .lyrics-lines {
+  padding: 8vh 8px 12vh;
+  font-size: clamp(17px, 1.5vw, 20px);
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+/* Only the colour changes, so the current line never shifts the layout. */
+.lyrics-line {
+  padding: 6px 0;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+  transition: color var(--motion) ease-out;
+}
+
+.lyrics-scroll.is-plain .lyrics-line {
+  padding: 0;
+  color: var(--text);
+}
+
+.lyrics-line.is-seekable:hover {
+  color: var(--text-2);
+}
+
+.lyrics-line.is-current,
+.lyrics-line.is-current:hover {
+  color: var(--text);
+}
+
+/* Two identical animations, alternated per switch, so each switch runs
+   it again without remounting anything. */
+.now-playing-content.is-switched-a,
+.now-playing-lyrics.is-switched-a {
+  animation: np-layout-in-a var(--motion) ease-out;
+}
+
+.now-playing-content.is-switched-b,
+.now-playing-lyrics.is-switched-b {
+  animation: np-layout-in-b var(--motion) ease-out;
+}
+
+@keyframes np-layout-in-a {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes np-layout-in-b {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .now-playing-content.is-switched-a,
+  .now-playing-content.is-switched-b,
+  .now-playing-lyrics.is-switched-a,
+  .now-playing-lyrics.is-switched-b {
+    animation: none;
+  }
+
+  .lyrics-line {
+    transition: none;
+  }
+}

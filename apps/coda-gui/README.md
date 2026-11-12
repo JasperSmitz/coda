@@ -4,6 +4,10 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 **Status:** early development, see [`docs/PLAN.md`](docs/PLAN.md).
 
+## Lyrics
+
+In Now Playing (`f`), press `l` (or the lyrics button at the top right) for lyrics mode: the player moves to a column on the left and the lyrics fill the middle. Timed (LRC) lyrics follow the song and a click on a line seeks there; plain lyrics scroll. The mode stays on until you turn it off, and is off again after a restart. Lyrics come from the file's tags (`LYRICS`/`UNSYNCEDLYRICS`, MP4 `©lyr`, ID3 `USLT`) or a `.lrc` file with the same name next to it, and for Navidrome tracks from the server (timed with a recent Navidrome that offers `getLyricsBySongId`, plain text otherwise). Nothing is fetched from online lyrics services.
+
 ## Requirements
 
 Coda plays through [mpv](https://mpv.io), which must be installed (it is looked for on `PATH`, then in `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`). The Navidrome password is kept in the OS credential store: the macOS Keychain, or on Linux a Secret Service provider such as GNOME Keyring or KWallet.

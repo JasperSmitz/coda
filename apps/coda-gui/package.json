@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "node scripts/check-colors.mjs && tsc && vite build",
-    "check:colors": "node --test scripts/ && node scripts/check-colors.mjs",
+    "check:colors": "node --test \"scripts/*.test.mjs\" && node scripts/check-colors.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

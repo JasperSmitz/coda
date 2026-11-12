@@ -3,23 +3,28 @@
 // Large cover over a blurred, darkened copy of it, title/artist/album, one
 // timeline with repeat beside it, one transport row with volume,
 // visualizer bars and an "Up next" card. The queue opens as a side panel
-// (`q` or the queue button) over the backdrop. Visualizer readings are
+// (`q` or the queue button) over the backdrop. Lyrics mode (`l` or the
+// lyrics button) stacks the player into a column on the left and shows
+// the lyrics in the middle (DESIGN.md). Visualizer readings are
 // asked for only while this view is shown and the window is not hidden or
 // minimised.
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Cover } from "../components/Cover";
+import { LyricsPanel } from "../components/LyricsPanel";
 import { ArtistAlbumLine } from "../components/NameLink";
 import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBar";
 import { Visualizer } from "../components/Visualizer";
 import {
   CloseIcon,
+  LyricsIcon,
   NextIcon,
   PauseIcon,
   PlayIcon,
   PreviousIcon,
   QueueIcon,
 } from "../components/icons";
+import { useLyrics } from "../hooks/useLyrics";
 import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
 import type { QueueItem, Snapshot } from "../lib/types";
 
@@ -30,6 +35,9 @@ interface Props {
   /** The queue side panel is shown (remembered apart from the main layout's). */
   queueOpen: boolean;
   onToggleQueue: () => void;
+  /** Lyrics mode is on (sticky for the session, kept by App). */
+  lyricsMode: boolean;
+  onToggleLyrics: () => void;
   /** The `QueuePanel` to show in the side panel. */
   queuePanel: ReactNode;
 }
@@ -84,6 +92,8 @@ export function NowPlayingView({
   onClose,
   queueOpen,
   onToggleQueue,
+  lyricsMode,
+  onToggleLyrics,
   queuePanel,
 }: Props) {
   const { playing, status } = snapshot;
@@ -92,6 +102,20 @@ export function NowPlayingView({
   useVisualizerReadings(snapshot.visualizerAvailable && playing != null);
   const panel = useRef<HTMLDivElement>(null);
   const view = useRef<HTMLElement>(null);
+  const lyricsShown = lyricsMode && playing != null;
+  const lyrics = useLyrics(playing, lyricsMode, snapshot.browse.server);
+  // The layout fades in when the mode is switched here, not when the view
+  // opens already in it. Nothing is remounted (focus stays where it is):
+  // each switch alternates between two identical animations, which makes
+  // the browser run it again.
+  const [switches, setSwitches] = useState(0);
+  const lastMode = useRef(lyricsMode);
+  useEffect(() => {
+    if (lyricsMode === lastMode.current) return;
+    lastMode.current = lyricsMode;
+    setSwitches((n) => n + 1);
+  }, [lyricsMode]);
+  const switchClass = switches === 0 ? "" : switches % 2 ? "is-switched-a" : "is-switched-b";
 
   // The browse view (and the element focused in it) went away: give the
   // view the focus, so Tab continues from here (and Escape still closes).
@@ -128,7 +152,9 @@ export function NowPlayingView({
     <section
       ref={view}
       tabIndex={-1}
-      className={`now-playing ${playing ? "" : "is-empty"} ${queueOpen ? "has-queue" : ""}`}
+      className={`now-playing ${playing ? "" : "is-empty"} ${queueOpen ? "has-queue" : ""} ${
+        lyricsShown ? "is-lyrics" : ""
+      }`}
       aria-label="Now Playing"
     >
       {playing?.coverUrl && (
@@ -144,7 +170,7 @@ export function NowPlayingView({
       <div className="now-playing-scrim" />
       <div className="now-playing-main">
         {playing ? (
-          <div className="now-playing-content">
+          <div className={`now-playing-content ${switchClass}`}>
             <Cover
               url={playing.coverUrl}
               name={playing.album ?? playing.title}
@@ -207,6 +233,11 @@ export function NowPlayingView({
         ) : (
           <p className="now-playing-nothing secondary">Nothing playing</p>
         )}
+        {lyricsShown && (
+          <div className={`now-playing-lyrics ${switchClass}`}>
+            <LyricsPanel state={lyrics} canSeek={!unavailable} />
+          </div>
+        )}
       </div>
       {queueOpen && (
         <div className="now-playing-queue" ref={panel}>
@@ -214,6 +245,15 @@ export function NowPlayingView({
         </div>
       )}
       <div className="now-playing-toolbar">
+        <button
+          className={`icon-button ${lyricsMode ? "is-active" : ""}`}
+          onClick={onToggleLyrics}
+          aria-label="Lyrics"
+          aria-pressed={lyricsMode}
+          title="Lyrics (l)"
+        >
+          <LyricsIcon />
+        </button>
         <button
           className={`icon-button ${queueOpen ? "is-active" : ""}`}
           onClick={onToggleQueue}

@@ -37,6 +37,21 @@ export interface QueueItem {
   track: Track;
 }
 
+/** One line of lyrics (`LyricLineDto`); `startMs` is set when timed. */
+export interface LyricLine {
+  startMs: number | null;
+  text: string;
+}
+
+/**
+ * A track's lyrics (`LyricsDto`). When `timed`, every line has a
+ * `startMs` and the lines are sorted by it.
+ */
+export interface Lyrics {
+  timed: boolean;
+  lines: LyricLine[];
+}
+
 export type Phase = "starting" | "ready" | "shuttingDown";
 export type Status = "stopped" | "loading" | "playing" | "paused" | "unavailable";
 export type Repeat = "off" | "all" | "one";

@@ -192,6 +192,20 @@ impl BrowseHandle {
         F: FnOnce(Client) -> Fut,
         Fut: Future<Output = Result<T, coda_core::navidrome::Error>>,
     {
+        self.fetch_raw(f).await?.map_err(|error| {
+            tracing::warn!(detail = %error.detail(), "Navidrome browse request failed");
+            BrowseError::new(BrowseErrorKind::Failed, error.to_string())
+        })
+    }
+
+    /// Like [`Self::fetch`], but hands the request's own result back
+    /// (unlogged): the outer error is only "no server", "shutting down" or
+    /// "stale".
+    pub async fn fetch_raw<T, E, F, Fut>(&self, f: F) -> Result<Result<T, E>, BrowseError>
+    where
+        F: FnOnce(Client) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
         let (client, generation) = self.client()?;
         let result = {
             let _permit = self
@@ -208,10 +222,7 @@ impl BrowseHandle {
                 "The server connection changed; reload",
             ));
         }
-        result.map_err(|error| {
-            tracing::warn!(detail = %error.detail(), "Navidrome browse request failed");
-            BrowseError::new(BrowseErrorKind::Failed, error.to_string())
-        })
+        Ok(result)
     }
 }
 

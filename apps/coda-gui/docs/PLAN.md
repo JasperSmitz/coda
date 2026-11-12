@@ -50,6 +50,10 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 - Media keys / MPRIS on Linux, Now Playing on macOS.
 - Packaging: AppImage/`.deb` and an Arch `PKGBUILD`; macOS `.dmg`. CI on Linux and macOS.
 
+### Lyrics mode (2026-11-12, `docs/plans/lyrics.md`)
+- Owner-approved scope change (VISION.md): lyrics in Now Playing, from the file's tags or a sidecar `.lrc` and from Navidrome. Slice 1 (core): `coda_core::lyrics` and `Client::lyrics`. Slice 2 (GUI): `now_playing_lyrics`, `useLyrics`, the lyrics-mode layout and `l`. Runtime checks: `scripts/smoke.md` "Lyrics mode".
+- Not wanted: word-level highlighting, ID3 `SYLT`, editing lyrics, online providers, choosing a language, a TUI lyrics screen, remembering the mode across launches.
+
 ### Later
 - Drag tracks/albums from browse views onto the queue.
 - Letter-key jump in the artist list; Navidrome album headers with year when opened via "Go to album".

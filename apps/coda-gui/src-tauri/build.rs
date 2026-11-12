@@ -54,6 +54,7 @@ fn main() {
         "ui_source_set",
         "home_history",
         "home_daily_picks",
+        "now_playing_lyrics",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

@@ -4,7 +4,8 @@
 //! It holds domain models, the queue, the pure player coordinator, the
 //! playback boundary (with its mpv backend), local library discovery, the
 //! Navidrome client, session persistence, configuration, cover art
-//! (decoding, the disk cache and what to show; `cover`), the Now playing
+//! (decoding, the disk cache and what to show; `cover`), lyrics (the LRC
+//! parser and a local file's lyrics; `lyrics`), the Now playing
 //! state (`now_playing`), the visualizer's display state, first-run setup
 //! state (`onboarding`) and its UI-free actions (`setup_actions`), the
 //! settings state (`settings`), text-field editing (`line_input`), logging
@@ -18,6 +19,7 @@ pub mod cover;
 pub mod library;
 pub mod line_input;
 pub mod logging;
+pub mod lyrics;
 pub mod model;
 pub mod navidrome;
 pub mod now_playing;
