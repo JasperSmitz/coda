@@ -382,11 +382,16 @@ pub async fn settings_save_server(
 pub async fn settings_disconnect(
     engine: State<'_, EngineHandle>,
     lock: State<'_, SettingsLock>,
+    browse: State<'_, crate::browse::BrowseHandle>,
 ) -> Result<(), String> {
-    {
+    let account = {
         let _write = lock.acquire().await?;
         let current = current().await?;
         let path = current.server_writable()?;
+        let account = match &current.dto.server {
+            ServerSettingsDto::Coda { url, username } => Some((url.clone(), username.clone())),
+            _ => None,
+        };
         if current.dto.music_dir.is_none() {
             return Err(
                 "Navidrome is the only source in the config file, so it stays; \
@@ -405,6 +410,11 @@ pub async fn settings_disconnect(
         })
         .await?
         .map_err(save_message)?;
+        account
+    };
+    // Its lyrics cache goes too, even if its client never started.
+    if let Some((url, username)) = account {
+        browse.lyrics().forget(&url, &username);
     }
     apply(
         &engine,

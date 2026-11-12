@@ -1,0 +1,31 @@
+# ADR 0007 — A local cache of Navidrome lyrics for search
+
+- **Status:** Accepted (2026-11-12; brief `docs/plans/lyrics-search.md`, decisions 1 and 5)
+- **Context:**
+  - The owner wants lyrics searchable from the search page, for the local library and for Navidrome.
+  - Navidrome's `search3` does not search lyrics, and Subsonic has no lyrics search.
+  - AGENTS.md lists database-backed library indexing as future work unless approved.
+- **Decision:**
+  - **A client-side cache:** Coda keeps its own copy of one server's lyrics on this computer and searches it with the same `coda_core::lyrics::index::LyricsIndex` (same folding and rules) as local lyrics.
+    - It is built in the background from the server's lyrics (`getLyricsBySongId`, else `getLyrics`), at most 3 requests at a time.
+    - It is loaded into memory when the app starts.
+  - **A file, not a database:** `$XDG_CACHE_HOME/coda/lyrics/<md5 of URL and user>.json`, compact JSON written atomically.
+    - The whole cache is read and searched in memory (a linear scan is fast enough: at most about 45 ms for 20,000 songs), so a query engine would add a dependency and a format to migrate for nothing.
+    - It is a cache: a corrupt or wrong-version file is rebuilt, never repaired.
+    - It holds ids, song details and lyrics text, never URLs, credentials or tokens.
+  - **Refresh policy:**
+    - A sync at launch (after about 30 s), when a server is added or changed, when the index is switched on, and on Rebuild. No timer while the app runs.
+    - A sync fetches only new albums and albums whose song count changed, drops removed albums, and fetches lyrics only for songs never checked.
+    - Every 30 days, or on Rebuild, everything is checked again; an interrupted refresh resumes.
+    - An album or song whose request keeps failing is retried in the next syncs and skipped after 3 completed ones, until the next refresh; a run of failures stops the sync without recording anything, and an empty or sharply shorter album list removes nothing (a server or permission hiccup is more likely than an emptied library; Rebuild accepts it).
+  - **Memory (decision 5):** the lyrics are held once (the original text; searches fold as they compare), and song details are held compactly.
+    - Measured: 42 MB for 20,000 songs that all have about 1.5 KB of lyrics, and at most 45 ms a search, in Latin, Cyrillic or CJK script.
+- **Alternatives:**
+  - **Changing Navidrome or reading its database:** not ours to change, and it ties Coda to Navidrome's internals.
+  - **Mapping local files to Navidrome songs:** fragile, and it misses songs that exist only on the server.
+  - **SQLite with full-text search:** a new dependency and schema for a few tens of MB, which a linear scan handles.
+- **Consequences:**
+  - The first build costs one request per album and one per song: minutes to tens of minutes for a 20,000-song library, once.
+  - Lyrics that change on the server without a change in the album's song count show up only at the 30-day refresh or after Rebuild.
+  - The cache is per server and user: switching servers keeps the old file. Disconnecting deletes it, and so does turning the switch off (Settings › Navidrome › "Index lyrics for search", the GUI preference `lyrics_index`).
+  - Only the GUI uses it; the TUI could, through the same core API.

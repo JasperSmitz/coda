@@ -34,7 +34,7 @@ pub fn search(tree: &LibraryTree, query: &str) -> Option<SearchResults> {
     if query.is_empty() {
         return None;
     }
-    let needle = query.to_lowercase();
+    let needle = needle(query);
     let root = tree.root_path();
     let mut tracks = Vec::new();
     let mut total = 0;
@@ -53,8 +53,14 @@ pub fn search(tree: &LibraryTree, query: &str) -> Option<SearchResults> {
     })
 }
 
-/// `needle` is already lowercase.
-fn matches(track: &Track, root: &Path, needle: &str) -> bool {
+/// What [`matches`] looks for: the trimmed query, lowercased. Empty for a
+/// blank query (which [`search`] does not run).
+pub(crate) fn needle(query: &str) -> String {
+    query.trim().to_lowercase()
+}
+
+/// Whether [`search`] lists `track` for `needle` (from [`needle`]).
+pub(crate) fn matches(track: &Track, root: &Path, needle: &str) -> bool {
     let has = |text: &str| text.to_lowercase().contains(needle);
     has(&track.title)
         || track.artist.as_deref().is_some_and(has)

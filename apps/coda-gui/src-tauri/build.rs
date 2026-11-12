@@ -1,6 +1,8 @@
 fn main() {
     // Our commands, declared so each needs an explicit `allow-<command>`
-    // permission in `capabilities/` (nothing is allowed by default).
+    // permission in `capabilities/` (nothing is allowed by default). Keep
+    // in step with `generate_handler!` in `src/lib.rs` and
+    // `capabilities/default.json`: `tests/acl.rs` checks all three.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "intent",
         "snapshot",
@@ -21,6 +23,7 @@ fn main() {
         "local_playlists",
         "local_playlist",
         "local_search",
+        "local_lyrics_search",
         "navidrome_artists",
         "navidrome_artist",
         "navidrome_artist_tracks",
@@ -30,6 +33,7 @@ fn main() {
         "navidrome_playlist",
         "navidrome_random_songs",
         "navidrome_search",
+        "navidrome_lyrics_search",
         // Navidrome playlist edits.
         "playlist_create",
         "playlist_save_queue",
@@ -55,6 +59,10 @@ fn main() {
         "home_history",
         "home_daily_picks",
         "now_playing_lyrics",
+        // The Navidrome lyrics index (Settings › Navidrome).
+        "lyrics_index_status",
+        "lyrics_index_rebuild",
+        "lyrics_index_set_enabled",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

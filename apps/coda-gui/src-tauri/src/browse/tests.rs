@@ -460,6 +460,119 @@ async fn navidrome_playlists_carry_the_hidden_entries_warning() {
     );
 }
 
+/// The library of [`library_handle`] with lyrics on three tracks.
+fn lyrics_handle() -> BrowseHandle {
+    use coda_core::lyrics::{index::IndexedLyrics, parse};
+    let browse = library_handle();
+    let lyrics = |text: &str| IndexedLyrics::new(&parse(text)).unwrap();
+    let mut writer = browse.try_write_local().unwrap();
+    writer.library_mut().unwrap().add_lyrics([
+        ("/m/loose.flac".into(), lyrics("Under the Sun\nwe walk")),
+        (
+            "/m/Band/First/1.flac".into(),
+            lyrics("sun shines\non the bay"),
+        ),
+        ("/m/Solo/Only/1.flac".into(), lyrics("rain all day")),
+    ]);
+    drop(writer);
+    browse
+}
+
+#[tokio::test]
+async fn local_lyrics_search_excludes_ids_and_splits_snippets() {
+    let browse = lyrics_handle();
+    let found = browse
+        .local(|v, c| local::lyrics_search(v, "SUN", &[], c))
+        .await
+        .unwrap();
+    assert_eq!(found.total, 2);
+    // Browse order: folders first, then the loose track.
+    let titles: Vec<_> = found
+        .matches
+        .iter()
+        .map(|m| m.track.title.as_str())
+        .collect();
+    assert_eq!(titles, ["T1", "T2"]);
+    let parts: Vec<_> = found.matches[1]
+        .snippet
+        .iter()
+        .map(|p| (p.text.as_str(), p.matched))
+        .collect();
+    assert_eq!(parts, [("Under the ", false), ("Sun", true)]);
+    // A phrase across two lines.
+    let found = browse
+        .local(|v, c| local::lyrics_search(v, "shines on", &[], c))
+        .await
+        .unwrap();
+    let parts: Vec<_> = found.matches[0]
+        .snippet
+        .iter()
+        .map(|p| (p.text.as_str(), p.matched))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("sun ", false),
+            ("shines", true),
+            (" / ", false),
+            ("on", true),
+            (" the bay", false)
+        ]
+    );
+
+    // The main search's songs are left out, and not counted.
+    let generation = browse.library_generation();
+    let first = found.matches[0].track.clone();
+    let SourceDto::Local { id: Some(id) } = first.source else {
+        panic!("local id");
+    };
+    let exclude = vec![id, "junk".into(), local_id(generation, 999)];
+    let found = browse
+        .local(move |v, c| local::lyrics_search(v, "sun", &exclude, c))
+        .await
+        .unwrap();
+    assert_eq!(found.total, 1);
+    assert_eq!(found.matches[0].track.title, "T2");
+    // Ids from an older library make the search stale.
+    let stale = vec![local_id(generation + 7, 0)];
+    let error = browse
+        .local(move |v, c| local::lyrics_search(v, "sun", &stale, c))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, BrowseErrorKind::Stale);
+    // Short queries find nothing.
+    let found = browse
+        .local(|v, c| local::lyrics_search(v, "su", &[], c))
+        .await
+        .unwrap();
+    assert_eq!((found.total, found.matches.len()), (0, 0));
+}
+
+#[test]
+#[allow(clippy::single_range_in_vec_init)]
+fn snippet_parts_follow_the_highlights() {
+    use coda_core::lyrics::index::Snippet;
+    let parts = |text: &str, highlights: Vec<std::ops::Range<usize>>| {
+        local::snippet_parts(&Snippet {
+            text: text.into(),
+            highlights,
+        })
+        .into_iter()
+        .map(|p| (p.text, p.matched))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        parts("été x", vec![0..3]),
+        [("été".into(), true), (" x".into(), false)]
+    );
+    assert_eq!(parts("abc", vec![]), [("abc".into(), false)]);
+    // Out-of-range or overlapping ranges never panic.
+    assert_eq!(
+        parts("abc", vec![1..9, 0..1]),
+        [("a".into(), false), ("bc".into(), true)]
+    );
+}
+
 #[tokio::test]
 async fn navidrome_search_and_random_songs() {
     let (server, browse) = server().await;

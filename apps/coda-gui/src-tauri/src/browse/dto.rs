@@ -125,6 +125,43 @@ pub struct SearchDto {
     pub total_tracks: usize,
 }
 
+/// One lyric match: the track and the lyric line(s) holding the match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsMatchDto {
+    pub track: TrackDto,
+    /// The snippet in order, split where the match starts and ends (so
+    /// the webview needs no index arithmetic). A snippet whose match
+    /// could not be mapped back exactly is one unmatched part.
+    pub snippet: Vec<SnippetPartDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetPartDto {
+    pub text: String,
+    pub matched: bool,
+}
+
+/// A lyrics search: at most `coda_core::lyrics::index::DEFAULT_LIMIT`
+/// matches, and how many there are in all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsSearchDto {
+    pub matches: Vec<LyricsMatchDto>,
+    pub total: usize,
+    /// Navidrome only: the index is still being built (songs checked so
+    /// far of those known), so more matches may come.
+    pub indexing: Option<IndexingDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexingDto {
+    pub done: usize,
+    pub total: usize,
+}
+
 /// A local context the engine resolves and plays itself (`playLocal`),
 /// so a whole-library folder or a big artist never crosses IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

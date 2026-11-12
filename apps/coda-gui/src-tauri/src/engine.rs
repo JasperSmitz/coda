@@ -291,6 +291,10 @@ impl Engine {
             }
         };
         self.browse.set_client(sources.client.clone());
+        // The lyrics index loads now and syncs a little later.
+        self.browse
+            .lyrics()
+            .set_server(sources.client.clone(), crate::lyrics_index::Start::Launch);
         self.server = sources.client.as_ref().map(crate::history::server_id);
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
@@ -1354,7 +1358,7 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
     let commands = engine.start(sources, problem, restored, now);
     io.send(commands);
     if let Some(dir) = engine.music_dir() {
-        io.scan = Some(scan::spawn_scan(dir));
+        io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }
     if let Some(client) = engine.client().cloned() {
         io.ping = Some(spawn_ping(client.clone()));
@@ -1377,6 +1381,7 @@ mod context;
 mod history;
 mod library;
 pub use history::HistoryMsg;
+use library::library_scan_options;
 
 #[cfg(test)]
 mod tests;

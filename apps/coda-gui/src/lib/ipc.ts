@@ -9,6 +9,7 @@ import type {
   ColorEdits,
   Intent,
   Lyrics,
+  LyricsIndexStatus,
   Progress,
   ResolvedTheme,
   ServerInput,
@@ -72,6 +73,19 @@ export type CoverSize = "small" | "large";
 /** The image URL for a track's cover at `size`. */
 export function coverSrc(coverUrl: string, size: CoverSize): string {
   return `${coverUrl}/${size}`;
+}
+
+// ----- the Navidrome lyrics index (each rejects with a message to show) -----
+
+export const lyricsIndexApi = {
+  status: () => invoke<LyricsIndexStatus>("lyrics_index_status"),
+  rebuild: () => invoke<void>("lyrics_index_rebuild"),
+  setEnabled: (enabled: boolean) =>
+    invoke<LyricsIndexStatus>("lyrics_index_set_enabled", { enabled }),
+};
+
+export function onLyricsIndex(handler: (status: LyricsIndexStatus) => void): Promise<UnlistenFn> {
+  return listen<LyricsIndexStatus>("lyrics-index", (event) => handler(event.payload));
 }
 
 // ----- settings and onboarding (each rejects with a message to show) -----

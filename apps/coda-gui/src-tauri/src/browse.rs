@@ -38,6 +38,7 @@ use tokio::sync::Semaphore;
 
 use crate::cover::CoverService;
 use crate::dto::{SourceDto, TrackDto};
+use crate::lyrics_index::LyricsIndex;
 use dto::{BrowseError, BrowseErrorKind};
 
 #[derive(Default)]
@@ -59,6 +60,8 @@ struct Shared {
     /// Album fetches of one artist play-all (within `fetches`).
     play_fetches: Semaphore,
     covers: Arc<CoverService>,
+    /// The Navidrome lyrics index (its loaded cache and sync).
+    lyrics: LyricsIndex,
 }
 
 /// The shared browse state; see the module docs. Cheap to clone.
@@ -90,18 +93,28 @@ pub struct LocalView<'a> {
 }
 
 impl BrowseHandle {
+    /// Without a lyrics index folder (tests): no lyrics sync.
     pub fn new(covers: Arc<CoverService>) -> Self {
+        Self::with_lyrics(covers, LyricsIndex::new(None))
+    }
+
+    pub fn with_lyrics(covers: Arc<CoverService>, lyrics: LyricsIndex) -> Self {
         Self(Arc::new(Shared {
             local: RwLock::new(LocalState::default()),
             remote: RwLock::new(RemoteState::default()),
             fetches: Semaphore::new(MAX_CONCURRENT_FETCHES),
             play_fetches: Semaphore::new(coda_core::navidrome::browse::MAX_JOB_FETCHES),
             covers,
+            lyrics,
         }))
     }
 
     pub fn covers(&self) -> &CoverService {
         &self.0.covers
+    }
+
+    pub fn lyrics(&self) -> &LyricsIndex {
+        &self.0.lyrics
     }
 
     // ----- the engine's side --------------------------------------------

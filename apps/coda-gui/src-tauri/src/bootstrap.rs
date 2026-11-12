@@ -29,6 +29,8 @@ pub struct Paths {
     pub log: Option<PathBuf>,
     /// Coda's cover cache folder (shared with the TUI).
     pub cover_cache: Option<PathBuf>,
+    /// The Navidrome lyrics caches (`<cache>/coda/lyrics`).
+    pub lyrics_cache: Option<PathBuf>,
     /// The TUI's session (`<state>/state.json`), imported once when the
     /// GUI has none yet. Only ever read.
     pub tui_session: Option<PathBuf>,
@@ -55,7 +57,8 @@ impl Paths {
             history: dir.as_ref().map(|d| d.join("history.json")),
             log: dir.map(|d| d.join("coda-app.log")),
             tui_session: config::session_file_path(xdg_state_home, home.clone()),
-            cover_cache: coda_core::cover::cache::cache_dir(xdg_cache_home, home),
+            cover_cache: coda_core::cover::cache::cache_dir(xdg_cache_home.clone(), home.clone()),
+            lyrics_cache: coda_core::lyrics::cache::cache_dir(xdg_cache_home, home),
         }
     }
 }

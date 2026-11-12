@@ -111,6 +111,11 @@ impl Engine {
         // Browse commands use the new client; ids and results of the old
         // one are stale (a new client generation).
         self.browse.set_client(client.clone());
+        // The lyrics index starts over for the new server now (and
+        // deletes the old server's cache on a disconnect).
+        self.browse
+            .lyrics()
+            .set_server(client.clone(), crate::lyrics_index::Start::Changed);
         // The history shows this server's entries (and picks) only.
         // A listen in progress keeps the contexts it started with (their
         // server's).
@@ -200,7 +205,7 @@ impl Engine {
 /// the old one lets its worker finish what it has queued).
 pub(crate) fn apply_settings_io<S: Sink>(engine: &mut Engine, io: &mut Io<S>) {
     if let Some(dir) = engine.take_rescan() {
-        io.scan = Some(scan::spawn_scan(dir));
+        io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }
     if let Some(change) = engine.take_client_change() {
         if change.ping {

@@ -13,6 +13,7 @@ import type {
   Folder,
   HomeHistory,
   LocalAlbumOrder,
+  LyricsSearch,
   Playlist,
   PlaylistDetail,
   SearchResults,
@@ -136,5 +137,13 @@ export const browse = {
     return source === "local"
       ? call("local_search", { query })
       : cached(`search:${query}`, () => call("navidrome_search", { query }));
+  },
+
+  /** Lyrics matching `query` in `source`, leaving out the songs in `exclude`. */
+  lyrics(source: SourceKind, query: string, exclude: string[]): Promise<LyricsSearch> {
+    return call(source === "local" ? "local_lyrics_search" : "navidrome_lyrics_search", {
+      query,
+      exclude,
+    });
   },
 };

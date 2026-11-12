@@ -1622,6 +1622,8 @@ impl App {
                 self.local.reselect(&self.library, key);
                 self.clamp_selections();
             }
+            // Never sent: the scan is started without lyrics.
+            ScanEvent::Lyrics(_) => {}
             ScanEvent::Playlist(file) => {
                 let key = self.local.selected_key(&self.library);
                 if self.library.add_playlist(file).is_none() {
@@ -2469,7 +2471,10 @@ pub async fn run(
     // terminal without restoring it or shutting the backend down.
     let mut terminal = ManuallyDrop::new(terminal);
 
-    let scan = music_dir.clone().map(scan::spawn_scan);
+    // The terminal player does not search lyrics, so the scan skips them.
+    let scan = music_dir
+        .clone()
+        .map(|dir| scan::spawn_scan(dir, scan::ScanOptions::default()));
     let ping = navidrome
         .clone()
         .map(|client| spawn_ping(client, Generation::default()));
