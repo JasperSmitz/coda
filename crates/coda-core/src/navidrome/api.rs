@@ -31,6 +31,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer};
 
 use super::{Access, Album, Artist, Playlist, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
+use crate::lyrics::{Lyrics, MAX_LINES, MAX_LYRICS_BYTES};
 use crate::model::{MAX_METADATA_CHARS, Track, TrackMetadata, clean_text};
 use crate::queue::MAX_QUEUE_LEN;
 
@@ -203,6 +204,99 @@ impl Reply for ExtensionsReply {
 
     fn take_error(&mut self) -> Option<ApiError> {
         self.error.take()
+    }
+}
+
+reply!(
+    /// `getLyricsBySongId` (OpenSubsonic `songLyrics`).
+    LyricsListReply { "lyricsList" => lyrics_list: LyricsList }
+);
+reply!(
+    /// `getLyrics` (classic Subsonic): plain text found by artist and
+    /// title.
+    LyricsReply { "lyrics" => lyrics: RawLyrics }
+);
+
+/// Upper bound on the `structuredLyrics` entries read (one per language
+/// or kind; the first suitable one is used).
+pub const MAX_STRUCTURED_LYRICS: usize = 16;
+
+/// The `lyricsList` of `getLyricsBySongId`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LyricsList {
+    #[serde(deserialize_with = "structured_lyrics_items")]
+    pub structured_lyrics: Vec<RawStructuredLyrics>,
+}
+
+/// One `structuredLyrics` entry. `lang` and the display names are not
+/// read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawStructuredLyrics {
+    #[serde(deserialize_with = "boolean")]
+    pub synced: Option<bool>,
+    /// Milliseconds; positive shows the lines earlier.
+    #[serde(deserialize_with = "signed_millis")]
+    pub offset: Option<i64>,
+    #[serde(deserialize_with = "lyric_lines")]
+    pub line: Vec<RawLyricLine>,
+}
+
+/// One line of structured lyrics.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawLyricLine {
+    /// Milliseconds from the start of the song.
+    #[serde(deserialize_with = "millis")]
+    pub start: Option<u64>,
+    #[serde(deserialize_with = "lyric_line_text")]
+    pub value: Option<String>,
+}
+
+/// The `lyrics` of `getLyrics`: only the text is read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawLyrics {
+    #[serde(deserialize_with = "lyrics_text")]
+    pub value: Option<String>,
+}
+
+impl RawStructuredLyrics {
+    /// These lyrics in Coda's model: timed when `synced` (lines without a
+    /// start are dropped, `offset` applied), else untimed. `None` when no
+    /// line has text.
+    pub fn into_lyrics(self) -> Option<Lyrics> {
+        let lyrics = if self.synced == Some(true) {
+            let offset = self.offset.unwrap_or(0);
+            let shift = Duration::from_millis(offset.unsigned_abs());
+            Lyrics::timed(
+                self.line
+                    .into_iter()
+                    .filter_map(|line| {
+                        let start = Duration::from_millis(line.start?);
+                        let start = if offset > 0 {
+                            start.saturating_sub(shift)
+                        } else {
+                            start.saturating_add(shift)
+                        };
+                        Some((start, line.value.unwrap_or_default()))
+                    })
+                    .collect(),
+            )
+        } else {
+            // One line per entry is the spec, but a server may send the
+            // whole text in one value: split it (each line and the line
+            // count are capped by the model).
+            let values: Vec<String> = self.line.into_iter().filter_map(|l| l.value).collect();
+            Lyrics::untimed(
+                values
+                    .iter()
+                    .flat_map(|value| value.split('\n'))
+                    .map(|line| line.strip_suffix('\r').unwrap_or(line)),
+            )
+        };
+        (!lyrics.is_blank()).then_some(lyrics)
     }
 }
 
@@ -620,6 +714,59 @@ fn text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D:
     })
 }
 
+/// A string of at most `max_bytes`, cut on a character boundary while it
+/// is copied (the rest is never copied).
+fn text_up_to<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    max_bytes: usize,
+) -> Result<Option<String>, D::Error> {
+    scalar(deserializer, |value| match value {
+        Scalar::Str(s) => {
+            let mut end = s.len().min(max_bytes);
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            Some(s[..end].to_owned())
+        }
+        _ => None,
+    })
+}
+
+/// A whole lyrics text, up to [`MAX_LYRICS_BYTES`].
+fn lyrics_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    text_up_to(deserializer, MAX_LYRICS_BYTES)
+}
+
+/// One lyrics line value, up to [`MAX_LYRICS_BYTES`]: an unsynced value
+/// may hold the whole text (split into lines later). What is copied never
+/// exceeds the body, which is capped; the model caps each line at
+/// [`crate::lyrics::MAX_LINE_CHARS`] characters.
+fn lyric_line_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    text_up_to(deserializer, MAX_LYRICS_BYTES)
+}
+
+/// Non-negative milliseconds as an integer or float (rounded down);
+/// anything else is `None`.
+fn millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    scalar(deserializer, |value| match value {
+        Scalar::U64(n) => Some(n),
+        // A float `as` cast saturates (and the sign is checked first).
+        Scalar::F64(n) if n >= 0.0 => Some(n as u64),
+        _ => None,
+    })
+}
+
+/// Signed milliseconds as an integer or float (rounded toward zero,
+/// saturating); NaN and anything else is `None`.
+fn signed_millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    scalar(deserializer, |value| match value {
+        Scalar::U64(n) => Some(i64::try_from(n).unwrap_or(i64::MAX)),
+        Scalar::I64(n) => Some(n),
+        Scalar::F64(n) if !n.is_nan() => Some(n as i64),
+        _ => None,
+    })
+}
+
 /// An id: a string, or an integer (some Subsonic servers use numeric
 /// ids). Ids over [`MAX_ID_CHARS`] are `None` (never copied); other
 /// values are `None`.
@@ -898,6 +1045,20 @@ where
     D: Deserializer<'de>,
 {
     capped_list(deserializer, MAX_EXTENSIONS)
+}
+
+fn structured_lyrics_items<'de, D>(deserializer: D) -> Result<Vec<RawStructuredLyrics>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list(deserializer, MAX_STRUCTURED_LYRICS).map(|list| list.items)
+}
+
+fn lyric_lines<'de, D>(deserializer: D) -> Result<Vec<RawLyricLine>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list(deserializer, MAX_LINES).map(|list| list.items)
 }
 
 fn playlist_entries<'de, D>(deserializer: D) -> Result<Counted<RawSong>, D::Error>
