@@ -243,6 +243,7 @@ pub fn run() {
             browse::commands::local_playlists,
             browse::commands::local_playlist,
             browse::commands::local_search,
+            browse::commands::local_lyrics_search,
             browse::commands::navidrome_artists,
             browse::commands::navidrome_artist,
             browse::commands::navidrome_artist_tracks,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-lyrics-search"
+description = "Enables the local_lyrics_search command without any pre-configured scope."
+commands.allow = ["local_lyrics_search"]
+
+[[permission]]
+identifier = "deny-local-lyrics-search"
+description = "Denies the local_lyrics_search command without any pre-configured scope."
+commands.deny = ["local_lyrics_search"]

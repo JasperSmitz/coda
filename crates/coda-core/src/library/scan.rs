@@ -14,8 +14,17 @@
 //!   sent as [`ScanEvent::Playlist`], after every track and before
 //!   [`ScanEvent::Finished`], so it can be matched with the whole library.
 //!   At most [`MAX_PLAYLISTS`] are read.
+//! - With [`ScanOptions::lyrics`], each track's lyrics are read from the
+//!   tags already parsed for its metadata (no second open); only for a
+//!   track whose tags have none, a sidecar `<stem>.lrc` is read, and only
+//!   when the walk listed one in that directory (no extra `stat` per
+//!   file), with [`crate::lyrics::read_local`]'s rules and FIFO safety.
+//!   Lyrics go out as [`ScanEvent::Lyrics`], always after the batch
+//!   holding their track. Off by default (the terminal player does not
+//!   search lyrics).
 
-use std::ffi::OsStr;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -28,6 +37,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use super::MAX_PLAYLISTS;
 use super::m3u::{self, PlaylistFile};
+use crate::lyrics::{self, Lyrics, index::IndexedLyrics};
 use crate::model::{Track, TrackMetadata};
 
 pub const AUDIO_EXTENSIONS: [&str; 13] = [
@@ -40,6 +50,9 @@ const CHANNEL_CAPACITY: usize = 16;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanEvent {
     Batch(Vec<Track>),
+    /// Lyrics of tracks already sent in a batch, by path (only with
+    /// [`ScanOptions::lyrics`]).
+    Lyrics(Vec<(PathBuf, IndexedLyrics)>),
     /// A playlist file, read and resolved; sent after every batch.
     Playlist(PlaylistFile),
     Finished {
@@ -53,50 +66,222 @@ pub enum ScanEvent {
     },
 }
 
+/// How a scan runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Tracks per batch at most.
+    pub batch_size: usize,
+    /// A batch is sent at least this often while tracks are found.
+    pub batch_interval: Duration,
+    /// Read lyrics and send them as [`ScanEvent::Lyrics`].
+    pub lyrics: bool,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: BATCH_SIZE,
+            batch_interval: BATCH_INTERVAL,
+            lyrics: false,
+        }
+    }
+}
+
 /// Starts a scan of `root` (absolute, canonicalized) on a blocking thread.
 /// Dropping the receiver stops the scan early. Must be called within a
 /// Tokio runtime.
-pub fn spawn_scan(root: PathBuf) -> mpsc::Receiver<ScanEvent> {
+pub fn spawn_scan(root: PathBuf, options: ScanOptions) -> mpsc::Receiver<ScanEvent> {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    tokio::task::spawn_blocking(move || scan(&root, &tx));
+    tokio::task::spawn_blocking(move || scan(&root, &tx, options));
     rx
 }
 
-/// Blocking scan with the default batching. Returns early if the receiver
-/// is dropped. Must not be called from async context.
-pub fn scan(root: &Path, tx: &mpsc::Sender<ScanEvent>) {
-    scan_with(root, tx, BATCH_SIZE, BATCH_INTERVAL);
+/// Blocking scan. Returns early if the receiver is dropped. Must not be
+/// called from async context.
+pub fn scan(root: &Path, tx: &mpsc::Sender<ScanEvent>, options: ScanOptions) {
+    scan_inner(root, tx, options, &mut Instant::now, &read_file);
 }
 
-/// Blocking scan with explicit batching, for tests.
+/// Blocking scan with explicit batching and no lyrics, for tests.
 pub fn scan_with(
     root: &Path,
     tx: &mpsc::Sender<ScanEvent>,
     batch_size: usize,
     batch_interval: Duration,
 ) {
-    scan_inner(
-        root,
-        tx,
+    let options = ScanOptions {
         batch_size,
         batch_interval,
-        &mut Instant::now,
-        &read_metadata,
-    );
+        lyrics: false,
+    };
+    scan(root, tx, options);
 }
 
-/// The scan loop with an injectable clock and metadata reader (tests).
+/// Reads one audio file's metadata and, when asked, its tag lyrics.
+type FileReader<'a> = dyn Fn(&Path, bool) -> (TrackMetadata, Option<Lyrics>) + 'a;
+
+/// Tracks and lyrics found but not sent yet. Lyrics always go out after
+/// the tracks, so a track is known before its lyrics arrive.
+struct Pending {
+    tracks: Vec<Track>,
+    lyrics: Vec<(PathBuf, IndexedLyrics)>,
+    last_flush: Instant,
+}
+
+impl Pending {
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty() && self.lyrics.is_empty()
+    }
+
+    /// Sends what is pending if a batch is full or the interval passed.
+    /// `false` once the receiver is gone.
+    fn flush_if_due(
+        &mut self,
+        tx: &mpsc::Sender<ScanEvent>,
+        options: &ScanOptions,
+        now: Instant,
+    ) -> bool {
+        let due = self.tracks.len() >= options.batch_size
+            || self.lyrics.len() >= options.batch_size
+            || now.saturating_duration_since(self.last_flush) >= options.batch_interval;
+        if !due {
+            return true;
+        }
+        self.last_flush = now;
+        self.flush(tx)
+    }
+
+    /// Sends everything pending. `false` once the receiver is gone.
+    fn flush(&mut self, tx: &mpsc::Sender<ScanEvent>) -> bool {
+        if !self.tracks.is_empty()
+            && tx
+                .blocking_send(ScanEvent::Batch(std::mem::take(&mut self.tracks)))
+                .is_err()
+        {
+            return false;
+        }
+        if !self.lyrics.is_empty()
+            && tx
+                .blocking_send(ScanEvent::Lyrics(std::mem::take(&mut self.lyrics)))
+                .is_err()
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// One directory being walked, for sidecar lyrics: its tracks without
+/// tag lyrics, and the `.lrc` names listed in it. Resolved once the walk
+/// has left the directory (its listing is complete).
+#[derive(Default)]
+struct OpenDir {
+    no_tag_lyrics: Vec<PathBuf>,
+    /// As [`name_key`] gives them.
+    lrc_names: HashSet<OsString>,
+}
+
+/// The directories on the walk's current path, by depth.
+#[derive(Default)]
+struct SidecarState {
+    open: Vec<OpenDir>,
+}
+
+impl SidecarState {
+    /// An entry at `depth` was reached: directories deeper than its
+    /// parent are complete, and their sidecars are read into `out`.
+    fn reach(&mut self, depth: usize, out: &mut Vec<(PathBuf, IndexedLyrics)>) {
+        while self.open.len() > depth {
+            if let Some(dir) = self.open.pop() {
+                dir.resolve(out);
+            }
+        }
+    }
+
+    /// Resolves every directory still open (the walk ended).
+    fn finish(&mut self, out: &mut Vec<(PathBuf, IndexedLyrics)>) {
+        self.reach(0, out);
+    }
+
+    /// The directory holding an entry at `depth` (> 0), opened if needed.
+    fn parent(&mut self, depth: usize) -> &mut OpenDir {
+        while self.open.len() < depth {
+            self.open.push(OpenDir::default());
+        }
+        &mut self.open[depth - 1]
+    }
+}
+
+impl OpenDir {
+    fn resolve(self, out: &mut Vec<(PathBuf, IndexedLyrics)>) {
+        if self.lrc_names.is_empty() {
+            return;
+        }
+        for path in self.no_tag_lyrics {
+            if !sidecar_listed(&self.lrc_names, &path, CASE_INSENSITIVE_NAMES) {
+                continue;
+            }
+            let read = std::panic::catch_unwind(|| lyrics::read_sidecar(&path));
+            if let Some(found) = read.ok().flatten().as_ref().and_then(IndexedLyrics::new) {
+                out.push((path, found));
+            }
+        }
+    }
+}
+
+/// Whether file names are compared ignoring case, as the file system
+/// does: on macOS (APFS and HFS+ are case-insensitive by default),
+/// [`crate::lyrics::read_local`]'s open of `<stem>.lrc` also finds
+/// `Song.LRC` or `song.lrc` for `Song.flac`, so the scan must too.
+/// Linux file systems are case-sensitive.
+const CASE_INSENSITIVE_NAMES: bool = cfg!(target_os = "macos");
+
+/// A file name as it is looked up in a listing: lowercased when names
+/// compare ignoring case.
+fn name_key(name: &OsStr, case_insensitive: bool) -> OsString {
+    if case_insensitive {
+        OsString::from(name.to_string_lossy().to_lowercase())
+    } else {
+        name.to_owned()
+    }
+}
+
+/// `true` for a `.lrc` file name, the extension as
+/// [`crate::lyrics::read_local`] would open it.
+fn is_lrc(path: &Path, case_insensitive: bool) -> bool {
+    path.extension().is_some_and(|ext| {
+        if case_insensitive {
+            ext.eq_ignore_ascii_case("lrc")
+        } else {
+            ext == "lrc"
+        }
+    })
+}
+
+/// Whether `lrc_names` (keys from [`name_key`]) holds the sidecar
+/// `<stem>.lrc` of the audio file at `audio`.
+fn sidecar_listed(lrc_names: &HashSet<OsString>, audio: &Path, case_insensitive: bool) -> bool {
+    audio
+        .with_extension("lrc")
+        .file_name()
+        .is_some_and(|name| lrc_names.contains(&name_key(name, case_insensitive)))
+}
+
+/// The scan loop with an injectable clock and file reader (tests).
 fn scan_inner(
     root: &Path,
     tx: &mpsc::Sender<ScanEvent>,
-    batch_size: usize,
-    batch_interval: Duration,
+    options: ScanOptions,
     clock: &mut dyn FnMut() -> Instant,
-    reader: &dyn Fn(&Path) -> TrackMetadata,
+    reader: &FileReader<'_>,
 ) {
     let started = Instant::now();
-    let mut batch = Vec::new();
-    let mut last_flush = clock();
+    let mut pending = Pending {
+        tracks: Vec::new(),
+        lyrics: Vec::new(),
+        last_flush: clock(),
+    };
+    let mut sidecars = SidecarState::default();
     let (mut tracks, mut skipped, mut errors) = (0usize, 0usize, 0usize);
     let mut playlists = Vec::new();
     let mut playlists_over_cap = 0usize;
@@ -113,23 +298,40 @@ fn scan_inner(
             return;
         }
         match entry {
-            Ok(entry) => match classify(&entry) {
-                Candidate::Ignore => {}
-                Candidate::Skip(why) => {
-                    skipped += 1;
-                    tracing::debug!(why, "skipping audio file");
+            Ok(entry) => {
+                let depth = entry.depth();
+                if options.lyrics && depth > 0 {
+                    sidecars.reach(depth, &mut pending.lyrics);
+                    if is_lrc(entry.path(), CASE_INSENSITIVE_NAMES) && !entry.file_type().is_dir() {
+                        let key = name_key(entry.file_name(), CASE_INSENSITIVE_NAMES);
+                        sidecars.parent(depth).lrc_names.insert(key);
+                    }
                 }
-                Candidate::Track => {
-                    let path = entry.into_path();
-                    let metadata = read_metadata_guarded(&path, reader);
-                    batch.push(Track::local(path, metadata));
-                    tracks += 1;
+                match classify(&entry) {
+                    Candidate::Ignore => {}
+                    Candidate::Skip(why) => {
+                        skipped += 1;
+                        tracing::debug!(why, "skipping audio file");
+                    }
+                    Candidate::Track => {
+                        let path = entry.into_path();
+                        let (metadata, found) = read_file_guarded(&path, options.lyrics, reader);
+                        match found.as_ref().and_then(IndexedLyrics::new) {
+                            Some(found) => pending.lyrics.push((path.clone(), found)),
+                            None if options.lyrics && depth > 0 => {
+                                sidecars.parent(depth).no_tag_lyrics.push(path.clone());
+                            }
+                            None => {}
+                        }
+                        pending.tracks.push(Track::local(path, metadata));
+                        tracks += 1;
+                    }
+                    Candidate::Playlist if playlists.len() < MAX_PLAYLISTS => {
+                        playlists.push(entry.into_path());
+                    }
+                    Candidate::Playlist => playlists_over_cap += 1,
                 }
-                Candidate::Playlist if playlists.len() < MAX_PLAYLISTS => {
-                    playlists.push(entry.into_path());
-                }
-                Candidate::Playlist => playlists_over_cap += 1,
-            },
+            }
             Err(error) => {
                 errors += 1;
                 // walkdir's message names the path; log only the kind.
@@ -139,22 +341,12 @@ fn scan_inner(
         }
         // Checked for every walked entry, so a slow stretch of non-audio
         // files cannot hold back tracks already found.
-        if !batch.is_empty() {
-            let now = clock();
-            let due = batch.len() >= batch_size
-                || now.saturating_duration_since(last_flush) >= batch_interval;
-            if due {
-                if tx
-                    .blocking_send(ScanEvent::Batch(std::mem::take(&mut batch)))
-                    .is_err()
-                {
-                    return;
-                }
-                last_flush = now;
-            }
+        if !pending.is_empty() && !pending.flush_if_due(tx, &options, clock()) {
+            return;
         }
     }
-    if !batch.is_empty() && tx.blocking_send(ScanEvent::Batch(batch)).is_err() {
+    sidecars.finish(&mut pending.lyrics);
+    if !pending.flush(tx) {
         return;
     }
     if playlists_over_cap > 0 {
@@ -252,19 +444,31 @@ pub fn is_audio_file(path: &Path) -> bool {
     })
 }
 
-/// [`read_metadata`], but a panic inside the tag parser (untrusted file
-/// contents) falls back to file-name-only metadata instead of ending the
-/// scan.
-fn read_metadata_guarded(path: &Path, reader: &dyn Fn(&Path) -> TrackMetadata) -> TrackMetadata {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader(path))).unwrap_or_else(|_| {
-        tracing::warn!("tag parser panicked; listing file by name only");
-        TrackMetadata::default()
-    })
+/// [`read_file`], but a panic inside the tag parser (untrusted file
+/// contents) falls back to file-name-only metadata and no lyrics instead
+/// of ending the scan.
+fn read_file_guarded(
+    path: &Path,
+    lyrics: bool,
+    reader: &FileReader<'_>,
+) -> (TrackMetadata, Option<Lyrics>) {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader(path, lyrics))).unwrap_or_else(
+        |_| {
+            tracing::warn!("tag parser panicked; listing file by name only");
+            (TrackMetadata::default(), None)
+        },
+    )
 }
 
 /// Reads tags and duration with lofty. Any failure yields empty metadata,
 /// so the file is still listed under its file name.
 pub fn read_metadata(path: &Path) -> TrackMetadata {
+    read_file(path, false).0
+}
+
+/// [`read_metadata`], plus the lyrics in the same tags when `lyrics` is
+/// set (`None` when they have none).
+pub fn read_file(path: &Path, lyrics: bool) -> (TrackMetadata, Option<Lyrics>) {
     let tagged = Probe::open(path)
         .map(|p| p.options(ParseOptions::new().read_cover_art(false)))
         .and_then(|p| Ok(p.guess_file_type()?))
@@ -273,17 +477,23 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
         Ok(tagged) => tagged,
         Err(error) => {
             tracing::debug!(%error, "could not read tags");
-            return TrackMetadata::default();
+            return (TrackMetadata::default(), None);
         }
+    };
+    let found = if lyrics {
+        lyrics::from_tagged(&tagged)
+    } else {
+        None
     };
     let duration = Some(tagged.properties().duration()).filter(|d| !d.is_zero());
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
-        return TrackMetadata {
+        let metadata = TrackMetadata {
             duration,
             ..TrackMetadata::default()
         };
+        return (metadata, found);
     };
-    TrackMetadata {
+    let metadata = TrackMetadata {
         title: tag.title().map(|s| s.into_owned()),
         artist: tag.artist().map(|s| s.into_owned()),
         album: tag.album().map(|s| s.into_owned()),
@@ -292,7 +502,8 @@ pub fn read_metadata(path: &Path) -> TrackMetadata {
         disc_no: tag.disk(),
         duration,
         cover_art: None,
-    }
+    };
+    (metadata, found)
 }
 
 #[cfg(test)]
@@ -300,13 +511,21 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    fn options(batch_size: usize, batch_interval: Duration) -> ScanOptions {
+        ScanOptions {
+            batch_size,
+            batch_interval,
+            lyrics: false,
+        }
+    }
+
     fn collect(rx: &mut mpsc::Receiver<ScanEvent>) -> (Vec<Vec<String>>, Option<usize>) {
         let mut batches = Vec::new();
         let mut finished = None;
         while let Ok(event) = rx.try_recv() {
             match event {
                 ScanEvent::Batch(b) => batches.push(b.into_iter().map(|t| t.title).collect()),
-                ScanEvent::Playlist(_) => {}
+                ScanEvent::Playlist(_) | ScanEvent::Lyrics(_) => {}
                 ScanEvent::Finished { tracks, .. } => finished = Some(tracks),
             }
         }
@@ -334,18 +553,17 @@ mod tests {
                 t0
             }
         };
-        let reader = |path: &Path| {
+        let reader = |path: &Path, _: bool| {
             if path.ends_with("a.mp3") {
                 a_read.set(true);
             }
-            TrackMetadata::default()
+            (TrackMetadata::default(), None)
         };
         let (tx, mut rx) = mpsc::channel(16);
         scan_inner(
             dir.path(),
             &tx,
-            1000,
-            Duration::from_secs(1),
+            options(1000, Duration::from_secs(1)),
             &mut clock,
             &reader,
         );
@@ -356,26 +574,53 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_names_match_by_case_only_where_the_file_system_ignores_it() {
+        let listing = |names: &[&str], ci: bool| -> HashSet<OsString> {
+            names
+                .iter()
+                .map(Path::new)
+                .filter(|p| is_lrc(p, ci))
+                .map(|p| name_key(p.as_os_str(), ci))
+                .collect()
+        };
+        // Case-sensitive (Linux): only the exact `<stem>.lrc`.
+        let names = listing(&["Song.lrc", "other.LRC", "x.lrc.txt"], false);
+        assert_eq!(names.len(), 1);
+        assert!(sidecar_listed(&names, Path::new("/m/Song.flac"), false));
+        assert!(!sidecar_listed(&names, Path::new("/m/song.flac"), false));
+        assert!(!sidecar_listed(&names, Path::new("/m/other.flac"), false));
+        // Case-insensitive (macOS): any case of stem and extension.
+        let names = listing(&["song.lrc", "OTHER.LRC", "x.lrc.txt"], true);
+        assert_eq!(names.len(), 2);
+        assert!(sidecar_listed(&names, Path::new("/m/Song.flac"), true));
+        assert!(sidecar_listed(&names, Path::new("/m/Other.mp3"), true));
+        assert!(!sidecar_listed(&names, Path::new("/m/ÉTÉ.mp3"), false));
+        let names = listing(&["été.lrc"], true);
+        assert!(sidecar_listed(&names, Path::new("/m/ÉTÉ.mp3"), true));
+        assert!(!sidecar_listed(&names, Path::new("/m/x.mp3"), true));
+    }
+
+    #[test]
     fn panicking_tag_parser_falls_back_and_scan_finishes() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["boom.flac", "fine.flac"] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
-        let reader = |path: &Path| {
+        let reader = |path: &Path, _: bool| {
             if path.ends_with("boom.flac") {
                 panic!("simulated lofty panic");
             }
-            TrackMetadata {
+            let metadata = TrackMetadata {
                 title: Some("Fine Title".into()),
                 ..TrackMetadata::default()
-            }
+            };
+            (metadata, None)
         };
         let (tx, mut rx) = mpsc::channel(16);
         scan_inner(
             dir.path(),
             &tx,
-            1000,
-            Duration::from_secs(3600),
+            options(1000, Duration::from_secs(3600)),
             &mut Instant::now,
             &reader,
         );

@@ -382,6 +382,26 @@
   font-size: var(--text-small);
 }
 
+/* Lyrics search: a third line with the lyric, the match marked. The
+   height matches SNIPPET_ROW in TrackTable.tsx. */
+.track-rows.with-snippet {
+  --row-height: 58px;
+}
+
+.track-snippet {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--text-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snippet-match {
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
 .track-duration {
   text-align: right;
   font-variant-numeric: tabular-nums;

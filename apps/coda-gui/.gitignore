@@ -51,3 +51,9 @@ dist-ssr
 
 # Agent worktrees
 .worktrees/
+
+# makepkg outputs (packaging/arch)
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/coda-app/
+packaging/arch/*.pkg.tar.*

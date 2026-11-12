@@ -2,7 +2,8 @@
 // duration; the playing row shows the equaliser. Rows are virtualized
 // (36px) inside the view's scroller, with disc headers when an album has
 // several discs. ↑/↓ select, Enter or double-click plays the list from
-// that track, right-click or "…" opens the track menu.
+// that track, right-click or "…" opens the track menu. With `snippets`
+// (lyrics search), each row shows its lyric line below, the match marked.
 
 import {
   memo,
@@ -16,7 +17,7 @@ import {
 } from "react";
 import { formatTime } from "../lib/format";
 import { playTracks, sameTrack } from "../lib/play";
-import type { PlayContext, Track } from "../lib/types";
+import type { PlayContext, SnippetPart, Track } from "../lib/types";
 import { useAppState } from "../state/store";
 import type { MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -24,7 +25,9 @@ import { TrackAlbum, TrackArtist } from "./NameLink";
 import { Equalizer } from "./QueuePanel";
 import { TrackMenu } from "./TrackMenu";
 
-const ROW = 36;
+const DEFAULT_ROW = 36;
+/** Rows with a lyric snippet (`--row-height` of `.track-rows.with-snippet`). */
+const SNIPPET_ROW = 58;
 const OVERSCAN = 10;
 
 type Row = { kind: "disc"; disc: number } | { kind: "track"; index: number };
@@ -76,6 +79,8 @@ interface Props {
   onPlay?: (index: number) => void;
   /** What the list is (album, playlist, folder), for the play history. */
   context?: PlayContext | null;
+  /** A lyric snippet per track, shown on a line of its own. */
+  snippets?: SnippetPart[][];
   label: string;
 }
 
@@ -103,8 +108,10 @@ export function TrackTable({
   discs = false,
   onPlay,
   context,
+  snippets,
   label,
 }: Props) {
+  const rowHeight = snippets ? SNIPPET_ROW : DEFAULT_ROW;
   const { snapshot } = useAppState();
   // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
   const locked = snapshot?.phase !== "ready";
@@ -167,15 +174,15 @@ export function TrackTable({
     const el = scroller.current;
     const own = table.current;
     if (!el || !own) return;
-    const top = own.offsetTop + rowOf(index) * ROW;
+    const top = own.offsetTop + rowOf(index) * rowHeight;
     if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
+    else if (top + rowHeight > el.scrollTop + el.clientHeight) el.scrollTop = top + rowHeight - el.clientHeight;
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (tracks.length === 0) return;
     const at = selected ?? -1;
-    const page = Math.max(1, Math.floor(view.height / ROW) - 1);
+    const page = Math.max(1, Math.floor(view.height / rowHeight) - 1);
     const move = (to: number) => {
       const index = Math.min(tracks.length - 1, Math.max(0, to));
       setSelected(index);
@@ -206,7 +213,7 @@ export function TrackTable({
       case "ContextMenu": {
         const index = Math.max(0, at);
         const rect = table.current?.getBoundingClientRect();
-        const y = (rect?.top ?? 0) + rowOf(index) * ROW + ROW - view.top + view.offset;
+        const y = (rect?.top ?? 0) + rowOf(index) * rowHeight + rowHeight - view.top + view.offset;
         openMenu(index, (rect?.left ?? 0) + 40, y);
         break;
       }
@@ -217,10 +224,10 @@ export function TrackTable({
     e.stopPropagation();
   };
 
-  const start = Math.max(0, Math.floor((view.top - view.offset) / ROW) - OVERSCAN);
+  const start = Math.max(0, Math.floor((view.top - view.offset) / rowHeight) - OVERSCAN);
   const end = Math.min(
     rows.length,
-    Math.ceil((view.top - view.offset + view.height) / ROW) + OVERSCAN,
+    Math.ceil((view.top - view.offset + view.height) / rowHeight) + OVERSCAN,
   );
 
   return (
@@ -234,16 +241,16 @@ export function TrackTable({
       </div>
       <div
         ref={table}
-        className="track-rows"
+        className={snippets ? "track-rows with-snippet" : "track-rows"}
         role="listbox"
         aria-label={label}
         tabIndex={0}
         aria-activedescendant={selected !== null ? `${idPrefix}-${selected}` : undefined}
-        style={{ height: rows.length * ROW }}
+        style={{ height: rows.length * rowHeight }}
         onKeyDown={onKeyDown}
       >
         {rows.slice(start, end).map((row, i) => {
-          const top = (start + i) * ROW;
+          const top = (start + i) * rowHeight;
           if (row.kind === "disc") {
             return (
               <div key={`disc-${row.disc}`} className="disc-row" style={{ top }}>
@@ -261,6 +268,7 @@ export function TrackTable({
               top={top}
               showAlbum={showAlbum}
               showArtist={showArtist}
+              snippet={snippets?.[row.index]}
               playing={sameTrack(track, playing)}
               animated={animated}
               selected={selected === row.index}
@@ -298,6 +306,7 @@ interface RowProps {
   top: number;
   showAlbum: boolean;
   showArtist: boolean;
+  snippet?: SnippetPart[];
   playing: boolean;
   animated: boolean;
   selected: boolean;
@@ -313,6 +322,7 @@ const TrackRow = memo(function TrackRow({
   top,
   showAlbum,
   showArtist,
+  snippet,
   playing,
   animated,
   selected,
@@ -350,6 +360,19 @@ const TrackRow = memo(function TrackRow({
       <span className="track-text">
         <span className="track-title">{track.title}</span>
         {showArtist && <TrackArtist track={track} className="track-artist secondary" />}
+        {snippet && (
+          <span className="track-snippet">
+            {snippet.map((part, i) =>
+              part.matched ? (
+                <mark key={i} className="snippet-match">
+                  {part.text}
+                </mark>
+              ) : (
+                <span key={i}>{part.text}</span>
+              ),
+            )}
+          </span>
+        )}
       </span>
       {showAlbum && <TrackAlbum track={track} className="track-album secondary" />}
       <span className="track-duration time secondary">{formatTime(track.durationMs)}</span>

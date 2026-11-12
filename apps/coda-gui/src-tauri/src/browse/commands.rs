@@ -70,6 +70,19 @@ pub async fn local_search(browse: State<'_, BrowseHandle>, query: String) -> Res
         .await
 }
 
+/// Lyrics matches, separate from [`local_search`] so the main results
+/// never wait for it. `exclude`: the song ids the main search returned.
+#[tauri::command]
+pub async fn local_lyrics_search(
+    browse: State<'_, BrowseHandle>,
+    query: String,
+    exclude: Vec<String>,
+) -> Result<LyricsSearchDto> {
+    browse
+        .local(move |view, covers| local::lyrics_search(view, &query, &exclude, covers))
+        .await
+}
+
 // ----- Navidrome ----------------------------------------------------------
 
 #[tauri::command]

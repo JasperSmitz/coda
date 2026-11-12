@@ -202,3 +202,9 @@ Each entry should state:
 - **Root cause:** Cargo's resolver unifies a dev-dependency's features with the normal dependency for every target built in that invocation, including the binary built for integration tests, which overwrites the normal one in `target/`. Before the split, the mock was `cfg(test)` inside one crate and never reached the binary.
 - **Rule:** never enable a feature that swaps a shipping backend through a dev-dependency. Give the library a separate test-support feature that only adds constructors (`coda-core`'s `test-util`: `SecretStore::mock()`), and after a feature change check the binary `cargo test` leaves behind (`strings`) and the resolved features (`cargo check --message-format=json`).
 - **Where verified:** monorepo migration Phase 3 review (F1); `crates/coda-tui/Cargo.toml`, `crates/coda-core/Cargo.toml` (`test-util`), ADR 0006.
+
+### A new Tauri command needs its permission, and only the runtime notices
+- **Context / symptom:** twice a new GUI command (`now_playing_lyrics`, then `local_lyrics_search`) was registered in `generate_handler!` and called from the webview, but not declared in `build.rs`'s `AppManifest::commands` or granted (`allow-<command>`) in `capabilities/default.json`. Every invoke would have been rejected ("not allowed") and the feature silently absent; all Rust tests passed, because they call the command's function directly, never through the ACL.
+- **Root cause:** the app manifest makes every command opt-in, and the three lists (handler, manifest, capability) are kept by hand in three files. Nothing at build or test time compared them.
+- **Rule:** when adding a command, touch all three; `apps/coda-gui/src-tauri/tests/acl.rs` now fails when they disagree (in either direction). Hand runtime-only behaviour (permissions, CSP) to the owner's smoke checks too.
+- **Where verified:** lyrics search slice 1 review (finding 1); `tests/acl.rs` fails with either entry removed.

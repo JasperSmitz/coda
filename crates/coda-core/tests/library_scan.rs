@@ -2,14 +2,16 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use coda_core::library::Library;
 use coda_core::library::m3u::PlaylistFile;
-use coda_core::library::scan::{self, ScanEvent};
+use coda_core::library::scan::{self, ScanEvent, ScanOptions};
 use coda_core::library::tree::LibraryTree;
+use coda_core::lyrics::index::IndexedLyrics;
 use coda_core::model::{MAX_METADATA_CHARS, Track};
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor, TagExt};
@@ -19,6 +21,7 @@ use tokio::sync::mpsc;
 struct Outcome {
     batches: Vec<Vec<Track>>,
     playlists: Vec<PlaylistFile>,
+    lyrics: Vec<(PathBuf, IndexedLyrics)>,
     finished: Option<(usize, usize, usize)>,
 }
 
@@ -43,12 +46,24 @@ impl Outcome {
 }
 
 fn run_scan_with(root: &Path, batch_size: usize, interval: Duration) -> Outcome {
+    run_scan_options(
+        root,
+        ScanOptions {
+            batch_size,
+            batch_interval: interval,
+            lyrics: false,
+        },
+    )
+}
+
+fn run_scan_options(root: &Path, options: ScanOptions) -> Outcome {
     let (tx, mut rx) = mpsc::channel(1024);
-    scan::scan_with(root, &tx, batch_size, interval);
+    scan::scan(root, &tx, options);
     drop(tx);
     let mut outcome = Outcome {
         batches: Vec::new(),
         playlists: Vec::new(),
+        lyrics: Vec::new(),
         finished: None,
     };
     while let Some(event) = rx.blocking_recv() {
@@ -61,6 +76,19 @@ fn run_scan_with(root: &Path, batch_size: usize, interval: Duration) -> Outcome 
             ScanEvent::Playlist(file) => {
                 assert!(outcome.finished.is_none(), "playlist after Finished");
                 outcome.playlists.push(file);
+            }
+            ScanEvent::Lyrics(lyrics) => {
+                assert!(outcome.playlists.is_empty(), "lyrics after a playlist");
+                for (path, _) in &lyrics {
+                    assert!(
+                        outcome
+                            .tracks()
+                            .iter()
+                            .any(|t| t.local_path() == Some(path.as_path())),
+                        "lyrics before their track"
+                    );
+                }
+                outcome.lyrics.extend(lyrics);
             }
             ScanEvent::Finished {
                 tracks,
@@ -313,12 +341,13 @@ async fn spawn_scan_streams_to_finished() {
     let (_guard, root) = root();
     touch(&root.join("x/a.mp3"));
     touch(&root.join("b.flac"));
-    let mut rx = scan::spawn_scan(root.clone());
+    let mut rx = scan::spawn_scan(root.clone(), scan::ScanOptions::default());
     let mut tracks = 0;
     loop {
         match rx.recv().await.expect("scan ends with Finished") {
             ScanEvent::Batch(batch) => tracks += batch.len(),
             ScanEvent::Playlist(_) => {}
+            ScanEvent::Lyrics(_) => panic!("lyrics are off by default"),
             ScanEvent::Finished { tracks: total, .. } => {
                 assert_eq!(total, tracks);
                 break;
@@ -409,4 +438,111 @@ fn a_playlist_entry_through_a_symlinked_folder_is_missing() {
         .collect();
     assert_eq!(paths, [root.join("real/x.mp3")]);
     assert_eq!(playlist.missing, 2);
+}
+
+// ----- lyrics -------------------------------------------------------------
+
+fn with_lyrics(root: &Path, batch_size: usize) -> Outcome {
+    run_scan_options(
+        root,
+        ScanOptions {
+            batch_size,
+            lyrics: true,
+            ..ScanOptions::default()
+        },
+    )
+}
+
+/// A WAV whose ID3v2 tag holds `lyrics` (USLT, lofty's `UnsyncLyrics`).
+fn wav_with_lyrics(path: &Path, lyrics: &str) {
+    common::write_wav(path, 100);
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.insert_text(ItemKey::UnsyncLyrics, lyrics.into());
+    tag.save_to_path(path, WriteOptions::default()).unwrap();
+}
+
+/// The relative paths whose lyrics match `query`, in browse order.
+fn lyric_hits(root: &Path, outcome: &Outcome, query: &str) -> Vec<String> {
+    let mut library = Library::new(root.to_owned());
+    library.extend(outcome.tracks().into_iter().cloned());
+    library.add_lyrics(outcome.lyrics.iter().cloned());
+    library
+        .search_lyrics(query, &HashSet::new(), 50)
+        .matches
+        .iter()
+        .map(|m| {
+            let path = library.track(m.key).local_path().unwrap();
+            path.strip_prefix(root).unwrap().display().to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn lyrics_come_from_tags_else_a_listed_sidecar() {
+    let (_guard, root) = root();
+    // Tag lyrics.
+    wav_with_lyrics(
+        &root.join("tagged.wav"),
+        "[00:01.00]Hello darkness\n[00:02.00]my old friend",
+    );
+    // Tags win over a sidecar.
+    wav_with_lyrics(&root.join("both.wav"), "from the tag, darkness");
+    std::fs::write(root.join("both.lrc"), "from the sidecar, darkness").unwrap();
+    // A sidecar listed before its track (`l` < `w`) and after it
+    // (`aac` < `lrc`; the file is not audio lofty reads, so no tags), and
+    // one with a folder walked between the track and the sidecar.
+    common::write_wav(&root.join("early.wav"), 100);
+    std::fs::write(root.join("early.lrc"), "[00:01]darkness, early").unwrap();
+    std::fs::write(root.join("late.aac"), b"not audio").unwrap();
+    std::fs::write(root.join("late.lrc"), "darkness, late").unwrap();
+    std::fs::create_dir_all(root.join("d/m.b")).unwrap();
+    std::fs::write(root.join("d/m.aac"), b"not audio").unwrap();
+    wav_with_lyrics(&root.join("d/m.b/inner.wav"), "inner darkness");
+    std::fs::write(root.join("d/m.lrc"), "darkness across a folder").unwrap();
+    // No lyrics at all; and a sidecar whose track is elsewhere.
+    common::write_wav(&root.join("none.wav"), 100);
+    std::fs::write(root.join("d/none.lrc"), "darkness, orphaned").unwrap();
+
+    for batch_size in [1, 200] {
+        let outcome = with_lyrics(&root, batch_size);
+        assert_eq!(outcome.finished, Some((7, 0, 0)));
+        assert_eq!(outcome.lyrics.len(), 6, "batch size {batch_size}");
+        assert_eq!(
+            lyric_hits(&root, &outcome, "DARKNESS"),
+            [
+                "d/m.b/inner.wav",
+                "d/m.aac",
+                "both.wav",
+                "early.wav",
+                "late.aac",
+                "tagged.wav"
+            ]
+        );
+        assert_eq!(lyric_hits(&root, &outcome, "from the"), ["both.wav"]);
+        assert_eq!(
+            lyric_hits(&root, &outcome, "hello darkness my"),
+            ["tagged.wav"]
+        );
+    }
+
+    // Off by default: no lyrics are read.
+    assert!(run_scan(&root).lyrics.is_empty());
+}
+
+#[test]
+fn a_fifo_sidecar_does_not_block_the_scan() {
+    let (_guard, root) = root();
+    std::fs::write(root.join("song.aac"), b"not audio").unwrap();
+    let status = std::process::Command::new("mkfifo")
+        .arg(root.join("song.lrc"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = root.clone();
+    std::thread::spawn(move || tx.send(with_lyrics(&path, 200).lyrics.len()));
+    let found = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("blocked on the FIFO");
+    assert_eq!(found, 0);
 }

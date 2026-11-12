@@ -200,7 +200,7 @@ impl Engine {
 /// the old one lets its worker finish what it has queued).
 pub(crate) fn apply_settings_io<S: Sink>(engine: &mut Engine, io: &mut Io<S>) {
     if let Some(dir) = engine.take_rescan() {
-        io.scan = Some(scan::spawn_scan(dir));
+        io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }
     if let Some(change) = engine.take_client_change() {
         if change.ping {

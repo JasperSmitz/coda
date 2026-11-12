@@ -143,6 +143,12 @@ Same setup as above. A configured music folder and Navidrome server make every s
 44. `/` or Ctrl+F opens Search with the cursor in the field (from anywhere, also again while on Search). Typing searches after a short pause; results are grouped per source into Artists, Albums and Tracks. Enter on a track plays that source's matching tracks from it; Escape leaves the field, a second Escape goes back.
 45. A query with no matches shows "No matches"; Navidrome down (stop the server) shows an error with Retry, while local results still show.
 
+### Lyrics search (`docs/plans/lyrics-search.md`)
+LS1. Local search for a phrase from a song's lyrics (tags or a `.lrc` next to the file): the song shows under **Lyrics** (below Artists, Albums, Tracks) with the matched line and the phrase emphasised (light and dark themes). Double-click (or select and Enter) plays it; right-click opens the track menu; the artist and album names lead to their pages. The search box's placeholder mentions lyrics.
+LS2. Search a phrase that wraps across two lyric lines: it still matches, and the snippet shows both lines joined by " / ". Curly and straight apostrophes match each other (`don’t` finds `don't` and back), and case does not matter.
+LS3. Search a song title that also appears in its chorus: the song shows under Tracks and not again under Lyrics. A common word with more than 50 lyric matches ends the section with "and N more".
+LS4. A 1–2 letter search shows no Lyrics section, and typing stays smooth (also with a large library). While the Lyrics section loads it is absent: no spinner or flash; with no matches anywhere, "No matches" shows.
+
 ### Errors and states
 46. Stop the Navidrome server and open Navidrome → Artists: loading skeleton, then "Could not load" with Retry; start the server and Retry loads.
 47. Light and dark themes: skeletons, tiles, rows, menus and notes are readable in both; focus rings visible when tabbing through the album grid and lists.

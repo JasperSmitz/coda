@@ -31,6 +31,14 @@ enum Outcome {
     },
 }
 
+/// The GUI's scan: lyrics on, for lyrics search.
+pub(crate) fn library_scan_options() -> scan::ScanOptions {
+    scan::ScanOptions {
+        lyrics: true,
+        ..scan::ScanOptions::default()
+    }
+}
+
 impl Engine {
     /// A new library at `dir` (`None`: none), replacing the old one and
     /// anything still queued for it.
@@ -81,6 +89,7 @@ impl Engine {
                     };
                     match event {
                         ScanEvent::Batch(tracks) => library.extend(tracks),
+                        ScanEvent::Lyrics(lyrics) => library.add_lyrics(lyrics),
                         ScanEvent::Playlist(file) => {
                             if library.add_playlist(file).is_none() {
                                 tracing::debug!("playlist over the cap ignored");

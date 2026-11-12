@@ -3,8 +3,9 @@
 //! produces [`crate::model::Track`]s.
 //!
 //! [`Library`] holds everything the scan found: the folder tree (which
-//! owns the tracks), the tag index (artists and albums) and the `.m3u`
-//! playlists, all updated as scan events arrive. It is plain synchronous
+//! owns the tracks), the tag index (artists and albums), the `.m3u`
+//! playlists and the lyrics index (when the scan reads lyrics), all
+//! updated as scan events arrive. It is plain synchronous
 //! data; nothing here does I/O except [`scan`] and [`m3u::read_playlist`].
 
 pub mod browse;
@@ -14,9 +15,10 @@ pub mod search;
 pub mod tags;
 pub mod tree;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::lyrics::index::{IndexedLyrics, LyricsIndex, LyricsResults};
 use crate::model::Track;
 use m3u::PlaylistFile;
 use tags::TagIndex;
@@ -56,6 +58,8 @@ pub struct Library {
     playlists: Vec<LocalPlaylist>,
     /// Playlists A–Z by name.
     playlists_sorted: Vec<PlaylistId>,
+    /// Lyrics of the tracks that have them (see [`scan::ScanOptions`]).
+    lyrics: LyricsIndex<TrackId>,
 }
 
 impl Library {
@@ -66,6 +70,7 @@ impl Library {
             by_path: HashMap::new(),
             playlists: Vec::new(),
             playlists_sorted: Vec::new(),
+            lyrics: LyricsIndex::new(),
         }
     }
 
@@ -148,6 +153,57 @@ impl Library {
         Some(id)
     }
 
+    /// Adds lyrics the scan read, for tracks it already delivered (by
+    /// path; lyrics of an unknown path are dropped). The scan sends each
+    /// track's lyrics at most once.
+    pub fn add_lyrics(&mut self, lyrics: impl IntoIterator<Item = (PathBuf, IndexedLyrics)>) {
+        for (path, lyrics) in lyrics {
+            let Some(id) = self.by_path.get(&path).copied() else {
+                continue;
+            };
+            self.lyrics.insert(id, lyrics);
+        }
+    }
+
+    pub fn lyrics(&self) -> &LyricsIndex<TrackId> {
+        &self.lyrics
+    }
+
+    /// Searches the lyrics (see [`LyricsIndex::search`]): the first
+    /// `limit` matches in browse order (as local search lists tracks),
+    /// and the total. Left out, so no track shows twice beside a local
+    /// search for the same `query`: every track that search matches
+    /// ([`search::search`]'s own rule, so also tracks the scan added
+    /// after it ran and those past its cap), and the tracks in `exclude`.
+    pub fn search_lyrics(
+        &self,
+        query: &str,
+        exclude: &HashSet<TrackId>,
+        limit: usize,
+    ) -> LyricsResults<TrackId> {
+        if self.lyrics.is_empty() {
+            return LyricsResults::default();
+        }
+        let root = self.tree.root_path();
+        let needle = search::needle(query);
+        let skip = |id: &TrackId| {
+            exclude.contains(id)
+                || (!needle.is_empty() && search::matches(self.tree.track(*id), root, &needle))
+        };
+        // Each track's place in browse order (one walk of the tree).
+        let mut rank = vec![u32::MAX; self.tree.len()];
+        let mut next = 0u32;
+        self.tree.for_each_id(self.tree.root(), |id| {
+            if let Some(slot) = rank.get_mut(id.index()) {
+                *slot = next;
+            }
+            next += 1;
+        });
+        let place = |id: &TrackId| rank.get(id.index()).copied().unwrap_or(u32::MAX);
+        self.lyrics
+            .search(query, skip, limit, |a, b| place(a).cmp(&place(b)))
+    }
+
     /// Every playlist, A–Z.
     pub fn playlists(&self) -> &[PlaylistId] {
         &self.playlists_sorted
@@ -219,6 +275,55 @@ mod tests {
             Some(Path::new("/music/b/2.flac"))
         );
         assert_eq!(library.track_id_by_path(Path::new("/music/c.flac")), None);
+    }
+
+    #[test]
+    fn lyrics_search_leaves_out_what_local_search_lists() {
+        use crate::lyrics::{index::IndexedLyrics, parse};
+        let titled = |path: &str, title: &str| {
+            Track::local(
+                path.into(),
+                TrackMetadata {
+                    title: Some(title.into()),
+                    ..TrackMetadata::default()
+                },
+            )
+        };
+        let mut library = Library::new("/m".into());
+        library.extend([
+            titled("/m/a.flac", "Here Comes the Sun"),
+            titled("/m/b.flac", "Morning"),
+            titled("/m/sunny/c.flac", "Evening"),
+            titled("/m/d.flac", "Night"),
+        ]);
+        let lyrics = |text: &str| IndexedLyrics::new(&parse(text)).unwrap();
+        library.add_lyrics([
+            ("/m/a.flac".into(), lyrics("here comes the sun")),
+            ("/m/b.flac".into(), lyrics("the sun is up")),
+            ("/m/sunny/c.flac".into(), lyrics("sun goes down")),
+            ("/m/d.flac".into(), lyrics("no sun at night")),
+            ("/m/unknown.flac".into(), lyrics("sun")),
+        ]);
+        let titles = |exclude: &HashSet<TrackId>| {
+            let found = library.search_lyrics(" SUN ", exclude, 50);
+            let titles: Vec<String> = found
+                .matches
+                .iter()
+                .map(|m| library.track(m.key).title.clone())
+                .collect();
+            (titles, found.total)
+        };
+        // The title match and the path match are local search's results.
+        assert_eq!(
+            titles(&HashSet::new()),
+            (vec!["Morning".to_owned(), "Night".to_owned()], 2)
+        );
+        let night = library.track_id_by_path(Path::new("/m/d.flac")).unwrap();
+        assert_eq!(
+            titles(&HashSet::from([night])),
+            (vec!["Morning".to_owned()], 1)
+        );
+        assert_eq!(library.lyrics().len(), 4);
     }
 
     #[test]

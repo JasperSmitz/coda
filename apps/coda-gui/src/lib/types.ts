@@ -241,6 +241,23 @@ export interface SearchResults {
   totalTracks: number;
 }
 
+/** One part of a lyric snippet; `matched` parts are the search phrase. */
+export interface SnippetPart {
+  text: string;
+  matched: boolean;
+}
+
+export interface LyricsMatch {
+  track: Track;
+  snippet: SnippetPart[];
+}
+
+/** A lyrics search: at most 50 matches, and how many there are in all. */
+export interface LyricsSearch {
+  matches: LyricsMatch[];
+  total: number;
+}
+
 export type LocalAlbumOrder = "name" | "artist";
 export type AlbumSort = "name" | "artist" | "newest" | "frequent" | "recent" | "random";
 

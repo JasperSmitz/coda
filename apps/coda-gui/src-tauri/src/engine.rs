@@ -1354,7 +1354,7 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
     let commands = engine.start(sources, problem, restored, now);
     io.send(commands);
     if let Some(dir) = engine.music_dir() {
-        io.scan = Some(scan::spawn_scan(dir));
+        io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }
     if let Some(client) = engine.client().cloned() {
         io.ping = Some(spawn_ping(client.clone()));
@@ -1377,6 +1377,7 @@ mod context;
 mod history;
 mod library;
 pub use history::HistoryMsg;
+use library::library_scan_options;
 
 #[cfg(test)]
 mod tests;

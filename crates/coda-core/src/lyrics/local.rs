@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::Path;
 
 use lofty::config::ParseOptions;
+use lofty::file::TaggedFile;
 use lofty::prelude::TaggedFileExt;
 use lofty::probe::Probe;
 use lofty::tag::ItemKey;
@@ -49,7 +50,7 @@ pub fn read_local(path: &Path) -> Result<Option<Lyrics>, Error> {
     if from_tags.is_some() {
         return Ok(from_tags);
     }
-    Ok(sidecar(path))
+    Ok(read_sidecar(path))
 }
 
 /// The best lyrics in the file's tags; see [`read_local`].
@@ -73,6 +74,12 @@ fn tag_lyrics(path: &Path) -> Option<Lyrics> {
             return None;
         }
     };
+    from_tagged(&tagged)
+}
+
+/// The best lyrics in an already read file's tags (see [`read_local`]):
+/// the scan reads them from the tags it parses anyway.
+pub(crate) fn from_tagged(tagged: &TaggedFile) -> Option<Lyrics> {
     let primary = tagged.primary_tag();
     let tags = primary.into_iter().chain(
         tagged
@@ -105,7 +112,7 @@ fn tag_lyrics(path: &Path) -> Option<Lyrics> {
 /// [`MAX_LYRICS_BYTES`]; invalid UTF-8 is replaced. Anything else (a FIFO,
 /// a device, a directory) is never opened for reading, so it cannot block;
 /// the open is non-blocking as well, against a swap after the check.
-fn sidecar(path: &Path) -> Option<Lyrics> {
+pub(crate) fn read_sidecar(path: &Path) -> Option<Lyrics> {
     let sidecar = path.with_extension("lrc");
     if sidecar == path {
         return None;

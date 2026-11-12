@@ -1,17 +1,20 @@
 //! Song lyrics: the [`Lyrics`] model, an LRC parser ([`parse`]) and the
 //! reader for a local file's lyrics ([`read_local`]). Navidrome lyrics are
-//! fetched by [`crate::navidrome::Client::lyrics`].
+//! fetched by [`crate::navidrome::Client::lyrics`]. [`index`] searches
+//! lyrics.
 //!
 //! Lyrics come from tags, sidecar files and servers, so they are
 //! untrusted: the text is capped at [`MAX_LYRICS_BYTES`], the lines at
 //! [`MAX_LINES`] and each line at [`MAX_LINE_CHARS`], and no input makes
 //! the parser panic.
 
+pub mod index;
 mod local;
 
 use std::time::Duration;
 
 pub use local::{Error, read_local};
+pub(crate) use local::{from_tagged, read_sidecar};
 
 /// Upper bound on the lyrics text read or parsed: longer text is cut (on
 /// a character boundary) before parsing.

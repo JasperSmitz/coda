@@ -3,10 +3,13 @@
 //! and folder tree (as Coda's local browser shows them).
 
 use coda_core::cover::CoverKey;
+use std::collections::HashSet;
+
 use coda_core::library::search;
 use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId};
 use coda_core::library::tree::TrackId;
 use coda_core::library::{Library, PlaylistId};
+use coda_core::lyrics::index::{DEFAULT_LIMIT, Snippet};
 use coda_core::model::thousands;
 
 use super::dto::*;
@@ -311,4 +314,69 @@ pub fn search(
         tracks,
         total_tracks,
     })
+}
+
+/// Lyrics matching `query`, leaving out every track the local search for
+/// `query` matches (`Library::search_lyrics`) and the tracks in `exclude`
+/// (the ids of the songs the main search listed; the mechanism Navidrome
+/// will need), so no track shows twice. At
+/// most [`DEFAULT_LIMIT`] in browse order, and the total. Ids from
+/// another library generation make the search stale; malformed ones are
+/// ignored, and only the first [`search::MAX_RESULTS`] are read.
+pub fn lyrics_search(
+    view: LocalView<'_>,
+    query: &str,
+    exclude: &[String],
+    covers: &CoverService,
+) -> Result<LyricsSearchDto, BrowseError> {
+    let query = super::cap_query(query);
+    let mut skip = HashSet::new();
+    for id in exclude.iter().take(search::MAX_RESULTS) {
+        match parse_local_id(id, view.generation) {
+            Ok(n) if (n as usize) < view.library.len() => {
+                skip.insert(TrackId(n));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind == BrowseErrorKind::Stale => return Err(error),
+            Err(_) => {}
+        }
+    }
+    let found = view.library.search_lyrics(&query, &skip, DEFAULT_LIMIT);
+    Ok(LyricsSearchDto {
+        matches: found
+            .matches
+            .into_iter()
+            .map(|m| LyricsMatchDto {
+                track: track_dto(view.library.track(m.key), Some(&view), covers),
+                snippet: snippet_parts(&m.snippet),
+            })
+            .collect(),
+        total: found.total,
+    })
+}
+
+/// `snippet` split at its highlight boundaries.
+pub(crate) fn snippet_parts(snippet: &Snippet) -> Vec<SnippetPartDto> {
+    let chars: Vec<char> = snippet.text.chars().collect();
+    let mut parts = Vec::new();
+    let mut at = 0;
+    let mut push = |range: std::ops::Range<usize>, matched: bool| {
+        if range.start < range.end {
+            parts.push(SnippetPartDto {
+                text: chars[range].iter().collect(),
+                matched,
+            });
+        }
+    };
+    for range in &snippet.highlights {
+        let (start, end) = (range.start.min(chars.len()), range.end.min(chars.len()));
+        if start < at {
+            continue;
+        }
+        push(at..start, false);
+        push(start..end, true);
+        at = end;
+    }
+    push(at..chars.len(), false);
+    parts
 }

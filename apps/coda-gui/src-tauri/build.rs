@@ -1,6 +1,8 @@
 fn main() {
     // Our commands, declared so each needs an explicit `allow-<command>`
-    // permission in `capabilities/` (nothing is allowed by default).
+    // permission in `capabilities/` (nothing is allowed by default). Keep
+    // in step with `generate_handler!` in `src/lib.rs` and
+    // `capabilities/default.json`: `tests/acl.rs` checks all three.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "intent",
         "snapshot",
@@ -21,6 +23,7 @@ fn main() {
         "local_playlists",
         "local_playlist",
         "local_search",
+        "local_lyrics_search",
         "navidrome_artists",
         "navidrome_artist",
         "navidrome_artist_tracks",
