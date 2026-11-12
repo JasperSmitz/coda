@@ -1,8 +1,10 @@
 // Search (`/` or Ctrl+F): a debounced query against the active source,
 // results grouped into artists, albums and tracks, with a link to search
 // the other source instead. Enter on a track plays the matching tracks
-// from it. Local searches add a Lyrics section, asked for once the main
-// results are in (so their songs are left out of it).
+// from it. A Lyrics section follows, asked for once the main results are
+// in (so their songs are left out of it): the local library's lyrics, or
+// the Navidrome lyrics index (with a note while it is still being built;
+// absent when the index is off).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
@@ -68,7 +70,7 @@ export function SearchView({ entry, source, query }: Props) {
             placeholder={
               source === "local"
                 ? "Artists, albums, tracks or lyrics in the local library"
-                : "Artists, albums, tracks in Navidrome"
+                : "Artists, albums, tracks or lyrics in Navidrome"
             }
             value={text}
             spellCheck={false}
@@ -124,17 +126,16 @@ function SourceResults({
   // the previous query's are still returned).
   const mainDone = load.state !== "loading" && load.key === mainKey;
 
-  // Lyrics: local only, once this query's results are in, without their
-  // songs (the backend also leaves out every track local search matches).
-  // One lyrics search per query.
+  // Lyrics: once this query's results are in, without their songs (the
+  // local backend also leaves out every track local search matches). One
+  // lyrics search per query.
   const lyricsQuery =
-    source === "local" && mainDone && results && [...query].length >= MIN_LYRICS_CHARS
-      ? query
-      : null;
-  const exclude = lyricsQuery === null ? [] : localIds(tracks);
-  const lyricsKey = `lyrics:${lyricsQuery ?? ""}:${exclude.join(",")}`;
+    mainDone && results && [...query].length >= MIN_LYRICS_CHARS ? query : null;
+  const exclude = lyricsQuery === null ? [] : songIds(tracks);
+  const lyricsKey = `lyrics:${source}:${lyricsQuery ?? ""}:${exclude.join(",")}`;
   const lyrics = useLoad<LyricsSearch | null>(
-    () => (lyricsQuery === null ? Promise.resolve(null) : browse.localLyrics(lyricsQuery, exclude)),
+    () =>
+      lyricsQuery === null ? Promise.resolve(null) : browse.lyrics(source, lyricsQuery, exclude),
     lyricsKey,
   );
   const lyricsDone = lyrics.state !== "loading" && lyrics.key === lyricsKey;
@@ -212,6 +213,13 @@ function SourceResults({
       {lyricsFound && lyricMatches.length > 0 && (
         <LyricsSection found={lyricsFound} scroller={scroller} />
       )}
+      {lyricsFound?.indexing && (
+        <p className="secondary search-note">
+          {lyricsFound.indexing.total === 0
+            ? "The lyrics index is still loading."
+            : `Lyrics are still being indexed (${lyricsFound.indexing.done.toLocaleString()} of ${plural(lyricsFound.indexing.total, "song")}).`}
+        </p>
+      )}
       {results && !empty && source === "navidrome" && (
         <p className="secondary search-note">
           The server returns at most 20 artists, 20 albums and 50 tracks.{" "}
@@ -224,9 +232,12 @@ function SourceResults({
   );
 }
 
-/** The local ids of `tracks` (those in the library). */
-function localIds(tracks: Track[]): string[] {
-  return tracks.flatMap((t) => (t.source.kind === "local" && t.source.id ? [t.source.id] : []));
+/** The ids of `tracks`: local ids (those in the library) or Navidrome song ids. */
+function songIds(tracks: Track[]): string[] {
+  return tracks.flatMap((t) => {
+    if (t.source.kind === "local") return t.source.id ? [t.source.id] : [];
+    return [t.source.songId];
+  });
 }
 
 /** Lyric matches: rows like the songs above, with the lyric line below. */

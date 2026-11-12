@@ -352,6 +352,7 @@ pub fn lyrics_search(
             })
             .collect(),
         total: found.total,
+        indexing: None,
     })
 }
 

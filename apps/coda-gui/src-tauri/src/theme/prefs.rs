@@ -1,7 +1,8 @@
 //! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
 //! from Coda's shared `config.toml`: the theme mode and names, accent
 //! overrides per theme, the visualizer's colours, and the source the
-//! sidebar browses. Written atomically;
+//! sidebar browses, and the Navidrome lyrics index switch. Written
+//! atomically;
 //! an unreadable or invalid file means the defaults (and is kept as
 //! `settings.toml.bad` when it is next replaced).
 
@@ -56,6 +57,9 @@ pub struct Prefs {
     /// keeps it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::history::SourceKind>,
+    /// "Index lyrics for search" (Settings › Navidrome; see
+    /// `crate::lyrics_index`). Changed only by `lyrics_index_set_enabled`.
+    pub lyrics_index: bool,
 }
 
 impl Default for Prefs {
@@ -68,6 +72,7 @@ impl Default for Prefs {
             accents: BTreeMap::new(),
             visualizer: VisualizerColors::Accent,
             source: None,
+            lyrics_index: true,
         }
     }
 }

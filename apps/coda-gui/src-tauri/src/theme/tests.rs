@@ -480,3 +480,48 @@ fn ghostty_theme_paths_are_read_directly() {
     assert_eq!(token(&a.dark, "bg").value, "#123456");
     assert_eq!(a.dark.name, "Kanso Zen");
 }
+
+#[test]
+fn the_lyrics_switch_defaults_on_and_survives_appearance_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("settings.toml");
+    // A file from before the switch existed.
+    std::fs::write(&path, "mode = \"single\"\ntheme = \"Coda\"\n").unwrap();
+    let (loaded, bad) = prefs::load(Some(&path));
+    assert!(!bad);
+    assert!(loaded.lyrics_index);
+    // Off is saved and read back.
+    let off = prefs::Prefs {
+        lyrics_index: false,
+        ..loaded.clone()
+    };
+    prefs::save(&path, &off, false).unwrap();
+    assert!(!prefs::load(Some(&path)).0.lyrics_index);
+    // An appearance change from the UI (which may not send it) keeps it.
+    let mut current = off.clone();
+    let from_ui = prefs::Prefs {
+        mode: prefs::Mode::System,
+        ..prefs::Prefs::default()
+    };
+    commands::replace_appearance(&mut current, from_ui);
+    assert!(!current.lyrics_index);
+    assert_eq!(current.mode, prefs::Mode::System);
+}
+
+#[tokio::test]
+async fn save_prefs_writes_only_a_change() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("settings.toml");
+    let f = fixture();
+    let appearance = Appearance::new(f.dirs.clone(), Some(path.clone()), Vec::new());
+    // Unchanged: nothing written.
+    commands::save_prefs(&appearance, |p| p.lyrics_index = true)
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    commands::save_prefs(&appearance, |p| p.lyrics_index = false)
+        .await
+        .unwrap();
+    assert!(!prefs::load(Some(&path)).0.lyrics_index);
+    assert!(!appearance.state.lock().await.0.lyrics_index);
+}

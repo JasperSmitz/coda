@@ -1,5 +1,6 @@
 // Settings: music folder (native picker), Navidrome server (test, save,
-// disconnect), cover art and scrobbling, and Appearance (themes; the
+// disconnect; the lyrics index's status, Rebuild and switch), cover art
+// and scrobbling, and Appearance (themes; the
 // GUI's own settings.toml, see views/settings/AppearanceSection). Every change is saved to Coda's
 // config.toml (shared with the TUI) and the keychain by the backend, then
 // applied live.
@@ -7,8 +8,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
 import { AppearanceSection } from "./settings/AppearanceSection";
-import { errorText, settingsApi } from "../lib/ipc";
-import type { ServerInput, Settings, Snapshot } from "../lib/types";
+import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
+import type { LyricsIndexStatus, ServerInput, Settings, Snapshot } from "../lib/types";
 
 /** A second click within this time disconnects. */
 const DISCONNECT_CONFIRM_MS = 3000;
@@ -227,6 +228,7 @@ function ServerSection({ settings, snapshot, reload }: { settings: Settings; sna
           server here.
         </p>
       )}
+      {server.kind !== "notConfigured" && !form && <LyricsIndexBlock />}
       {form && (
         <form className="settings-form" onSubmit={submit}>
           <ServerFields value={form} onChange={setForm} disabled={busy} autoFocus />
@@ -242,6 +244,115 @@ function ServerSection({ settings, snapshot, reload }: { settings: Settings; sna
       )}
       <StatusLine status={status} />
     </section>
+  );
+}
+
+const PAUSE_TEXT = {
+  unreachable: "Paused: couldn’t reach the server",
+  rejected: "Paused: the server rejected the login",
+  failed: "Paused: the server’s answers could not be used",
+} as const;
+
+/** The index's status line, or null when there is nothing to say. */
+function lyricsIndexText(s: LyricsIndexStatus): string | null {
+  const songs = (n: number) => `${n.toLocaleString()} song${n === 1 ? "" : "s"}`;
+  switch (s.state) {
+    case "off":
+    case "noServer":
+      return null;
+    case "loading":
+      return "Loading the index…";
+    case "idle":
+      return `${songs(s.checked)} indexed`;
+    case "albums":
+      return s.todo > 0
+        ? `Indexing… ${s.done.toLocaleString()} of ${s.todo.toLocaleString()} albums`
+        : "Indexing… listing albums";
+    case "songs":
+      // Of all songs, as the search page's note counts them.
+      return `Indexing… ${s.checked.toLocaleString()} of ${songs(s.songs)}`;
+    case "upToDate":
+      return `${songs(s.checked)} indexed · up to date`;
+    case "paused":
+      return `${PAUSE_TEXT[s.pause ?? "unreachable"]} · ${songs(s.checked)} indexed`;
+  }
+}
+
+/** What the live region announces: the state, not every count. */
+const STATE_ANNOUNCEMENT: Record<LyricsIndexStatus["state"], string> = {
+  off: "Lyrics search off",
+  noServer: "",
+  loading: "Loading the lyrics index",
+  idle: "Lyrics index loaded",
+  albums: "Indexing lyrics",
+  songs: "Indexing lyrics",
+  upToDate: "Lyrics index up to date",
+  paused: "Lyrics indexing paused",
+};
+
+/** Settings › Navidrome › Lyrics search: status, Rebuild and the switch. */
+function LyricsIndexBlock() {
+  const [status, setStatus] = useState<LyricsIndexStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const unlisten = onLyricsIndex((s) => live && setStatus(s));
+    lyricsIndexApi
+      .status()
+      .then((s) => live && setStatus((current) => current ?? s))
+      .catch((e: unknown) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+  if (!status || status.state === "noServer") return null;
+  const enabled = status.state !== "off";
+  const text = lyricsIndexText(status);
+  const act = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    work()
+      .catch((e: unknown) => setError(errorText(e)))
+      .finally(() => setBusy(false));
+  };
+  const syncing = status.state === "albums" || status.state === "songs" || status.state === "loading";
+  return (
+    <div className="settings-subsection" role="group" aria-labelledby="settings-lyrics-index">
+      <h3 id="settings-lyrics-index">Lyrics search</h3>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          onChange={(e) => {
+            const on = e.target.checked;
+            // The answer is the new status, so the switch never snaps back.
+            act(() => lyricsIndexApi.setEnabled(on).then(setStatus));
+          }}
+        />
+        <span>
+          Index lyrics for search
+          <span className="secondary"> — kept on this computer, so Navidrome lyrics can be searched</span>
+        </span>
+      </label>
+      {enabled && (
+        <div className="settings-row">
+          {/* The counts change up to 4 times a second: not live. */}
+          <div className="secondary" aria-live="off">
+            {text}
+          </div>
+          <button className="button" onClick={() => act(lyricsIndexApi.rebuild)} disabled={busy || syncing}>
+            Rebuild index
+          </button>
+        </div>
+      )}
+      <span className="visually-hidden" role="status">
+        {STATE_ANNOUNCEMENT[status.state]}
+      </span>
+      {error && <p className="settings-status settings-status-error">{error}</p>}
+    </div>
   );
 }
 

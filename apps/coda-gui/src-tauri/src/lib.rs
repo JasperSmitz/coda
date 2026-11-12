@@ -14,6 +14,7 @@ pub mod dto;
 pub mod engine;
 pub mod history;
 pub mod lyrics;
+pub mod lyrics_index;
 pub mod media;
 pub mod playlists;
 pub mod settings;
@@ -84,6 +85,8 @@ fn begin_quit(app: &AppHandle) {
         app.state::<playlists::PlaylistEditor>()
             .finish(playlists::EDIT_GRACE)
             .await;
+        // The lyrics sync stops; what it has is saved (bounded).
+        app.state::<BrowseHandle>().lyrics().shutdown().await;
         engine.shutdown().await;
         tracing::info!("coda-app quitting");
         app.state::<Quit>().done.store(true, Ordering::SeqCst);
@@ -122,6 +125,23 @@ fn watch_signals(app: AppHandle) {
         }
     });
 }
+
+/// Sends the lyrics index's status as the `lyrics-index` event when it
+/// changes, at most every [`LYRICS_INDEX_EVENT_GAP`] (the latest wins).
+fn forward_lyrics_index(
+    app: AppHandle,
+    mut changes: tokio::sync::watch::Receiver<lyrics_index::LyricsIndexDto>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while changes.changed().await.is_ok() {
+            let status = *changes.borrow_and_update();
+            let _ = app.emit("lyrics-index", status);
+            tokio::time::sleep(LYRICS_INDEX_EVENT_GAP).await;
+        }
+    });
+}
+
+const LYRICS_INDEX_EVENT_GAP: std::time::Duration = std::time::Duration::from_millis(250);
 
 static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 
@@ -166,7 +186,10 @@ pub fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "coda-app starting");
     let covers = Arc::new(CoverService::new(paths.cover_cache.clone()));
     let protocol_covers = covers.clone();
-    let browse = BrowseHandle::new(covers.clone());
+    let browse = BrowseHandle::with_lyrics(
+        covers.clone(),
+        lyrics_index::LyricsIndex::new(paths.lyrics_cache.clone()),
+    );
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -184,6 +207,13 @@ pub fn run() {
             // The main window is created here (not from the config) so the
             // chosen theme's colours are set before its first paint.
             app.manage(theme::Appearance::from_process());
+            let lyrics_on = app
+                .state::<theme::Appearance>()
+                .state
+                .try_lock()
+                .map_or(true, |state| state.0.lyrics_index);
+            browse.lyrics().set_enabled_at_start(lyrics_on);
+            forward_lyrics_index(app.handle().clone(), browse.lyrics().subscribe());
             let startup = app.state::<theme::Appearance>().startup();
             let window_config = app
                 .config()
@@ -253,6 +283,10 @@ pub fn run() {
             browse::commands::navidrome_playlist,
             browse::commands::navidrome_random_songs,
             browse::commands::navidrome_search,
+            browse::commands::navidrome_lyrics_search,
+            lyrics_index::lyrics_index_status,
+            lyrics_index::lyrics_index_rebuild,
+            lyrics_index::lyrics_index_set_enabled,
             playlists::commands::playlist_create,
             playlists::commands::playlist_save_queue,
             playlists::commands::playlist_add,

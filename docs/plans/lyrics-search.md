@@ -13,6 +13,7 @@
   2. **A lyric match plays like any song row.** There is no "play from this line" and no seeking to the matched line.
   3. **A separate "Lyrics" section on the search page, below the existing sections.** A track already listed in that search's songs results is left out of the Lyrics section, so no track appears twice.
   4. **Size:** a cache and memory use of a couple of dozen MB for a large library is acceptable.
+  5. **Memory (owner, 2026-11-12, after slice 2 measured 77 MB for 20,000 songs that all have lyrics):** slim it down. Keep one copy of the lyrics text in memory (the original), and search it with a fast fold-on-the-fly matcher that gives exactly the results of fold-then-find. Store song details compactly. Target: about 40 MB worst case, about 50 ms or less per search at 20,000 songs (release).
 - **Scope change to record:** AGENTS.md lists "database-backed library indexing" as future work unless approved. This is a cache file, not a database, but it is persistent indexing, so record the approval:
   - update the AGENTS.md line;
   - update VISION.md;

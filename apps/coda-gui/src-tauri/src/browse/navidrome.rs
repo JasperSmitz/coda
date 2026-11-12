@@ -7,12 +7,17 @@ use coda_core::model::thousands;
 use coda_core::navidrome::browse::MAX_ALBUMS;
 use coda_core::navidrome::browse::read_only_reason;
 use coda_core::navidrome::{Access, Album, AlbumSort, Artist, Hidden, Playlist};
+use std::collections::HashSet;
+
+use coda_core::lyrics::index::DEFAULT_LIMIT;
 use tokio::task::JoinSet;
 
 use super::dto::*;
+use super::local::snippet_parts;
 use super::{BrowseHandle, cap_query, check_id, remote_cover, track_dto};
 use crate::cover::CoverService;
 use crate::dto::TrackDto;
+use crate::lyrics_index::IndexStateDto;
 
 const HIDDEN_WHY: &str = "(missing files or other libraries)";
 
@@ -288,6 +293,59 @@ impl BrowseHandle {
             .fetch(|c| async move { c.random_songs().await })
             .await?;
         Ok(tracks_dto(&tracks, self.covers()))
+    }
+
+    /// Lyrics matches in the server's lyrics cache (see
+    /// `crate::lyrics_index`), leaving out the song ids in `exclude` (the
+    /// main search's songs). Empty when the index is off. `indexing`
+    /// whenever songs are left to check (building, waiting for the launch
+    /// sync or paused), and `{0, 0}` while the cache is still loading.
+    /// Runs on a blocking thread.
+    pub async fn navidrome_lyrics_search(
+        &self,
+        query: String,
+        exclude: Vec<String>,
+    ) -> Result<LyricsSearchDto, BrowseError> {
+        let empty = LyricsSearchDto {
+            matches: Vec::new(),
+            total: 0,
+            indexing: None,
+        };
+        let Some(store) = self.lyrics().store() else {
+            let loading = self.lyrics().status().state == IndexStateDto::Loading;
+            return Ok(LyricsSearchDto {
+                indexing: loading.then_some(IndexingDto { done: 0, total: 0 }),
+                ..empty
+            });
+        };
+        let handle = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let query = cap_query(&query);
+            let skip: HashSet<String> = exclude
+                .into_iter()
+                .take(coda_core::library::search::MAX_RESULTS)
+                .filter(|id| check_id(id).is_ok())
+                .collect();
+            let found = store.search(&query, &skip, DEFAULT_LIMIT);
+            let status = store.status();
+            LyricsSearchDto {
+                matches: found
+                    .matches
+                    .into_iter()
+                    .map(|m| LyricsMatchDto {
+                        track: track_dto(&m.key, None, handle.covers()),
+                        snippet: snippet_parts(&m.snippet),
+                    })
+                    .collect(),
+                total: found.total,
+                indexing: (status.checked < status.songs).then_some(IndexingDto {
+                    done: status.checked,
+                    total: status.songs,
+                }),
+            }
+        })
+        .await
+        .map_err(|_| BrowseError::new(BrowseErrorKind::Failed, "The lyrics search failed"))
     }
 
     /// `search3`: artists, albums and songs.

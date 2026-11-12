@@ -150,6 +150,16 @@ pub struct SnippetPartDto {
 pub struct LyricsSearchDto {
     pub matches: Vec<LyricsMatchDto>,
     pub total: usize,
+    /// Navidrome only: the index is still being built (songs checked so
+    /// far of those known), so more matches may come.
+    pub indexing: Option<IndexingDto>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexingDto {
+    pub done: usize,
+    pub total: usize,
 }
 
 /// A local context the engine resolves and plays itself (`playLocal`),

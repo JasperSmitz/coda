@@ -54,6 +54,9 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 - Owner-approved scope change (VISION.md): lyrics in Now Playing, from the file's tags or a sidecar `.lrc` and from Navidrome. Slice 1 (core): `coda_core::lyrics` and `Client::lyrics`. Slice 2 (GUI): `now_playing_lyrics`, `useLyrics`, the lyrics-mode layout and `l`. Runtime checks: `scripts/smoke.md` "Lyrics mode".
 - Not wanted: word-level highlighting, ID3 `SYLT`, editing lyrics, online providers, choosing a language, a TUI lyrics screen, remembering the mode across launches.
 
+### Lyrics search (2026-11-12, `docs/plans/lyrics-search.md`)
+- Slice 1 (local): `coda_core::lyrics::index`, lyrics from the scan, `local_lyrics_search`, the search page's Lyrics section. Slice 2 (Navidrome): `coda_core::lyrics::cache` (a per-server cache file and its background sync; ADR 0007), `navidrome_lyrics_search`, the `lyrics_index_*` commands and the Settings › Navidrome "Lyrics search" block. Runtime checks: `scripts/smoke.md` "Lyrics search" (LS1–LS10).
+
 ### Later
 - Drag tracks/albums from browse views onto the queue.
 - Letter-key jump in the artist list; Navidrome album headers with year when opened via "Go to album".

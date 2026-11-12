@@ -111,6 +111,11 @@ impl Engine {
         // Browse commands use the new client; ids and results of the old
         // one are stale (a new client generation).
         self.browse.set_client(client.clone());
+        // The lyrics index starts over for the new server now (and
+        // deletes the old server's cache on a disconnect).
+        self.browse
+            .lyrics()
+            .set_server(client.clone(), crate::lyrics_index::Start::Changed);
         // The history shows this server's entries (and picks) only.
         // A listen in progress keeps the contexts it started with (their
         // server's).

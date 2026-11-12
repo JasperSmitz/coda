@@ -139,8 +139,11 @@ export const browse = {
       : cached(`search:${query}`, () => call("navidrome_search", { query }));
   },
 
-  /** Local lyrics matching `query`, leaving out the songs in `exclude`. */
-  localLyrics(query: string, exclude: string[]): Promise<LyricsSearch> {
-    return call("local_lyrics_search", { query, exclude });
+  /** Lyrics matching `query` in `source`, leaving out the songs in `exclude`. */
+  lyrics(source: SourceKind, query: string, exclude: string[]): Promise<LyricsSearch> {
+    return call(source === "local" ? "local_lyrics_search" : "navidrome_lyrics_search", {
+      query,
+      exclude,
+    });
   },
 };

@@ -84,10 +84,7 @@ pub async fn appearance_set(
     prefs: Prefs,
 ) -> Result<AppearanceDto> {
     change(&appearance, move |_, current| {
-        // The browsed source is not an appearance setting.
-        let source = current.source;
-        *current = prefs;
-        current.source = source;
+        replace_appearance(current, prefs);
         Ok(())
     })
     .await
@@ -227,15 +224,33 @@ pub async fn ui_source_set(
     appearance: State<'_, Appearance>,
     source: crate::history::SourceKind,
 ) -> Result<()> {
+    save_prefs(&appearance, |prefs| prefs.source = Some(source)).await
+}
+
+/// `current` with the appearance settings of `prefs`; the browsed source
+/// and the lyrics switch are not appearance settings, so they stay.
+pub(crate) fn replace_appearance(current: &mut Prefs, prefs: Prefs) {
+    let (source, lyrics_index) = (current.source, current.lyrics_index);
+    *current = prefs;
+    current.source = source;
+    current.lyrics_index = lyrics_index;
+}
+
+/// Changes one non-appearance preference with `edit` and saves the file
+/// (its other settings stay). Nothing is written when nothing changed.
+pub(crate) async fn save_prefs(
+    appearance: &Appearance,
+    edit: impl FnOnce(&mut Prefs),
+) -> Result<()> {
     let mut state = appearance.state.lock().await;
-    if state.0.source == Some(source) {
+    let (mut next, bad) = state.clone();
+    edit(&mut next);
+    if next == state.0 {
         return Ok(());
     }
     let Some(path) = appearance.prefs_path.clone() else {
         return Err("There is no config folder; set HOME or XDG_CONFIG_HOME".into());
     };
-    let (mut next, bad) = state.clone();
-    next.source = Some(source);
     let saved = next.clone();
     blocking(move || prefs::save(&path, &saved, bad))
         .await?

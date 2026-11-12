@@ -252,10 +252,27 @@ export interface LyricsMatch {
   snippet: SnippetPart[];
 }
 
-/** A lyrics search: at most 50 matches, and how many there are in all. */
+/**
+ * A lyrics search: at most 50 matches, and how many there are in all.
+ * `indexing` (Navidrome only): songs are left to check, `done` of `total`
+ * checked so far (`total` 0: the index is still loading).
+ */
 export interface LyricsSearch {
   matches: LyricsMatch[];
   total: number;
+  indexing: { done: number; total: number } | null;
+}
+
+/** The Navidrome lyrics index (`LyricsIndexDto`, the `lyrics-index` event). */
+export interface LyricsIndexStatus {
+  state: "off" | "noServer" | "loading" | "idle" | "albums" | "songs" | "upToDate" | "paused";
+  pause: "unreachable" | "rejected" | "failed" | null;
+  /** This sync's progress in albums (state `albums`); see `checked`/`songs` for songs. */
+  done: number;
+  todo: number;
+  songs: number;
+  checked: number;
+  withLyrics: number;
 }
 
 export type LocalAlbumOrder = "name" | "artist";
@@ -392,6 +409,8 @@ export interface AppearancePrefs {
   visualizer: VisualizerColors;
   /** The browsed source (kept by the backend; see `sourceApi`). */
   source?: SourceKind | null;
+  /** Index Navidrome lyrics for search (kept by the backend; see `lyricsIndexApi`). */
+  lyricsIndex?: boolean;
 }
 
 export interface Appearance {

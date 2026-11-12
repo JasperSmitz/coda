@@ -145,3 +145,15 @@ pub async fn navidrome_random_songs(browse: State<'_, BrowseHandle>) -> Result<V
 pub async fn navidrome_search(browse: State<'_, BrowseHandle>, query: String) -> Result<SearchDto> {
     browse.navidrome_search(query).await
 }
+
+/// Lyrics matches from the server's lyrics cache, separate from
+/// [`navidrome_search`] so the main results never wait for it. `exclude`:
+/// the song ids the main search returned.
+#[tauri::command]
+pub async fn navidrome_lyrics_search(
+    browse: State<'_, BrowseHandle>,
+    query: String,
+    exclude: Vec<String>,
+) -> Result<LyricsSearchDto> {
+    browse.navidrome_lyrics_search(query, exclude).await
+}

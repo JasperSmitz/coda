@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lyrics-index-set-enabled"
+description = "Enables the lyrics_index_set_enabled command without any pre-configured scope."
+commands.allow = ["lyrics_index_set_enabled"]
+
+[[permission]]
+identifier = "deny-lyrics-index-set-enabled"
+description = "Denies the lyrics_index_set_enabled command without any pre-configured scope."
+commands.deny = ["lyrics_index_set_enabled"]

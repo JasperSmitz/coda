@@ -165,9 +165,9 @@ fn blank_lyrics_take_no_entry() {
     assert_eq!(IndexedLyrics::new(&parse("")), None);
     assert_eq!(IndexedLyrics::new(&parse("[00:01]\n[00:02]")), None);
     let lyrics = indexed("[00:01]a\n[00:02]\n[00:03]b");
-    assert_eq!(&*lyrics.folded, "a b");
+    assert_eq!(fold(lyrics.text()), "a b");
     assert_eq!(&*lyrics.text, "a\nb");
-    assert_eq!(lyrics.heap_bytes(), 3 + 3);
+    assert_eq!(lyrics.heap_bytes(), 3);
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn untrimmed_and_blank_lines_are_trimmed_and_skipped() {
         timed: false,
     };
     let indexed = IndexedLyrics::new(&lyrics).unwrap();
-    assert_eq!(&*indexed.folded, "hello world again");
+    assert_eq!(fold(indexed.text()), "hello world again");
     assert_eq!(&*indexed.text, "hello\nworld\nagain");
     let mut index = LyricsIndex::new();
     index.insert(0u32, indexed);
@@ -210,29 +210,113 @@ fn untrimmed_and_blank_lines_are_trimmed_and_skipped() {
     assert_eq!(IndexedLyrics::new(&blank), None);
 }
 
-/// A verse of about 1.5 KB that varies per track, so the text is not one
-/// repeated string.
-fn synthetic_lyrics(i: usize) -> String {
-    let words = [
-        "night",
-        "river",
-        "golden",
-        "Shadow",
-        "dancing",
-        "Heart’s",
-        "fire",
-        "“echo”",
-        "slowly",
-        "morning",
-        "Stranger",
-        "window",
-        "silver",
-        "train",
-        "falling",
-        "à",
-        "été",
-        "rain",
-    ];
+/// Words of the synthetic lyrics in three scripts: mostly Latin (with
+/// curly quotes and accents), Cyrillic and CJK.
+pub(crate) const LATIN: &[&str] = &[
+    "night",
+    "river",
+    "golden",
+    "Shadow",
+    "dancing",
+    "Heart’s",
+    "fire",
+    "“echo”",
+    "slowly",
+    "morning",
+    "Stranger",
+    "window",
+    "silver",
+    "train",
+    "falling",
+    "à",
+    "été",
+    "rain",
+];
+pub(crate) const CYRILLIC: &[&str] = &[
+    "ночь",
+    "река",
+    "золото",
+    "Тень",
+    "танцы",
+    "Сердце",
+    "огонь",
+    "«эхо»",
+    "медленно",
+    "утро",
+    "Незнакомец",
+    "окно",
+    "серебро",
+    "поезд",
+    "падение",
+    "дождь",
+    "и",
+    "я",
+];
+pub(crate) const CJK: &[&str] = &[
+    "夜",
+    "川",
+    "金色の",
+    "影",
+    "踊る",
+    "心の",
+    "火",
+    "「こだま」",
+    "ゆっくり",
+    "朝",
+    "見知らぬ人",
+    "窓",
+    "銀",
+    "列車",
+    "落ちる",
+    "雨",
+    "愛",
+    "君",
+];
+
+/// Each corpus with its queries, and whether each matches: no match in
+/// its script, an English phrase (no match), and some that match.
+type Corpus = (
+    &'static str,
+    &'static [&'static str],
+    &'static [(&'static str, bool)],
+);
+pub(crate) const CORPORA: &[Corpus] = &[
+    (
+        "Latin",
+        LATIN,
+        &[
+            ("zzz no match", false),
+            ("i love you", false),
+            ("golden river night", true),
+            ("heart's fire", true),
+            ("ÉTÉ", true),
+        ],
+    ),
+    (
+        "Cyrillic",
+        CYRILLIC,
+        &[
+            ("жжж нет", false),
+            ("i love you", false),
+            ("ночь река", true),
+            ("СЕРДЦЕ огонь", true),
+        ],
+    ),
+    (
+        "CJK",
+        CJK,
+        &[
+            ("存在しない", false),
+            ("i love you", false),
+            ("心の 火", true),
+            ("金色の 夜", true),
+        ],
+    ),
+];
+
+/// A verse of about 1.5 KB from `words` that varies per track, so the
+/// text is not one repeated string.
+pub(crate) fn synthetic_lyrics_in(words: &[&str], i: usize) -> String {
     let mut out = String::new();
     let mut n = i as u64;
     while out.len() < 1_500 {
@@ -248,35 +332,52 @@ fn synthetic_lyrics(i: usize) -> String {
     out
 }
 
-/// 50,000 tracks with about 1.5 KB of lyrics each. Prints the build time,
-/// the memory held and the time per search (run with `--release
-/// --ignored --nocapture` for the real figures); the assertions only
-/// catch something pathological.
+/// 50,000 tracks with about 1.5 KB of lyrics each, in each corpus.
+/// Prints the build time, the memory held and the time per search (run
+/// with `--release --ignored --nocapture` for the real figures); the
+/// assertions only catch something pathological, and a non-Latin script
+/// much slower than Latin.
 #[test]
 #[ignore = "timing: run in release with --nocapture"]
 fn fifty_thousand_tracks_of_lyrics_search_quickly() {
-    let texts: Vec<String> = (0..50_000).map(synthetic_lyrics).collect();
-    let text_bytes: usize = texts.iter().map(String::len).sum();
-    let start = Instant::now();
-    let mut index = LyricsIndex::new();
-    for (i, text) in texts.iter().enumerate() {
-        index.insert(i as u32, indexed(text));
-    }
-    let built = start.elapsed();
-    println!(
-        "index 50,000 tracks ({:.1} MB of lyrics): {built:?}, {:.1} MB held",
-        text_bytes as f64 / 1e6,
-        index.heap_bytes() as f64 / 1e6
-    );
-    drop(texts);
-    let mut worst = Duration::ZERO;
-    for query in ["zzz no match", "golden river night", "heart's fire", "ÉTÉ"] {
+    let mut worst_by_corpus = Vec::new();
+    for (name, words, queries) in CORPORA {
+        let texts: Vec<String> = (0..50_000).map(|i| synthetic_lyrics_in(words, i)).collect();
+        let text_bytes: usize = texts.iter().map(String::len).sum();
         let start = Instant::now();
-        let results = search(&index, query);
-        let elapsed = start.elapsed();
-        worst = worst.max(elapsed);
-        println!("search {query:?}: {} matches in {elapsed:?}", results.total);
+        let mut index = LyricsIndex::new();
+        for (i, text) in texts.iter().enumerate() {
+            index.insert(i as u32, indexed(text));
+        }
+        let built = start.elapsed();
+        println!(
+            "{name}: index 50,000 tracks ({:.1} MB of lyrics): {built:?}, {:.1} MB held",
+            text_bytes as f64 / 1e6,
+            index.heap_bytes() as f64 / 1e6
+        );
+        drop(texts);
+        // The first search builds the reverse fold table, once per process.
+        search(&index, "warm up");
+        let mut worst = Duration::ZERO;
+        for (query, matches) in *queries {
+            let start = Instant::now();
+            let results = search(&index, query);
+            let elapsed = start.elapsed();
+            worst = worst.max(elapsed);
+            println!(
+                "  search {query:?}: {} matches in {elapsed:?}",
+                results.total
+            );
+            assert_eq!(results.total > 0, *matches, "{name} {query}");
+        }
+        worst_by_corpus.push(worst);
     }
-    assert!(search(&index, "heart's fire").total > 0);
-    assert!(worst < Duration::from_secs(5), "{worst:?}");
+    let latin = worst_by_corpus[0];
+    for worst in &worst_by_corpus {
+        assert!(*worst < Duration::from_secs(5), "{worst:?}");
+        assert!(
+            *worst <= latin * 4 + Duration::from_millis(20),
+            "{worst:?} vs Latin {latin:?}"
+        );
+    }
 }

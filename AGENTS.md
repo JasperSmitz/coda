@@ -73,7 +73,7 @@ Report commands actually run; never claim a check passed without running it. Whe
 
 ## Scope and documentation discipline
 - Work in small vertical slices, one frontend or one core change at a time, with both frontends still building.
-- HEART integration, daemons, equalizers, elaborate plugin systems, and database-backed library indexing are future work unless explicitly approved.
+- HEART integration, daemons, equalizers, elaborate plugin systems, and database-backed library indexing are future work unless explicitly approved. Approved exception: the Navidrome lyrics search cache, a per-server cache file (ADR 0007).
 - Update `docs/ARCHITECTURE.md` (or the GUI's) for shipped structural changes, `docs/ROADMAP.md` / `apps/coda-gui/docs/PLAN.md` for milestone status, and `docs/decisions/` for consequential choices.
 - Add `docs/LESSONS.md` entries only for demonstrated, reusable lessons, not routine status notes.
 - Keep responses concise: decisions, important trade-offs, verification, and next actions.

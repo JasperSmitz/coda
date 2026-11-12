@@ -1,24 +1,33 @@
 //! Lyrics search: an in-memory index of lyrics text, searched by
 //! substring on a folded form (see [`fold`]).
 //!
-//! Each entry keeps its lyrics twice: the folded text that searches run
-//! over, and the original lines (trimmed, joined by `\n`) that snippets
-//! are cut from, by folding those lines again for the few results shown.
-//! Memory is about twice the lyrics text; tracks without lyrics take no
-//! space. Timestamps and word stamps are never kept (the
+//! Each entry keeps its lyrics once: the original lines (trimmed, joined
+//! by `\n`). A search folds as it compares (module `find`: a byte scan for
+//! the chars that fold to the needle's first char, then a compare that
+//! folds char by char), with exactly the result of folding the text and
+//! finding the needle in it; snippets fold the few lines shown again.
+//! Only the first `limit` matches are put in order (selected, then
+//! sorted), the rest only counted.
+//! Memory is the lyrics text plus a few bytes per entry; tracks without
+//! lyrics take no space. Timestamps and word stamps are never kept (the
 //! text comes from a parsed [`Lyrics`]).
 //!
-//! A search is linear over every entry's folded text. With 50,000
-//! entries of about 1.5 KB each (76 MB of lyrics), a search took 30 ms
-//! when nothing matched and at most 40 ms in all, in a release build on
-//! an x86-64 Linux desktop; the index held 148 MB (1.95 times the text)
-//! and took 0.76 s to build (the `#[ignore]`d test in `tests.rs`). So it
-//! runs on a blocking thread per search, without a token index.
+//! A search is linear over every entry's text. With 50,000 entries of
+//! about 1.5 KB each (76–77 MB of lyrics, the text held once), in a
+//! release build on an x86-64 Linux desktop (the `#[ignore]`d test in
+//! `tests.rs`): Latin script 7–58 ms a search, Cyrillic 19–100 ms (worst
+//! for a query starting with a letter as common as `н`), CJK 13–33 ms;
+//! 0.17–0.25 s to build. The first search of a process also builds the
+//! fold tables (a few ms). For a Navidrome cache of
+//! 20,000 songs, see [`super::cache`]. So it runs on a blocking thread
+//! per search, without a token index.
 
 use std::cmp::Ordering;
 use std::ops::Range;
 
 use super::Lyrics;
+
+mod find;
 
 /// Shortest query searched, in chars after folding: shorter ones give no
 /// results and do no work.
@@ -32,9 +41,8 @@ pub const SNIPPET_SEPARATOR: &str = " / ";
 /// [`IndexedLyrics::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedLyrics {
-    /// Every non-blank line folded, joined by one space.
-    folded: Box<str>,
-    /// Every non-blank line trimmed, joined by `\n`.
+    /// Every non-blank line trimmed, joined by `\n`. Folded, it is every
+    /// line folded joined by one space (lines are trimmed and non-blank).
     text: Box<str>,
 }
 
@@ -43,7 +51,6 @@ impl IndexedLyrics {
     /// lines). Each line is trimmed (and split at any line break inside
     /// it); blank ones are left out.
     pub fn new(lyrics: &Lyrics) -> Option<Self> {
-        let mut folded = String::new();
         let mut text = String::new();
         let lines = lyrics
             .lines
@@ -53,27 +60,37 @@ impl IndexedLyrics {
             .filter(|line| !line.is_empty());
         for line in lines {
             if !text.is_empty() {
-                folded.push(' ');
                 text.push('\n');
             }
-            fold_into(line, &mut folded, |_, _| {});
             text.push_str(line);
         }
         if text.is_empty() {
             return None;
         }
         Some(Self {
-            folded: folded.into_boxed_str(),
             text: text.into_boxed_str(),
         })
     }
 
     /// Bytes held on the heap (for the memory figure).
     pub fn heap_bytes(&self) -> usize {
-        self.folded.len() + self.text.len()
+        self.text.len()
     }
 
-    /// The snippet for the match at `range` of `folded`. The lines are
+    /// The lyrics as kept: every non-blank line trimmed, joined by `\n`
+    /// (what a cache stores; [`IndexedLyrics::from_text`] reads it back).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Lyrics stored by [`IndexedLyrics::text`], read back as untrusted
+    /// input: capped like any lyrics text (see [`super::MAX_LYRICS_BYTES`],
+    /// [`super::MAX_LINES`], [`super::MAX_LINE_CHARS`]). `None` when blank.
+    pub fn from_text(text: &str) -> Option<Self> {
+        Self::new(&Lyrics::untimed(super::cap_text(text).split('\n')))
+    }
+
+    /// The snippet for the match at `range` of the folded text. The lines are
     /// folded again, one by one, to find the ones the match spans (cheap:
     /// only for the results shown).
     fn snippet(&self, range: Range<usize>) -> Snippet {
@@ -82,7 +99,7 @@ impl IndexedLyrics {
         let mut exact = true;
         let mut chars_before = 0;
         let mut scratch = String::new();
-        // Where the current line starts in `folded`.
+        // Where the current line starts in the folded text.
         let mut start = 0;
         for line in self.text.split('\n') {
             scratch.clear();
@@ -180,6 +197,40 @@ impl<K: Clone> LyricsIndex<K> {
         self.entries.push((key, lyrics));
     }
 
+    /// Adds `key`'s lyrics and returns their slot (for [`Self::set`] and
+    /// [`Self::swap_remove`]).
+    pub fn push(&mut self, key: K, lyrics: IndexedLyrics) -> usize {
+        self.entries.push((key, lyrics));
+        self.entries.len() - 1
+    }
+
+    /// The lyrics in `slot`.
+    pub fn get(&self, slot: usize) -> Option<&IndexedLyrics> {
+        self.entries.get(slot).map(|(_, l)| l)
+    }
+
+    /// Replaces the lyrics in `slot`.
+    pub fn set(&mut self, slot: usize, lyrics: IndexedLyrics) {
+        if let Some(entry) = self.entries.get_mut(slot) {
+            entry.1 = lyrics;
+        }
+    }
+
+    /// Removes the entry in `slot`; the last entry moves there (its key
+    /// is returned, so a caller tracking slots can update it).
+    pub fn swap_remove(&mut self, slot: usize) -> Option<&K> {
+        if slot >= self.entries.len() {
+            return None;
+        }
+        self.entries.swap_remove(slot);
+        self.entries.get(slot).map(|(k, _)| k)
+    }
+
+    /// Every entry, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &IndexedLyrics)> {
+        self.entries.iter().map(|(k, l)| (k, l))
+    }
+
     /// Tracks with lyrics.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -189,8 +240,8 @@ impl<K: Clone> LyricsIndex<K> {
         self.entries.is_empty()
     }
 
-    /// Bytes held on the heap by the entries (lyrics, line starts and the
-    /// entry list; not what the keys own).
+    /// Bytes held on the heap by the entries (lyrics and the entry list;
+    /// not what the keys own).
     pub fn heap_bytes(&self) -> usize {
         self.entries.capacity() * size_of::<(K, IndexedLyrics)>()
             + self
@@ -216,22 +267,35 @@ impl<K: Clone> LyricsIndex<K> {
         if needle.chars().count() < MIN_QUERY_CHARS {
             return LyricsResults::default();
         }
-        let mut found: Vec<(usize, usize)> = self
+        let finder = find::Needle::new(&needle);
+        let mut found: Vec<(usize, find::Found)> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(i, (key, lyrics))| {
-                let at = lyrics.folded.find(&needle)?;
+                let at = finder.find(&lyrics.text)?;
                 (!skip(key)).then_some((i, at))
             })
             .collect();
         let total = found.len();
-        found.sort_by(|a, b| order(&self.entries[a.0].0, &self.entries[b.0].0));
+        // Only the first `limit` are needed in order: select them, then
+        // sort those (ties by insertion order, as a stable sort gives).
+        let cmp = |a: &(usize, find::Found), b: &(usize, find::Found)| {
+            order(&self.entries[a.0].0, &self.entries[b.0].0).then(a.0.cmp(&b.0))
+        };
+        if limit == 0 {
+            found.clear();
+        } else if found.len() > limit {
+            found.select_nth_unstable_by(limit - 1, cmp);
+            found.truncate(limit);
+        }
+        found.sort_unstable_by(cmp);
         let matches = found
             .into_iter()
             .take(limit)
             .map(|(i, at)| {
                 let (key, lyrics) = &self.entries[i];
+                let at = at.folded_offset(&lyrics.text);
                 LyricsMatch {
                     key: key.clone(),
                     snippet: lyrics.snippet(at..at + needle.len()),

@@ -1,13 +1,14 @@
 //! Song lyrics: the [`Lyrics`] model, an LRC parser ([`parse`]) and the
 //! reader for a local file's lyrics ([`read_local`]). Navidrome lyrics are
 //! fetched by [`crate::navidrome::Client::lyrics`]. [`index`] searches
-//! lyrics.
+//! lyrics; [`cache`] keeps a Navidrome server's lyrics on disk for it.
 //!
 //! Lyrics come from tags, sidecar files and servers, so they are
 //! untrusted: the text is capped at [`MAX_LYRICS_BYTES`], the lines at
 //! [`MAX_LINES`] and each line at [`MAX_LINE_CHARS`], and no input makes
 //! the parser panic.
 
+pub mod cache;
 pub mod index;
 mod local;
 

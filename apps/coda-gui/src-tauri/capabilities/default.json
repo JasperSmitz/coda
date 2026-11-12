@@ -32,6 +32,7 @@
     "allow-navidrome-playlist",
     "allow-navidrome-random-songs",
     "allow-navidrome-search",
+    "allow-navidrome-lyrics-search",
     "allow-playlist-create",
     "allow-playlist-save-queue",
     "allow-playlist-add",
@@ -54,6 +55,9 @@
     "allow-home-history",
     "allow-home-daily-picks",
     "allow-now-playing-lyrics",
+    "allow-lyrics-index-status",
+    "allow-lyrics-index-rebuild",
+    "allow-lyrics-index-set-enabled",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

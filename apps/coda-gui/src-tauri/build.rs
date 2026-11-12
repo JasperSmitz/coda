@@ -33,6 +33,7 @@ fn main() {
         "navidrome_playlist",
         "navidrome_random_songs",
         "navidrome_search",
+        "navidrome_lyrics_search",
         // Navidrome playlist edits.
         "playlist_create",
         "playlist_save_queue",
@@ -58,6 +59,10 @@ fn main() {
         "home_history",
         "home_daily_picks",
         "now_playing_lyrics",
+        // The Navidrome lyrics index (Settings › Navidrome).
+        "lyrics_index_status",
+        "lyrics_index_rebuild",
+        "lyrics_index_set_enabled",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

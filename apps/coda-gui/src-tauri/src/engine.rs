@@ -291,6 +291,10 @@ impl Engine {
             }
         };
         self.browse.set_client(sources.client.clone());
+        // The lyrics index loads now and syncs a little later.
+        self.browse
+            .lyrics()
+            .set_server(sources.client.clone(), crate::lyrics_index::Start::Launch);
         self.server = sources.client.as_ref().map(crate::history::server_id);
         self.client = sources.client;
         self.scrobble_setting = sources.scrobble;
