@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Cover } from "../components/Cover";
+import { NameLink } from "../components/NameLink";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
 import { BackIcon, ForwardIcon, PlayIcon, ShuffleIcon } from "../components/icons";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
@@ -14,6 +15,7 @@ import { browse } from "../lib/browse";
 import {
   albumContext,
   artistContext,
+  openRoute,
   playFrom,
   playlistContext,
   playLocal,
@@ -58,6 +60,8 @@ interface Card {
   path: string[] | null;
   name: string;
   subtitle: string | null;
+  /** Albums: the artist (the subtitle), when known. */
+  artistId: string | null;
   coverUrl: string | null;
   /** An album card's listing data (the album view's hint). */
   album?: Album;
@@ -76,6 +80,7 @@ function fromAlbum(source: SourceKind, album: Album): Card {
     path: null,
     name: album.name,
     subtitle: album.artist,
+    artistId: album.artistId,
     coverUrl: album.coverUrl,
     album,
   };
@@ -87,7 +92,7 @@ function itemAlbum(card: Card): Album {
       id: card.id,
       name: card.name,
       artist: card.subtitle,
-      artistId: null,
+      artistId: card.artistId,
       year: null,
       trackCount: null,
       durationMs: null,
@@ -189,6 +194,9 @@ function CardTile({
   showKind: boolean;
 }) {
   const sub = [showKind ? KIND_LABEL[card.kind] : null, card.subtitle].filter(Boolean).join(" · ");
+  // An album's known artist is a link below the button (no button in a button).
+  const artistId = card.kind === "album" ? card.artistId : null;
+  const artist = card.subtitle;
   return (
     <li className="home-card">
       <button
@@ -211,8 +219,24 @@ function CardTile({
           className={`home-card-cover ${card.kind === "artist" ? "round" : ""}`}
         />
         <span className="album-title">{card.name}</span>
-        <span className="album-sub secondary">{sub || " "}</span>
+        {(artistId === null || !artist) && (
+          <span className="album-sub secondary">{sub || " "}</span>
+        )}
       </button>
+      {artistId !== null && artist && (
+        <div className="album-sub card-sub-link secondary">
+          {showKind && `${KIND_LABEL[card.kind]} · `}
+          <NameLink
+            inRow
+            label={`Go to artist ${artist}`}
+            onGo={() =>
+              openRoute({ kind: "artist", source: card.source, id: artistId, name: artist })
+            }
+          >
+            {artist}
+          </NameLink>
+        </div>
+      )}
       <button
         className="icon-button home-card-play"
         tabIndex={-1}

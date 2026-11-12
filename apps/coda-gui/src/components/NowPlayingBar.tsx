@@ -4,6 +4,7 @@ import { formatTime } from "../lib/format";
 import type { Progress, Repeat, Snapshot } from "../lib/types";
 import { useProgress } from "../state/store";
 import { Cover } from "./Cover";
+import { ArtistAlbumLine } from "./NameLink";
 import { Slider } from "./Slider";
 import {
   NextIcon,
@@ -62,7 +63,7 @@ export function NowPlayingBar({
                 {playing.title}
               </div>
               <div className="bar-artist secondary">
-                {[playing.artist, playing.album].filter(Boolean).join(" — ")}
+                <ArtistAlbumLine track={playing} />
               </div>
             </div>
           </>
