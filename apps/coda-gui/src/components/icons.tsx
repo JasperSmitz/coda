@@ -83,6 +83,14 @@ export const QueueIcon = (p: IconProps) => (
     <path d="M17 15v6l4-3z" fill="currentColor" stroke="none" />
   </Icon>
 );
+/** Lyrics: lines of text beside a small microphone. */
+export const LyricsIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 6h9M3 11h7M3 16h5" />
+    <rect x="15" y="4" width="5" height="9" rx="2.5" />
+    <path d="M13 11a4.5 4.5 0 0 0 9 0M17.5 15.5V20" />
+  </Icon>
+);
 export const CloseIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M6 6l12 12M18 6L6 18" />

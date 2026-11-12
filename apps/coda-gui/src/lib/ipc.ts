@@ -8,6 +8,7 @@ import type {
   AppearancePrefs,
   ColorEdits,
   Intent,
+  Lyrics,
   Progress,
   ResolvedTheme,
   ServerInput,
@@ -15,6 +16,7 @@ import type {
   Snapshot,
   SourceKind,
   ThemeSummary,
+  TrackRef,
   VisualizerFrame,
 } from "./types";
 
@@ -55,6 +57,14 @@ export function onProgress(handler: (progress: Progress) => void): Promise<Unlis
 
 export function onVisualizer(handler: (frame: VisualizerFrame) => void): Promise<UnlistenFn> {
   return listen<VisualizerFrame>("visualizer", (event) => handler(event.payload));
+}
+
+/**
+ * The lyrics of the playing track: `null` when it has none; rejects with a
+ * message when they could not be read or fetched.
+ */
+export function fetchLyrics(track: TrackRef): Promise<Lyrics | null> {
+  return invoke<Lyrics | null>("now_playing_lyrics", { track });
 }
 
 export type CoverSize = "small" | "large";

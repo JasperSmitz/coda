@@ -22,6 +22,7 @@ The Cargo target dir is at the repository root (`../../target`); a debug binary 
 - [ ] **Queue:** add, play next, reorder by drag, remove, clear (asks first), shuffle upcoming (items 10–12, Q1–Q5).
 - [ ] **Controls and seek:** Space, `n`/`p`, ←/→ (∓5 s), drag and click on the seek bar, volume slider and `+`/`-` (also while stopped), repeat `r` (items 5–8).
 - [ ] **Visualizer:** `f` opens Now Playing; bars move with the music and fall to rest on pause (item 18).
+- [ ] **Lyrics mode:** in Now Playing, `l` moves the player left and shows the lyrics; the highlight follows the song (items L1–L8).
 - [ ] **Artwork:** covers in the bar, queue, album grid and Now Playing; Settings → Cover art off shows placeholders, on brings them back (items 9, 27).
 - [ ] **Settings persistence:** change the music folder, cover art or scrobbling, quit, relaunch: the settings, the queue, the volume and the window size are restored (items 7, 13, 23–27, 32).
 - [ ] **Quit, no mpv left:** close the window while playing: the app exits within ~2 s and `pgrep -x mpv` shows nothing new (also after `kill -TERM`, and on Linux `kill -KILL`, items 13–14b).
@@ -85,6 +86,16 @@ P9. Keyboard only: every dialog takes Enter/Esc, Tab stays inside it, focus retu
 17c. Shortcuts in Now Playing: Space, n/p, ←/→, +/-, `r` (repeat button follows, no toast), `q`, Esc, `f`. Toasts appear bottom-right (no bar below them).
 18. Visualizer: bars move with the music, fall smoothly to silence within ~1 s after pause. In the log, `SetVisualizer(true)` is only sent while the view is open; minimise the window (or switch to another macOS Space) → readings stop, restore → they resume. With "Reduce motion" on (macOS Accessibility / GNOME), the bars update a few times a second instead of animating.
 19. Nothing playing: "Nothing playing", no visualizer.
+
+## Lyrics mode (`l` in Now Playing)
+L1. A local FLAC with timed lyrics: press `f`, then `l` (also once with the focus on the play button, via Tab: after `l` the focus ring is still on it): the player moves into a column on the left (cover, title, artist — album, timeline, transport with volume, visualizer, Up next) and the lyrics appear in the middle. The lyrics button (top right, left of the queue button) shows its on state; its tooltip is "Lyrics (l)". The highlight follows the song; seeking on the timeline (and ←/→) jumps the highlight; clicking a line seeks there. Pause: the highlight stays. The visualizer still reads well at the column's width.
+L2. Scroll the lyrics by hand (wheel, dragging the scrollbar, or click the lyrics and use ↑/↓/Page keys): auto-follow pauses, then after ~4 s it eases back to the current line. Drag the scrollbar slowly for more than 4 s, and also hold it still for more than 4 s: it is never pulled back while you hold it; it eases back ~4 s after you let go.
+L3. An instrumental track (no `LYRICS` tag): "No lyrics for this track", and the layout stays put. Skip between tracks with and without lyrics: nothing jumps (also skipping from late in one timed track to another timed track played earlier, so cached: the new lyrics start at the top, not scrolled to the old position; likewise a Navidrome track while it buffers), and lyrics of the previous track never show for the next one. A track with plain (untimed) lyrics shows them as text to scroll, none highlighted.
+L4. A Navidrome track with lyrics, and one without ("No lyrics for this track"). With the server unreachable: "Couldn't load lyrics" (not "No lyrics").
+L5. Open the queue (`q`) in lyrics mode: on a wide window (≥1180px) three columns (player, lyrics, queue), the current line still about a third of the way down; on a narrower one the panel overlays the lyrics.
+L6. At the minimum window size (900×600) the column layout still fits: cover, title, timeline, transport and the lyrics all usable (the left column scrolls if the window is short). There is no stacked layout.
+L7. Turn on reduced motion (macOS Accessibility / GNOME "Reduce animation"): toggling `l` does not animate, the lyrics jump to the current line instead of scrolling smoothly.
+L8. Leave Now Playing (`f`/Esc) and come back: lyrics mode is still on. `l` outside Now Playing does nothing. Restart the app: it is off.
 
 ## Media controls
 20. macOS: Control Center / the menu-bar Now Playing widget shows title, artist, album, cover and a moving position; its play/pause, next/previous and the scrubber work; the keyboard's media keys (F7–F9) work while another app is focused.

@@ -6,6 +6,7 @@ import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
+import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
 import { nav, routeFor, sourceReplaced, useNav, viewFor } from "./state/nav";
@@ -66,6 +67,7 @@ function useBrowseGenerations(snapshot: Snapshot | null) {
     if (!last) return;
     if (server !== last.server) {
       clearBrowseCache();
+      clearLyricsCache();
       sourceReplaced("navidrome");
     }
     if (library !== last.library) sourceReplaced("local");
@@ -101,6 +103,9 @@ export default function App() {
   const [layoutQueueOpen, toggleLayoutQueue] = useStoredFlag(QUEUE_OPEN_KEY, true);
   const [npQueueOpen, toggleNpQueue] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
   const [nowPlaying, setNowPlaying] = useState(false);
+  // Lyrics mode in Now Playing: sticky for the session, off at launch.
+  const [npLyrics, setNpLyrics] = useState(false);
+  const toggleNpLyrics = useCallback(() => setNpLyrics((on) => !on), []);
   const toggleNowPlaying = useCallback(() => setNowPlaying((open) => !open), []);
   const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
   const showView = (next: ViewId) => {
@@ -132,6 +137,7 @@ export default function App() {
     started,
     onToggleQueue: toggleQueue,
     onToggleNowPlaying: onboarding ? undefined : toggleNowPlaying,
+    onToggleLyrics: immersive && !onboarding ? toggleNpLyrics : undefined,
   });
 
   if (onboarding) {
@@ -165,6 +171,8 @@ export default function App() {
             onClose={closeNowPlaying}
             queueOpen={npQueueOpen}
             onToggleQueue={toggleNpQueue}
+            lyricsMode={npLyrics}
+            onToggleLyrics={toggleNpLyrics}
             queuePanel={queuePanel}
           />
           {snapshot.phase === "starting" && <div className="starting secondary">Starting…</div>}

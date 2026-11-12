@@ -10,6 +10,7 @@ Coda is a keyboard-first Rust TUI music player with a calm, compact interface. I
 - Control play/pause, next/previous, seek and volume without leaving the terminal.
 - Keep the interface responsive during file scans and network operations.
 - Gracefully handle missing files, disconnected servers and playback failures.
+- In the desktop app, show the playing track's lyrics in Now Playing (lyrics mode), from the file's tags or a sidecar `.lrc` and from Navidrome; timed lyrics follow the song. No online lyrics providers.
 
 ## Guiding principles
 1. **Music first:** reliable playback outweighs visual effects.
@@ -19,4 +20,4 @@ Coda is a keyboard-first Rust TUI music player with a calm, compact interface. I
 5. **Small and understandable:** choose the simplest architecture that supports the current milestone.
 
 ## Not in the initial scope
-Lyrics, smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified. Cover art is M9 and a full-screen now-playing view is proposed as M10; endless play and context-aware autoplay are noted for later.
+Smart playlists, equalizer, library deduplication, automatic downloads, offline caching, MPRIS, daemon mode, music recommendations, and HEART integration. Revisit them only when justified. Lyrics were moved into scope on 2026-11-12 (lyrics in the GUI's Now Playing, from tags and Navidrome; `docs/plans/lyrics.md`); a TUI lyrics screen is not planned. Cover art is M9 and a full-screen now-playing view is proposed as M10; endless play and context-aware autoplay are noted for later.

@@ -4,6 +4,7 @@
 
 import { useSyncExternalStore } from "react";
 import { fetchSnapshot, onProgress, onSnapshot } from "../lib/ipc";
+import { playingEntryChanged } from "../lib/progress";
 import type { Progress, QueueItem, Snapshot } from "../lib/types";
 
 export interface AppState {
@@ -35,6 +36,13 @@ const progress = createStore<Progress>({ positionMs: null, durationMs: null });
 
 function applySnapshot(snapshot: Snapshot) {
   const current = app.get();
+  // Another entry is heard: the last position was the previous track's.
+  // Cleared first, so nothing sees the new track with the old position
+  // (the engine's next progress report can be up to 100 ms away, and has
+  // no position until the new load starts).
+  if (playingEntryChanged(current.snapshot, snapshot)) {
+    progress.set({ positionMs: null, durationMs: null });
+  }
   app.set({ snapshot, queue: snapshot.queue ?? current.queue });
 }
 

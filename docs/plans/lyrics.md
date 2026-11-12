@@ -106,7 +106,7 @@ New module `coda_core::lyrics`:
 - **Lyrics on:**
   - **The left column:** the player column is about 300–340 px wide. The cover is at most the column width.
   - **The other two areas:** the lyrics fill the middle (text max ~40 ch, centred in its area). With the queue open, the queue takes its own column on the right instead of overlaying, when the window is wide enough (≥ ~1200 px). Below that it overlays as now.
-  - **Narrow windows:** below ~900 px, the layout stacks. A compact player row (small cover, title, timeline, transport) goes on top and the lyrics fill the rest.
+  - **Narrow windows:** below ~900 px, the layout stacks. A compact player row (small cover, title, timeline, transport) goes on top and the lyrics fill the rest. *(Dropped in implementation, 2026-11-12: the window's minimum width is 900 px (`tauri.conf.json`), which always leaves room for the column beside the lyrics, so stacking is unnecessary and its CSS would be dead code.)*
 - **Visualizer and "Up next":** both stay in the left column. Check that the visualizer still reads well at the column's width. It is drawn from the same measured bands, and only the drawn bar count may change. Don't change the band measurement.
 - **The toggle:** the toolbar's lyrics button shows its on state. Its tooltip is "Lyrics (l)". The aria-label names the state.
 - **Moving between layouts:** a short transition (reduced motion: none).
@@ -134,7 +134,7 @@ New module `coda_core::lyrics`:
 3. An instrumental track: "No lyrics for this track", and the layout stays put. Skipping between tracks with and without lyrics doesn't jump.
 4. A Navidrome track with lyrics, and one without.
 5. Open the queue in lyrics mode, wide and narrow: three columns when wide, the overlay when narrow.
-6. Shrink the window below ~900 px: the stacked layout.
+6. At the minimum window width (900 px), the column layout still fits. *(The stacked layout was dropped; see Layout.)*
 7. Turn on reduced motion: no animated scrolling or transitions.
 8. Leave Now Playing and come back: lyrics mode is still on. Restart the app: it is off.
 
