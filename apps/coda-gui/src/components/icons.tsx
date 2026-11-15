@@ -114,6 +114,13 @@ export const AlbumIcon = (p: IconProps) => (
     <circle cx="12" cy="12" r="2" />
   </Icon>
 );
+/** Genres: a label tag. */
+export const GenreIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3a1 1 0 0 1 0 1.4l-7.3 7.3a1 1 0 0 1-1.4 0z" />
+    <circle cx="8" cy="8" r="1.5" />
+  </Icon>
+);
 export const FolderIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M3.5 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />

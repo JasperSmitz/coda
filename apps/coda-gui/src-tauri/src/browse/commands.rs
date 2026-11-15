@@ -42,6 +42,18 @@ pub async fn local_album(browse: State<'_, BrowseHandle>, id: String) -> Result<
 }
 
 #[tauri::command]
+pub async fn local_genres(browse: State<'_, BrowseHandle>) -> Result<Vec<GenreDto>> {
+    browse.local(local::genres).await
+}
+
+#[tauri::command]
+pub async fn local_genre(browse: State<'_, BrowseHandle>, id: String) -> Result<GenreDetailDto> {
+    browse
+        .local(move |view, covers| local::genre(view, &id, covers))
+        .await
+}
+
+#[tauri::command]
 pub async fn local_folder(browse: State<'_, BrowseHandle>, path: Vec<String>) -> Result<FolderDto> {
     browse
         .local(move |view, covers| local::folder(view, path, covers))
@@ -121,6 +133,29 @@ pub async fn navidrome_albums(
     offset: usize,
 ) -> Result<AlbumPageDto> {
     browse.navidrome_albums(sort, offset).await
+}
+
+#[tauri::command]
+pub async fn navidrome_genres(browse: State<'_, BrowseHandle>) -> Result<Vec<GenreDto>> {
+    browse.navidrome_genres().await
+}
+
+/// `genre`: the genre's id (the server's exact value).
+#[tauri::command]
+pub async fn navidrome_genre_albums(
+    browse: State<'_, BrowseHandle>,
+    genre: String,
+    offset: usize,
+) -> Result<AlbumPageDto> {
+    browse.navidrome_genre_albums(genre, offset).await
+}
+
+#[tauri::command]
+pub async fn navidrome_genre_random_songs(
+    browse: State<'_, BrowseHandle>,
+    genre: String,
+) -> Result<Vec<TrackDto>> {
+    browse.navidrome_genre_random_songs(genre).await
 }
 
 #[tauri::command]

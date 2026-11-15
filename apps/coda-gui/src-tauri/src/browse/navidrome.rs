@@ -6,7 +6,7 @@ use coda_core::model::Track;
 use coda_core::model::thousands;
 use coda_core::navidrome::browse::MAX_ALBUMS;
 use coda_core::navidrome::browse::read_only_reason;
-use coda_core::navidrome::{Access, Album, AlbumSort, Artist, Hidden, Playlist};
+use coda_core::navidrome::{Access, Album, AlbumPage, AlbumSort, Artist, Genre, Hidden, Playlist};
 use std::collections::HashSet;
 
 use coda_core::lyrics::index::DEFAULT_LIMIT;
@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 
 use super::dto::*;
 use super::local::snippet_parts;
-use super::{BrowseHandle, cap_query, check_id, remote_cover, track_dto};
+use super::{BrowseHandle, cap_query, check_genre, check_id, remote_cover, track_dto};
 use crate::cover::CoverService;
 use crate::dto::TrackDto;
 use crate::lyrics_index::IndexStateDto;
@@ -86,6 +86,36 @@ fn playlist_dto(playlist: &Playlist, covers: &CoverService, username: &str) -> P
 
 fn tracks_dto(tracks: &[Track], covers: &CoverService) -> Vec<TrackDto> {
     tracks.iter().map(|t| track_dto(t, None, covers)).collect()
+}
+
+fn genre_dto(genre: &Genre) -> GenreDto {
+    GenreDto {
+        id: genre.query().to_owned(),
+        name: genre.name.clone(),
+        album_count: genre.album_count,
+        track_count: genre.song_count,
+    }
+}
+
+/// An album's genres from its songs, in tag order, each once (ignoring
+/// case). The songs carry cleaned names, which are also their ids here.
+/// The webview swaps each for the server's exact value from its cached
+/// genre listing (`resolveGenreLinks` in `src/lib/genres.ts`), so a value
+/// with stray spaces still opens; the cleaned name is the fallback for a
+/// genre the listing lacks.
+fn album_genres(tracks: &[Track]) -> Vec<GenreDto> {
+    let mut seen = HashSet::new();
+    tracks
+        .iter()
+        .flat_map(|t| &t.genres)
+        .filter(|g| seen.insert(g.to_lowercase()))
+        .map(|g| GenreDto {
+            id: g.clone(),
+            name: g.clone(),
+            album_count: None,
+            track_count: None,
+        })
+        .collect()
 }
 
 impl BrowseHandle {
@@ -177,6 +207,7 @@ impl BrowseHandle {
         };
         Ok(AlbumDetailDto {
             album,
+            genres: album_genres(&tracks),
             tracks: tracks_dto(&tracks, self.covers()),
         })
     }
@@ -199,15 +230,65 @@ impl BrowseHandle {
         let page = self
             .fetch(|c| async move { c.album_list(sort, offset, size).await })
             .await?;
+        Ok(self.album_page_dto(page, offset, size))
+    }
+
+    fn album_page_dto(&self, page: AlbumPage, offset: usize, size: usize) -> AlbumPageDto {
         let next = offset + page.served;
-        Ok(AlbumPageDto {
+        AlbumPageDto {
             albums: page
                 .albums
                 .iter()
                 .map(|a| album_dto(a, self.covers()))
                 .collect(),
             next_offset: (page.served >= size && next < MAX_ALBUMS).then_some(next),
-        })
+        }
+    }
+
+    /// Every genre (`getGenres`), A–Z, with the server's counts. A genre
+    /// whose exact value the genre commands would refuse ([`check_genre`]:
+    /// longer than `MAX_GENRE_CHARS`) is left out, so every listed id
+    /// opens.
+    pub async fn navidrome_genres(&self) -> Result<Vec<GenreDto>, BrowseError> {
+        let genres = self.fetch(|c| async move { c.genres().await }).await?;
+        Ok(genres
+            .iter()
+            .filter(|g| check_genre(g.query()).is_ok())
+            .map(genre_dto)
+            .collect())
+    }
+
+    /// One page of a genre's albums (`genre`: its id, the server's value)
+    /// from `offset`, paged like [`Self::navidrome_albums`].
+    pub async fn navidrome_genre_albums(
+        &self,
+        genre: String,
+        offset: usize,
+    ) -> Result<AlbumPageDto, BrowseError> {
+        check_genre(&genre)?;
+        if offset >= MAX_ALBUMS {
+            return Ok(AlbumPageDto {
+                albums: Vec::new(),
+                next_offset: None,
+            });
+        }
+        let size = ALBUM_PAGE.min(MAX_ALBUMS - offset);
+        let page = self
+            .fetch(|c| async move { c.albums_by_genre(&genre, offset, size).await })
+            .await?;
+        Ok(self.album_page_dto(page, offset, size))
+    }
+
+    /// Random songs of a genre (Shuffle on a genre page, as Shuffle all).
+    pub async fn navidrome_genre_random_songs(
+        &self,
+        genre: String,
+    ) -> Result<Vec<TrackDto>, BrowseError> {
+        check_genre(&genre)?;
+        let tracks = self
+            .fetch(|c| async move { c.random_songs_in_genre(&genre).await })
+            .await?;
+        Ok(tracks_dto(&tracks, self.covers()))
     }
 
     pub async fn navidrome_playlists(&self) -> Result<Vec<PlaylistDto>, BrowseError> {

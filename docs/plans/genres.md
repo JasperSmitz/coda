@@ -19,7 +19,7 @@
 3. **Grouping:** genres group case-insensitively and show their most common spelling, exactly like artists and albums (`TagIndex`). There is no "No genre" entry: finding untagged music is library maintenance.
 4. **What the Genres view shows:**
    - A list of genres A–Z, with album and track counts.
-   - Opening a genre shows its **albums** (an album is in a genre when any of its tracks is), sorted by artist, then album. Play and Shuffle play the whole genre.
+   - Opening a genre shows its **albums** (an album is in a genre when any of its tracks is). Local: sorted by artist, then album; Play and Shuffle play the whole genre. Navidrome (accepted deviation, slice 2): the albums come in the server's `byGenre` order, and the page has **Shuffle only** (random songs in the genre, below); playing a whole remote genre in order would need `getSongsByGenre`, which is not in this milestone.
    - **Shuffle a genre:** local shuffles every track in the genre (capped at the queue maximum, like Shuffle all). Navidrome uses `getRandomSongs` with `genre=`, 500 songs, like Shuffle all.
 5. **Sources stay separate,** like the rest of browsing: Local genres and Navidrome genres. Combining sources is the Mixes milestone's job.
 6. **Order:** core, then the GUI, then the TUI, one slice each, with both frontends building after every slice.
@@ -65,8 +65,8 @@
 - **Backend:** commands `local_genres`, `local_genre{id}`, `navidrome_genres`, `navidrome_genre_albums{genre, offset}`, `navidrome_genre_random_songs{genre}`. `GenreDto { id, name, albumCount, trackCount }`. Local genre ids use the `"<generation>:<n>"` form. `LocalContextDto::Genre{id}` so the engine resolves and shuffles a local genre itself, as it does for artists and folders.
 - **Frontend:**
   - a "Genres" sidebar entry for both sources, after Albums;
-  - a genre list view, then a genre page with its albums and Play/Shuffle buttons; `s` shuffles the genre, as on other pages;
-  - the album page shows the album's genres as small links to their genre pages.
+  - a genre list view, then a genre page with its albums and Play/Shuffle buttons; `s` shuffles the genre, as on other pages. Accepted deviation: a Navidrome genre page has Shuffle only (random songs in the genre) and lists its albums in the server's order (decision 4);
+  - the album page shows the album's genres as small links to their genre pages. On Navidrome a link is resolved against the server's genre listing (case-insensitive cleaned name → that genre's exact value), so it opens what the Genres list opens.
 - **Tests:** backend command and engine tests (local genre play and shuffle); `pnpm build` and `pnpm check:colors`. Runtime checks are handed to the owner in `scripts/smoke.md`.
 
 ## Slice 3: TUI

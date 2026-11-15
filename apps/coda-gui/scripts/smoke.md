@@ -23,6 +23,7 @@ The Cargo target dir is at the repository root (`../../target`); a debug binary 
 - [ ] **Controls and seek:** Space, `n`/`p`, ←/→ (∓5 s), drag and click on the seek bar, volume slider and `+`/`-` (also while stopped), repeat `r` (items 5–8).
 - [ ] **Visualizer:** `f` opens Now Playing; bars move with the music and fall to rest on pause (item 18).
 - [ ] **Lyrics mode:** in Now Playing, `l` moves the player left and shows the lyrics; the highlight follows the song (items L1–L8).
+- [ ] **Genres:** Local and Navidrome → Genres: the list opens; a genre shows its albums; Shuffle plays only that genre; an album page's genre tags open their genres; Navidrome Albums still pages (items G1–G9).
 - [ ] **Artwork:** covers in the bar, queue, album grid and Now Playing; Settings → Cover art off shows placeholders, on brings them back (items 9, 27).
 - [ ] **Settings persistence:** change the music folder, cover art or scrobbling, quit, relaunch: the settings, the queue, the volume and the window size are restored (items 7, 13, 23–27, 32).
 - [ ] **Quit, no mpv left:** close the window while playing: the app exits within ~2 s and `pgrep -x mpv` shows nothing new (also after `kill -TERM`, and on Linux `kill -KILL`, items 13–14b).
@@ -154,6 +155,17 @@ LS7. Add an album on the server (or a song to an album), rescan Navidrome, then 
 LS8. **Rebuild index** checks every album and song again (the count restarts at 0 of all songs) while search keeps working. Turning **Index lyrics for search** off removes the Navidrome Lyrics section and deletes the server's file in `~/.cache/coda/lyrics/`; turning it on builds it again. Disconnecting the server deletes its file too; switching to another server keeps the first server's file.
 LS9. While the index builds, browsing Navidrome (albums, artists, search) and playing Navidrome tracks stay as responsive as without it; stop the server mid-build: Settings shows "Paused: couldn't reach the server" (after about 10 failed requests), nothing else complains, and the next launch goes on. With a screen reader, the Lyrics search block announces state changes only, not every count.
 LS10. Search Navidrome lyrics in a non-Latin script (Cyrillic, Japanese, …) with a large library: results come as fast as for English lyrics.
+
+### Genres (`docs/plans/genres.md`)
+G1. Local → **Genres** (in the sidebar between Albums and Artists, with a tag icon): every tagged genre A–Z, each with "N albums · N tracks"; genres differing only in case are one row, shown in the most common spelling. A file with `Rock;Progressive Rock` in one tag counts under both. ↑/↓, PageUp/PageDown and Home/End move the selection (it stays on the same genre while a scan adds genres above it), Enter or a click opens; hovering a long name shows it in full; Backspace returns to the list at the same scroll position. `s` on the list is Shuffle all.
+G2. A local genre: its albums as a grid (by artist, then album), the eyebrow "Local library · Genre", the counts under the title. **Play** queues the genre's tracks (album by album, only that genre's tracks of a mixed album) and plays the first; **Shuffle** and `s` play them shuffled. With a genre of more than 10,000 tracks (or a test library made so), Shuffle notes "Shuffling 10,000 of N tracks". Neither adds the genre to Home's Recently played.
+G3. A local album page: the album's genres show as small tags under the artist/year line, broad genre first as tagged; a click (or Tab to it and Enter) opens that genre's page. An untagged album shows no tags row.
+G4. Rescan or change the music folder while a local genre page is open: the view reloads or returns to Home without an error about a missing genre.
+G5. Navidrome → **Genres**: the server's genres A–Z with its album and song counts. A genre opens its albums (scrolling loads more for a large genre); **Shuffle** and `s` play random songs of that genre only (check a few tracks' genres on the server); there is no Play button. A genre whose random songs come back empty shows "No songs found in this genre".
+G6. A Navidrome album page shows its genres as tags; one opens that genre's albums with the server's counts under the title, the same albums as opening it from the Genres list (also for a genre the server stores with a trailing space). A genre whose name has accents or `&` (e.g. "Drum & Bass") opens and shuffles correctly.
+G7. Queue a Navidrome album, quit and relaunch: the queue is restored (genres are saved with it; nothing visible changes).
+G8. Light and dark themes: the genre rows, the selected row and the album page's genre tags are readable, with a visible focus ring when tabbing; long genre names end in "…" on the album page, and hovering one shows the full name.
+G9. Navidrome → Albums, each of the six sorts: scrolling still loads more pages until the end; stop the server, scroll to trigger a failed page, restart it and press Retry: the loaded albums stay and loading resumes.
 
 ### Errors and states
 46. Stop the Navidrome server and open Navidrome → Artists: loading skeleton, then "Could not load" with Retry; start the server and Retry loads.

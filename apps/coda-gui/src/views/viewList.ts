@@ -2,4 +2,11 @@
 // in state/nav.ts).
 
 export type ViewId =
-  "home" | "search" | "albums" | "artists" | "playlists" | "folders" | "settings";
+  | "home"
+  | "search"
+  | "albums"
+  | "genres"
+  | "artists"
+  | "playlists"
+  | "folders"
+  | "settings";

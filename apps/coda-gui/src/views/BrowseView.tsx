@@ -7,6 +7,7 @@ import { AlbumsView } from "./AlbumsView";
 import { ArtistView } from "./ArtistView";
 import { ArtistsView } from "./ArtistsView";
 import { FolderView } from "./FolderView";
+import { GenreView, GenresView } from "./GenresView";
 import { HomeView } from "./HomeView";
 import { PlaylistView, PlaylistsView } from "./PlaylistsView";
 import { SearchView } from "./SearchView";
@@ -26,6 +27,8 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
       return <AlbumsView key={entry.id} entry={entry} route={route} />;
     case "playlists":
       return <PlaylistsView key={entry.id} entry={entry} source={route.source} />;
+    case "genres":
+      return <GenresView key={entry.id} entry={entry} source={route.source} />;
     case "folder":
       return <FolderView key={entry.id} entry={entry} path={route.path} />;
     case "artist":
@@ -52,6 +55,17 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
     case "playlist":
       return (
         <PlaylistView
+          key={entry.id}
+          entry={entry}
+          source={route.source}
+          id={route.id}
+          name={route.name}
+          hint={route.hint}
+        />
+      );
+    case "genre":
+      return (
+        <GenreView
           key={entry.id}
           entry={entry}
           source={route.source}

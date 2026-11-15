@@ -57,6 +57,10 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 ### Lyrics search (2026-11-12, `docs/plans/lyrics-search.md`)
 - Slice 1 (local): `coda_core::lyrics::index`, lyrics from the scan, `local_lyrics_search`, the search page's Lyrics section. Slice 2 (Navidrome): `coda_core::lyrics::cache` (a per-server cache file and its background sync; ADR 0007), `navidrome_lyrics_search`, the `lyrics_index_*` commands and the Settings › Navidrome "Lyrics search" block. Runtime checks: `scripts/smoke.md` "Lyrics search" (LS1–LS10).
 
+### Genres (2026-11-15, `docs/plans/genres.md`, M11 slice 2)
+- Owner-approved (VISION.md "Direction"): a Genres sidebar entry for both sources after Albums, the genre list (A–Z, album and track counts), a genre page with its albums and Play/Shuffle (`s` shuffles the genre), and an album's genres as links on its page. Backend: `local_genres`, `local_genre`, `navidrome_genres`, `navidrome_genre_albums`, `navidrome_genre_random_songs`, `GenreDto`, `LocalContextDto::Genre`; `TrackDto`/`TrackRef` carry genres, so Navidrome tracks keep them in the queue. Navidrome genre pages offer Shuffle only (the server gives random songs of a genre; playing a whole genre in order would need `getSongsByGenre`) and list their albums in the server's order; an album's genre links are resolved against the server's genre listing so they open its exact value. Runtime checks: `scripts/smoke.md` "Genres" (G1–G9).
+- Not in it: genres in search, the play history or Now Playing; combining sources (Mixes).
+
 ### Later
 - Drag tracks/albums from browse views onto the queue.
 - Letter-key jump in the artist list; Navidrome album headers with year when opened via "Go to album".

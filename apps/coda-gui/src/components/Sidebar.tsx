@@ -6,6 +6,7 @@ import {
   AlbumIcon,
   ArtistIcon,
   FolderIcon,
+  GenreIcon,
   HomeIcon,
   LocalIcon,
   PlaylistIcon,
@@ -99,6 +100,7 @@ export function Sidebar({ view, onView, snapshot }: Props) {
       </ul>
       <ul>
         {item("albums", "Albums", <AlbumIcon />)}
+        {item("genres", "Genres", <GenreIcon />)}
         {item("artists", "Artists", <ArtistIcon />)}
         {item("playlists", "Playlists", <PlaylistIcon />)}
         {source === "local" && item("folders", "Folders", <FolderIcon />)}

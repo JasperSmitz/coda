@@ -55,6 +55,7 @@ impl Fixture {
             duration_ms: None,
             album_id: None,
             artist_id: None,
+            genres: Vec::new(),
         }
     }
 }
@@ -381,6 +382,11 @@ fn navidrome_refs_are_built_from_their_metadata_and_scrobbled() {
         duration_ms: Some(120_000),
         album_id: Some("al-9".into()),
         artist_id: None,
+        // Untrusted: cleaned, deduplicated and capped like server data.
+        genres: (0..40)
+            .map(|i| format!(" Genre {} ", i % 20))
+            .chain(["genre 1".into()])
+            .collect(),
     };
     let commands = engine.handle_intent(
         Intent::PlayTracks {
@@ -402,6 +408,10 @@ fn navidrome_refs_are_built_from_their_metadata_and_scrobbled() {
     assert!(playing.cover_url.is_some());
     // The album link given in the ref survives into the queue.
     assert_eq!(playing.album_id.as_deref(), Some("al-9"));
+    // So do its genres, through `Track::navidrome`.
+    assert_eq!(playing.genres.len(), coda_core::model::MAX_GENRES);
+    assert_eq!(playing.genres[0], "Genre 0");
+    assert_eq!(playing.genres[1], "Genre 1");
 
     engine.handle_playback_event(PlaybackEvent::Started { load }, now);
     let scrobbles = engine.take_scrobbles();
@@ -988,6 +998,7 @@ fn remote_ref(song: &str) -> TrackRef {
         duration_ms: Some(120_000),
         album_id: None,
         artist_id: None,
+        genres: Vec::new(),
     }
 }
 
@@ -1368,6 +1379,97 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             .notices
             .iter()
             .any(|n| n.text == "The library changed; reload the view")
+    );
+}
+
+#[test]
+fn play_local_plays_and_shuffles_a_genre() {
+    let names = ["a.flac", "b.flac", "c.flac", "d.flac"];
+    let fixture = Fixture::new(&names);
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.start(
+        sources(Some(fixture.root.clone()), None),
+        None,
+        restored(Vec::new(), None),
+        now,
+    );
+    // Ambient: a, c and d (one album, "Unknown album"); b has none.
+    let tracks: Vec<Track> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut track = fixture.track(name);
+            track.track_no = Some(i as u32 + 1);
+            if *name != "b.flac" {
+                track.genres = vec!["Ambient".into()];
+            }
+            track
+        })
+        .collect();
+    engine.handle_scan_event(ScanEvent::Batch(tracks), now);
+    let genre = engine.browse().read_library(|view| {
+        let view = view.unwrap();
+        browse::local_id(view.generation, view.library.tags().genres()[0].0)
+    });
+    let titles = |engine: &mut Engine| -> Vec<String> {
+        let queue = engine.full_snapshot().queue.unwrap();
+        queue.iter().map(|e| e.track.title.clone()).collect()
+    };
+
+    // Play from the second track of the genre.
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Genre { id: genre.clone() },
+            start: Some(1),
+            shuffle: false,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1);
+    assert_eq!(titles(&mut engine), ["A.FLAC", "C.FLAC", "D.FLAC"]);
+    let snapshot = engine.full_snapshot();
+    let queue = snapshot.queue.unwrap();
+    assert_eq!(snapshot.current_key.as_deref(), Some(queue[1].key.as_str()));
+    assert_eq!(queue[0].track.genres, ["Ambient"]);
+
+    // Shuffle: the same tracks in some order.
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Genre { id: genre.clone() },
+            start: None,
+            shuffle: true,
+        },
+        now,
+    );
+    assert_eq!(loads(&commands).len(), 1);
+    let mut shuffled = titles(&mut engine);
+    shuffled.sort();
+    assert_eq!(shuffled, ["A.FLAC", "C.FLAC", "D.FLAC"]);
+
+    // A genre is not a play history context (genres brief).
+    assert_eq!(engine.history().plays().count(), 0);
+
+    // An unknown genre id: a notice, the queue unchanged.
+    let generation = engine.browse().library_generation();
+    let commands = engine.handle_intent(
+        Intent::PlayLocal {
+            context: crate::browse::dto::LocalContextDto::Genre {
+                id: browse::local_id(generation, 7),
+            },
+            start: None,
+            shuffle: false,
+        },
+        now,
+    );
+    assert!(loads(&commands).is_empty());
+    assert_eq!(titles(&mut engine).len(), 3);
+    assert!(
+        engine
+            .full_snapshot()
+            .notices
+            .iter()
+            .any(|n| n.text == "Genre not found")
     );
 }
 

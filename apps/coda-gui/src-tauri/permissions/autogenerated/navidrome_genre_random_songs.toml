@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-genre-random-songs"
+description = "Enables the navidrome_genre_random_songs command without any pre-configured scope."
+commands.allow = ["navidrome_genre_random_songs"]
+
+[[permission]]
+identifier = "deny-navidrome-genre-random-songs"
+description = "Denies the navidrome_genre_random_songs command without any pre-configured scope."
+commands.deny = ["navidrome_genre_random_songs"]

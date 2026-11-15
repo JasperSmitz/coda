@@ -109,7 +109,7 @@ Brief: `docs/plans/release-1.0.md`. Version 1.0.0 covers M1–M10; what it conta
 ## M11 — Genres (in progress)
 Brief: `docs/plans/genres.md` (approved 2026-11-15). A Genres view for both sources, with a genre's albums and shuffle by genre. Genres are read as tagged, split on Navidrome's default separators (`;`, `/`, `,`); no hierarchy, no editing or fetching.
 - **Slice 1, core (completed, reviewed):** genres on tracks (local tags and Navidrome), saved with the queue; the local genre index; Navidrome `getGenres`, albums by genre and random songs by genre; Genres views in both browsers, not yet on their Home menus.
-- **Slice 2, GUI:** not started.
+- **Slice 2, GUI (completed, reviewed; owner smoke checks G1–G9 pending):** a Genres sidebar entry for both sources, the genre list and a genre's albums with Play/Shuffle (Navidrome: Shuffle, random songs of the genre), `s` shuffling the genre, an album's genres as links; Navidrome tracks keep their genres in the queue (`TrackRef.genres`).
 - **Slice 3, TUI:** not started.
 
 ## Postponed indefinitely

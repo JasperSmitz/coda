@@ -499,6 +499,7 @@ mod tests {
             cover_url: Some("coda://localhost/cover/00000000000000ff".into()),
             album_id: None,
             artist_id: None,
+            genres: Vec::new(),
         }
     }
 

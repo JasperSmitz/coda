@@ -1,4 +1,4 @@
-//! `playLocal`: a local folder or artist played (or shuffled) from the
+//! `playLocal`: a local folder, artist or genre played (or shuffled) from the
 //! library itself, so a whole-library context never crosses IPC and only
 //! the tracks that fit the queue are cloned.
 
