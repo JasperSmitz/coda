@@ -432,6 +432,8 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
                 0 => "Empty playlist".to_owned(),
                 n => format!("No tracks found ({} missing)", thousands(n)),
             },
+            // Music without genre tags: Coda reads genres, never guesses them.
+            LocalView::Genres if !library.is_empty() => "No genre tags found".to_owned(),
             _ => format!("No music found in {}", app.music_dir().to_string_lossy()),
         };
         let line = Line::styled(fit(&message, usize::from(body.width)), DIM_TEXT);
@@ -522,7 +524,12 @@ fn local_row(
         }
         LocalRow::Genre(genre) => row_line(
             genre.name(),
-            Some(count(genre.albums().len(), "album")),
+            genre_detail(
+                genre.name(),
+                Some(count(genre.albums().len(), "album")),
+                Some(count(genre.track_count(), "track")),
+                width,
+            ),
             width,
         ),
     }
@@ -545,18 +552,60 @@ fn album_detail(
     length: Option<Duration>,
     width: usize,
 ) -> Option<String> {
-    let length = length.map(format_time);
-    let (first, length) = match (first, length) {
-        (Some(first), Some(length)) => (first, length),
-        (first, length) => return first.or(length),
+    joined_detail(
+        left,
+        first,
+        length.map(format_time),
+        Join::ExtraFirst,
+        width,
+    )
+}
+
+/// The right-hand side of a genre row named `name`: `albums · tracks`
+/// (`3 albums · 42 tracks`), or whichever is known. When both would leave
+/// the name fewer than [`MIN_NAME_WITH_LENGTH`] columns (or fewer than it
+/// needs), the album count wins, as the album rows the genre opens on do.
+fn genre_detail(
+    name: &str,
+    albums: Option<String>,
+    tracks: Option<String>,
+    width: usize,
+) -> Option<String> {
+    joined_detail(name, albums, tracks, Join::KeptFirst, width)
+}
+
+/// Which of [`joined_detail`]'s two parts is shown first.
+#[derive(Clone, Copy)]
+enum Join {
+    KeptFirst,
+    ExtraFirst,
+}
+
+/// The right-hand side of a row named `name`: `kept` and `extra` joined
+/// with ` · ` (in `order`), or whichever is known. When both would leave
+/// the name fewer than [`MIN_NAME_WITH_LENGTH`] columns (or fewer than it
+/// needs), `kept` wins and `extra` is left out.
+fn joined_detail(
+    name: &str,
+    kept: Option<String>,
+    extra: Option<String>,
+    order: Join,
+    width: usize,
+) -> Option<String> {
+    let (kept, extra) = match (kept, extra) {
+        (Some(kept), Some(extra)) => (kept, extra),
+        (kept, extra) => return kept.or(extra),
     };
-    let both = format!("{length} · {first}");
+    let both = match order {
+        Join::KeptFirst => format!("{kept} · {extra}"),
+        Join::ExtraFirst => format!("{extra} · {kept}"),
+    };
     // At least one column for the name, as `row_line` requires.
-    let name = fit(left, MIN_NAME_WITH_LENGTH).width().max(1);
+    let name = fit(name, MIN_NAME_WITH_LENGTH).width().max(1);
     if both.width() + 1 + name <= width {
         Some(both)
     } else {
-        Some(first)
+        Some(kept)
     }
 }
 
@@ -815,7 +864,12 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
         ),
         Row::Genre(genre) => row_line(
             &genre.name,
-            genre.album_count.map(|n| count(n as usize, "album")),
+            genre_detail(
+                &genre.name,
+                genre.album_count.map(|n| count(n as usize, "album")),
+                genre.song_count.map(|n| count(n as usize, "song")),
+                width,
+            ),
             width,
         ),
         Row::Album(album) => {
@@ -3307,6 +3361,150 @@ mod tests {
         }
     }
 
+    fn genre_track(rel: &str, artist: &str, album: &str, genres: &[&str]) -> Track {
+        let mut track = album_track(rel, rel, artist, "", album);
+        track.genres = genres.iter().map(|g| (*g).to_owned()).collect();
+        track
+    }
+
+    #[test]
+    fn local_genres_list_their_counts_and_open_on_their_albums() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                genre_track("k/01.flac", "Miles Davis", "Kind of Blue", &["Jazz"]),
+                genre_track("k/02.flac", "Miles Davis", "Kind of Blue", &["Jazz"]),
+                genre_track("p/01.flac", "Yes", "Close to the Edge", &["Rock", "Prog"]),
+                genre_track("r/01.flac", "Abba", "Arrival", &["rock"]),
+                genre_track("x/01.flac", "Nobody", "Untagged", &[]),
+            ]),
+            now,
+        );
+        // Home → Genres, the last entry.
+        local_press(&mut app, &[Action::Down; 5], now);
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 16, now);
+        assert!(
+            screen.contains("┌ Local (scanning…) › Genres ─"),
+            "{screen}"
+        );
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        // A–Z, grouped case-insensitively, with album and track counts.
+        assert!(
+            at("> Jazz") < at("Prog") && at("Prog") < at("Rock"),
+            "{screen}"
+        );
+        assert!(
+            lines[at("Jazz")].contains("1 album · 2 tracks│"),
+            "{screen}"
+        );
+        assert!(
+            lines[at("Rock")].contains("2 albums · 2 tracks│"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Untagged"), "{screen}");
+        // Narrow: the album count wins, on the Jazz row itself.
+        let narrow = render(&app, 24, 16, now);
+        let narrow_lines: Vec<&str> = narrow.lines().collect();
+        let jazz = narrow_lines.iter().find(|l| l.contains("> Jazz")).unwrap();
+        assert!(jazz.contains("1 album│"), "{narrow}");
+        assert!(!jazz.contains("track"), "{narrow}");
+        // A genre's albums, each with its artist, by artist.
+        local_press(&mut app, &[Action::Down, Action::Down, Action::Open], now);
+        let screen = render(&app, 100, 16, now);
+        assert!(
+            screen.contains("┌ Local (scanning…) › Genres › Rock ─"),
+            "{screen}"
+        );
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(
+            at("> Arrival — Abba") < at("Close to the Edge — Yes"),
+            "{screen}"
+        );
+        assert!(lines[at("Arrival")].contains("1:30 · 1 track│"), "{screen}");
+    }
+
+    #[test]
+    fn local_genres_without_genre_tags_say_so() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![genre_track("a/01.flac", "A", "A", &[])]),
+            now,
+        );
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 1,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        local_press(&mut app, &[Action::Down; 5], now);
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 12, now);
+        assert!(screen.contains("No genre tags found"), "{screen}");
+        // An empty library says what it always says.
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Finished {
+                tracks: 0,
+                skipped: 0,
+                errors: 0,
+            },
+            now,
+        );
+        local_press(&mut app, &[Action::Down; 5], now);
+        local_press(&mut app, &[Action::Activate], now);
+        let screen = render(&app, 100, 12, now);
+        assert!(screen.contains("No music found in /music"), "{screen}");
+    }
+
+    #[test]
+    fn genre_details_join_albums_and_tracks_and_albums_win_when_narrow() {
+        let albums = || Some("2 albums".to_owned());
+        let tracks = || Some("14 tracks".to_owned());
+        let detail = |a, t, width| genre_detail("Jazz", a, t, width);
+        assert_eq!(
+            detail(albums(), tracks(), 80),
+            Some("2 albums · 14 tracks".into())
+        );
+        assert_eq!(detail(None, tracks(), 80), Some("14 tracks".into()));
+        assert_eq!(detail(albums(), None, 80), Some("2 albums".into()));
+        assert_eq!(detail(None, None, 80), None);
+        // "Jazz" (4) + a space + "2 albums · 14 tracks" (20) = 25 columns.
+        assert_eq!(
+            detail(albums(), tracks(), 25),
+            Some("2 albums · 14 tracks".into())
+        );
+        assert_eq!(detail(albums(), tracks(), 24), Some("2 albums".into()));
+        for width in 0..40 {
+            let line = row_line("Jazz", detail(albums(), tracks(), width), width);
+            assert!(line.width() <= width, "{width}: {line}");
+        }
+        // A long name keeps at least MIN_NAME_WITH_LENGTH columns.
+        let long = "Progressive Electronic Berlin School";
+        let width = MIN_NAME_WITH_LENGTH + 1 + "2 albums · 14 tracks".width();
+        assert_eq!(
+            genre_detail(long, albums(), tracks(), width),
+            Some("2 albums · 14 tracks".into())
+        );
+        assert_eq!(
+            genre_detail(long, albums(), tracks(), width - 1),
+            Some("2 albums".into())
+        );
+        // Navidrome's shapes: songs, and counts the server may leave out.
+        let songs = || Some("12 songs".to_owned());
+        assert_eq!(detail(None, songs(), 80), Some("12 songs".into()));
+        assert_eq!(
+            detail(Some("3 albums".into()), songs(), 80),
+            Some("3 albums · 12 songs".into())
+        );
+    }
+
     #[test]
     fn local_home_lists_and_playlists_render() {
         use coda_core::library::m3u::PlaylistFile;
@@ -3331,9 +3529,16 @@ mod tests {
         // Home, with the scanning note in the title.
         let screen = render(&app, 140, 16, now);
         assert!(screen.contains("┌ Local (scanning…) ─"), "{screen}");
-        for (i, entry) in ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
-            .iter()
-            .enumerate()
+        for (i, entry) in [
+            "Shuffle all",
+            "Playlists",
+            "Folders",
+            "Artists",
+            "Albums",
+            "Genres",
+        ]
+        .iter()
+        .enumerate()
         {
             let mark = if i == 0 { "> " } else { "  " };
             assert!(screen.contains(&format!("│{mark}{entry} ")), "{screen}");
@@ -3661,6 +3866,69 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("9:22"), "{screen}");
+    }
+
+    #[test]
+    fn navidrome_genre_rows_show_albums_and_songs() {
+        use coda_core::navidrome::api::RawGenre;
+        let now = Instant::now();
+        let mut app = nav_home();
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+        );
+        let request = app.take_fetch_requests().remove(0);
+        assert_eq!(request.resource, Res::Genres);
+        let genre = |value: &str, album_count, song_count| {
+            RawGenre {
+                value: Some(value.into()),
+                song_count,
+                album_count,
+            }
+            .into_genre()
+            .unwrap()
+        };
+        let genres = vec![
+            genre("Jazz", Some(3), Some(12)),
+            genre("Rock", None, Some(1)),
+        ];
+        answer(&mut app, &request, Ok(Content::Genres(genres)));
+        let screen = render(&app, 100, 14, now);
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(
+            lines[at("> Jazz")].contains("3 albums · 12 songs│"),
+            "{screen}"
+        );
+        // No album count from the server: the song count alone.
+        assert!(lines[at("Rock")].contains(" 1 song│"), "{screen}");
+        assert!(!lines[at("Rock")].contains("album"), "{screen}");
+    }
+
+    #[test]
+    fn navidrome_home_lists_genres_after_albums() {
+        let now = Instant::now();
+        let mut app = nav_home();
+        let screen = render(&app, 100, 14, now);
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert!(at("  Albums ") + 1 == at("  Genres "), "{screen}");
+        // Past Playlists, Artists and Albums.
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+        );
+        let request = app.take_fetch_requests().remove(0);
+        assert_eq!(request.resource, Res::Genres);
+        let screen = render(&app, 100, 14, now);
+        assert!(
+            screen.contains("Navidrome (connected) › Genres"),
+            "{screen}"
+        );
+        assert!(screen.contains("Loading…"), "{screen}");
+        answer(&mut app, &request, Ok(Content::Genres(Vec::new())));
+        let screen = render(&app, 100, 14, now);
+        assert!(screen.contains("No genres"), "{screen}");
     }
 
     #[test]

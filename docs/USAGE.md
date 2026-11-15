@@ -145,9 +145,13 @@ The keys on the screen:
 The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing on the screen.
 
 ## Local library
-- **The home menu:** Shuffle all, Playlists, Folders, Artists and Albums.
+- **The home menu:** Shuffle all, Playlists, Folders, Artists, Albums and Genres.
 - **Grouping by tags:** artists and albums are grouped by the album artist, or by the artist when there is none. `o` in Albums switches between A–Z and by artist.
 - **Album rows** show the track count, and the running time when every track's length is known.
+- **Genres** come from your tags, as written: Coda never fetches or corrects them, and knows no hierarchy ("Rock" and "Progressive Rock" are two genres).
+  - **Several genres per track:** every genre field counts, and a single value is split on `;`, `/` and `,` (as Navidrome does), so `Rock;Progressive Rock` is two genres. Genres are grouped regardless of case.
+  - **The list** is A–Z, with each genre's album and track counts. Tracks without a genre are not listed.
+  - **A genre** opens on its albums, by artist: an album is in a genre when any of its tracks is. Enter plays an album whole; `s` on a genre shuffles all of its tracks, and `a` / `A` add them.
 - **Playlists** are the `.m3u`/`.m3u8` files in the music folder. A playlist lists the scanned tracks it names, in its order.
   - **Paths:** relative to the playlist, or absolute inside the music folder. Windows `\` separators work.
   - **Counted as missing:** URLs, drive letters, and anything outside the music folder.
@@ -156,10 +160,13 @@ The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing 
     - Absolute entries must spell the music folder's real path, with symlinks resolved. On macOS that means `/private/tmp`, not `/tmp`.
 
 ## Navidrome library
-- **The home menu:** Shuffle all, Playlists, Artists and Albums.
+- **The home menu:** Shuffle all, Playlists, Artists, Albums and Genres.
 - **Albums** load page by page as you scroll. Album rows show the year and the running time.
   - **`o` changes the order:** A–Z, by artist, newest, most played, recently played, or 500 at random.
   - **`R` reloads,** or retries a page that failed.
+- **Genres** are the server's list, A–Z, with album and song counts. A genre opens on its albums, in the server's order, page by page.
+  - **`s` on a genre** plays 500 random songs from it, a new set on every press, like Shuffle all.
+  - **`a` / `A` / `P` don't add a genre:** it may hold thousands of albums. The status line says to open it and add albums instead.
 - **Search (`/`)** finds artists, albums and songs.
 
 ### Editing playlists

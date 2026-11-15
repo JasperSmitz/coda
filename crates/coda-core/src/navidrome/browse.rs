@@ -1,8 +1,7 @@
 //! Remote browse state for the Navidrome source: a navigation stack of
 //! views (Home → Playlists / Artists / Albums / Genres → …, plus search
-//! results; Genres is not listed in [`HOME_ENTRIES`] yet), a
-//! session-only cache of fetched lists, paged album lists, the search
-//! input, and ordered background enqueue jobs. No Ratatui, no I/O.
+//! results), a session-only cache of fetched lists, paged album lists, the
+//! search input, and ordered background enqueue jobs. No Ratatui, no I/O.
 //!
 //! [`Browser`] never fetches anything itself. Like the player emits
 //! playback commands, it queues [`FetchRequest`]s (taken with
@@ -158,7 +157,6 @@ pub enum HomeEntry {
     Playlists,
     Artists,
     Albums,
-    /// Every genre; not in [`HOME_ENTRIES`] until the frontends show it.
     Genres,
 }
 
@@ -175,11 +173,12 @@ impl HomeEntry {
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 4] = [
+pub const HOME_ENTRIES: [HomeEntry; 5] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Artists,
     HomeEntry::Albums,
+    HomeEntry::Genres,
 ];
 
 /// The label of the "Shuffle all" Home entry (both sources).
@@ -3230,10 +3229,11 @@ mod tests {
             (Resource::Home, Load::Ready)
         );
         let rows: Vec<Row> = b.current_content().unwrap().rows(0, 10);
+        assert_eq!(rows, HOME_ENTRIES.map(Row::Home).to_vec());
+        let labels: Vec<&str> = HOME_ENTRIES.iter().map(|e| e.label()).collect();
         assert_eq!(
-            rows,
-            HOME_ENTRIES.map(Row::Home).to_vec(),
-            "Playlists, Artists, Albums"
+            labels,
+            ["Shuffle all", "Playlists", "Artists", "Albums", "Genres"]
         );
         // Nothing to add or refresh on Home, and it is the root.
         assert!(b.enqueue_selected(Placement::End).is_empty());
@@ -3249,6 +3249,7 @@ mod tests {
                 page_request(AlbumSort::Name, 0),
                 "Albums (A–Z)",
             ),
+            (HomeEntry::Genres, Resource::Genres, "Genres"),
         ] {
             open_home(&mut b, entry);
             assert_eq!(one(&mut b).resource, resource);
@@ -3985,11 +3986,10 @@ mod tests {
         }
     }
 
-    /// Opens the Genres view, as Home → Genres does (the entry is not on
-    /// Home yet), and answers its request with `genres`.
+    /// Opens Home → Genres and answers its request with `genres`.
     fn open_genres(b: &mut Browser, genres: Vec<Genre>) {
-        select_home(b, HomeEntry::ShuffleAll);
-        b.open_view(Resource::Genres, HomeEntry::Genres.label().to_owned());
+        open_home(b, HomeEntry::Genres);
+        assert_eq!(b.current().unwrap().title, "Genres");
         let request = one(b);
         assert_eq!(request.resource, Resource::Genres);
         assert_eq!(request.resource.endpoint(), "getGenres");

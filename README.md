@@ -11,10 +11,10 @@ They share the config file and the Navidrome password in the OS keychain; each k
 **Status:** the terminal player is at 1.0. Milestones M1–M10 are done; see [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Features
-- **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks. "Shuffle all" plays your whole library.
-- **Local library:** browse by playlists (`.m3u`/`.m3u8`), folders, artists or albums. The scan runs in the background.
+- **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks, a local genre's tracks (up to the queue cap) or up to 500 random songs of a Navidrome genre. "Shuffle all" plays your whole library.
+- **Local library:** browse by playlists (`.m3u`/`.m3u8`), folders, artists, albums or genres. The scan runs in the background.
 - **Navidrome:**
-  - browse playlists, artists and albums (six sort orders);
+  - browse playlists, artists, albums (six sort orders) and genres;
   - stream into the same queue as local tracks;
   - scrobble plays;
   - create, rename, reorder and delete your playlists.
@@ -140,7 +140,7 @@ Press `?` in Coda for the full list.
 **How Enter works:**
 - **On a track:** it plays the album, playlist, folder or search results the track is shown in, starting at that track. The earlier tracks come before it, so `<` goes back through them.
 - **On an album or playlist:** it plays it from the start.
-- **On an artist or folder:** it opens it.
+- **On an artist, genre or folder:** it opens it.
 
 The queue is temporary: `a` and `A` add to it, and a playlist is how you keep one. Navidrome tracks are marked `☁` in the queue.
 

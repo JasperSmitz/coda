@@ -114,6 +114,9 @@ pub const CLEAR_CONFIRM: Duration = Duration::from_secs(3);
 pub const CLEAR_PROMPT: &str = "Press C again to clear the queue";
 /// Status for "Add to playlist" (`P`) on local tracks.
 pub const LOCAL_TO_PLAYLIST: &str = "Only Navidrome songs can be added to a Navidrome playlist";
+/// Status for `a` / `A` / `P` on a Navidrome genre, which is not added
+/// whole (it may hold thousands of albums).
+pub const GENRE_NOT_ADDED: &str = "Open the genre to add its albums";
 /// Status for `S` without Navidrome songs in the queue.
 pub const NO_REMOTE_IN_QUEUE: &str = "No Navidrome songs in the queue to save";
 
@@ -1079,6 +1082,9 @@ impl App {
                 };
                 if self.remote_active() {
                     let outcomes = self.browser_mut().enqueue_selected(placement);
+                    if outcomes.is_empty() && self.remote_genre_selected() {
+                        self.set_status(GENRE_NOT_ADDED, now);
+                    }
                     self.apply_job_outcomes(outcomes, now)
                 } else {
                     if self.local_results_active() {
@@ -1166,7 +1172,9 @@ impl App {
             }
             Action::AddToPlaylist => {
                 if self.remote_active() {
-                    self.browser_mut().open_picker();
+                    if !self.browser_mut().open_picker() && self.remote_genre_selected() {
+                        self.set_status(GENRE_NOT_ADDED, now);
+                    }
                 } else if self.local_results_active() || self.local_browse_active() {
                     self.set_status(LOCAL_TO_PLAYLIST, now);
                 }
@@ -1958,6 +1966,17 @@ impl App {
         if let Some(track) = self.selected_search_result() {
             self.enqueue_with_status(track.display_name(), vec![track], placement, now);
         }
+    }
+
+    /// Whether the selected Navidrome row is a genre.
+    fn remote_genre_selected(&self) -> bool {
+        self.browser
+            .as_ref()
+            .and_then(|b| {
+                let view = b.current()?;
+                b.content(view)?.row(view.selected)
+            })
+            .is_some_and(|row| matches!(row, browse::Row::Genre(_)))
     }
 
     fn browser_mut(&mut self) -> &mut Browser {
@@ -3719,7 +3738,14 @@ mod tests {
             // Home is there before anything is scanned.
             assert_eq!(
                 row_names(&app),
-                ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
+                [
+                    "Shuffle all",
+                    "Playlists",
+                    "Folders",
+                    "Artists",
+                    "Albums",
+                    "Genres"
+                ]
             );
             open_local(&mut app, entry, now);
             assert!(app.library_rows().is_empty(), "{entry:?}");
@@ -4179,6 +4205,63 @@ mod tests {
         // Enter on a folder still opens it.
         press(&mut app, &[Action::Activate], now);
         assert_eq!(path_titles(&app), ["Folders", "m"]);
+    }
+
+    #[test]
+    fn local_genres_open_on_their_albums_play_them_and_shuffle_or_add_the_genre() {
+        let now = Instant::now();
+        let mut app = App::new(ROOT.into());
+        let mut tracks = tag_library();
+        for track in &mut tracks {
+            let album = track.album.as_deref().map(str::to_lowercase);
+            track.genres = match album.as_deref() {
+                Some("kind") => vec!["Jazz".into(), "Modal".into()],
+                Some("blue") => vec!["jazz".into()],
+                Some("hits") => vec!["Pop".into()],
+                _ => Vec::new(),
+            };
+        }
+        app.handle_scan_event(ScanEvent::Batch(tracks), now);
+        open_local(&mut app, local::HomeEntry::Genres, now);
+        assert_eq!(path_titles(&app), ["Genres"]);
+        assert_eq!(row_names(&app), ["Jazz", "Modal", "Pop"]);
+        // `s` shuffles the whole genre without opening it.
+        app.rng = Rng::from_seed(3);
+        press(&mut app, &[Action::PlayShuffled], now);
+        let titles: Vec<String> = queue_titles(&app)
+            .into_iter()
+            .map(|t| t.trim_end_matches('*').to_owned())
+            .collect();
+        assert_eq!(sorted(titles), ["M One", "M Two", "Y One"]);
+        assert_eq!(app.status(now), Some("Shuffling Jazz"));
+        assert_eq!(path_titles(&app), ["Genres"], "`s` never opens");
+        // `a` adds it, in the genre's order.
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Enqueue],
+            now,
+        );
+        assert_eq!(&queue_titles(&app)[3..], ["C One", "C Two"]);
+        // Enter opens a genre, on its albums with their artists.
+        press(&mut app, &[Action::Up, Action::Up], now);
+        assert!(press(&mut app, &[Action::Activate], now).is_empty());
+        assert_eq!(path_titles(&app), ["Genres", "Jazz"]);
+        assert_eq!(row_names(&app), ["Blue — Miles", "Kind — Miles"]);
+        // Enter on an album plays it whole; `l` opens it.
+        press(&mut app, &[Action::Down], now);
+        let commands = press(&mut app, &[Action::Activate], now);
+        assert_eq!(load_path(&commands), PathBuf::from("/music/m/x/01.flac"));
+        assert_eq!(queue_titles(&app), ["M One*", "M Two"]);
+        assert_eq!(app.status(now), Some("Playing Kind"));
+        press(&mut app, &[Action::Open], now);
+        assert_eq!(path_titles(&app), ["Genres", "Jazz", "Kind"]);
+        // `h` goes back up, re-selecting what was opened.
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Kind — Miles");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Jazz");
+        press(&mut app, &[Action::Parent], now);
+        assert_eq!(selected_name(&app), "Genres");
     }
 
     #[test]
@@ -5338,7 +5421,14 @@ mod tests {
         let (mut app, now) = tag_app();
         assert_eq!(
             row_names(&app),
-            ["Shuffle all", "Playlists", "Folders", "Artists", "Albums"]
+            [
+                "Shuffle all",
+                "Playlists",
+                "Folders",
+                "Artists",
+                "Albums",
+                "Genres"
+            ]
         );
         assert!(path_titles(&app).is_empty());
         open_local(&mut app, local::HomeEntry::Artists, now);
@@ -8830,6 +8920,35 @@ mod tests {
         );
         // The shown Playlists list is reloaded.
         assert_eq!(one_request(&mut app).resource, Resource::Playlists);
+    }
+
+    #[test]
+    fn adding_a_navidrome_genre_says_to_open_it() {
+        let (mut app, now) = nav_home();
+        // Past Playlists, Artists and Albums to Genres.
+        press(
+            &mut app,
+            &[Action::Down, Action::Down, Action::Down, Action::Activate],
+            now,
+        );
+        let request = one_request(&mut app);
+        assert_eq!(request.resource, Resource::Genres);
+        let rock = navidrome::api::RawGenre {
+            value: Some("Rock".into()),
+            song_count: Some(2_000),
+            album_count: Some(150),
+        }
+        .into_genre()
+        .unwrap();
+        respond(&mut app, &request, Ok(Content::Genres(vec![rock])));
+        for action in [Action::Enqueue, Action::EnqueueNext, Action::AddToPlaylist] {
+            app.status = None;
+            assert!(press(&mut app, &[action], now).is_empty(), "{action:?}");
+            assert_eq!(status_text(&app, now), GENRE_NOT_ADDED, "{action:?}");
+            assert!(requests(&mut app).is_empty(), "{action:?}");
+            assert!(app.player().queue().is_empty(), "{action:?}");
+            assert!(browser(&app).picker().is_none(), "{action:?}");
+        }
     }
 
     #[test]

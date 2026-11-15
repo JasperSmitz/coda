@@ -1,6 +1,6 @@
 //! Local browse navigation: a stack of views rooted at a static Home
-//! (Shuffle all, Playlists, Folders, Artists, Albums; Genres exists but is
-//! not listed in [`HOME_ENTRIES`] yet), over a [`Library`]. Plain
+//! (Shuffle all, Playlists, Folders, Artists, Albums, Genres), over a
+//! [`Library`]. Plain
 //! synchronous state with no I/O and no terminal types; separate from the
 //! Navidrome browser, whose views are fetched.
 //!
@@ -25,7 +25,6 @@ pub enum HomeEntry {
     Folders,
     Artists,
     Albums,
-    /// Every genre; not in [`HOME_ENTRIES`] until the frontends show it.
     Genres,
 }
 
@@ -43,12 +42,13 @@ impl HomeEntry {
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 5] = [
+pub const HOME_ENTRIES: [HomeEntry; 6] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Folders,
     HomeEntry::Artists,
     HomeEntry::Albums,
+    HomeEntry::Genres,
 ];
 
 /// What a local view shows.
@@ -587,15 +587,61 @@ mod tests {
         library
     }
 
-    /// The Genres view, as Home → Genres opens it (the entry is not on
-    /// Home yet).
-    fn genres_view() -> LocalBrowser {
+    /// Home → Genres, opened as a user does: down to the last Home entry.
+    fn genres_view(library: &Library) -> LocalBrowser {
         let mut browser = LocalBrowser::new();
-        browser.stack.push(Entry {
-            view: View::Genres,
-            selected: 0,
-        });
+        let at = HOME_ENTRIES
+            .iter()
+            .position(|e| *e == HomeEntry::Genres)
+            .unwrap();
+        browser.move_selection(library, at as isize);
+        assert_eq!(browser.selected_label(library).as_deref(), Some("Genres"));
+        assert!(browser.open_selected(library));
+        assert_eq!(*browser.current(), View::Genres);
         browser
+    }
+
+    #[test]
+    fn home_lists_genres_after_albums() {
+        let library = library(Vec::new());
+        let browser = LocalBrowser::new();
+        let labels: Vec<&str> = browser
+            .rows(&library, 0, 10)
+            .into_iter()
+            .map(|row| match row {
+                Row::Home(entry) => entry.label(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Shuffle all",
+                "Playlists",
+                "Folders",
+                "Artists",
+                "Albums",
+                "Genres"
+            ]
+        );
+        // The entry itself only opens: nothing to play or add.
+        let mut home = LocalBrowser::new();
+        home.move_selection(&library, 5);
+        assert_eq!(
+            home.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Genres))
+        );
+        assert_eq!(home.play_context(&library, false), None);
+        assert_eq!(home.play_context(&library, true), None);
+        assert_eq!(home.selected_tracks(&library), None);
+        let mut genres = genres_view(&library);
+        assert_eq!(genres.path_titles(&library), ["Genres"]);
+        // `h` comes back to the Genres entry.
+        genres.go_up(&library);
+        assert_eq!(
+            genres.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Genres))
+        );
     }
 
     fn titles(library: &Library, ids: &[TrackId]) -> Vec<String> {
@@ -611,7 +657,7 @@ mod tests {
             track("a/1.flac", "Abe", "Aa", 1, &["rock", "Jazz"]),
             track("a/2.flac", "Abe", "Aa", 2, &["Jazz"]),
         ]);
-        let mut browser = genres_view();
+        let mut browser = genres_view(&library);
         assert_eq!(browser.path_titles(&library), ["Genres"]);
         assert_eq!(browser.len(&library), 2);
         let names: Vec<String> = browser
@@ -661,7 +707,7 @@ mod tests {
     #[test]
     fn the_genre_selection_stays_on_its_genre_while_the_scan_adds_more() {
         let mut library = library(vec![track("b/1.flac", "B", "B", 1, &["Blues"])]);
-        let mut browser = genres_view();
+        let mut browser = genres_view(&library);
         let key = browser.selected_key(&library);
         library.extend([track("a/1.flac", "A", "A", 1, &["Ambient"])]);
         browser.reselect(&library, key);
@@ -672,7 +718,7 @@ mod tests {
     #[test]
     fn an_empty_library_has_no_genres() {
         let library = library(Vec::new());
-        let browser = genres_view();
+        let browser = genres_view(&library);
         assert!(browser.is_empty(&library));
         assert_eq!(browser.play_context(&library, true), None);
     }
