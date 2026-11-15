@@ -16,6 +16,7 @@ fn track(id: &str, album: &str, artist: &str, title: &str, n: u32) -> Track {
             disc_no: Some(1),
             duration: Some(Duration::from_secs(200)),
             cover_art: Some(format!("mf-{id}")),
+            genres: Vec::new(),
         },
     );
     track.artist_id = Some(format!("ar-{artist}"));

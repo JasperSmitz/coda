@@ -1,4 +1,4 @@
-//! Artists and albums grouped by tags, updated incrementally as scan
+//! Artists, albums and genres grouped by tags, updated incrementally as scan
 //! batches arrive. Refers to tracks by [`TrackId`]; the tracks themselves
 //! live in the [`LibraryTree`](super::tree::LibraryTree).
 //!
@@ -8,8 +8,13 @@
 //!   album artists is two albums.
 //! - Names compare case-insensitively with surrounding whitespace trimmed
 //!   (tags are trimmed when read); the most common spelling is shown.
+//! - **Genre:** each of a track's genres (a track has none, one or
+//!   several; there is no "unknown" genre). A genre's albums are the
+//!   albums any of its tracks is on.
 //! - Artists sort A–Z, an artist's albums A–Z, the unknown ones last.
-//!   Album tracks sort by disc, track number, title, then path.
+//!   Album tracks sort by disc, track number, title, then path. Genres
+//!   sort A–Z; a genre's albums by artist, then album (as
+//!   [`AlbumOrder::Artist`]).
 //!
 //! Inserting a track costs a few hash lookups and, for a new artist or
 //! album, one binary-search insert into each sorted list.
@@ -34,6 +39,11 @@ pub struct ArtistId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AlbumId(pub u32);
+
+/// A genre's position in the index: dense, in the order genres were first
+/// seen, and stable while the library grows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GenreId(pub u32);
 
 /// The spellings of one grouping key and how often each was seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,6 +141,43 @@ impl Album {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Genre {
+    id: GenreId,
+    /// Lowercased name.
+    key: String,
+    spellings: Spellings,
+    /// Sorted by id (scan order), for membership tests.
+    tracks: Vec<TrackId>,
+    /// Sorted by artist, then album.
+    albums: Vec<AlbumId>,
+}
+
+impl Genre {
+    pub fn id(&self) -> GenreId {
+        self.id
+    }
+
+    /// The most common spelling.
+    pub fn name(&self) -> &str {
+        self.spellings.best().unwrap_or_default()
+    }
+
+    /// The albums any of its tracks is on, by artist then album.
+    pub fn albums(&self) -> &[AlbumId] {
+        &self.albums
+    }
+
+    pub fn track_count(&self) -> usize {
+        self.tracks.len()
+    }
+
+    /// `true` if track `id` has this genre.
+    pub fn contains(&self, id: TrackId) -> bool {
+        self.tracks.binary_search(&id).is_ok()
+    }
+}
+
 /// The order of the Albums list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlbumOrder {
@@ -167,6 +214,10 @@ pub struct TagIndex {
     artists_sorted: Vec<ArtistId>,
     albums_by_name: Vec<AlbumId>,
     albums_by_artist: Vec<AlbumId>,
+    genres: Vec<Genre>,
+    genre_ids: HashMap<String, GenreId>,
+    /// Every genre, A–Z.
+    genres_sorted: Vec<GenreId>,
 }
 
 /// `None` keys (unknown) sort after every name.
@@ -210,6 +261,32 @@ impl TagIndex {
 
     pub fn album(&self, id: AlbumId) -> &Album {
         &self.albums[id.0 as usize]
+    }
+
+    pub fn genre(&self, id: GenreId) -> &Genre {
+        &self.genres[id.0 as usize]
+    }
+
+    /// Every genre, A–Z.
+    pub fn genres(&self) -> &[GenreId] {
+        &self.genres_sorted
+    }
+
+    /// The tracks of genre `id` in play order: its albums by artist then
+    /// album, each album's tracks of that genre in album order.
+    pub fn genre_tracks(&self, id: GenreId) -> Vec<TrackId> {
+        let genre = self.genre(id);
+        let mut ids = Vec::with_capacity(genre.tracks.len());
+        for album in &genre.albums {
+            ids.extend(
+                self.album(*album)
+                    .tracks()
+                    .iter()
+                    .copied()
+                    .filter(|t| genre.contains(*t)),
+            );
+        }
+        ids
     }
 
     /// Every artist, A–Z (unknown last).
@@ -264,13 +341,20 @@ impl TagIndex {
         (artists, albums)
     }
 
-    /// Adds track `id` (`tracks[id]`) to its artist and album.
+    /// Adds track `id` (`tracks[id]`) to its artist, album and genres.
     pub fn insert(&mut self, id: TrackId, tracks: &[Track]) {
         let track = &tracks[id.index()];
         let artist = self.artist_for(key_of(artist_tag(track)));
-        let album = self.album_for(artist, key_of(track.album.as_deref()));
+        let album_id = self.album_for(artist, key_of(track.album.as_deref()));
         self.artists[artist.0 as usize].tracks += 1;
-        let album = &mut self.albums[album.0 as usize];
+        // A track's genres are already distinct ignoring case.
+        for name in &track.genres {
+            if let Some(key) = key_of(Some(name)) {
+                let genre = self.genre_for(key);
+                self.add_to_genre(genre, id, album_id);
+            }
+        }
+        let album = &mut self.albums[album_id.0 as usize];
         match track.duration {
             Some(duration) => album.duration = album.duration.saturating_add(duration),
             None => album.duration_unknown = true,
@@ -344,6 +428,57 @@ impl TagIndex {
         id
     }
 
+    fn genre_for(&mut self, (key, spelling): (String, &str)) -> GenreId {
+        let id = match self.genre_ids.get(&key) {
+            Some(id) => *id,
+            None => {
+                let id = GenreId(self.genres.len() as u32);
+                let genres = &self.genres;
+                let at = self
+                    .genres_sorted
+                    .partition_point(|g| genres[g.0 as usize].key < key);
+                self.genres_sorted.insert(at, id);
+                self.genre_ids.insert(key.clone(), id);
+                self.genres.push(Genre {
+                    id,
+                    key,
+                    spellings: Spellings::default(),
+                    tracks: Vec::new(),
+                    albums: Vec::new(),
+                });
+                id
+            }
+        };
+        self.genres[id.0 as usize].spellings.add(spelling);
+        id
+    }
+
+    /// Adds track `track` on album `album` to genre `id`.
+    fn add_to_genre(&mut self, id: GenreId, track: TrackId, album: AlbumId) {
+        let Self {
+            artists,
+            albums,
+            genres,
+            ..
+        } = self;
+        let genre = &mut genres[id.0 as usize];
+        if let Err(at) = genre.tracks.binary_search(&track) {
+            genre.tracks.insert(at, track);
+        }
+        let by_artist = |a: AlbumId, b: AlbumId| {
+            let (a, b) = (&albums[a.0 as usize], &albums[b.0 as usize]);
+            compare_keys(
+                &artists[a.artist.0 as usize].key,
+                &artists[b.artist.0 as usize].key,
+            )
+            .then_with(|| compare_keys(&a.key, &b.key))
+            .then(a.id.cmp(&b.id))
+        };
+        if let Err(at) = genre.albums.binary_search_by(|a| by_artist(*a, album)) {
+            genre.albums.insert(at, album);
+        }
+    }
+
     /// Inserts a new album into its artist's list and both album lists.
     fn place_album(&mut self, id: AlbumId) {
         let Self {
@@ -391,6 +526,7 @@ mod tests {
         album: Option<&'a str>,
         disc: Option<u32>,
         no: Option<u32>,
+        genres: &'a [&'a str],
     }
 
     fn track(path: &str, tags: Tags<'_>) -> Track {
@@ -403,6 +539,7 @@ mod tests {
                 album: tags.album.map(Into::into),
                 disc_no: tags.disc,
                 track_no: tags.no,
+                genres: tags.genres.iter().map(|g| (*g).to_owned()).collect(),
                 ..TrackMetadata::default()
             },
         )
@@ -798,5 +935,147 @@ mod tests {
         assert_eq!(index.album(albums[0]).name(), "Bandwagon");
         assert_eq!(index.search("   ", 10), (vec![], vec![]));
         assert_eq!(index.search("t", 1).0.len(), 1);
+    }
+
+    fn genre_rows(index: &TagIndex) -> Vec<String> {
+        index
+            .genres()
+            .iter()
+            .map(|g| {
+                let genre = index.genre(*g);
+                format!(
+                    "{} ({} albums, {} tracks)",
+                    genre.name(),
+                    genre.albums().len(),
+                    genre.track_count()
+                )
+            })
+            .collect()
+    }
+
+    fn genre_named(index: &TagIndex, name: &str) -> GenreId {
+        *index
+            .genres()
+            .iter()
+            .find(|g| index.genre(**g).name() == name)
+            .unwrap()
+    }
+
+    fn genre_albums(index: &TagIndex, genre: GenreId) -> Vec<String> {
+        index
+            .genre(genre)
+            .albums()
+            .iter()
+            .map(|a| {
+                let album = index.album(*a);
+                format!("{} / {}", album.name(), index.artist(album.artist()).name())
+            })
+            .collect()
+    }
+
+    fn tagged<'a>(artist: &'a str, album: &'a str, no: u32, genres: &'a [&'a str]) -> Tags<'a> {
+        Tags {
+            title: None,
+            artist: Some(artist),
+            album: Some(album),
+            no: Some(no),
+            genres,
+            ..Tags::default()
+        }
+    }
+
+    #[test]
+    fn genres_group_ignoring_case_and_show_the_most_common_spelling() {
+        let tracks = [
+            track("1.flac", tagged("A", "X", 1, &["Hip-Hop", "Jazz"])),
+            track("2.flac", tagged("A", "X", 2, &["hip-hop"])),
+            track("3.flac", tagged("B", "Y", 1, &["hip-hop"])),
+            track("4.flac", tagged("B", "Y", 2, &[])),
+            track("5.flac", tagged("C", "Z", 1, &["Ambient"])),
+        ];
+        let index = index(&tracks);
+        // A–Z, with no entry for untagged tracks.
+        assert_eq!(
+            genre_rows(&index),
+            [
+                "Ambient (1 albums, 1 tracks)",
+                "hip-hop (2 albums, 3 tracks)",
+                "Jazz (1 albums, 1 tracks)",
+            ]
+        );
+        // Ids are dense, in the order genres were first seen.
+        assert_eq!(genre_named(&index, "hip-hop"), GenreId(0));
+        assert_eq!(genre_named(&index, "Jazz"), GenreId(1));
+        assert_eq!(genre_named(&index, "Ambient"), GenreId(2));
+    }
+
+    #[test]
+    fn a_genre_has_the_albums_of_its_tracks_by_artist_then_album() {
+        let tracks = [
+            track("1.flac", tagged("Zed", "Alpha", 1, &["Rock"])),
+            track(
+                "2.flac",
+                tagged("Abe", "Omega", 1, &["Rock", "Progressive Rock"]),
+            ),
+            track("3.flac", tagged("Abe", "Beta", 1, &["Pop"])),
+            // One track of an album is enough.
+            track("4.flac", tagged("Abe", "Beta", 2, &["Rock"])),
+            track("5.flac", tagged("Abe", "Omega", 2, &["Rock"])),
+            track("6.flac", tagged("Abe", "Omega", 3, &[])),
+        ];
+        let index = index(&tracks);
+        let rock = genre_named(&index, "Rock");
+        assert_eq!(
+            genre_albums(&index, rock),
+            ["Beta / Abe", "Omega / Abe", "Alpha / Zed"]
+        );
+        assert_eq!(index.genre(rock).track_count(), 4);
+        // Playing the genre: its albums in that order, each album's tracks
+        // of the genre in album order.
+        let names: Vec<String> = index
+            .genre_tracks(rock)
+            .iter()
+            .map(|t| tracks[t.index()].title.clone())
+            .collect();
+        assert_eq!(names, ["4", "2", "5", "1"]);
+        let prog = genre_named(&index, "Progressive Rock");
+        assert_eq!(genre_albums(&index, prog), ["Omega / Abe"]);
+        assert_eq!(index.genre_tracks(prog), [TrackId(1)]);
+    }
+
+    #[test]
+    fn genres_grow_with_incremental_batches() {
+        let tracks = [
+            track("1.flac", tagged("M", "Mid", 1, &["Folk"])),
+            track("2.flac", tagged("Z", "Last", 1, &["folk", "Blues"])),
+            track("3.flac", tagged("A", "First", 1, &["FOLK"])),
+            track("4.flac", tagged("A", "First", 2, &["Folk", "Ambient"])),
+        ];
+        let mut index = TagIndex::default();
+        index.insert(TrackId(0), &tracks);
+        let folk = genre_named(&index, "Folk");
+        assert_eq!(genre_albums(&index, folk), ["Mid / M"]);
+        index.insert(TrackId(1), &tracks);
+        index.insert(TrackId(2), &tracks);
+        // The id stays; the list and albums grow in order around it.
+        assert_eq!(genre_named(&index, "Folk"), folk);
+        assert_eq!(
+            genre_albums(&index, folk),
+            ["First / A", "Mid / M", "Last / Z"]
+        );
+        assert_eq!(
+            genre_rows(&index),
+            ["Blues (1 albums, 1 tracks)", "Folk (3 albums, 3 tracks)"]
+        );
+        index.insert(TrackId(3), &tracks);
+        assert_eq!(
+            genre_rows(&index),
+            [
+                "Ambient (1 albums, 1 tracks)",
+                "Blues (1 albums, 1 tracks)",
+                "Folk (3 albums, 4 tracks)",
+            ]
+        );
+        assert_eq!(index.genre_tracks(folk).len(), 4);
     }
 }

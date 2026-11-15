@@ -483,6 +483,8 @@ impl Engine {
                                 disc_no: r.disc_no,
                                 duration: r.duration_ms.map(Duration::from_millis),
                                 cover_art,
+                                // Track refs carry no genres yet.
+                                genres: Vec::new(),
                             },
                         );
                         track.album_id = r.album_id.filter(|id| valid_ref_id(id));

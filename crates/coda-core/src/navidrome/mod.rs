@@ -41,6 +41,27 @@ pub struct Album {
     pub artist_id: Option<String>,
 }
 
+/// A genre as listed by `getGenres`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Genre {
+    /// Cleaned for display ([`crate::model::clean_text`]).
+    pub name: String,
+    /// The name exactly as the server sent it: what the genre's albums
+    /// and random songs are asked for by (the server matches it exactly).
+    query: String,
+    /// As reported by the server (saturated at `u32::MAX`).
+    pub song_count: Option<u32>,
+    pub album_count: Option<u32>,
+}
+
+impl Genre {
+    /// The genre as the server sent it, for [`Client::albums_by_genre`]
+    /// and [`Client::random_songs_in_genre`]; show [`Self::name`].
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+}
+
 /// A playlist as listed by `getPlaylists`. Its songs are fetched with
 /// `getPlaylist`, as [`crate::model::Track`]s in playlist order.
 #[derive(Debug, Clone, PartialEq, Eq)]

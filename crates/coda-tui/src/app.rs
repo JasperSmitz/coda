@@ -3579,6 +3579,7 @@ mod tests {
                 LocalRow::Artist(a) => a.name().to_owned(),
                 LocalRow::Album(album, artist) => format!("{} — {}", album.name(), artist.name()),
                 LocalRow::Playlist(p) => p.name.clone(),
+                LocalRow::Genre(g) => g.name().to_owned(),
             })
             .collect()
     }

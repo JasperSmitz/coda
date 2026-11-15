@@ -300,6 +300,11 @@ struct EntryFile {
     /// back to its song id, which Navidrome also serves art for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cover_art: Option<String>,
+    /// The track's genres, as split when read. Added after version 1
+    /// shipped, like `album_artist`: left out when empty, and an entry
+    /// without it (an older file) has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    genres: Vec<String>,
 }
 
 impl From<RepeatMode> for RepeatFile {
@@ -342,6 +347,7 @@ impl EntryFile {
                 .duration
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             cover_art: track.cover_art.clone(),
+            genres: track.genres.clone(),
         })
     }
 
@@ -357,6 +363,7 @@ impl EntryFile {
             disc_no: self.disc_no,
             duration: self.duration_ms.map(Duration::from_millis),
             cover_art: None,
+            genres: self.genres,
         };
         match self.source {
             SourceFile::Local(path) => {
@@ -638,6 +645,7 @@ mod tests {
                 disc_no: Some(1),
                 duration: Some(Duration::from_millis(183_250)),
                 cover_art: None,
+                genres: vec!["Rock".into(), "Progressive Rock".into()],
             },
         )
     }
@@ -761,6 +769,44 @@ mod tests {
         assert!(!String::from_utf8_lossy(&json).contains("cover_art"));
         let (again, _) = decode(&json).unwrap();
         assert_eq!(again.tracks[0].cover_art.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn genres_are_optional_within_version_1() {
+        // A version 1 file written before `genres` existed: none.
+        let old = br#"{"version":1,"volume":50,"repeat":"off","current":0,
+            "queue":[{"source":{"local":"/music/a.flac"},"title":"A"},
+            {"source":{"navidrome":"s"},"title":"B"}]}"#;
+        let (session, skipped) = decode(old).unwrap();
+        assert_eq!(skipped, 0);
+        assert!(session.tracks.iter().all(|t| t.genres.is_empty()));
+        // Empty: left out of the file, which stays version 1.
+        let json = String::from_utf8(encode(&session).unwrap()).unwrap();
+        assert!(!json.contains("genres"), "{json}");
+        assert!(json.contains(r#""version":1"#), "{json}");
+        // Present: kept in order through a round trip (the remote sample
+        // track has none, so it writes none).
+        let json = String::from_utf8(encode(&sample()).unwrap()).unwrap();
+        assert!(
+            json.contains(r#""genres":["Rock","Progressive Rock"]"#),
+            "{json}"
+        );
+        assert_eq!(json.matches("genres").count(), 2, "{json}");
+        let loaded = decode(json.as_bytes()).unwrap().0;
+        assert_eq!(loaded.tracks[0].genres, ["Rock", "Progressive Rock"]);
+        assert_eq!(loaded, sample());
+        // A saved list is cleaned and capped like tags, but not split
+        // again.
+        let many: Vec<String> = (0..40).map(|i| format!(r#""g{i}""#)).collect();
+        let edited = format!(
+            r#"{{"version":1,"volume":50,"repeat":"off","current":null,
+            "queue":[{{"source":{{"navidrome":"s"}},"genres":[" AC/DC ","ac/dc",""]}},
+            {{"source":{{"navidrome":"t"}},"genres":[{}]}}]}}"#,
+            many.join(",")
+        );
+        let (session, _) = decode(edited.as_bytes()).unwrap();
+        assert_eq!(session.tracks[0].genres, ["AC/DC"]);
+        assert_eq!(session.tracks[1].genres.len(), crate::model::MAX_GENRES);
     }
 
     #[test]

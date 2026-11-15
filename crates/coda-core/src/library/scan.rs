@@ -38,7 +38,7 @@ use walkdir::{DirEntry, WalkDir};
 use super::MAX_PLAYLISTS;
 use super::m3u::{self, PlaylistFile};
 use crate::lyrics::{self, Lyrics, index::IndexedLyrics};
-use crate::model::{Track, TrackMetadata};
+use crate::model::{Track, TrackMetadata, split_genres};
 
 pub const AUDIO_EXTENSIONS: [&str; 13] = [
     "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wav", "aif", "aiff", "wv", "ape", "mpc",
@@ -502,6 +502,9 @@ pub fn read_file(path: &Path, lyrics: bool) -> (TrackMetadata, Option<Lyrics>) {
         disc_no: tag.disk(),
         duration,
         cover_art: None,
+        // Every genre item: repeated Vorbis fields, an ID3 `TCON` list
+        // (lofty resolves numeric genres), then split on separators.
+        genres: split_genres(tag.get_strings(ItemKey::Genre)),
     };
     (metadata, found)
 }

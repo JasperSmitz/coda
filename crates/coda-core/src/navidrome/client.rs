@@ -26,7 +26,7 @@ use url::form_urlencoded;
 use url::{Host, Url};
 
 use super::api::{self, AUTH_ERROR_CODES, MAX_ALBUM_LIST_SIZE, RANDOM_SONGS_SIZE};
-use super::{Album, AlbumPage, AlbumSort, Artist, Playlist, PlaylistSongs, SearchResults};
+use super::{Album, AlbumPage, AlbumSort, Artist, Genre, Playlist, PlaylistSongs, SearchResults};
 use crate::lyrics::{self, Lyrics};
 use crate::model::Track;
 use crate::playback::StreamUrl;
@@ -406,16 +406,51 @@ impl Client {
             .await?
             .album_list2
             .ok_or_else(|| Error::Decode("getAlbumList2: missing albumList2".into()))?;
-        Ok(AlbumPage {
-            served: list.album.served.min(size),
-            albums: list
-                .album
-                .items
-                .into_iter()
-                .take(size)
-                .filter_map(api::RawAlbum::into_album)
-                .collect(),
-        })
+        Ok(album_page(list, size))
+    }
+
+    /// One page of a genre's albums (`getAlbumList2`, `type=byGenre`),
+    /// starting at `offset`, in served order. `size` is clamped to
+    /// `1..=500`. The genre name is sent as given (encoded, never logged).
+    pub async fn albums_by_genre(
+        &self,
+        genre: &str,
+        offset: usize,
+        size: usize,
+    ) -> Result<AlbumPage, Error> {
+        let size = size.clamp(1, MAX_ALBUM_LIST_SIZE);
+        let size_param = size.to_string();
+        let offset_param = offset.to_string();
+        let params = [
+            ("type", "byGenre"),
+            ("genre", genre),
+            ("size", size_param.as_str()),
+            ("offset", offset_param.as_str()),
+        ];
+        let list = self
+            .get::<api::AlbumListReply>("getAlbumList2", &params)
+            .await?
+            .album_list2
+            .ok_or_else(|| Error::Decode("getAlbumList2: missing albumList2".into()))?;
+        Ok(album_page(list, size))
+    }
+
+    /// Every genre (`getGenres`), A–Z ignoring case. Genres without a
+    /// name are skipped.
+    pub async fn genres(&self) -> Result<Vec<Genre>, Error> {
+        let genres = self
+            .get::<api::GenresReply>("getGenres", &[])
+            .await?
+            .genres
+            .ok_or_else(|| Error::Decode("getGenres: missing genres".into()))?;
+        let mut genres: Vec<Genre> = genres
+            .genre
+            .items
+            .into_iter()
+            .filter_map(api::RawGenre::into_genre)
+            .collect();
+        genres.sort_by_cached_key(|g| g.name.to_lowercase());
+        Ok(genres)
     }
 
     /// The user's playlists, in served order (`getPlaylists`).
@@ -458,8 +493,20 @@ impl Client {
     /// order. A new request gives a new selection; nothing is cached.
     pub async fn random_songs(&self) -> Result<Vec<Track>, Error> {
         let size = RANDOM_SONGS_SIZE.to_string();
+        self.random_songs_with(&[("size", size.as_str())]).await
+    }
+
+    /// Like [`Self::random_songs`], from one genre (`genre=`; encoded,
+    /// never logged).
+    pub async fn random_songs_in_genre(&self, genre: &str) -> Result<Vec<Track>, Error> {
+        let size = RANDOM_SONGS_SIZE.to_string();
+        self.random_songs_with(&[("size", size.as_str()), ("genre", genre)])
+            .await
+    }
+
+    async fn random_songs_with(&self, params: &[(&str, &str)]) -> Result<Vec<Track>, Error> {
         let songs = self
-            .get::<api::RandomSongsReply>("getRandomSongs", &[("size", size.as_str())])
+            .get::<api::RandomSongsReply>("getRandomSongs", params)
             .await?
             .random_songs
             .ok_or_else(|| Error::Decode("getRandomSongs: missing randomSongs".into()))?;
@@ -942,6 +989,22 @@ async fn read_capped(response: &mut reqwest::Response, max_body: usize) -> Resul
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// A page of `getAlbumList2` of `size` requested albums: the usable ones
+/// among the first `size` served, and how many were served (at most
+/// `size`).
+fn album_page(list: api::AlbumList2, size: usize) -> AlbumPage {
+    AlbumPage {
+        served: list.album.served.min(size),
+        albums: list
+            .album
+            .items
+            .into_iter()
+            .take(size)
+            .filter_map(api::RawAlbum::into_album)
+            .collect(),
+    }
 }
 
 fn check_status<R: api::Reply>(endpoint: &str, mut response: R) -> Result<R, Error> {

@@ -4,8 +4,9 @@
 use std::error::Error as _;
 use std::time::Duration;
 
+use coda_core::model::{MAX_GENRES, split_genres};
 use coda_core::model::{MAX_METADATA_CHARS, TrackSource, UNKNOWN_TITLE};
-use coda_core::navidrome::api::MAX_PLAYLIST_ENTRIES;
+use coda_core::navidrome::api::{MAX_GENRES_LISTED, MAX_GENRES_PER_SONG, MAX_PLAYLIST_ENTRIES};
 use coda_core::navidrome::client::{self, MAX_BODY_BYTES, MAX_PLAYLIST_BODY_BYTES, parse_base_url};
 use coda_core::navidrome::{AlbumSort, Client, Error, Password, UNKNOWN_ARTIST};
 use serde_json::{Value, json};
@@ -891,6 +892,45 @@ async fn a_playlist_of_10000_realistic_entries_parses_within_its_cap() {
             .starts_with("Some Rather Long Song Title Number 9999")
     );
     assert_eq!(songs.tracks[0].duration, Some(Duration::from_secs(245)));
+    // Genres are read too, from the OpenSubsonic list.
+    assert_eq!(songs.tracks[9_999].genres, ["Rock", "Live"]);
+}
+
+/// Genre names take nothing from the response budget: a full playlist of
+/// songs with more genres than a track keeps is still built whole.
+#[tokio::test]
+async fn a_playlist_of_10000_entries_with_many_genres_each_is_built_whole() {
+    let (server, client) = server().await;
+    let genres: Vec<Value> = (0..MAX_GENRES_PER_SONG + 4)
+        .map(|g| json!({ "name": format!("Genre {g}") }))
+        .collect();
+    let entries: Vec<Value> = (0..10_000)
+        .map(|i| {
+            let mut entry = navidrome_entry(i);
+            entry["genres"] = Value::Array(genres.clone());
+            entry
+        })
+        .collect();
+    let body = serde_json::to_vec(&json!({ "subsonic-response": {
+        "status": "ok", "version": "1.16.1", "type": "navidrome", "openSubsonic": true,
+        "playlist": { "id": "big", "name": "Big", "songCount": 10_000, "entry": entries }
+    }}))
+    .unwrap();
+    assert!(body.len() < MAX_PLAYLIST_BODY_BYTES, "{} bytes", body.len());
+    mount(
+        &server,
+        "getPlaylist",
+        ResponseTemplate::new(200).set_body_raw(body, "application/json"),
+    )
+    .await;
+    let songs = client.playlist("big").await.unwrap();
+    assert_eq!(songs.served, 10_000);
+    assert_eq!(songs.tracks.len(), 10_000);
+    assert_eq!(songs.truncated(), None);
+    let expected: Vec<String> = (0..MAX_GENRES).map(|g| format!("Genre {g}")).collect();
+    for track in &songs.tracks {
+        assert_eq!(track.genres, expected);
+    }
 }
 
 #[tokio::test]
@@ -1139,4 +1179,284 @@ async fn oversized_random_songs_replies_are_capped_drained_or_rejected() {
     )
     .await;
     assert!(matches!(client.random_songs().await, Err(Error::TooLarge)));
+}
+
+#[tokio::test]
+async fn song_genres_prefer_the_opensubsonic_list_over_the_classic_string() {
+    let (server, client) = server().await;
+    let many: Vec<Value> = (0..100)
+        .map(|i| json!({ "name": format!("G{i}") }))
+        .collect();
+    mount(
+        &server,
+        "getRandomSongs",
+        ok(json!({ "randomSongs": { "song": [
+            // The server's list as it is: not split again.
+            { "id": "1", "genre": "Rock", "genres": [{ "name": "Rock" }, { "name": "AC/DC Tribute" }] },
+            // The classic string alone, split like local tags.
+            { "id": "2", "genre": "Rock;Progressive Rock / Jazz, rock" },
+            // An empty or unusable list falls back to the string.
+            { "id": "3", "genre": "Pop", "genres": [] },
+            { "id": "4", "genre": "Funk", "genres": [{ "name": "  " }, "x", { "name": 7 }] },
+            // Nothing usable: no genres.
+            { "id": "5", "genre": ["Rock"], "genres": { "name": "Rock" } },
+            { "id": "6", "genres": many },
+            { "id": "7", "genres": [{ "name": "Soul" }, { "name": "soul" }, { "name": "x".repeat(10_000) }] },
+        ]}})),
+    )
+    .await;
+    let tracks = client.random_songs().await.unwrap();
+    let genres: Vec<Vec<String>> = tracks.iter().map(|t| t.genres.clone()).collect();
+    assert_eq!(genres[0], ["Rock", "AC/DC Tribute"]);
+    assert_eq!(genres[1], ["Rock", "Progressive Rock", "Jazz"]);
+    assert_eq!(genres[2], ["Pop"]);
+    assert_eq!(genres[3], ["Funk"]);
+    assert!(genres[4].is_empty());
+    assert_eq!(genres[5].len(), MAX_GENRES);
+    assert_eq!(genres[5][0], "G0");
+    assert_eq!(genres[6].len(), 2);
+    assert_eq!(genres[6][1].chars().count(), MAX_METADATA_CHARS);
+}
+
+/// The classic string is split whole, like a local tag, and only then is
+/// each genre cut: a long string never cuts a later genre short.
+#[tokio::test]
+async fn a_long_classic_genre_string_is_split_before_it_is_cut() {
+    let (server, client) = server().await;
+    // Longer than a genre may be, but every part fits.
+    let combined = format!("{};Jazz;{};Soul", "A".repeat(510), "B".repeat(300));
+    // An oversized first part, then a short genre.
+    let oversized = format!("{};Jazz", "C".repeat(MAX_METADATA_CHARS + 100));
+    assert!(combined.chars().count() > MAX_METADATA_CHARS);
+    mount(
+        &server,
+        "getRandomSongs",
+        ok(json!({ "randomSongs": { "song": [
+            { "id": "1", "genre": combined },
+            { "id": "2", "genre": oversized },
+        ]}})),
+    )
+    .await;
+    let tracks = client.random_songs().await.unwrap();
+    assert_eq!(tracks[0].genres, split_genres([&combined]));
+    assert_eq!(tracks[0].genres.len(), 4);
+    assert_eq!(tracks[0].genres[1], "Jazz");
+    assert_eq!(tracks[0].genres[3], "Soul");
+    assert_eq!(tracks[1].genres, split_genres([&oversized]));
+    assert_eq!(tracks[1].genres.len(), 2);
+    assert_eq!(tracks[1].genres[0].chars().count(), MAX_METADATA_CHARS);
+    assert_eq!(tracks[1].genres[1], "Jazz");
+}
+
+#[tokio::test]
+async fn genres_are_listed_a_to_z_with_their_counts() {
+    let (server, client) = server().await;
+    mount(
+        &server,
+        "getGenres",
+        ok(json!({ "genres": { "genre": [
+            { "value": "rock", "songCount": 120, "albumCount": 9 },
+            { "value": "Ambient", "songCount": 1e20, "albumCount": -1 },
+            { "value": "  " },
+            { "songCount": 3 },
+            "garbage",
+            { "value": "Jazz" },
+        ]}})),
+    )
+    .await;
+    let genres = client.genres().await.unwrap();
+    let rows: Vec<(&str, Option<u32>, Option<u32>)> = genres
+        .iter()
+        .map(|g| (g.name.as_str(), g.song_count, g.album_count))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("Ambient", Some(u32::MAX), None),
+            ("Jazz", None, None),
+            ("rock", Some(120), Some(9)),
+        ]
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_signed(&requests[0]);
+}
+
+/// A genre is shown cleaned but asked for exactly as the server sent it,
+/// which the server matches exactly.
+#[tokio::test]
+async fn a_genre_is_asked_for_by_its_name_as_sent() {
+    let (server, client) = server().await;
+    let raw = "  Rock \t";
+    let long = format!(" {}", "y".repeat(MAX_METADATA_CHARS + 10));
+    mount(
+        &server,
+        "getGenres",
+        ok(json!({ "genres": { "genre": [{ "value": raw }, { "value": long }] }})),
+    )
+    .await;
+    mount(&server, "getAlbumList2", ok(json!({ "albumList2": {} }))).await;
+    mount(&server, "getRandomSongs", ok(json!({ "randomSongs": {} }))).await;
+    let genres = client.genres().await.unwrap();
+    assert_eq!(genres[0].name, "Rock");
+    assert_eq!(genres[0].query(), raw);
+    assert_eq!(genres[1].name.chars().count(), MAX_METADATA_CHARS);
+    assert_eq!(genres[1].query(), long);
+    for genre in &genres {
+        client.albums_by_genre(genre.query(), 0, 50).await.unwrap();
+        client.random_songs_in_genre(genre.query()).await.unwrap();
+    }
+    let sent: Vec<(String, String)> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|r| {
+            let q = query(&r.url);
+            (r.url.path().to_owned(), param(&q, "genre").unwrap())
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            ("/rest/getAlbumList2".to_owned(), raw.to_owned()),
+            ("/rest/getRandomSongs".to_owned(), raw.to_owned()),
+            ("/rest/getAlbumList2".to_owned(), long.clone()),
+            ("/rest/getRandomSongs".to_owned(), long.clone()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn genres_empty_failed_malformed_and_oversized_replies() {
+    // Subsonic omits the array of an empty list.
+    for body in [
+        json!({ "genres": {} }),
+        json!({ "genres": { "genre": [] } }),
+    ] {
+        let (server, client) = self::server().await;
+        mount(&server, "getGenres", ok(body)).await;
+        assert!(client.genres().await.unwrap().is_empty());
+    }
+    let (server, client) = self::server().await;
+    mount(&server, "getGenres", failed(70, "not found")).await;
+    assert!(matches!(
+        client.genres().await,
+        Err(Error::Server { code: 70, .. })
+    ));
+    let (server, client) = self::server().await;
+    mount(&server, "getGenres", ok(json!({ "genres": "nope" }))).await;
+    assert!(matches!(client.genres().await, Err(Error::Decode(_))));
+    let (server, client) = self::server().await;
+    mount(&server, "getGenres", ok(json!({}))).await;
+    assert!(matches!(client.genres().await, Err(Error::Decode(_))));
+    // More than the cap: the rest is drained.
+    let (server, client) = self::server().await;
+    let items: Vec<Value> = (0..MAX_GENRES_LISTED + 50)
+        .map(|i| json!({ "value": format!("g{i:06}") }))
+        .collect();
+    mount(
+        &server,
+        "getGenres",
+        ok(json!({ "genres": { "genre": items } })),
+    )
+    .await;
+    assert_eq!(client.genres().await.unwrap().len(), MAX_GENRES_LISTED);
+    // Over the body cap.
+    let (server, client) = self::server().await;
+    let huge = format!(
+        r#"{{"subsonic-response":{{"status":"ok","genres":{{}},"pad":"{}"}}}}"#,
+        "x".repeat(MAX_BODY_BYTES)
+    );
+    mount(
+        &server,
+        "getGenres",
+        ResponseTemplate::new(200).set_body_raw(huge, "application/json"),
+    )
+    .await;
+    assert!(matches!(client.genres().await, Err(Error::TooLarge)));
+}
+
+#[tokio::test]
+async fn albums_by_genre_send_the_genre_size_and_offset() {
+    let (server, client) = server().await;
+    let genre = "Rock & Roll/Pop? #1 ü";
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("type", "byGenre"))
+        .and(query_param("genre", genre))
+        .and(query_param("size", "500"))
+        .and(query_param("offset", "1000"))
+        .respond_with(ok(json!({ "albumList2": { "album": [
+            { "id": "al1", "name": "First", "artist": "X" },
+            { "name": "no id" },
+        ]}})))
+        .mount(&server)
+        .await;
+    let page = client.albums_by_genre(genre, 1000, 500).await.unwrap();
+    assert_eq!(page.served, 2, "unusable items still count");
+    assert_eq!(page.albums.len(), 1);
+    assert_eq!(page.albums[0].name, "First");
+    let requests = server.received_requests().await.unwrap();
+    assert_signed(&requests[0]);
+    // Encoded by the URL builder: the `&`, `?` and `#` stay in the value.
+    assert!(!requests[0].url.as_str().contains("Rock & Roll"));
+    // The size is clamped like `album_list`'s; an empty list is empty.
+    let (server, client) = self::server().await;
+    mount(&server, "getAlbumList2", ok(json!({ "albumList2": {} }))).await;
+    for size in [0, usize::MAX] {
+        assert_eq!(
+            client.albums_by_genre("Jazz", 0, size).await.unwrap(),
+            Default::default()
+        );
+    }
+    let sizes: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| param(&query(&r.url), "size").unwrap())
+        .collect();
+    assert_eq!(sizes, ["1", "500"]);
+    // Failed and malformed replies.
+    let (server, client) = self::server().await;
+    mount(&server, "getAlbumList2", failed(70, "not found")).await;
+    assert!(matches!(
+        client.albums_by_genre("Jazz", 0, 500).await,
+        Err(Error::Server { code: 70, .. })
+    ));
+    let (server, client) = self::server().await;
+    mount(&server, "getAlbumList2", ok(json!({}))).await;
+    assert!(matches!(
+        client.albums_by_genre("Jazz", 0, 500).await,
+        Err(Error::Decode(_))
+    ));
+}
+
+#[tokio::test]
+async fn random_songs_in_a_genre_send_the_genre_and_the_server_maximum() {
+    let (server, client) = server().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getRandomSongs"))
+        .and(query_param("genre", "Drum & Bass"))
+        .and(query_param("size", "500"))
+        .respond_with(ok(json!({ "randomSongs": { "song": [
+            { "id": "s1", "title": "One", "genres": [{ "name": "Drum & Bass" }] },
+        ]}})))
+        .mount(&server)
+        .await;
+    let tracks = client.random_songs_in_genre("Drum & Bass").await.unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0].genres, ["Drum & Bass"]);
+    assert_signed(&server.received_requests().await.unwrap()[0]);
+    // Empty and failed replies.
+    let (server, client) = self::server().await;
+    mount(&server, "getRandomSongs", ok(json!({ "randomSongs": {} }))).await;
+    assert!(client.random_songs_in_genre("x").await.unwrap().is_empty());
+    let (server, client) = self::server().await;
+    mount(&server, "getRandomSongs", failed(70, "not found")).await;
+    assert!(matches!(
+        client.random_songs_in_genre("x").await,
+        Err(Error::Server { code: 70, .. })
+    ));
 }

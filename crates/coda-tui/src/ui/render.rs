@@ -505,7 +505,9 @@ fn local_row(
         ),
         LocalRow::Album(album, artist) => {
             let left = match view {
-                LocalView::Albums(_) => format!("{} — {}", album.name(), artist.name()),
+                LocalView::Albums(_) | LocalView::Genre(_) => {
+                    format!("{} — {}", album.name(), artist.name())
+                }
                 _ => album.name().to_owned(),
             };
             let tracks = Some(count(album.tracks().len(), "track"));
@@ -518,6 +520,11 @@ fn local_row(
         LocalRow::Playlist(playlist) => {
             row_line(&playlist.name, Some(playlist_counts(playlist)), width)
         }
+        LocalRow::Genre(genre) => row_line(
+            genre.name(),
+            Some(count(genre.albums().len(), "album")),
+            width,
+        ),
     }
 }
 
@@ -699,12 +706,16 @@ fn draw_remote(
                 let text = match current.resource {
                     Resource::Home => "",
                     Resource::Artists => "No artists",
-                    Resource::Artist(_) | Resource::Albums(_) | Resource::AlbumPage { .. } => {
-                        "No albums"
-                    }
-                    Resource::Album(_) | Resource::Playlist(_) | Resource::RandomSongs => {
-                        "No songs"
-                    }
+                    Resource::Artist(_)
+                    | Resource::Albums(_)
+                    | Resource::AlbumPage { .. }
+                    | Resource::Genre(_)
+                    | Resource::GenreAlbums { .. } => "No albums",
+                    Resource::Album(_)
+                    | Resource::Playlist(_)
+                    | Resource::RandomSongs
+                    | Resource::GenreRandomSongs(_) => "No songs",
+                    Resource::Genres => "No genres",
                     Resource::Search(_) => "No results",
                     Resource::Playlists => "No playlists",
                 };
@@ -770,7 +781,10 @@ impl RowStyle {
         Self {
             album_artist: matches!(
                 resource,
-                Resource::Search(_) | Resource::Albums(_) | Resource::AlbumPage { .. }
+                Resource::Search(_)
+                    | Resource::Albums(_)
+                    | Resource::AlbumPage { .. }
+                    | Resource::Genre(_)
             ),
             song_artist: matches!(resource, Resource::Search(_) | Resource::Playlist(_)),
         }
@@ -797,6 +811,11 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
         Row::Artist(artist) => row_line(
             &artist.name,
             artist.album_count.map(|n| count(n as usize, "album")),
+            width,
+        ),
+        Row::Genre(genre) => row_line(
+            &genre.name,
+            genre.album_count.map(|n| count(n as usize, "album")),
             width,
         ),
         Row::Album(album) => {
