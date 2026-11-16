@@ -57,6 +57,11 @@ pub enum StartError {
     /// player queued its own message).
     #[error("Playback unavailable")]
     Refused,
+    /// The queue was replaced or cleared after the mix was made and
+    /// before it started ([`ActiveMix::has_ended`]): the user chose
+    /// something else to play.
+    #[error("Something else is playing")]
+    Ended,
 }
 
 /// A playing mix: its recipe, its picker and the queue it filled.
@@ -67,18 +72,24 @@ pub struct ActiveMix {
     picker: Picker,
     /// The queue context it owns; `None` until it starts or adopts one.
     queue_context: Option<u64>,
+    /// The queue context when it was made: replaced before the mix
+    /// starts, the mix has ended without playing.
+    created_context: u64,
 }
 
 impl ActiveMix {
     /// `saved`: the mix is in the mixes file (else a quick mix). `picker`
     /// holds one pool per ingredient, in order (or will, as a Navidrome
-    /// mix's fetches return).
-    pub fn new(mix: Mix, saved: bool, picker: Picker) -> Self {
+    /// mix's fetches return). Records `player`'s queue context: once the
+    /// queue is replaced or cleared, even before the mix starts, the mix
+    /// has ended ([`ActiveMix::has_ended`]).
+    pub fn new(mix: Mix, saved: bool, picker: Picker, player: &Player) -> Self {
         Self {
             mix,
             saved,
             picker,
             queue_context: None,
+            created_context: player.queue_context(),
         }
     }
 
@@ -110,13 +121,18 @@ impl ActiveMix {
     }
 
     /// Replaces the queue with [`START_TRACKS`] songs and plays the first;
-    /// the mix then owns the queue. On an error the queue and the picker
-    /// are as they were (only `rng` has moved on).
+    /// the mix then owns the queue. Refused once the mix has ended
+    /// ([`StartError::Ended`]: the queue was replaced since it was made, or
+    /// since it started). On an error the queue and the picker are as they
+    /// were (only `rng` has moved on).
     pub fn start(
         &mut self,
         player: &mut Player,
         rng: &mut Rng,
     ) -> Result<Vec<PlayerCommand>, StartError> {
+        if self.has_ended(player) {
+            return Err(StartError::Ended);
+        }
         let picker = self.picker.clone();
         let tracks = self.picker.next(START_TRACKS, rng);
         if tracks.is_empty() {
@@ -143,6 +159,18 @@ impl ActiveMix {
     /// has ended and the frontend drops it.
     pub fn owns_queue(&self, player: &Player) -> bool {
         self.queue_context == Some(player.queue_context())
+    }
+
+    /// The queue has been replaced or cleared since the mix started (or
+    /// adopted it), or, before it starts, since the mix was made: the mix
+    /// is over (decision 7), and the frontend drops it. Before that, a
+    /// Navidrome mix's first fetches may land before the queue is filled.
+    pub fn has_ended(&self, player: &Player) -> bool {
+        let context = player.queue_context();
+        match self.queue_context {
+            Some(owned) => owned != context,
+            None => self.created_context != context,
+        }
     }
 
     /// How many songs to add now: [`TOP_UP_TRACKS`] when the mix owns the

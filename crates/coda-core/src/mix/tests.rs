@@ -268,7 +268,7 @@ fn local_ingredients_resolve_by_name_across_a_rescan() {
         );
         assert!(pools[3].is_empty(), "no such genre");
         assert!(pools[4].is_empty(), "no such album by that artist");
-        let active = ActiveMix::new(mix.clone(), true, local::picker(lib, &mix));
+        let active = ActiveMix::new(mix.clone(), true, local::picker(lib, &mix), &Player::new());
         assert_eq!(
             active.empty_ingredients(),
             [&genre("Jazz"), &album("Abba", "Fragile")]
@@ -316,8 +316,8 @@ fn skip(player: &mut Player, n: usize) {
 #[test]
 fn starting_a_mix_queues_25_songs_and_plays_the_first() {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     player.enqueue(song("Other", "Old", 1, &[]));
     let mut rng = Rng::from_seed(7);
     let commands = active.start(&mut player, &mut rng).unwrap();
@@ -338,8 +338,8 @@ fn starting_a_mix_queues_25_songs_and_plays_the_first() {
 #[test]
 fn a_mix_tops_up_when_five_or_fewer_remain() {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     let mut rng = Rng::from_seed(7);
     active.start(&mut player, &mut rng).unwrap();
     // 24 after the current one; 6 after skipping 18.
@@ -361,8 +361,8 @@ fn a_mix_tops_up_when_five_or_fewer_remain() {
 #[test]
 fn replacing_or_clearing_the_queue_ends_the_mix_and_edits_do_not() {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, false, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, false, picker, &player);
     let mut rng = Rng::from_seed(3);
     active.start(&mut player, &mut rng).unwrap();
     // Adding, reordering, removing and skipping keep the mix.
@@ -385,7 +385,12 @@ fn replacing_or_clearing_the_queue_ends_the_mix_and_edits_do_not() {
     );
     assert_eq!(active.top_up(&mut player, &mut rng).added, 0);
     assert_eq!(player.queue().len(), 1);
-    // Clearing ends it too, even when it restarts on the same player.
+    // An ended mix does not start again.
+    assert_eq!(active.start(&mut player, &mut rng), Err(StartError::Ended));
+    assert_eq!(player.queue().len(), 1);
+    // Clearing ends a mix too, also one started on the same player.
+    let (mix, picker) = big_mix();
+    let mut active = ActiveMix::new(mix, false, picker, &player);
     active.start(&mut player, &mut rng).unwrap();
     assert!(active.owns_queue(&player));
     player.clear_queue();
@@ -400,10 +405,26 @@ fn replacing_or_clearing_the_queue_ends_the_mix_and_edits_do_not() {
 }
 
 #[test]
+fn a_queue_replaced_before_the_mix_starts_ends_it() {
+    let (mix, picker) = big_mix();
+    let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
+    let mut rng = Rng::from_seed(3);
+    // Adding before it starts does not end it.
+    player.enqueue(song("Other", "X", 1, &[]));
+    assert!(!active.has_ended(&player));
+    // Playing something else does.
+    player.play_context(vec![song("Other", "Y", 1, &[])], 0);
+    assert!(active.has_ended(&player));
+    assert_eq!(active.start(&mut player, &mut rng), Err(StartError::Ended));
+    assert_eq!(player.queue().len(), 1, "the user's queue stays");
+}
+
+#[test]
 fn a_restored_mix_adopts_the_restored_queue() {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix.clone(), true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix.clone(), true, picker, &player);
     player.restore(
         (0..3).map(|n| song("Yes", "Fragile", n, &[])).collect(),
         Some(0),
@@ -427,15 +448,15 @@ fn a_restored_mix_adopts_the_restored_queue() {
         "left alone"
     );
     assert_eq!(active.session(), SessionMix::Saved(mix.id.clone()));
-    let quick = ActiveMix::new(mix.clone(), false, Picker::new(3));
+    let quick = ActiveMix::new(mix.clone(), false, Picker::new(3), &Player::new());
     assert_eq!(quick.session(), SessionMix::Quick(mix));
 }
 
 #[test]
 fn near_the_cap_the_oldest_played_entries_make_room() {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     let mut rng = Rng::from_seed(5);
     active.start(&mut player, &mut rng).unwrap();
     // Fill the queue to 3 short of the cap, then play on to its end.
@@ -458,8 +479,8 @@ fn near_the_cap_the_oldest_played_entries_make_room() {
 #[test]
 fn a_mix_without_songs_or_playback_does_not_start() {
     let mix = Mix::new("Empty", MixSource::Local, vec![genre("Jazz")]).unwrap();
-    let mut active = ActiveMix::new(mix, true, Picker::from_pools(vec![Vec::new()]));
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, Picker::from_pools(vec![Vec::new()]), &player);
     player.enqueue(song("Other", "Old", 1, &[]));
     let mut rng = Rng::from_seed(1);
     assert_eq!(
@@ -470,7 +491,7 @@ fn a_mix_without_songs_or_playback_does_not_start() {
     assert!(!active.owns_queue(&player));
 
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     player.handle_event(PlaybackEvent::BackendExited("gone".into()));
     let before = active.clone();
     assert_eq!(
@@ -506,8 +527,8 @@ fn play_and_end(player: &mut Player, reason: EndReason) -> Vec<PlayerCommand> {
 /// before any top-up), with `repeat`.
 fn mix_at_its_last_entry(repeat: RepeatMode) -> (ActiveMix, Player, Rng) {
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     let mut rng = Rng::from_seed(12);
     active.start(&mut player, &mut rng).unwrap();
     player.set_repeat(repeat);
@@ -600,8 +621,8 @@ fn a_refill_after_the_end_near_the_cap_plays_the_users_song() {
     // At the cap the refill first trims played entries; the ended entry
     // and the user's song after it stay, and the user's song plays.
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     let mut rng = Rng::from_seed(5);
     active.start(&mut player, &mut rng).unwrap();
     let filler: Vec<Track> = (0..MAX_QUEUE_LEN - START_TRACKS - 1)
@@ -702,8 +723,8 @@ fn only_reaching_the_end_on_its_own_resumes() {
     not_resumed(&mut active, &mut player, "next");
     // A restored queue on its last entry.
     let (mix, picker) = big_mix();
-    let mut active = ActiveMix::new(mix, true, picker);
     let mut player = Player::new();
+    let mut active = ActiveMix::new(mix, true, picker, &player);
     player.restore(
         (0..3).map(|n| song("Yes", "Fragile", n, &[])).collect(),
         Some(2),

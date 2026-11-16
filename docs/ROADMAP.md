@@ -114,9 +114,9 @@ Brief: `docs/plans/genres.md` (approved 2026-11-15). A Genres view for both sour
 
 ## M12 — Mixes (in progress)
 Brief: `docs/plans/mixes.md` (approved 2026-11-16). A mix is a saved recipe of genres, artists and albums from one source, resolved each time it plays and played as an endless, balanced shuffle. Saved mixes live in `$XDG_DATA_HOME/coda/mixes.json`, shared by both apps (ADR 0008).
-- **Slice 1, core:**
+- **Slice 1, core (completed, reviewed):**
   - **Part 1a (completed, reviewed):** the `mix` module (model with caps, the shared mixes file, the balanced `Picker`, local resolution by name, `ActiveMix` with its top-up and cap trim), the queue's context counter, the active mix in the session, `navidrome::server_id` in core. Nothing user-visible yet.
-  - **Part 1b:** Navidrome resolution (genre refetch, artist fan-out, id fallback by name).
+  - **Part 1b (completed, reviewed):** Navidrome resolution in `mix::navidrome`: a genre by its exact value (`getRandomSongs`, fetched again once played through, never when the sample held the whole genre), an artist's albums two at a time (at most 200, kept while the mix plays), an album; the id fallback by name through `search3` (and the artist index); the `MixFetches` coordinator (pending, in flight, failed with retry and `next_retry`, generation and queue-replaced checks, also before the start; refuses another server, terminal); at most two requests in flight per mix; `Fetch::spawn` answers exactly once. Nothing user-visible yet.
 - **Slice 2, GUI** and **slice 3, TUI:** not started.
 
 ## Postponed indefinitely

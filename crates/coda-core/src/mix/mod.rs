@@ -11,6 +11,8 @@
 //! - [`Picker`]: which songs come next (balance and variety), pure.
 //! - [`local`]: a local mix's ingredients resolved to songs from the
 //!   [`Library`](crate::library::Library).
+//! - [`navidrome`]: a Navidrome mix's ingredients fetched from its server,
+//!   and [`navidrome::MixFetches`], which tracks a playing mix's fetches.
 //! - [`ActiveMix`]: the mix that owns the queue, and its top-up.
 //!
 //! A Navidrome mix records its server as [`crate::navidrome::server_id`]
@@ -18,6 +20,7 @@
 
 mod active;
 pub mod local;
+pub mod navidrome;
 mod picker;
 pub mod store;
 
