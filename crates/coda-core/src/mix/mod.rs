@@ -116,12 +116,56 @@ impl Ingredient {
         }
     }
 
+    /// Whether `self` and `other` (both [cleaned](Self::cleaned) for
+    /// `source`) are the same ingredient, so a recipe holds it once: a
+    /// Navidrome artist or album by its id when it has one, a Navidrome
+    /// genre by its exact value, anything else by its names, ignoring case
+    /// for a local mix (how the library groups them). The GUI's
+    /// `ingredientKey` (`apps/coda-gui/src/lib/mixRecipe.ts`) is the same
+    /// rule.
+    pub fn same_as(&self, other: &Self, source: &MixSource) -> bool {
+        let local = matches!(source, MixSource::Local);
+        let names = |a: &str, b: &str| {
+            if local {
+                a.trim().to_lowercase() == b.trim().to_lowercase()
+            } else {
+                a == b
+            }
+        };
+        // Navidrome: by id when there is one (one with an id and one
+        // without are different); a local mix has no ids.
+        let ids = |a: &Option<String>, b: &Option<String>| match (a, b) {
+            (None, None) => None,
+            (Some(a), Some(b)) => Some(a == b),
+            _ => Some(false),
+        };
+        match (self, other) {
+            (Self::Genre { name: a }, Self::Genre { name: b }) => names(a, b),
+            (Self::Artist { name: a, id: x }, Self::Artist { name: b, id: y }) => {
+                ids(x, y).unwrap_or_else(|| names(a, b))
+            }
+            (
+                Self::Album {
+                    artist: a,
+                    name: n,
+                    id: x,
+                },
+                Self::Album {
+                    artist: b,
+                    name: m,
+                    id: y,
+                },
+            ) => ids(x, y).unwrap_or_else(|| names(a, b) && names(n, m)),
+            _ => false,
+        }
+    }
+
     /// Cleaned for `source`, or `None` if unusable: names trimmed and
     /// capped like tags (a Navidrome genre keeps its exact value, only
     /// capped), never blank, no control characters; ids dropped for a
     /// local mix and checked like song ids for Navidrome (empty or over
     /// [`MAX_ID_CHARS`]: `None`).
-    fn cleaned(self, source: &MixSource) -> Option<Self> {
+    pub(crate) fn cleaned(self, source: &MixSource) -> Option<Self> {
         let navidrome = matches!(source, MixSource::Navidrome { .. });
         // A bad id (empty, too long, control characters) is no reason to
         // lose the ingredient: its name is the fallback anyway.
@@ -201,8 +245,8 @@ impl Mix {
     /// The mix cleaned and checked: the name trimmed and capped like tags
     /// and never blank; a Navidrome source's server shaped like a
     /// [`server_id`](crate::navidrome::server_id); 1 to
-    /// [`MAX_INGREDIENTS`] ingredients, each usable, duplicates dropped
-    /// (keeping the first).
+    /// [`MAX_INGREDIENTS`] ingredients, each usable, duplicates
+    /// ([`Ingredient::same_as`]) dropped, keeping the first.
     pub fn validated(self) -> Result<Self, MixError> {
         let name = clean_name(self.name).ok_or(MixError::NoName)?;
         if let MixSource::Navidrome { server } = &self.source
@@ -218,7 +262,10 @@ impl Mix {
             let ingredient = ingredient
                 .cleaned(&self.source)
                 .ok_or(MixError::BadIngredient)?;
-            if !ingredients.contains(&ingredient) {
+            if !ingredients
+                .iter()
+                .any(|i| i.same_as(&ingredient, &self.source))
+            {
                 ingredients.push(ingredient);
             }
         }

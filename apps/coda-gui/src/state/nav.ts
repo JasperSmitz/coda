@@ -15,6 +15,7 @@ export type Route =
   | { kind: "albums"; source: "local"; order: LocalAlbumOrder }
   | { kind: "albums"; source: "navidrome"; sort: AlbumSort }
   | { kind: "playlists"; source: SourceKind }
+  | { kind: "mixes"; source: SourceKind }
   | { kind: "genres"; source: SourceKind }
   | { kind: "folder"; path: string[] }
   | { kind: "artist"; source: SourceKind; id: string; name: string }
@@ -161,6 +162,8 @@ export function routeFor(view: ViewId, source: SourceKind): Route {
       return { kind: "playlists", source };
     case "genres":
       return { kind: "genres", source };
+    case "mixes":
+      return { kind: "mixes", source };
     case "settings":
       return { kind: "settings" };
   }
@@ -189,5 +192,7 @@ export function viewFor(route: Route): ViewId {
     case "genres":
     case "genre":
       return "genres";
+    case "mixes":
+      return "mixes";
   }
 }

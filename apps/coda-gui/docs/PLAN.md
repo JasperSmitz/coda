@@ -61,6 +61,11 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 - Owner-approved (VISION.md "Direction"): a Genres sidebar entry for both sources after Albums, the genre list (A–Z, album and track counts), a genre page with its albums and Play/Shuffle (`s` shuffles the genre), and an album's genres as links on its page. Backend: `local_genres`, `local_genre`, `navidrome_genres`, `navidrome_genre_albums`, `navidrome_genre_random_songs`, `GenreDto`, `LocalContextDto::Genre`; `TrackDto`/`TrackRef` carry genres, so Navidrome tracks keep them in the queue. Navidrome genre pages offer Shuffle only (the server gives random songs of a genre; playing a whole genre in order would need `getSongsByGenre`) and list their albums in the server's order; an album's genre links are resolved against the server's genre listing so they open its exact value. Runtime checks: `scripts/smoke.md` "Genres" (G1–G9).
 - Not in it: genres in search, the play history or Now Playing; combining sources (Mixes).
 
+### Mixes (2026-11-16, `docs/plans/mixes.md`, M12 slice 2)
+- Part 2a (backend, reviewed): the engine plays mixes (`playMix`, `playQuickMix`, local and Navidrome top-ups, session restore); the mixes and editor-search commands; `snapshot.mix`.
+- Part 2b (screens, implemented, awaiting review): a **Mixes** sidebar entry per source after Playlists (cards with ingredient chips, Play, Edit…/Delete… in the card menu, **New mix…**, a one-line empty state; the playing mix's card marked); the mix editor dialog (name, one search over genres, artists and albums of the source, chips, Play as a quick mix, Save, typed errors inline); **Add to mix…** in the genre and artist rows' menus, the album menu and the genre, artist and album page headers; "Mix: <name>" / "Quick mix: <name>" with a loading state in Now Playing and the queue panel. Pure helpers in `lib/mixRecipe.ts` (`scripts/mixes.test.mjs`). Runtime checks: `scripts/smoke.md` "Mixes" (M1–M14).
+- Not in it: mixes on Home or in the play history, multi-select to build a mix, exclusions and weights, combining sources.
+
 ### Later
 - Drag tracks/albums from browse views onto the queue.
 - Letter-key jump in the artist list; Navidrome album headers with year when opened via "Go to album".

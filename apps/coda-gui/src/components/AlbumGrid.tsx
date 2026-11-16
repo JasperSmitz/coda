@@ -1,7 +1,7 @@
 // A virtualized album grid (DESIGN.md: ~180px tiles, cover, title and
 // artist below). Rows render only near the view's scroll position; the
 // arrow keys move between tiles, Enter opens one, right-click or "…"
-// opens the album menu. `onEnd` asks for more (infinite scroll).
+// opens the album menu (with "Add to mix…"). `onEnd` asks for more (infinite scroll).
 
 import {
   memo,
@@ -13,6 +13,8 @@ import {
   type RefObject,
 } from "react";
 import { browse } from "../lib/browse";
+import { addToMixFlow } from "../lib/mixes";
+import { albumIngredient } from "../lib/mixRecipe";
 import { albumContext, enqueue, openRoute, playFrom, playTracks } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav } from "../state/nav";
@@ -247,6 +249,15 @@ export function AlbumGrid({
               action: () => playFrom(async () => enqueue(await tracksOf(menu.album), false)),
             },
             // ADD TO PLAYLIST: "Add to playlist…" goes here (later slice).
+            {
+              label: "Add to mix…",
+              // An album without an artist cannot be found again by name.
+              disabled: locked || albumIngredient(source, menu.album) === null,
+              action: () => {
+                const ingredient = albumIngredient(source, menu.album);
+                if (ingredient) void addToMixFlow(source, ingredient);
+              },
+            },
             { label: "Open album", action: () => openAlbum(source, menu.album) },
             {
               label: "Go to artist",

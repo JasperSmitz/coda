@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
 import { DialogHost } from "./components/Dialog";
+import { MixDialogHost } from "./components/MixDialogs";
 import { NowPlayingBar } from "./components/NowPlayingBar";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
@@ -158,6 +159,7 @@ export default function App() {
       disabled={!ready}
       locked={!started}
       serverConfigured={snapshot.navidrome.state !== "notConfigured"}
+      mix={snapshot.mix}
     />
   );
 
@@ -179,6 +181,7 @@ export default function App() {
         </main>
         <Toasts notices={snapshot.notices} />
         <DialogHost />
+        <MixDialogHost />
       </div>
     );
   }
@@ -210,6 +213,7 @@ export default function App() {
       )}
       {snapshot && <Toasts notices={snapshot.notices} />}
       <DialogHost />
+      <MixDialogHost />
     </div>
   );
 }

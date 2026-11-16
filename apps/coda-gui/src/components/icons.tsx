@@ -213,3 +213,15 @@ export const ServerIcon = (p: IconProps) => (
     <path d="M7.5 7.5h.01M7.5 16.5h.01" strokeWidth={2.6} />
   </Icon>
 );
+/** Mixes: two overlapping circles (ingredients blended). */
+export const MixIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="9" cy="12" r="5.5" />
+    <circle cx="15" cy="12" r="5.5" />
+  </Icon>
+);
+export const PlusIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Icon>
+);

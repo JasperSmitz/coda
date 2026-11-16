@@ -328,6 +328,7 @@ pub fn run() {
             mixes::list_mixes,
             mixes::add_mix,
             mixes::update_mix,
+            mixes::add_to_mix,
             mixes::delete_mix,
             mixes::mix_search_genres,
             mixes::mix_search_artists,

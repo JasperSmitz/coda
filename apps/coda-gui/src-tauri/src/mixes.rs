@@ -2,10 +2,12 @@
 //! and the mix editor's searches. Playing a mix is an engine intent
 //! (`playMix`, `playQuickMix`; `engine/mix.rs`).
 //!
-//! - **Store:** `list_mixes`, `add_mix`, `update_mix` and `delete_mix`
-//!   call `coda_core::mix::store` on a blocking thread. Every change
-//!   re-reads the shared file (`$XDG_DATA_HOME/coda/mixes.json`, ADR 0008),
-//!   so the TUI's changes are never overwritten. A Navidrome mix belongs
+//! - **Store:** `list_mixes`, `add_mix`, `update_mix`, `add_to_mix` and
+//!   `delete_mix` call `coda_core::mix::store` on a blocking thread. Every
+//!   change re-reads the shared file (`$XDG_DATA_HOME/coda/mixes.json`,
+//!   ADR 0008) and changes one mix, so other mixes are never lost.
+//!   `update_mix` replaces that mix's whole recipe (last writer wins);
+//!   `add_to_mix` appends one ingredient to the recipe as saved now. A Navidrome mix belongs
 //!   to the current server (its `server_id`, never a URL or user name).
 //! - **Search:** the current source's genres, artists and albums by name,
 //!   as ingredients: local ones from the library's `TagIndex` (by name, the
@@ -127,6 +129,10 @@ pub enum MixErrorKind {
     OtherSource,
     /// There are already 500 mixes.
     Full,
+    /// `add_to_mix`: the saved mix holds that ingredient already.
+    AlreadyIn,
+    /// `add_to_mix`: the saved mix holds 50 ingredients already.
+    MixFull,
     /// The file was written by a newer Coda: left alone.
     Newer,
     /// No music folder or server for the source, or no data directory.
@@ -168,6 +174,8 @@ impl From<StoreError> for MixErrorDto {
             StoreError::OtherSource => MixErrorKind::OtherSource,
             StoreError::Exists | StoreError::NotKept | StoreError::TooLarge => MixErrorKind::Failed,
             StoreError::Full => MixErrorKind::Full,
+            StoreError::AlreadyIn => MixErrorKind::AlreadyIn,
+            StoreError::MixFull => MixErrorKind::MixFull,
             StoreError::Newer => MixErrorKind::Newer,
             StoreError::Io(_) => MixErrorKind::Failed,
         };
@@ -319,6 +327,31 @@ pub async fn update(
     .await
 }
 
+/// Adds one ingredient to the end of saved mix `id` of `source`, checked
+/// under the file's lock against the mix as saved now (another app's
+/// changes are kept): `notFound`, `otherSource`, `alreadyIn` or `mixFull`
+/// otherwise. Returns the mix as saved.
+pub async fn add_ingredient(
+    file: &MixesFile,
+    browse: &BrowseHandle,
+    id: String,
+    source: SourceKind,
+    ingredient: IngredientDto,
+) -> MixResult<MixDto> {
+    let path = path(file)?;
+    let id = parse_id(&id)?;
+    let source = mix_source(browse, source)?;
+    blocking(move || {
+        let saved = store::add_ingredient(&path, &id, &source, ingredient.into())?;
+        saved
+            .iter()
+            .find(|m| m.id == id)
+            .map(MixDto::of)
+            .ok_or_else(|| StoreError::NotFound.into())
+    })
+    .await
+}
+
 /// Deletes mix `id` of `source` (Navidrome: the current server's). One
 /// already gone is no error; one of another source (the server or account
 /// changed since it was listed) is refused with `otherSource`.
@@ -365,6 +398,17 @@ pub async fn update_mix(
     mix: MixInputDto,
 ) -> MixResult<MixDto> {
     update(&file, &browse, id, mix).await
+}
+
+#[tauri::command]
+pub async fn add_to_mix(
+    file: State<'_, MixesFile>,
+    browse: State<'_, BrowseHandle>,
+    id: String,
+    source: SourceKind,
+    ingredient: IngredientDto,
+) -> MixResult<MixDto> {
+    add_ingredient(&file, &browse, id, source, ingredient).await
 }
 
 #[tauri::command]

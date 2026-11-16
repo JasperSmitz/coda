@@ -229,6 +229,94 @@ async fn mixes_errors_are_typed() {
 }
 
 #[tokio::test]
+async fn add_to_mix_appends_to_the_saved_recipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = MixesFile(Some(dir.path().join("mixes.json")));
+    let browse = handle();
+    let saved = add(
+        &file,
+        &browse,
+        input("Prog", SourceKind::Local, vec![genre("Prog Rock")]),
+    )
+    .await
+    .unwrap();
+    // Changed elsewhere after the picker listed it: both changes kept.
+    update(
+        &file,
+        &browse,
+        saved.id.clone(),
+        input(
+            "Prog 2",
+            SourceKind::Local,
+            vec![genre("Prog Rock"), genre("Jazz")],
+        ),
+    )
+    .await
+    .unwrap();
+    let added = add_ingredient(
+        &file,
+        &browse,
+        saved.id.clone(),
+        SourceKind::Local,
+        genre("Rock"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(added.name, "Prog 2");
+    assert_eq!(
+        added.ingredients,
+        vec![genre("Prog Rock"), genre("Jazz"), genre("Rock")]
+    );
+    let kind = |result: MixResult<MixDto>| result.unwrap_err().kind;
+    assert_eq!(
+        kind(
+            add_ingredient(
+                &file,
+                &browse,
+                saved.id.clone(),
+                SourceKind::Local,
+                genre("jazz")
+            )
+            .await
+        ),
+        MixErrorKind::AlreadyIn
+    );
+    assert_eq!(
+        kind(
+            add_ingredient(
+                &file,
+                &browse,
+                "0123456789abcdef".into(),
+                SourceKind::Local,
+                genre("x")
+            )
+            .await
+        ),
+        MixErrorKind::NotFound
+    );
+    // Full now (50 genres).
+    let many: Vec<IngredientDto> = (0..coda_core::mix::MAX_INGREDIENTS)
+        .map(|i| genre(&format!("g{i}")))
+        .collect();
+    update(
+        &file,
+        &browse,
+        saved.id.clone(),
+        input("Prog", SourceKind::Local, many),
+    )
+    .await
+    .unwrap();
+    let err = add_ingredient(&file, &browse, saved.id, SourceKind::Local, genre("x"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, MixErrorKind::MixFull);
+    assert_eq!(
+        serde_json::to_value(&err).unwrap()["kind"],
+        json!("mixFull")
+    );
+}
+
+#[tokio::test]
 async fn navidrome_mixes_belong_to_the_current_server() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();

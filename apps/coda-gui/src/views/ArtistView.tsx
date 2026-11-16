@@ -5,9 +5,11 @@ import { useRef } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
+import { AddToMixButton } from "../components/MixParts";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { artistIngredient } from "../lib/mixRecipe";
 import { artistContext, playFrom, playLocal, playTracks, useShuffleContext } from "../lib/play";
 import type { SourceKind } from "../lib/types";
 import type { Entry } from "../state/nav";
@@ -57,11 +59,14 @@ export function ArtistView({ entry, source, id, name }: Props) {
         title={title}
         cover={<Cover url={cover} name={title} size="small" className="header-cover round" />}
         actions={
-          <PlayButtons
-            onPlay={() => play(false)}
-            onShuffle={() => play(true)}
-            disabled={albums.length === 0}
-          />
+          <>
+            <PlayButtons
+              onPlay={() => play(false)}
+              onShuffle={() => play(true)}
+              disabled={albums.length === 0}
+            />
+            <AddToMixButton source={source} ingredient={artistIngredient(source, { id, name: title })} />
+          </>
         }
       >
         <div className="secondary">

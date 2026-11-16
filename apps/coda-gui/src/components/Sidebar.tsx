@@ -8,6 +8,7 @@ import {
   FolderIcon,
   GenreIcon,
   HomeIcon,
+  MixIcon,
   LocalIcon,
   PlaylistIcon,
   SearchIcon,
@@ -103,6 +104,7 @@ export function Sidebar({ view, onView, snapshot }: Props) {
         {item("genres", "Genres", <GenreIcon />)}
         {item("artists", "Artists", <ArtistIcon />)}
         {item("playlists", "Playlists", <PlaylistIcon />)}
+        {item("mixes", "Mixes", <MixIcon />)}
         {source === "local" && item("folders", "Folders", <FolderIcon />)}
       </ul>
       <ul className="nav-bottom">{item("settings", "Settings", <SettingsIcon />)}</ul>

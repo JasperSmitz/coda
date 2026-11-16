@@ -72,6 +72,7 @@ fn main() {
         "list_mixes",
         "add_mix",
         "update_mix",
+        "add_to_mix",
         "delete_mix",
         "mix_search_genres",
         "mix_search_artists",

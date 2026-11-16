@@ -5,12 +5,14 @@
 import { useEffect, useRef } from "react";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
+import { AddToMixButton } from "../components/MixParts";
 import { TrackTable } from "../components/TrackTable";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { albumContext, openRoute, playTracks, useShuffleContext } from "../lib/play";
 import { resolveGenreLink } from "../lib/genres";
+import { albumIngredient } from "../lib/mixRecipe";
 import type { Album, Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { PlayButtons, SOURCE_LABEL, summary, ViewHeader } from "./common";
@@ -96,11 +98,18 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
           />
         }
         actions={
-          <PlayButtons
-            onPlay={() => playTracks(tracks, undefined, false, context)}
-            onShuffle={() => playTracks(tracks, undefined, true, context)}
-            disabled={tracks.length === 0}
-          />
+          <>
+            <PlayButtons
+              onPlay={() => playTracks(tracks, undefined, false, context)}
+              onShuffle={() => playTracks(tracks, undefined, true, context)}
+              disabled={tracks.length === 0}
+            />
+            {/* The album artist exactly as listed (Navidrome: with the album's id). */}
+            <AddToMixButton
+              source={source}
+              ingredient={album ? albumIngredient(source, { ...album, id }) : undefined}
+            />
+          </>
         }
       >
         <div className="album-meta">

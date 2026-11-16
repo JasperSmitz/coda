@@ -4,10 +4,13 @@
 //! and write (ADR 0008).
 //!
 //! It is the first file both apps write, so a change never writes a list
-//! held in memory: [`add`], [`update`] and [`delete`] each take an
-//! exclusive lock (`flock` on `.mixes.json.lock` beside it), read the file
-//! again, apply that one change by mix id and write the result atomically
-//! (a temp file, `fsync`, rename). Two apps editing at once both keep their
+//! held in memory: [`add`], [`update`], [`add_ingredient`] and [`delete`]
+//! each take an exclusive lock (`flock` on `.mixes.json.lock` beside it),
+//! read the file again, apply that one change by mix id and write the
+//! result atomically (a temp file, `fsync`, rename). [`update`] replaces
+//! the whole recipe (last writer wins); [`add_ingredient`] appends one
+//! ingredient to the recipe as read under the lock, so it never loses
+//! another app's edit. Two apps editing at once both keep their
 //! change. [`load`] reads under a shared lock, and sets a bad file aside
 //! only under the exclusive lock after reading it again, so a reader never
 //! sets aside a good file another app has just written.
@@ -29,7 +32,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{MAX_MIXES, Mix, MixError, MixFileOut, MixId, MixSource, mix_from_value};
+use super::{
+    Ingredient, MAX_INGREDIENTS, MAX_MIXES, Mix, MixError, MixFileOut, MixId, MixSource,
+    mix_from_value,
+};
 use crate::fsio::{quarantine, read_bounded, write_atomic};
 
 /// The schema version this build reads and writes. Any new ingredient
@@ -70,6 +76,12 @@ pub enum StoreError {
     /// server or account) than the change: a mix keeps its source.
     #[error("that mix was made for another music source")]
     OtherSource,
+    /// [`add_ingredient`]: the saved mix holds it already.
+    #[error("that is already in the mix")]
+    AlreadyIn,
+    /// [`add_ingredient`]: the saved mix holds [`MAX_INGREDIENTS`] already.
+    #[error("the mix is full (at most {MAX_INGREDIENTS} genres, artists and albums)")]
+    MixFull,
     #[error("a mix with that id already exists")]
     Exists,
     #[error("there are already {MAX_MIXES} mixes")]
@@ -197,6 +209,45 @@ pub fn update(path: &Path, mix: Mix) -> Result<Vec<Mix>, StoreError> {
             return Err(StoreError::OtherSource);
         }
         *slot = mix;
+        Ok(true)
+    })
+}
+
+/// Adds `ingredient` at the end of the saved mix `id` of `source`, checked
+/// against the mix as it is in the file now (under the lock), so nothing
+/// another app changed meanwhile is lost: [`StoreError::NotFound`],
+/// [`StoreError::OtherSource`], [`StoreError::AlreadyIn`] (the same
+/// ingredient, [`Ingredient::same_as`]) or [`StoreError::MixFull`], and
+/// `Invalid(BadIngredient)` for an unusable one. Returns every mix as
+/// saved.
+pub fn add_ingredient(
+    path: &Path,
+    id: &MixId,
+    source: &MixSource,
+    ingredient: Ingredient,
+) -> Result<Vec<Mix>, StoreError> {
+    let ingredient = ingredient
+        .cleaned(source)
+        .ok_or(StoreError::Invalid(MixError::BadIngredient))?;
+    change(path, |mixes| {
+        let slot = mixes
+            .iter_mut()
+            .find(|m| &m.id == id)
+            .ok_or(StoreError::NotFound)?;
+        if &slot.source != source {
+            return Err(StoreError::OtherSource);
+        }
+        if slot
+            .ingredients
+            .iter()
+            .any(|i| i.same_as(&ingredient, source))
+        {
+            return Err(StoreError::AlreadyIn);
+        }
+        if slot.ingredients.len() >= MAX_INGREDIENTS {
+            return Err(StoreError::MixFull);
+        }
+        slot.ingredients.push(ingredient);
         Ok(true)
     })
 }

@@ -411,3 +411,88 @@ fn a_file_near_the_cap_can_still_shrink() {
     assert_eq!(loaded.len(), mixes.len() - 1);
     assert_eq!(backups(&path), Vec::<String>::new());
 }
+
+#[test]
+fn add_ingredient_appends_to_the_mix_as_saved_now() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = mixes_path(&dir);
+    let a = mix("A");
+    add(&path, a.clone()).unwrap();
+    // Another app renames A and adds an artist after this one listed it:
+    // adding an ingredient keeps both changes.
+    let elsewhere = Mix {
+        name: "A2".into(),
+        ingredients: vec![
+            genre("Prog Rock"),
+            Ingredient::Artist {
+                name: "Yes".into(),
+                id: None,
+            },
+        ],
+        ..a.clone()
+    };
+    update(&path, elsewhere).unwrap();
+    let saved = add_ingredient(&path, &a.id, &MixSource::Local, genre(" Jazz ")).unwrap();
+    assert_eq!(names(&saved), ["A2"]);
+    assert_eq!(
+        saved[0].ingredients,
+        [
+            genre("Prog Rock"),
+            Ingredient::Artist {
+                name: "Yes".into(),
+                id: None
+            },
+            genre("Jazz"),
+        ],
+        "cleaned and appended"
+    );
+    assert_eq!(load(&path).0, saved);
+
+    // Checked against the stored mix: a duplicate (local names ignore
+    // case and spaces), another source, a missing mix, an unusable one.
+    assert!(matches!(
+        add_ingredient(&path, &a.id, &MixSource::Local, genre("prog rock")),
+        Err(StoreError::AlreadyIn)
+    ));
+    assert!(matches!(
+        add_ingredient(
+            &path,
+            &a.id,
+            &MixSource::Navidrome {
+                server: "00c36aa1074c465c".into()
+            },
+            genre("Rock")
+        ),
+        Err(StoreError::OtherSource)
+    ));
+    assert!(matches!(
+        add_ingredient(&path, &mix("B").id, &MixSource::Local, genre("Rock")),
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        add_ingredient(&path, &a.id, &MixSource::Local, genre(" ")),
+        Err(StoreError::Invalid(MixError::BadIngredient))
+    ));
+    assert_eq!(load(&path).0, saved, "refusals change nothing");
+
+    // Full now, though it was not when this app listed it.
+    let full = Mix {
+        ingredients: (0..MAX_INGREDIENTS)
+            .map(|i| genre(&format!("g{i}")))
+            .collect(),
+        ..a.clone()
+    };
+    update(&path, full.clone()).unwrap();
+    assert!(matches!(
+        add_ingredient(&path, &a.id, &MixSource::Local, genre("Rock")),
+        Err(StoreError::MixFull)
+    ));
+    // And no longer full once another app removed one.
+    let fewer = Mix {
+        ingredients: full.ingredients[1..].to_vec(),
+        ..full
+    };
+    update(&path, fewer).unwrap();
+    let saved = add_ingredient(&path, &a.id, &MixSource::Local, genre("Rock")).unwrap();
+    assert_eq!(saved[0].ingredients.len(), MAX_INGREDIENTS);
+}

@@ -1,0 +1,256 @@
+/* M12: mixes (the Mixes view, the editor, ingredient chips and the
+   "Mix: <name>" line in Now Playing and the queue). Tokens only. */
+
+/* ----- ingredient chips ----- */
+
+.mix-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+}
+
+.mix-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 9px 0 7px;
+  border-radius: 12px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: var(--text-small);
+}
+
+.mix-chip > svg {
+  flex: none;
+  color: var(--text-2);
+}
+
+.mix-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mix-chip-detail {
+  color: var(--text-2);
+}
+
+.mix-chip-more {
+  padding: 0 9px;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.mix-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-right: -5px;
+  border-radius: 50%;
+  color: var(--text-2);
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+
+.mix-chip-remove:hover,
+.mix-chip-remove:focus-visible {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* ----- the Mixes view ----- */
+
+.mix-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  list-style: none;
+  padding-bottom: 24px;
+}
+
+.mix-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 14px 12px 16px;
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  transition: border-color var(--motion-fast);
+}
+
+.mix-card:hover,
+.mix-card:focus-within {
+  border-color: var(--text-3);
+}
+
+.mix-card.is-active {
+  border-color: var(--accent);
+}
+
+.mix-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mix-card-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.mix-card-state {
+  flex: none;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.mix-card .mix-chips {
+  flex: 1;
+  align-content: flex-start;
+}
+
+.mix-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mix-card-more {
+  margin-left: auto;
+}
+
+/* ----- the editor ----- */
+
+.dialog-mix {
+  width: min(540px, 100%);
+}
+
+.mix-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mix-editor-label {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+}
+
+.mix-editor-chips {
+  margin-bottom: 8px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.mix-results {
+  margin-top: 6px;
+  min-height: 0;
+  height: 200px;
+}
+
+.mix-result > svg {
+  flex: none;
+  color: var(--text-2);
+}
+
+.mix-result.is-selected > svg {
+  color: inherit;
+}
+
+/* The previous query's results while the next search runs: shown, not choosable. */
+.mix-results.is-busy .mix-result {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* Save, Play and Cancel waiting (the opening re-read, a save in flight); the search when full. */
+.mix-editor .button[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.mix-editor .dialog-input[aria-disabled="true"] {
+  opacity: 0.6;
+}
+
+/* "Add to mix…": a mix that held it already or was full, as listed (a hint). */
+.picker-row.is-refused .picker-name {
+  color: var(--text-2);
+}
+
+.mix-editor-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--text);
+  font-size: var(--text-small);
+  overflow-wrap: anywhere;
+}
+
+/* ----- "Mix: <name>" ----- */
+
+.active-mix {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--text-small);
+}
+
+.active-mix > svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.active-mix-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-mix.is-loading > svg {
+  color: var(--text-3);
+}
+
+.active-mix-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.queue-mix {
+  padding: 8px 12px 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.now-playing-mix {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.now-playing-nothing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}

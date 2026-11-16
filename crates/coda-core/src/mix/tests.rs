@@ -184,6 +184,69 @@ fn a_navidrome_mix_keeps_exact_genres_and_usable_ids() {
 }
 
 #[test]
+fn duplicates_follow_the_same_rule_as_the_gui() {
+    // Local: names ignoring case and spaces (how the library groups them).
+    let local = Mix::new(
+        "Local",
+        MixSource::Local,
+        vec![
+            genre("Rock"),
+            genre(" rock"),
+            artist("Yes"),
+            artist("YES"),
+            album("Yes", "Fragile"),
+            album("yes", "FRAGILE"),
+            album("Yes", "Relayer"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        local.ingredients,
+        [
+            genre("Rock"),
+            artist("Yes"),
+            album("Yes", "Fragile"),
+            album("Yes", "Relayer")
+        ]
+    );
+    // Navidrome: genres by exact value; artists and albums by id when they
+    // have one (same id, other name: the same; one without an id is not
+    // the same as one with), else by exact names.
+    let with_id = |name: &str, id: Option<&str>| Ingredient::Artist {
+        name: name.into(),
+        id: id.map(Into::into),
+    };
+    let remote = Mix::new(
+        "Remote",
+        MixSource::Navidrome {
+            server: SERVER.into(),
+        },
+        vec![
+            genre("Rock"),
+            genre("rock"),
+            with_id("Yes", Some("ar-1")),
+            with_id("Yes (band)", Some("ar-1")),
+            with_id("Yes", None),
+            with_id("Yes", Some("ar-2")),
+            artist("yes"),
+            artist("Yes"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        remote.ingredients,
+        [
+            genre("Rock"),
+            genre("rock"),
+            with_id("Yes", Some("ar-1")),
+            with_id("Yes", None),
+            with_id("Yes", Some("ar-2")),
+            artist("yes"),
+        ]
+    );
+}
+
+#[test]
 fn mix_ids_are_checked() {
     assert!(MixId::parse("0123abcdEF-_x").is_some());
     for bad in ["", "a b", "a/b", "é", &"a".repeat(65)] {

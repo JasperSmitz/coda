@@ -194,6 +194,8 @@ export type MixErrorKind =
   | "notFound"
   | "otherSource"
   | "full"
+  | "alreadyIn"
+  | "mixFull"
   | "newer"
   | "notConfigured"
   | "failed";

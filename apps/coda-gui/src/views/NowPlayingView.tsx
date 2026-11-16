@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Cover } from "../components/Cover";
 import { LyricsPanel } from "../components/LyricsPanel";
+import { ActiveMixLine } from "../components/MixParts";
 import { ArtistAlbumLine } from "../components/NameLink";
 import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBar";
 import { Visualizer } from "../components/Visualizer";
@@ -178,6 +179,7 @@ export function NowPlayingView({
               className="now-playing-cover"
             />
             <div className="now-playing-info">
+              {snapshot.mix && <ActiveMixLine mix={snapshot.mix} className="now-playing-mix" />}
               <h1 className="now-playing-title" title={playing.title}>
                 {playing.title}
               </h1>
@@ -231,7 +233,10 @@ export function NowPlayingView({
             </div>
           </div>
         ) : (
-          <p className="now-playing-nothing secondary">Nothing playing</p>
+          <div className="now-playing-nothing">
+            {snapshot.mix && <ActiveMixLine mix={snapshot.mix} className="now-playing-mix" />}
+            <p className="secondary">Nothing playing</p>
+          </div>
         )}
         {lyricsShown && (
           <div className={`now-playing-lyrics ${switchClass}`}>

@@ -66,6 +66,7 @@
     "allow-list-mixes",
     "allow-add-mix",
     "allow-update-mix",
+    "allow-add-to-mix",
     "allow-delete-mix",
     "allow-mix-search-genres",
     "allow-mix-search-artists",
