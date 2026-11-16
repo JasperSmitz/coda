@@ -356,7 +356,10 @@ fn a_newer_mixes_file_is_said_so_not_taken_for_a_deleted_mix() {
     assert!(!texts.contains(&"That mix no longer exists".to_owned()));
     // On startup the session's mix is not resumed (and logged).
     let saved = Some(SessionMix::Saved(mix.id.clone()));
-    assert_eq!(crate::bootstrap::restore_mix(saved, Some(&path)), None);
+    assert_eq!(
+        crate::bootstrap::restore_mix(saved, Some(&path)),
+        (None, None)
+    );
 }
 
 /// A restarted engine with a local Jazz mix restored on its queue
@@ -490,14 +493,29 @@ fn startup_reads_a_saved_mix_again_and_forgets_a_deleted_one() {
     use crate::bootstrap::restore_mix;
     assert_eq!(
         restore_mix(Some(SessionMix::Quick(mix.clone())), None),
-        Some((mix.clone(), false))
+        (Some((mix.clone(), false)), None)
     );
     let saved = Some(SessionMix::Saved(mix.id.clone()));
-    assert_eq!(restore_mix(saved.clone(), Some(&path)), None);
+    assert_eq!(restore_mix(saved.clone(), Some(&path)), (None, None));
     store::add(&path, mix.clone()).unwrap();
-    assert_eq!(restore_mix(saved.clone(), Some(&path)), Some((mix, true)));
-    assert_eq!(restore_mix(saved, None), None);
-    assert_eq!(restore_mix(None, Some(&path)), None);
+    assert_eq!(
+        restore_mix(saved.clone(), Some(&path)),
+        (Some((mix.clone(), true)), None)
+    );
+    assert_eq!(restore_mix(saved.clone(), None), (None, None));
+    assert_eq!(restore_mix(None, Some(&path)), (None, None));
+    // A mixes file that cannot be read is set aside and the user told.
+    std::fs::write(&path, "not json").unwrap();
+    let (resumed, notice) = restore_mix(saved, Some(&path));
+    assert_eq!(resumed, None);
+    let notice = notice.expect("a notice");
+    assert!(
+        notice.starts_with("Could not read the mixes file: ") && notice.contains("; kept as "),
+        "{notice}"
+    );
+    let kept = notice.split("; kept as ").nth(1).unwrap();
+    assert_eq!(std::fs::read_to_string(kept).unwrap(), "not json");
+    assert!(!path.exists());
 }
 
 // ----- Navidrome ---------------------------------------------------------------

@@ -109,28 +109,40 @@ pub struct Mixes {
     /// (`true`), or a quick mix's recipe (`false`). `None` when there was
     /// none, or the saved mix is gone.
     pub restored: Option<(Mix, bool)>,
+    /// The mixes file was rejected while reading the session's mix: shown
+    /// as a notice at startup.
+    pub notice: Option<String>,
 }
 
 /// The session's mix as the engine resumes it: a saved mix is read again
 /// from `path` (blocking), so its latest recipe plays; gone, there is no
-/// mix (the queue plays as a plain queue).
-pub fn restore_mix(session: Option<SessionMix>, path: Option<&Path>) -> Option<(Mix, bool)> {
-    match session? {
-        SessionMix::Quick(mix) => Some((mix, false)),
-        SessionMix::Saved(id) => match crate::engine::read_saved_mix(path?, &id) {
-            ReadMix::Found(mix) => Some((mix, true)),
-            ReadMix::Gone => {
+/// mix (the queue plays as a plain queue). The second value is a notice
+/// for a mixes file rejected meanwhile ("Could not read the mixes file:
+/// …; kept as …").
+pub fn restore_mix(
+    session: Option<SessionMix>,
+    path: Option<&Path>,
+) -> (Option<(Mix, bool)>, Option<String>) {
+    let mix = match session {
+        None => None,
+        Some(SessionMix::Quick(mix)) => Some((mix, false)),
+        Some(SessionMix::Saved(id)) => match path.map(|p| crate::engine::read_saved_mix(p, &id)) {
+            None => None,
+            Some(ReadMix::Found(mix)) => Some((mix, true)),
+            Some(ReadMix::Gone) => {
                 tracing::info!("the saved mix of the session no longer exists");
                 None
             }
-            ReadMix::Newer => {
+            Some(ReadMix::Newer) => {
                 tracing::warn!(
                     "the saved mix of the session not resumed: the mixes file is from a newer Coda"
                 );
                 None
             }
+            Some(ReadMix::Rejected(notice)) => return (None, Some(notice)),
         },
-    }
+    };
+    (mix, None)
 }
 
 /// Loads the config and builds the Navidrome client (the password may
@@ -332,7 +344,7 @@ pub async fn restore(path: Option<PathBuf>, tui: Option<PathBuf>) -> Restored {
 pub async fn start(paths: &Paths) -> Startup {
     let history_path = paths.history.clone();
     let mixes_path = paths.mixes.clone();
-    let (sources, playback, (restored, mix), history) = tokio::join!(
+    let (sources, playback, (restored, (mix, notice)), history) = tokio::join!(
         sources(),
         playback(),
         async {
@@ -359,6 +371,7 @@ pub async fn start(paths: &Paths) -> Startup {
         mixes: Mixes {
             path: mixes_path,
             restored: mix,
+            notice,
         },
     }
 }

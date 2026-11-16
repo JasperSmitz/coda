@@ -26,6 +26,7 @@ use crate::ui::cover::{ArtFrame, ArtPainter, Graphics, RESIZE_SETTLE, area_pixel
 use crate::ui::{help, now_playing, settings};
 use coda_core::library::browse::{Row as LocalRow, View as LocalView};
 use coda_core::library::{Library, LocalPlaylist};
+use coda_core::mix::{Ingredient, Marks, Mix};
 use coda_core::model::Track;
 use coda_core::model::thousands;
 use coda_core::navidrome::browse::{Browser, Load, More, NEW_PLAYLIST_ROW, Picker, Resource, Row};
@@ -60,6 +61,12 @@ const HORIZONTAL_EIGHTHS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊',
 /// U+2601 has no emoji presentation by default, so terminals draw it as a
 /// one-column text glyph (and `unicode-width` agrees).
 pub const REMOTE_MARKER: &str = "☁";
+/// Marks a genre, artist or album row marked for a quick mix (`m`). One
+/// column wide, like [`REMOTE_MARKER`].
+pub const MARK_MARKER: &str = "✓";
+/// What an empty Mixes view says.
+pub const NO_MIXES: &str =
+    "No saved mixes (make them in Coda's desktop app; m marks rows for a quick mix)";
 const SEARCH_PROMPT: &str = "Search: ";
 /// Shown right-aligned on the search input line when it fits.
 const SEARCH_HINT: &str = "Enter search · Esc cancel";
@@ -426,6 +433,7 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
     if browser.is_empty(library) {
         let scanning = matches!(app.scan_state(), ScanState::Scanning { .. });
         let message = match view_shown {
+            LocalView::Mixes => NO_MIXES.to_owned(),
             _ if scanning => "Scanning…".to_owned(),
             LocalView::Playlists => "No playlists (.m3u or .m3u8 files)".to_owned(),
             LocalView::Playlist(id) => match library.playlist(*id).missing {
@@ -450,12 +458,15 @@ fn draw_library(frame: &mut Frame, app: &App, view: &mut ViewState, area: Rect, 
         height,
     );
     view.library_offset = offset;
+    let marks = app.marks(Source::Local).filter(|m| !m.is_empty());
     let items: Vec<ListItem> = app
         .library_rows_window(offset, height)
         .into_iter()
         .map(|row| {
             note_row_built();
-            ListItem::new(local_row(library, view_shown, row, width))
+            let marked = is_marked(marks, row.ingredient());
+            let line = local_row(library, view_shown, row, marked_width(marked, width));
+            ListItem::new(with_mark(line, marked))
         })
         .collect();
     let mut state =
@@ -532,7 +543,59 @@ fn local_row(
             ),
             width,
         ),
+        LocalRow::Mix(mix) => mix_row(mix, width),
     }
+}
+
+/// A saved mix: its name, and what it holds on the right (`2 genres, 1
+/// artist`).
+fn mix_row(mix: &Mix, width: usize) -> Line<'static> {
+    let (mut genres, mut artists, mut albums) = (0, 0, 0);
+    for ingredient in &mix.ingredients {
+        match ingredient {
+            Ingredient::Genre { .. } => genres += 1,
+            Ingredient::Artist { .. } => artists += 1,
+            Ingredient::Album { .. } => albums += 1,
+        }
+    }
+    let parts: Vec<String> = [(genres, "genre"), (artists, "artist"), (albums, "album")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| count(n, what))
+        .collect();
+    row_line(&mix.name, Some(parts.join(", ")), width)
+}
+
+/// Whether a row (as an ingredient) is among `marks`.
+fn is_marked(marks: Option<&Marks>, ingredient: Option<Ingredient>) -> bool {
+    match (marks, ingredient) {
+        (Some(marks), Some(ingredient)) => marks.contains(&ingredient),
+        _ => false,
+    }
+}
+
+/// The width left for a row's text beside the mark.
+fn marked_width(marked: bool, width: usize) -> usize {
+    if marked {
+        width.saturating_sub(MARK_MARKER.width() + 1)
+    } else {
+        width
+    }
+}
+
+/// `line` with the mark in front, if `marked`.
+fn with_mark(line: Line<'static>, marked: bool) -> Line<'static> {
+    if !marked {
+        return line;
+    }
+    let mut spans = vec![Span::styled(
+        format!("{MARK_MARKER} "),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(line.spans);
+    Line::from(spans).style(line.style)
 }
 
 /// Columns an album row's name keeps before its length gives way.
@@ -767,6 +830,7 @@ fn draw_remote(
                     Resource::Genres => "No genres",
                     Resource::Search(_) => "No results",
                     Resource::Playlists => "No playlists",
+                    Resource::Mixes => NO_MIXES,
                 };
                 message(frame, text, DIM_TEXT);
                 return;
@@ -796,12 +860,15 @@ fn draw_remote(
             view.remote_rows = height;
             let offset = scroll_offset(view.remote_offset, current.selected, content.len(), height);
             view.remote_offset = offset;
+            let marks = app.marks(Source::Navidrome).filter(|m| !m.is_empty());
             let items: Vec<ListItem> = content
                 .rows(offset, height)
                 .into_iter()
                 .map(|row| {
                     note_row_built();
-                    ListItem::new(remote_row(row, style, width))
+                    let marked = is_marked(marks, row.ingredient());
+                    let line = remote_row(row, style, marked_width(marked, width));
+                    ListItem::new(with_mark(line, marked))
                 })
                 .collect();
             let mut state =
@@ -885,6 +952,7 @@ fn remote_row(row: Row<'_>, style: RowStyle, width: usize) -> Line<'static> {
             );
             row_line(&left, detail, width)
         }
+        Row::Mix(mix) => mix_row(mix, width),
         Row::Song(track) => {
             let left = if style.song_artist {
                 track.display_name()
@@ -1471,12 +1539,32 @@ fn eighths(value: f32, cells: u16) -> u16 {
     (value * f32::from(cells) * 8.0).round() as u16
 }
 
+/// The status bar keeps at least this many columns for its message when
+/// the mix's label is added.
+const MIN_STATUS_MESSAGE: usize = 20;
+/// The mix's label is left out of the status bar when it would be
+/// narrower than this.
+const MIN_MIX_LABEL: usize = 8;
+const MIX_SEPARATOR: &str = " · ";
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect, now: Instant) {
-    let right = match app.scan_state() {
+    let mut right = match app.scan_state() {
         ScanState::Scanning { tracks } => format!("Scanning… {} ", count(tracks, "track")),
         ScanState::Failed { .. } => "Scan incomplete ".to_owned(),
         ScanState::Finished { .. } | ScanState::NoLibrary => "? help ".to_owned(),
     };
+    // The mix that plays (or loads): at most a third of the bar, and only
+    // in what the scan or help text leaves while the message area keeps
+    // its minimum; left out when too little room is left.
+    if let Some(label) = app.mix_label() {
+        let width = usize::from(area.width);
+        let room = (width / 3)
+            .min(width.saturating_sub(right.width() + MIN_STATUS_MESSAGE))
+            .saturating_sub(MIX_SEPARATOR.width());
+        if room >= MIN_MIX_LABEL {
+            right = format!("{}{MIX_SEPARATOR}{right}", fit(&label, room));
+        }
+    }
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right.width() as u16)])
             .areas(area);
@@ -2252,18 +2340,23 @@ mod tests {
             "Play in context / play entry",
             "Play shuffled / queue: shuffle",
             "Open / go up (Esc: leave results)",
-            "Queue: remove / move down / up",
+            "Remove / move (queue, playlist)",
             "Queue: current / clear / save",
             "Seek −5 s, +5 s / volume up, down",
             "Add to a Navidrome playlist",
             "Playlists: new / rename / delete",
-            "Playlist: remove / move song",
+            "Mark for a quick mix / play marked",
             "Playlist: save / discard order",
             "Repeat (off/all/one) / visualizer",
-            "Streamed from Navidrome",
+            "Streamed from Navidrome / marked",
         ] {
             assert!(screen.contains(text), "{text}: {screen}");
         }
+        assert_eq!(
+            help::MARKERS,
+            format!("{REMOTE_MARKER} / {MARK_MARKER}"),
+            "the help names the markers drawn"
+        );
         // Also fits a tiny terminal without panicking.
         render(&app, 10, 5, now);
     }
@@ -3197,6 +3290,8 @@ mod tests {
         let now = Instant::now();
         assert_eq!(REMOTE_MARKER.width(), 1);
         assert_eq!(REMOTE_MARKER.chars().count(), 1);
+        assert_eq!(MARK_MARKER.width(), 1);
+        assert_eq!(MARK_MARKER.chars().count(), 1);
         let mut app = App::with_sources(Some("/music".into()), Some(nav_client()));
         app.handle_scan_event(
             ScanEvent::Batch(vec![tagged("l.flac", "Local Song", "Band", 61)]),
@@ -3365,6 +3460,98 @@ mod tests {
         let mut track = album_track(rel, rel, artist, "", album);
         track.genres = genres.iter().map(|g| (*g).to_owned()).collect();
         track
+    }
+
+    #[test]
+    fn marked_rows_saved_mixes_and_the_playing_mix_show() {
+        let now = Instant::now();
+        let mut app = App::new("/music".into());
+        app.handle_scan_event(
+            ScanEvent::Batch(vec![
+                genre_track("k/01.flac", "Miles Davis", "Kind of Blue", &["Jazz"]),
+                genre_track("p/01.flac", "Yes", "Close to the Edge", &["Prog"]),
+            ]),
+            now,
+        );
+        // Home lists Mixes after Genres.
+        let screen = render(&app, 100, 16, now);
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        assert_eq!(at("Mixes"), at("Genres") + 1, "{screen}");
+        // `m` on a genre marks it.
+        local_press(&mut app, &[Action::Down; 5], now);
+        local_press(
+            &mut app,
+            &[Action::Activate, Action::Down, Action::ToggleMark],
+            now,
+        );
+        let screen = render(&app, 100, 16, now);
+        assert!(
+            screen.contains(&format!("> {MARK_MARKER} Prog")),
+            "{screen}"
+        );
+        assert!(!screen.contains(&format!("{MARK_MARKER} Jazz")), "{screen}");
+
+        // An empty Mixes view says how to make one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixes.json");
+        app.set_mixes_path(Some(path.clone()));
+        local_press(&mut app, &[Action::Parent, Action::Down, Action::Open], now);
+        let read = app.take_mixes_read().unwrap();
+        app.mixes_loaded(read.read(), now);
+        let screen = render(&app, 120, 16, now);
+        assert!(screen.contains("No saved mixes"), "{screen}");
+        // A saved mix shows what it holds; playing it names it in the
+        // status bar.
+        let mix = coda_core::mix::Mix::new(
+            "Late night",
+            coda_core::mix::MixSource::Local,
+            vec![
+                coda_core::mix::Ingredient::Genre {
+                    name: "Jazz".into(),
+                },
+                coda_core::mix::Ingredient::Genre {
+                    name: "Prog".into(),
+                },
+                coda_core::mix::Ingredient::Artist {
+                    name: "Yes".into(),
+                    id: None,
+                },
+            ],
+        )
+        .unwrap();
+        coda_core::mix::store::add(&path, mix).unwrap();
+        local_press(&mut app, &[Action::Refresh], now);
+        let read = app.take_mixes_read().unwrap();
+        app.mixes_loaded(read.read(), now);
+        let screen = render(&app, 100, 16, now);
+        assert!(screen.contains("› Mixes"), "{screen}");
+        assert!(screen.contains("> Late night"), "{screen}");
+        assert!(screen.contains("2 genres, 1 artist"), "{screen}");
+        local_press(&mut app, &[Action::Activate], now);
+        let load = app.take_mix_load().unwrap();
+        app.mix_loaded(load.read(), now);
+        let screen = render(&app, 100, 16, now);
+        let status = screen.lines().last().unwrap();
+        assert!(status.contains("Mix: Late night · "), "{screen}");
+        // A long name gives way to the rest of the bar: while scanning
+        // ("Scanning… 2 tracks "), 52 columns leave the label 10 and the
+        // message 20.
+        let narrow = render(&app, 52, 16, now);
+        let status = narrow.lines().last().unwrap();
+        assert!(
+            status.contains("Mix: Late… · Scanning… 2 tracks"),
+            "{narrow}"
+        );
+        assert!(status.contains("Playing mix Late"), "{narrow}");
+        // Narrower, the label is left out and the message keeps its room.
+        for width in [30, 40, 45] {
+            let narrow = render(&app, width, 16, now);
+            let status = narrow.lines().last().unwrap();
+            assert!(!status.contains("Mix:"), "{width}: {narrow}");
+            assert!(status.contains("Scanning…"), "{width}: {narrow}");
+            assert!(status.contains(" Playing"), "{width}: {narrow}");
+        }
     }
 
     #[test]

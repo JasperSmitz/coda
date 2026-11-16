@@ -73,13 +73,21 @@ pub(crate) enum ReadMix {
     Gone,
     /// The file was written by a newer Coda: it reads as empty.
     Newer,
+    /// The file could not be used (and was set aside): what to tell the
+    /// user ("Could not read the mixes file: …; kept as …").
+    Rejected(String),
 }
 
 /// Reads saved mix `id` from `path` (blocking).
 pub(crate) fn read_saved_mix(path: &Path, id: &MixId) -> ReadMix {
     let (mixes, outcome) = store::load(path);
-    if let LoadOutcome::Newer { .. } = outcome {
-        return ReadMix::Newer;
+    match &outcome {
+        LoadOutcome::Newer { .. } => return ReadMix::Newer,
+        LoadOutcome::Rejected { kept_as, .. } => {
+            tracing::warn!(kept_as = ?kept_as, "the mixes file was rejected");
+            return ReadMix::Rejected(outcome.rejected_notice().unwrap_or_default());
+        }
+        LoadOutcome::Missing | LoadOutcome::Loaded { .. } => {}
     }
     mixes
         .into_iter()
@@ -208,6 +216,10 @@ impl Engine {
             }
             ReadMix::Newer => {
                 self.notify(capitalize(&StoreError::Newer.to_string()), now);
+                Vec::new()
+            }
+            ReadMix::Rejected(notice) => {
+                self.notify(notice, now);
                 Vec::new()
             }
         }

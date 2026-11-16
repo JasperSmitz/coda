@@ -12,6 +12,7 @@ They share the config file and the Navidrome password in the OS keychain; each k
 
 ## Features
 - **Play in context.** Enter plays an album or playlist from the selected track. `s` plays it shuffled, and that includes all of an artist's tracks, a local genre's tracks (up to the queue cap) or up to 500 random songs of a Navidrome genre. "Shuffle all" plays your whole library.
+- **Mixes:** endless, balanced shuffles of genres, artists and albums. Play the mixes saved in Coda's desktop app, or mark rows with `m` and press `M` for a quick mix. See [Mixes](docs/USAGE.md#mixes).
 - **Local library:** browse by playlists (`.m3u`/`.m3u8`), folders, artists, albums or genres. The scan runs in the background.
 - **Navidrome:**
   - browse playlists, artists, albums (six sort orders) and genres;
@@ -122,6 +123,7 @@ Press `?` in Coda for the full list.
 | `/` | search | — |
 | `o` / `R` | sort albums / reload (Navidrome) | — |
 | `P` / `N` / `e` | add to a playlist / new playlist / rename | — |
+| `m` / `M` | mark a genre, artist or album / play the marked ones as a mix | — |
 | `S` / `g` / `C C` | — | save as a playlist / jump to current / clear |
 
 | Key | Anywhere |

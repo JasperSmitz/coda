@@ -65,6 +65,21 @@ pub enum LoadOutcome {
     Newer { version: u64 },
 }
 
+impl LoadOutcome {
+    /// For a rejected file, what the user is told: "Could not read the
+    /// mixes file: <reason>; kept as <path>". `None` otherwise.
+    pub fn rejected_notice(&self) -> Option<String> {
+        let LoadOutcome::Rejected { reason, kept_as } = self else {
+            return None;
+        };
+        let kept = match kept_as {
+            Some(path) => format!("; kept as {}", path.to_string_lossy()),
+            None => String::new(),
+        };
+        Some(format!("Could not read the mixes file: {reason}{kept}"))
+    }
+}
+
 /// Why a change was not saved.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

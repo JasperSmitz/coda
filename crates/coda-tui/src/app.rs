@@ -67,7 +67,9 @@ use tokio::time::MissedTickBehavior;
 use crate::ui::cover::{ArtPainter, LateReplyFilter, TermEnv};
 use crate::ui::{help, keymap, render};
 use coda_core::cover::{self, CoverRequest, CoverResponse, CoverSize, Covers, cache::DiskCache};
-use coda_core::library::browse::{HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow};
+use coda_core::library::browse::{
+    HomeEntry as LocalHomeEntry, LocalBrowser, Row as LocalRow, View as LocalView,
+};
 use coda_core::library::scan::{self, ScanEvent};
 use coda_core::library::search::{self, SearchResults};
 use coda_core::library::{Library, MAX_PLAYLISTS};
@@ -93,6 +95,10 @@ use coda_core::session::{self, Session};
 use coda_core::settings::{self, Change, Settings};
 use coda_core::setup_actions::{self, Reply, SaveNavidrome};
 use coda_core::visualizer::Meter;
+
+mod mix;
+
+pub use mix::{LoadedMix, MixLoad, MixesLoaded, MixesRead, RestoredMix, restore_saved_mix};
 
 /// Redraw interval when nothing else changes (progress, status expiry).
 pub const TICK: Duration = Duration::from_millis(250);
@@ -247,6 +253,12 @@ pub enum Action {
     ToggleVisualizer,
     /// `f`: open or close the Now playing screen (also Esc on it).
     ToggleNowPlaying,
+    /// Library (`m`): mark (or unmark) the selected genre, artist or album
+    /// for a quick mix.
+    ToggleMark,
+    /// Library (`M`): play the marked rows of the source shown as a quick
+    /// mix, and clear the marks.
+    PlayMarked,
     Quit,
 }
 
@@ -274,6 +286,8 @@ impl Action {
                 | Self::SaveOrder
                 | Self::MoveEntryUp
                 | Self::MoveEntryDown
+                | Self::ToggleMark
+                | Self::PlayMarked
         )
     }
 
@@ -453,6 +467,32 @@ pub struct App {
     /// The last frame said a large cover would show better than the small
     /// one (Kitty graphics, a large enough area).
     large_cover_useful: bool,
+    /// The shared mixes file (`None`: no data folder).
+    mixes_path: Option<PathBuf>,
+    /// A read of the mixes file the loop has not started yet.
+    mixes_read: Option<MixesRead>,
+    /// The latest read asked for; older answers are dropped.
+    mixes_serial: u64,
+    /// Rows marked for a quick mix, per source (Navidrome: `None` without
+    /// a client).
+    local_marks: coda_core::mix::Marks,
+    remote_marks: Option<coda_core::mix::Marks>,
+    /// The mix that owns the queue.
+    mix: Option<mix::MixState>,
+    /// A Navidrome mix still loading its first songs.
+    pending_mix: Option<mix::MixState>,
+    /// The last tag given to a mix.
+    mix_tags: u64,
+    /// Bumped by every valid play request: a saved mix read for an older
+    /// one does not start.
+    mix_request: u64,
+    /// A saved mix to read again (Enter or `s` on it) the loop has not
+    /// started yet.
+    mix_load: Option<mix::MixLoad>,
+    /// Mix fetches for the loop to spawn, with their mix's tag.
+    mix_fetch_queue: Vec<(u64, coda_core::mix::navidrome::Fetch)>,
+    /// Bumped when the mix (saved with the session) changes.
+    mix_revision: u64,
 }
 
 impl App {
@@ -485,6 +525,7 @@ impl App {
             }
             _ => Source::Local,
         };
+        let remote_marks = navidrome.as_ref().map(mix::remote_marks);
         Self {
             player: Player::new(),
             library: Library::new(music_dir.unwrap_or_default()),
@@ -524,6 +565,18 @@ impl App {
             covers: Covers::new(false),
             now_playing: NowPlaying::default(),
             large_cover_useful: false,
+            mixes_path: None,
+            mixes_read: None,
+            mixes_serial: 0,
+            local_marks: coda_core::mix::Marks::new(coda_core::mix::MixSource::Local),
+            remote_marks,
+            mix: None,
+            pending_mix: None,
+            mix_tags: 0,
+            mix_request: 0,
+            mix_load: None,
+            mix_fetch_queue: Vec::new(),
+            mix_revision: 0,
         }
     }
 
@@ -631,7 +684,7 @@ impl App {
 
     /// Increases whenever something worth saving changes.
     fn revision(&self) -> u64 {
-        self.player.revision() + self.settings_revision
+        self.player.revision() + self.settings_revision + self.mix_revision
     }
 
     // ----- session saving ----------------------------------------------
@@ -671,6 +724,7 @@ impl App {
         self.saved_revision = Some(self.revision());
         Session {
             visualizer: self.visualizer,
+            mix: self.session_mix(),
             ..Session::from_player(&self.player)
         }
     }
@@ -999,6 +1053,9 @@ impl App {
         let clear_armed = self.clear_armed_until.take();
         let edit_armed = self.edit_armed.take();
         let mut backend = Vec::new();
+        let context = self.player.queue_context();
+        let mixes_shown = self.mixes_view_displayed();
+        let mut mix_played = false;
         let commands = match action {
             Action::Activate if self.prompt_active() => {
                 self.settings.open_connect();
@@ -1014,7 +1071,32 @@ impl App {
                 self.move_selection(1);
                 Vec::new()
             }
+            Action::Activate | Action::PlayShuffled
+                if self.focus == Focus::Library && self.selected_mix().is_some() =>
+            {
+                mix_played = true;
+                match self.selected_mix() {
+                    Some(mix) => self.play_saved_mix(mix.id, now),
+                    None => Vec::new(),
+                }
+            }
+            Action::ToggleMark => {
+                self.toggle_mark(now);
+                Vec::new()
+            }
+            Action::PlayMarked => {
+                mix_played = true;
+                self.play_marks(now)
+            }
             Action::Activate | Action::PlayShuffled if self.remote_active() => {
+                // A play (not Enter that opens a row) is the latest play
+                // request, even if it then finds no songs.
+                if self
+                    .browser_mut()
+                    .plays_selected(action == Action::PlayShuffled)
+                {
+                    self.supersede_mix_requests(now);
+                }
                 let outcomes = if action == Action::PlayShuffled {
                     self.browser_mut().play_shuffled()
                 } else {
@@ -1134,7 +1216,9 @@ impl App {
                 Vec::new()
             }
             Action::Refresh => {
-                if self.remote_active() {
+                if self.mixes_view_shown() {
+                    self.request_mixes_read(now);
+                } else if self.remote_active() {
                     self.browser_mut().refresh();
                 }
                 Vec::new()
@@ -1271,6 +1355,19 @@ impl App {
         };
         let mut commands = self.dispatch(commands, now);
         commands.extend(backend);
+        // Anything else that replaced or cleared the queue is a play
+        // request too: a mix still loading no longer starts. (Enter and `s`
+        // that play supersede it before they play.)
+        if !mix_played && self.player.queue_context() != context {
+            self.supersede_mix_requests(now);
+        }
+        // A Mixes view becoming shown (opened, or a switch to the other
+        // source's) reads the mixes file again.
+        let shown = self.mixes_view_displayed();
+        if shown.is_some() && shown != mixes_shown {
+            self.request_mixes_read(now);
+        }
+        commands.extend(self.check_mix(now));
         commands
     }
 
@@ -1376,8 +1473,8 @@ impl App {
         if let Some(position) = position {
             self.scrobbling.progressed(&self.player, position);
         }
-        let commands = resolve::dispatch(&mut self.player, self.navidrome.as_ref(), commands);
-        self.after_player_call(now);
+        let mut commands = self.dispatch(commands, now);
+        commands.extend(self.check_mix(now));
         commands
     }
 
@@ -1534,6 +1631,7 @@ impl App {
             _ => {}
         }
         self.navidrome = client;
+        self.mix_client_changed(now);
         self.connection = Connection::Connecting;
         self.scrobbling
             .client_replaced(scrobble && self.navidrome.is_some(), &self.player);
@@ -1616,10 +1714,14 @@ impl App {
         // what it changes next shows on the Now playing screen.
         self.now_playing.user_acted();
         let commands = self.apply_job_outcomes(outcomes, now);
-        self.dispatch(commands, now)
+        let mut commands = self.dispatch(commands, now);
+        commands.extend(self.check_mix(now));
+        commands
     }
 
-    pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
+    /// Applies a scan event. A batch may top up a local mix that waited
+    /// for songs: the commands to send are returned.
+    pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) -> Vec<PlaybackCommand> {
         match event {
             ScanEvent::Batch(tracks) => {
                 let key = self.local.selected_key(&self.library);
@@ -1664,6 +1766,7 @@ impl App {
                 self.set_status(text, now);
             }
         }
+        self.check_mix(now)
     }
 
     /// The scan channel closed. Without a preceding `Finished`, the scan
@@ -1769,10 +1872,13 @@ impl App {
             self.local.selected_row(&self.library),
             Some(LocalRow::Home(LocalHomeEntry::ShuffleAll))
         ) {
+            self.supersede_mix_requests(now);
             return self.shuffle_all_local(now);
         }
         match self.local.play_context(&self.library, shuffle) {
             Some(context) => {
+                // The latest play request, even if it finds no songs.
+                self.supersede_mix_requests(now);
                 let tracks = context
                     .tracks
                     .iter()
@@ -1959,6 +2065,7 @@ impl App {
             return Vec::new();
         };
         let (tracks, start) = (search.results.tracks.clone(), search.selected);
+        self.supersede_mix_requests(now);
         self.play_tracks(track.display_name(), tracks, Some(start), shuffle, now)
     }
 
@@ -2418,8 +2525,9 @@ pub use coda_core::model::count;
 /// status line; neither ever blocks the loop.
 ///
 /// `restored` (already loaded) is restored before the loop starts and its
-/// notice shown. With a save path, changes are saved there during the
-/// session (debounced) and once more on exit, bounded by [`SAVE_TIMEOUT`].
+/// notice shown, with the mix it saved ([`Restored`]). With a save path,
+/// changes are saved there during the session (debounced) and once more on
+/// exit, bounded by [`SAVE_TIMEOUT`].
 ///
 /// With `scrobble` (and a client), plays of Navidrome tracks are reported
 /// to the server by a background [`Scrobbler`].
@@ -2435,7 +2543,7 @@ pub async fn run(
     music_dir: Option<PathBuf>,
     navidrome: Option<navidrome::Client>,
     scrobble: bool,
-    restored: session::Restored,
+    restored: Restored,
     settings: settings::Context,
     covers: CoverConfig,
 ) -> io::Result<()> {
@@ -2506,12 +2614,22 @@ pub async fn run(
     app.set_settings_context(settings);
     app.set_scrobbling(scrobbler.is_some());
     app.set_cover_art(covers.enabled);
+    app.set_mixes_path(restored.mixes_path);
     let now = Instant::now();
-    playback.send_all(app.restore_session(restored.session, now));
-    if let Some(notice) = restored.notice {
+    let session = restored.session;
+    playback.send_all(app.restore_session(session.session, now));
+    app.restore_mix(restored.mix.mix, now);
+    // The session's notice, and a mixes file rejected while reading the
+    // session's mix.
+    let notice = [session.notice, restored.mix.notice]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if !notice.is_empty() {
         app.set_status(notice, now);
     }
-    let mut saver = Saver::new(restored.save_path);
+    let mut saver = Saver::new(session.save_path);
     let (scrobbler, scrobble_failure) = scrobbler.unzip();
     let sources = Sources {
         scan,
@@ -2548,6 +2666,17 @@ pub async fn run(
     release_terminal(ManuallyDrop::into_inner(terminal));
     restore_terminal();
     result
+}
+
+/// What [`run`] restores: the session, and the mix it saved.
+#[derive(Debug)]
+pub struct Restored {
+    pub session: session::Restored,
+    /// The shared mixes file (`None`: no data folder).
+    pub mixes_path: Option<PathBuf>,
+    /// The session's mix as resumed ([`restore_saved_mix`]), and a notice
+    /// for the startup status if the mixes file was rejected.
+    pub mix: RestoredMix,
 }
 
 /// Cover art settings for [`run`].
@@ -3158,6 +3287,65 @@ async fn next_scan_event(scan: &mut Option<mpsc::Receiver<ScanEvent>>) -> Option
     }
 }
 
+/// A mix fetch's result with the tag of the mix it is for.
+type MixFetched = (u64, coda_core::mix::navidrome::Fetched);
+
+/// The loop's channels for mix results.
+struct MixChannels {
+    /// The mixes file as read (the Mixes views).
+    loaded: mpsc::UnboundedSender<MixesLoaded>,
+    /// A saved mix read again before it plays.
+    saved: mpsc::UnboundedSender<LoadedMix>,
+    /// Mix fetch results.
+    fetched: mpsc::UnboundedSender<MixFetched>,
+}
+
+/// Starts what the mixes need: a read of the mixes file and of a saved mix
+/// to play (blocking threads) and the mix fetches (`Fetch::spawn` with the
+/// current client and the browser's shared fetch limit, never under a
+/// permit of it). Results come back through `channels`, which the loop
+/// selects on.
+fn drive_mixes(app: &mut App, fetches: &Fetches, channels: &MixChannels, now: Instant) {
+    if let Some(read) = app.take_mixes_read() {
+        let tx = channels.loaded.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(read.read());
+        });
+    }
+    if let Some(load) = app.take_mix_load() {
+        let tx = channels.saved.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(load.read());
+        });
+    }
+    let due = app.take_mix_fetches();
+    if due.is_empty() {
+        return;
+    }
+    let Some(client) = app.navidrome_client().cloned() else {
+        app.mix_fetches_unsent(now);
+        return;
+    };
+    for (tag, fetch) in due {
+        let tx = channels.fetched.clone();
+        // Detached: dropping the coordinator stops it, and it always
+        // answers once.
+        drop(
+            fetch.spawn(client.clone(), fetches.limit.clone(), move |result| {
+                let _ = tx.send((tag, result));
+            }),
+        );
+    }
+}
+
+/// Waits until `at`; never without one.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -3189,6 +3377,14 @@ async fn event_loop(
     let (fetch_tx, mut fetch_rx) = mpsc::unbounded_channel();
     let (settings_tx, mut settings_rx) = mpsc::unbounded_channel();
     let (edit_tx, mut edit_rx) = mpsc::unbounded_channel();
+    let (mixes_tx, mut mixes_rx) = mpsc::unbounded_channel();
+    let (saved_tx, mut saved_rx) = mpsc::unbounded_channel();
+    let (mix_tx, mut mix_rx) = mpsc::unbounded_channel();
+    let mix_channels = MixChannels {
+        loaded: mixes_tx,
+        saved: saved_tx,
+        fetched: mix_tx,
+    };
     let mut playback_open = true;
     let mut dirty = true;
     // Only the visualizer changed: redraw just its area over a copy of the
@@ -3218,6 +3414,7 @@ async fn event_loop(
                 .unzip();
         }
         fetches.spawn(app.take_fetch_requests(), app.navidrome_client(), &fetch_tx);
+        drive_mixes(app, &fetches, &mix_channels, Instant::now());
         covers.spawn(app.take_cover_requests(), app.navidrome_client(), &cover_tx);
         // After the requests: following the track may have dropped a
         // large load, which is then aborted here.
@@ -3253,6 +3450,7 @@ async fn event_loop(
                 render::redraw_visualizer(terminal, frame, app, area)?;
             }
         }
+        let retry = app.mix_retry_at();
         tokio::select! {
             input_event = input.next() => match input_event {
                 Some(Ok(Event::Key(key))) if late_replies.swallow(&key, Instant::now()) => {
@@ -3316,7 +3514,10 @@ async fn event_loop(
             },
             event = next_scan_event(&mut scan) => {
                 match event {
-                    Some(event) => app.handle_scan_event(event, Instant::now()),
+                    Some(event) => {
+                        let commands = app.handle_scan_event(event, Instant::now());
+                        playback.send_all(commands);
+                    }
                     None => {
                         scan = None;
                         app.scan_closed(Instant::now());
@@ -3327,6 +3528,28 @@ async fn event_loop(
             // The loop holds a sender, so this never yields `None`.
             Some(response) = fetch_rx.recv() => {
                 let commands = app.handle_fetch_response(response, Instant::now());
+                playback.send_all(commands);
+                dirty = true;
+            },
+            // Likewise.
+            Some(loaded) = mixes_rx.recv() => {
+                app.mixes_loaded(loaded, Instant::now());
+                dirty = true;
+            },
+            // Likewise.
+            Some(loaded) = saved_rx.recv() => {
+                let commands = app.mix_loaded(loaded, Instant::now());
+                playback.send_all(commands);
+                dirty = true;
+            },
+            // Likewise.
+            Some((tag, fetched)) = mix_rx.recv() => {
+                let commands = app.mix_fetched(tag, fetched, Instant::now());
+                playback.send_all(commands);
+                dirty = true;
+            },
+            _ = sleep_until(retry) => {
+                let commands = app.mix_retry(Instant::now());
                 playback.send_all(commands);
                 dirty = true;
             },
@@ -3599,6 +3822,7 @@ mod tests {
                 LocalRow::Album(album, artist) => format!("{} — {}", album.name(), artist.name()),
                 LocalRow::Playlist(p) => p.name.clone(),
                 LocalRow::Genre(g) => g.name().to_owned(),
+                LocalRow::Mix(m) => m.name.clone(),
             })
             .collect()
     }
@@ -3744,7 +3968,8 @@ mod tests {
                     "Folders",
                     "Artists",
                     "Albums",
-                    "Genres"
+                    "Genres",
+                    "Mixes"
                 ]
             );
             open_local(&mut app, entry, now);
@@ -5427,7 +5652,8 @@ mod tests {
                 "Folders",
                 "Artists",
                 "Albums",
-                "Genres"
+                "Genres",
+                "Mixes"
             ]
         );
         assert!(path_titles(&app).is_empty());

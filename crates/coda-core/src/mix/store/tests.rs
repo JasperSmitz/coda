@@ -186,6 +186,16 @@ fn every_change_rereads_the_file_so_two_writers_keep_both() {
 
 #[test]
 fn a_bad_file_is_kept_aside_and_an_empty_list_used() {
+    assert_eq!(LoadOutcome::Missing.rejected_notice(), None);
+    assert_eq!(
+        LoadOutcome::Rejected {
+            reason: "bad".into(),
+            kept_as: None
+        }
+        .rejected_notice()
+        .as_deref(),
+        Some("Could not read the mixes file: bad")
+    );
     let dir = tempfile::tempdir().unwrap();
     let path = mixes_path(&dir);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -206,6 +216,17 @@ fn a_bad_file_is_kept_aside_and_an_empty_list_used() {
             panic!("{bad}: {outcome:?}");
         };
         assert!(!reason.contains("json\""), "{reason}");
+        assert_eq!(
+            LoadOutcome::Rejected {
+                reason: reason.clone(),
+                kept_as: Some(kept.clone()),
+            }
+            .rejected_notice(),
+            Some(format!(
+                "Could not read the mixes file: {reason}; kept as {}",
+                kept.display()
+            ))
+        );
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), bad);
         std::fs::remove_file(kept).unwrap();
     }

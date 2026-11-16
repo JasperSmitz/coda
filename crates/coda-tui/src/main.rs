@@ -156,10 +156,27 @@ async fn run() -> ExitCode {
         "sources configured"
     );
 
-    let restored = session::restore(config::session_file_path(
+    let mut restored = session::restore(config::session_file_path(
         std::env::var_os("XDG_STATE_HOME"),
         std::env::var_os("HOME"),
     ));
+    // The session's mix: a saved one is read again from the mixes file.
+    let mixes_path =
+        config::mixes_file_path(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"));
+    let session_mix = restored.session.mix.take();
+    let path = mixes_path.clone();
+    let mix =
+        tokio::task::spawn_blocking(move || app::restore_saved_mix(session_mix, path.as_deref()))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "reading the session's mix failed");
+                app::RestoredMix::default()
+            });
+    let restored = app::Restored {
+        session: restored,
+        mixes_path,
+        mix,
+    };
 
     // mpv from `PATH` only, as before: core's `spawn_backend` also looks in
     // well-known folders for the desktop app, whose launchers get a

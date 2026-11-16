@@ -1503,6 +1503,10 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
     io.send(commands);
     engine.set_mixes_path(mixes.path);
     engine.restore_mix(mixes.restored, now);
+    // The mixes file was rejected while reading the session's mix.
+    if let Some(notice) = mixes.notice {
+        engine.notify(notice, now);
+    }
     if let Some(dir) = engine.music_dir() {
         io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }

@@ -51,6 +51,8 @@ pub fn map_key(key: KeyEvent, focus: Focus, help_open: bool) -> Option<Action> {
         KeyCode::Char('N') if library => Action::NewPlaylist,
         KeyCode::Char('e') if library => Action::RenamePlaylist,
         KeyCode::Char('w') if library => Action::SaveOrder,
+        KeyCode::Char('m') if library => Action::ToggleMark,
+        KeyCode::Char('M') if library => Action::PlayMarked,
         KeyCode::Char('1') => Action::SelectLocal,
         KeyCode::Char('2') => Action::SelectNavidrome,
         // Queue: the entry; library: a Navidrome playlist's song, or (in
@@ -219,6 +221,9 @@ mod tests {
             (ch('N'), Action::NewPlaylist),
             (ch('e'), Action::RenamePlaylist),
             (ch('w'), Action::SaveOrder),
+            (ch('m'), Action::ToggleMark),
+            (ch('M'), Action::PlayMarked),
+            (shifted('M'), Action::PlayMarked),
         ];
         for (k, action) in cases {
             assert_eq!(lib(k), Some(action), "{k:?}");

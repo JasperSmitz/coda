@@ -14,12 +14,14 @@
 //! - [`navidrome`]: a Navidrome mix's ingredients fetched from its server,
 //!   and [`navidrome::MixFetches`], which tracks a playing mix's fetches.
 //! - [`ActiveMix`]: the mix that owns the queue, and its top-up.
+//! - [`Marks`]: rows marked for a quick mix (the TUI).
 //!
 //! A Navidrome mix records its server as [`crate::navidrome::server_id`]
 //! (a hash): no URLs or credentials are stored.
 
 mod active;
 pub mod local;
+mod marks;
 pub mod navidrome;
 mod picker;
 pub mod store;
@@ -31,6 +33,7 @@ use serde::{Deserialize, Serialize};
 pub use active::{
     ActiveMix, Appended, START_TRACKS, StartError, TOP_UP_TRACKS, TOP_UP_WHEN_REMAINING,
 };
+pub use marks::{Marks, Toggled, default_name};
 pub use picker::{MAX_RECENT_WINDOW, Picker};
 
 use crate::model::{MAX_METADATA_CHARS, clean_text};

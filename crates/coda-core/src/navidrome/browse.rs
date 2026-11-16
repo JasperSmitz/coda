@@ -1,5 +1,5 @@
 //! Remote browse state for the Navidrome source: a navigation stack of
-//! views (Home → Playlists / Artists / Albums / Genres → …, plus search
+//! views (Home → Playlists / Artists / Albums / Genres / Mixes → …, plus search
 //! results), a session-only cache of fetched lists, paged album lists, the
 //! search input, and ordered background enqueue jobs. No Ratatui, no I/O.
 //!
@@ -78,6 +78,7 @@ use super::{
     PlaylistSongs, SearchResults,
 };
 use crate::line_input::LineInput;
+use crate::mix::{Ingredient, Mix, MixId};
 use crate::model::{Track, thousands};
 use crate::queue::Placement;
 
@@ -104,6 +105,7 @@ pub const HOME_TITLE: &str = "Home";
 pub const ARTISTS_TITLE: &str = "Artists";
 pub const PLAYLISTS_TITLE: &str = "Playlists";
 pub const GENRES_TITLE: &str = "Genres";
+pub const MIXES_TITLE: &str = "Mixes";
 /// Upper bound on the songs one edit adds (the playlist entry cap).
 pub const MAX_EDIT_SONGS: usize = MAX_PLAYLIST_ENTRIES;
 /// After an edit refused because the playlist changed on the server.
@@ -158,6 +160,9 @@ pub enum HomeEntry {
     Artists,
     Albums,
     Genres,
+    /// The saved mixes of this server (M12); the frontend reads them from
+    /// the mixes file when the view opens ([`Browser::set_mixes`]).
+    Mixes,
 }
 
 impl HomeEntry {
@@ -168,17 +173,19 @@ impl HomeEntry {
             Self::Artists => ARTISTS_TITLE,
             Self::Albums => "Albums",
             Self::Genres => GENRES_TITLE,
+            Self::Mixes => MIXES_TITLE,
         }
     }
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 5] = [
+pub const HOME_ENTRIES: [HomeEntry; 6] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Artists,
     HomeEntry::Albums,
     HomeEntry::Genres,
+    HomeEntry::Mixes,
 ];
 
 /// The label of the "Shuffle all" Home entry (both sources).
@@ -231,13 +238,16 @@ pub enum Resource {
     /// A fresh set of random songs of one genre (`getRandomSongs` with
     /// `genre`), for `s` on a genre; held like [`Resource::RandomSongs`].
     GenreRandomSongs(String),
+    /// This server's saved mixes, from the mixes file (M12): set by the
+    /// frontend ([`Browser::set_mixes`]), never fetched.
+    Mixes,
 }
 
 impl Resource {
     /// The Subsonic endpoint, for logs.
     pub fn endpoint(&self) -> &'static str {
         match self {
-            Self::Home => "none",
+            Self::Home | Self::Mixes => "none",
             Self::Artists => "getArtists",
             Self::Artist(_) => "getArtist",
             Self::Album(_) => "getAlbum",
@@ -293,6 +303,8 @@ pub enum Content {
     /// joined as [`Content::Albums`].
     AlbumPage(AlbumPage),
     Genres(Vec<Genre>),
+    /// Saved mixes ([`Resource::Mixes`]).
+    Mixes(Vec<Mix>),
 }
 
 static HOME: Content = Content::Home;
@@ -326,11 +338,37 @@ pub enum Row<'a> {
     Song(&'a Track),
     Playlist(&'a Playlist),
     Genre(&'a Genre),
+    /// A saved mix (Enter or `s` plays it).
+    Mix(&'a Mix),
 }
 
 impl Row<'_> {
     pub fn is_selectable(&self) -> bool {
         !matches!(self, Row::Header(_))
+    }
+
+    /// The row as a mix ingredient (a quick mix's marks): a genre by the
+    /// server's exact value, an artist by id and name, an album by id,
+    /// name and album artist (decision 3; the name is the fallback when
+    /// the id no longer exists). `None` for anything else, and for an
+    /// album the server lists without an artist (it could not be found
+    /// again by name).
+    pub fn ingredient(&self) -> Option<Ingredient> {
+        Some(match self {
+            Row::Genre(genre) => Ingredient::Genre {
+                name: genre.query().to_owned(),
+            },
+            Row::Artist(artist) => Ingredient::Artist {
+                name: artist.name.clone(),
+                id: Some(artist.id.clone()),
+            },
+            Row::Album(album) => Ingredient::Album {
+                artist: album.artist.clone().filter(|a| !a.trim().is_empty())?,
+                name: album.name.clone(),
+                id: Some(album.id.clone()),
+            },
+            _ => return None,
+        })
     }
 }
 
@@ -346,6 +384,7 @@ impl Content {
             Self::PlaylistSongs(p) => p.tracks.len(),
             Self::AlbumPage(page) => page.albums.len(),
             Self::Genres(v) => v.len(),
+            Self::Mixes(v) => v.len(),
         }
     }
 
@@ -378,6 +417,7 @@ impl Content {
             Self::Playlists(v) => window(v, start, len).iter().map(Row::Playlist).collect(),
             Self::Search(r) => search_rows(r).skip(start).take(len).collect(),
             Self::Genres(v) => window(v, start, len).iter().map(Row::Genre).collect(),
+            Self::Mixes(v) => window(v, start, len).iter().map(Row::Mix).collect(),
         }
     }
 }
@@ -1035,7 +1075,9 @@ impl Browser {
             return false;
         };
         let (resource, title) = match row {
-            Row::Header(_) | Row::Song(_) | Row::Home(HomeEntry::ShuffleAll) => return false,
+            Row::Header(_) | Row::Song(_) | Row::Mix(_) | Row::Home(HomeEntry::ShuffleAll) => {
+                return false;
+            }
             Row::Home(HomeEntry::Albums) => {
                 self.open_albums(self.album_sort);
                 return true;
@@ -1045,6 +1087,14 @@ impl Browser {
             }
             Row::Home(entry @ HomeEntry::Artists) => (Resource::Artists, entry.label().to_owned()),
             Row::Home(entry @ HomeEntry::Genres) => (Resource::Genres, entry.label().to_owned()),
+            Row::Home(entry @ HomeEntry::Mixes) => {
+                // Shown at once (empty until the frontend's read of the
+                // mixes file arrives); never fetched.
+                self.cache
+                    .entry(Resource::Mixes)
+                    .or_insert_with(|| Content::Mixes(Vec::new()));
+                (Resource::Mixes, entry.label().to_owned())
+            }
             Row::Genre(g) => {
                 self.open_genre(g.query.clone(), g.name.clone());
                 return true;
@@ -1084,6 +1134,19 @@ impl Browser {
             Some((label, target)) => self.start_play(label, target, true),
             None => Vec::new(),
         }
+    }
+
+    /// Whether Enter (`shuffle`: `s`) on the selected row would play
+    /// something (a valid play request, whether or not it then finds
+    /// songs), rather than open it or do nothing.
+    pub fn plays_selected(&self, shuffle: bool) -> bool {
+        self.play_target(shuffle).is_some()
+    }
+
+    /// Whether the selected row is an album the server lists without an
+    /// artist (it cannot be a mix ingredient).
+    pub fn selected_album_without_artist(&self) -> bool {
+        matches!(self.selected_row(), Some(Row::Album(a)) if a.artist.as_deref().is_none_or(|a| a.trim().is_empty()))
     }
 
     /// Drops a play request still waiting for its songs (another entry
@@ -1147,7 +1210,7 @@ impl Browser {
                 RANDOM_SONGS_LABEL.to_owned(),
                 PlayTarget::Fetch(JobTarget::RandomSongs(Resource::RandomSongs)),
             ),
-            Row::Header(_) | Row::Home(_) => return None,
+            Row::Header(_) | Row::Home(_) | Row::Mix(_) => return None,
             Row::Artist(_) | Row::Genre(_) if !shuffle => return None,
             Row::Genre(g) => (
                 g.name.clone(),
@@ -1272,7 +1335,8 @@ impl Browser {
         let Some(resource) = self.current().map(|v| v.resource.clone()) else {
             return;
         };
-        if resource == Resource::Home {
+        // Static, or read from the mixes file by the frontend.
+        if matches!(resource, Resource::Home | Resource::Mixes) {
             return;
         }
         let id = match AlbumList::of(&resource) {
@@ -1302,6 +1366,44 @@ impl Browser {
     fn selected_row(&self) -> Option<Row<'_>> {
         let view = self.current()?;
         self.content(view)?.row(view.selected)
+    }
+
+    /// The selected row as a mix ingredient ([`Row::ingredient`]).
+    pub fn selected_ingredient(&self) -> Option<Ingredient> {
+        self.selected_row()?.ingredient()
+    }
+
+    /// The selected saved mix, in the Mixes view.
+    pub fn selected_mix(&self) -> Option<&Mix> {
+        match self.selected_row()? {
+            Row::Mix(mix) => Some(mix),
+            _ => None,
+        }
+    }
+
+    /// This server's saved mixes, read again from the mixes file (the
+    /// frontend filters them to this server's). A Mixes view keeps its
+    /// selection on the mix it was on.
+    pub fn set_mixes(&mut self, mixes: Vec<Mix>) {
+        let selected_id = |b: &Self, view: &View| match b.content(view)?.row(view.selected)? {
+            Row::Mix(mix) => Some(mix.id.clone()),
+            _ => None,
+        };
+        let keep: Vec<Option<MixId>> = self
+            .stack
+            .iter()
+            .map(|view| match view.resource {
+                Resource::Mixes => selected_id(self, view),
+                _ => None,
+            })
+            .collect();
+        for (view, id) in self.stack.iter_mut().zip(keep) {
+            if let Some(at) = id.and_then(|id| mixes.iter().position(|m| m.id == id)) {
+                view.selected = at;
+            }
+        }
+        self.cache.insert(Resource::Mixes, Content::Mixes(mixes));
+        self.fix_selection();
     }
 
     fn open_view(&mut self, resource: Resource, title: String) {
@@ -1543,7 +1645,7 @@ impl Browser {
     fn selected_target(&self) -> Option<(String, JobTarget)> {
         Some(match self.selected_row()? {
             // A genre is not added whole: it may hold thousands of albums.
-            Row::Header(_) | Row::Home(_) | Row::Genre(_) => return None,
+            Row::Header(_) | Row::Home(_) | Row::Genre(_) | Row::Mix(_) => return None,
             Row::Song(t) => (t.display_name(), JobTarget::Song(Box::new(t.clone()))),
             Row::Album(a) => (
                 a.name.clone(),
@@ -2696,8 +2798,9 @@ pub async fn fetch(client: &Client, resource: &Resource) -> Result<Content, Erro
             .random_songs_in_genre(genre)
             .await
             .map(Content::Songs),
-        // Never requested: Home is static, album lists load by page.
-        Resource::Home | Resource::Albums(_) | Resource::Genre(_) => {
+        // Never requested: Home is static, album lists load by page, the
+        // frontend reads mixes from the mixes file.
+        Resource::Home | Resource::Albums(_) | Resource::Genre(_) | Resource::Mixes => {
             Err(Error::Decode("not a fetchable resource".to_owned()))
         }
     }
@@ -3233,7 +3336,14 @@ mod tests {
         let labels: Vec<&str> = HOME_ENTRIES.iter().map(|e| e.label()).collect();
         assert_eq!(
             labels,
-            ["Shuffle all", "Playlists", "Artists", "Albums", "Genres"]
+            [
+                "Shuffle all",
+                "Playlists",
+                "Artists",
+                "Albums",
+                "Genres",
+                "Mixes"
+            ]
         );
         // Nothing to add or refresh on Home, and it is the root.
         assert!(b.enqueue_selected(Placement::End).is_empty());
@@ -4147,5 +4257,129 @@ mod tests {
             ok(&mut b, &all, Content::Songs(vec![song("a")])),
             [shuffle_all(vec![song("a")], Generation(0))]
         );
+    }
+
+    fn mix(id: &str, name: &str) -> Mix {
+        let server = crate::navidrome::server_id_of("https://music.example/", "listener");
+        let mut mix = Mix::new(
+            name,
+            crate::mix::MixSource::Navidrome { server },
+            vec![Ingredient::Genre {
+                name: "Rock".into(),
+            }],
+        )
+        .unwrap();
+        mix.id = MixId::parse(id).unwrap();
+        mix
+    }
+
+    #[test]
+    fn the_mixes_view_shows_what_the_frontend_read_and_keeps_its_selection() {
+        let mut b = Browser::new();
+        open_home(&mut b, HomeEntry::Mixes);
+        // Shown at once and never fetched; empty until the read arrives.
+        assert!(b.take_requests().is_empty());
+        let view = b.current().unwrap();
+        assert_eq!(
+            (
+                view.resource.clone(),
+                view.load.clone(),
+                view.title.as_str()
+            ),
+            (Resource::Mixes, Load::Ready, MIXES_TITLE)
+        );
+        assert!(b.current_content().unwrap().is_empty());
+        assert_eq!(b.selected_mix(), None);
+        b.set_mixes(vec![mix("a1", "Prog"), mix("b2", "Jazz")]);
+        b.move_selection(1);
+        assert_eq!(b.selected_mix().map(|m| m.name.as_str()), Some("Jazz"));
+        // Enter, `s`, `a` and `R` leave a mix to the frontend.
+        assert!(b.activate().is_empty());
+        assert!(b.play_shuffled().is_empty());
+        assert!(b.enqueue_selected(Placement::End).is_empty());
+        assert!(!b.open_selected());
+        b.refresh();
+        assert!(b.take_requests().is_empty());
+        assert_eq!(b.selected_ingredient(), None);
+        // Read again: the selection stays on its mix, or in range.
+        b.set_mixes(vec![mix("c3", "New"), mix("a1", "Prog"), mix("b2", "Jazz")]);
+        assert_eq!(b.selected_mix().map(|m| m.name.as_str()), Some("Jazz"));
+        b.set_mixes(vec![mix("a1", "Prog")]);
+        assert_eq!(b.selected_mix().map(|m| m.name.as_str()), Some("Prog"));
+        // `h` back to the Mixes entry; opening again shows the last read.
+        b.go_up();
+        assert_eq!(b.current().unwrap().resource, Resource::Home);
+        open_home(&mut b, HomeEntry::Mixes);
+        assert_eq!(b.current_content().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn genres_artists_and_albums_are_ingredients_with_their_ids() {
+        let mut b = Browser::new();
+        open_genres(&mut b, vec![genre("Prog Rock", 3)]);
+        assert_eq!(
+            b.selected_ingredient(),
+            Some(Ingredient::Genre {
+                name: "Prog Rock".into()
+            })
+        );
+        let artist_row = artist("ar-1");
+        assert_eq!(
+            Row::Artist(&artist_row).ingredient(),
+            Some(Ingredient::Artist {
+                name: "Artist ar-1".into(),
+                id: Some("ar-1".into())
+            })
+        );
+        let mut with_artist = album("al-1");
+        with_artist.artist = Some("Yes".into());
+        assert_eq!(
+            Row::Album(&with_artist).ingredient(),
+            Some(Ingredient::Album {
+                artist: "Yes".into(),
+                name: "Album al-1".into(),
+                id: Some("al-1".into())
+            })
+        );
+        // Without an artist an album could not be found again by name.
+        assert_eq!(Row::Album(&album("al-2")).ingredient(), None);
+        assert_eq!(Row::Song(&song("s")).ingredient(), None);
+        assert_eq!(Row::Home(HomeEntry::Genres).ingredient(), None);
+    }
+
+    #[test]
+    fn plays_selected_tells_a_play_from_opening_and_spots_an_album_without_an_artist() {
+        let mut b = Browser::new();
+        b.set_viewport_rows(10);
+        // Home: Shuffle all plays; the other entries open.
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        assert!(b.plays_selected(false));
+        select_home(&mut b, HomeEntry::Genres);
+        assert!(!b.plays_selected(false) && !b.plays_selected(true));
+        open_genres(&mut b, vec![genre("Jazz", 1)]);
+        // Enter opens a genre; `s` plays it.
+        assert!(!b.plays_selected(false));
+        assert!(b.plays_selected(true));
+        assert!(!b.selected_album_without_artist());
+        b.activate();
+        let first = one(&mut b);
+        let mut with_artist = album("al-1");
+        with_artist.artist = Some("Yes".into());
+        ok(
+            &mut b,
+            &first,
+            Content::AlbumPage(AlbumPage {
+                albums: vec![album("al-2"), with_artist],
+                served: 2,
+            }),
+        );
+        assert!(b.plays_selected(false), "an album plays");
+        assert!(b.selected_album_without_artist());
+        b.move_selection(1);
+        assert!(!b.selected_album_without_artist());
+        // A Mixes view leaves its rows to the frontend.
+        open_home(&mut b, HomeEntry::Mixes);
+        b.set_mixes(vec![mix("a1", "Prog")]);
+        assert!(!b.plays_selected(false) && !b.plays_selected(true));
     }
 }
