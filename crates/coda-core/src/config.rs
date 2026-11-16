@@ -903,6 +903,21 @@ pub fn state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Op
     Some(state.join("coda"))
 }
 
+/// `$XDG_DATA_HOME/coda`, else `~/.local/share/coda`: user data that
+/// both frontends read and write (the mixes). Relative or empty values
+/// are ignored; `None` if no location is known.
+pub fn data_dir(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+    let data = absolute(xdg_data_home)
+        .or_else(|| absolute(home).map(|h| h.join(".local").join("share")))?;
+    Some(data.join("coda"))
+}
+
+/// `mixes.json` (the saved mixes, [`crate::mix::store`]) in [`data_dir`].
+pub fn mixes_file_path(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    Some(data_dir(xdg_data_home, home)?.join("mixes.json"))
+}
+
 /// `coda.log` in [`state_dir`].
 pub fn log_file_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     Some(state_dir(xdg_state_home, home)?.join("coda.log"))
@@ -1931,5 +1946,27 @@ mod tests {
             Some(PathBuf::from("/home/u/.local/state/coda/state.json"))
         );
         assert_eq!(session_file_path(None, None), None);
+    }
+
+    #[test]
+    fn mixes_live_in_the_data_directory() {
+        assert_eq!(
+            mixes_file_path(Some("/data".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/data/coda/mixes.json"))
+        );
+        assert_eq!(
+            mixes_file_path(None, Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/share/coda/mixes.json"))
+        );
+        assert_eq!(
+            mixes_file_path(Some("rel".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/share/coda/mixes.json"))
+        );
+        assert_eq!(
+            data_dir(Some("".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/share/coda"))
+        );
+        assert_eq!(mixes_file_path(None, Some("rel".into())), None);
+        assert_eq!(mixes_file_path(None, None), None);
     }
 }

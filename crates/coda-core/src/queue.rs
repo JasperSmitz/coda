@@ -54,6 +54,8 @@ pub struct Queue {
     next_anchor: Option<QueueEntryId>,
     next_id: u64,
     revision: u64,
+    /// Bumped by [`Queue::clear`]; see [`Queue::context`]. Not saved.
+    context: u64,
 }
 
 impl Queue {
@@ -81,6 +83,41 @@ impl Queue {
     /// `current`. Never decreases.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Increases each time the queue is emptied ([`Queue::clear`], which
+    /// is also how the player replaces it), and on nothing else. Whoever
+    /// filled the queue (an active mix) records it and knows the queue is
+    /// no longer theirs once it differs; ordinary edits (adding,
+    /// reordering, removing, skipping) keep it.
+    pub fn context(&self) -> u64 {
+        self.context
+    }
+
+    /// How many entries come after the current one; every entry when
+    /// there is no current one.
+    pub fn remaining_after_current(&self) -> usize {
+        match self.current.and_then(|id| self.position(id)) {
+            Some(pos) => self.entries.len() - pos - 1,
+            None => self.entries.len(),
+        }
+    }
+
+    /// Removes up to `count` entries from the front of the queue, never
+    /// the current entry or anything after it (without a current entry,
+    /// nothing is removed). For making room in a queue near
+    /// [`MAX_QUEUE_LEN`]: the oldest played entries go first. Returns how
+    /// many were removed.
+    pub fn remove_played(&mut self, count: usize) -> usize {
+        let Some(pos) = self.current.and_then(|id| self.position(id)) else {
+            return 0;
+        };
+        let n = count.min(pos);
+        if n > 0 {
+            self.entries.drain(..n);
+            self.changed();
+        }
+        n
     }
 
     fn changed(&mut self) {
@@ -293,10 +330,12 @@ impl Queue {
     }
 
     /// Removes every entry. Ids are never reused afterwards.
+    /// Bumps [`Queue::context`].
     pub fn clear(&mut self) {
         self.entries.clear();
         self.current = None;
         self.next_anchor = None;
+        self.context += 1;
         self.changed();
     }
 
@@ -926,5 +965,64 @@ mod tests {
             assert!(x < n);
         }
         assert_eq!(a.below(0), 0);
+    }
+
+    #[test]
+    fn context_changes_only_when_the_queue_is_cleared() {
+        let mut q = Queue::new();
+        assert_eq!(q.context(), 0);
+        let a = q.append(t("A"));
+        let b = q.append(t("B"));
+        q.insert_next(t("N"));
+        q.set_current(a);
+        q.move_to_next();
+        q.move_down(a);
+        q.remove(b);
+        q.shuffle_after_current(|n| n - 1);
+        assert_eq!(q.context(), 0, "edits keep the context");
+        q.clear();
+        assert_eq!(q.context(), 1);
+        q.clear();
+        assert_eq!(q.context(), 2, "every clear counts, even of an empty queue");
+    }
+
+    #[test]
+    fn remaining_after_current_counts_the_upcoming_entries() {
+        let mut q = Queue::new();
+        assert_eq!(q.remaining_after_current(), 0);
+        let ids: Vec<_> = ["A", "B", "C"].iter().map(|n| q.append(t(n))).collect();
+        assert_eq!(q.remaining_after_current(), 3, "no current: all upcoming");
+        q.set_current(ids[0]);
+        assert_eq!(q.remaining_after_current(), 2);
+        q.set_current(ids[2]);
+        assert_eq!(q.remaining_after_current(), 0);
+    }
+
+    #[test]
+    fn remove_played_drops_the_oldest_entries_before_the_current_one() {
+        let mut q = Queue::new();
+        let ids: Vec<_> = ["A", "B", "C", "D"]
+            .iter()
+            .map(|n| q.append(t(n)))
+            .collect();
+        assert_eq!(q.remove_played(5), 0, "no current: nothing is played");
+        q.set_current(ids[2]);
+        let revision = q.revision();
+        assert_eq!(q.remove_played(1), 1);
+        assert!(q.revision() > revision);
+        let names = |q: &Queue| {
+            q.entries()
+                .iter()
+                .map(|e| e.track.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&q), ["B", "C", "D"]);
+        assert_eq!(q.remove_played(9), 1, "never the current entry or later");
+        assert_eq!(names(&q), ["C", "D"]);
+        assert_eq!(q.current(), Some(ids[2]));
+        let revision = q.revision();
+        assert_eq!(q.remove_played(3), 0);
+        assert_eq!(q.revision(), revision, "nothing removed, no change");
+        assert_eq!(q.context(), 0);
     }
 }

@@ -112,5 +112,12 @@ Brief: `docs/plans/genres.md` (approved 2026-11-15). A Genres view for both sour
 - **Slice 2, GUI (completed, reviewed; owner smoke checks G1–G9 pending):** a Genres sidebar entry for both sources, the genre list and a genre's albums with Play/Shuffle (Navidrome: Shuffle, random songs of the genre), `s` shuffling the genre, an album's genres as links; Navidrome tracks keep their genres in the queue (`TrackRef.genres`).
 - **Slice 3, TUI (completed, reviewed; pty smoke run passed):** Genres on both Home menus, after Albums; the genre list shows album and track (Navidrome: song) counts, a genre opens on its albums with their artists, Enter plays an album, `s` shuffles the genre and, locally, `a`/`A` add it. A local library without genre tags says "No genre tags found". No new keys.
 
+## M12 — Mixes (in progress)
+Brief: `docs/plans/mixes.md` (approved 2026-11-16). A mix is a saved recipe of genres, artists and albums from one source, resolved each time it plays and played as an endless, balanced shuffle. Saved mixes live in `$XDG_DATA_HOME/coda/mixes.json`, shared by both apps (ADR 0008).
+- **Slice 1, core:**
+  - **Part 1a (completed, reviewed):** the `mix` module (model with caps, the shared mixes file, the balanced `Picker`, local resolution by name, `ActiveMix` with its top-up and cap trim), the queue's context counter, the active mix in the session, `navidrome::server_id` in core. Nothing user-visible yet.
+  - **Part 1b:** Navidrome resolution (genre refetch, artist fan-out, id fallback by name).
+- **Slice 2, GUI** and **slice 3, TUI:** not started.
+
 ## Postponed indefinitely
 - **HEART integration.** The HEART project is on the back burner (owner, 2026-10-31). The earlier recommendation is kept for reference in `docs/plans/heart-integration.md`; Coda stays standalone.

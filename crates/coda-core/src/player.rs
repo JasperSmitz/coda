@@ -218,6 +218,8 @@ pub struct Player {
     /// After a gapless advance, the previous track until the new one is
     /// heard.
     outgoing: Option<Outgoing>,
+    /// See [`Player::stopped_at_end`].
+    stopped_at_end: bool,
 }
 
 impl Default for Player {
@@ -248,6 +250,7 @@ impl Player {
             announced: None,
             earlier_next: Vec::new(),
             outgoing: None,
+            stopped_at_end: false,
         }
     }
 
@@ -255,8 +258,34 @@ impl Player {
         &self.queue
     }
 
+    /// [`Queue::context`]: changes only when the queue is replaced
+    /// ([`Player::play_context`]) or cleared ([`Player::clear_queue`]).
+    pub fn queue_context(&self) -> u64 {
+        self.queue.context()
+    }
+
+    /// Removes up to `count` already-played entries from the front of the
+    /// queue ([`Queue::remove_played`]), to make room near
+    /// [`MAX_QUEUE_LEN`]. Playback is not affected: the current entry and
+    /// everything after it stay. Returns how many were removed.
+    pub fn remove_played(&mut self, count: usize) -> usize {
+        self.queue.remove_played(count)
+    }
+
     pub fn current_load(&self) -> Option<LoadId> {
         self.current_load
+    }
+
+    /// Playback stopped because a track that played ended with no next
+    /// entry (Repeat Off at the end of the queue), and nothing has happened
+    /// since: no load, stop, Space or a pause from the backend, `>`, `<`,
+    /// restore, removal, reordering, shuffle or clear (volume and repeat
+    /// changes keep it). Adding to the queue keeps it too, so a mix's
+    /// top-up can go on playing ([`crate::mix::ActiveMix::append`]).
+    /// Never after an error, a track that ended without playing, or a
+    /// stop.
+    pub fn stopped_at_end(&self) -> bool {
+        self.stopped_at_end
     }
 
     /// What is heard: after a gapless advance, the previous track still
@@ -475,6 +504,7 @@ impl Player {
     /// Space: toggle pause when loaded; otherwise play the current entry,
     /// or the first entry when there is no current one.
     pub fn toggle_pause(&mut self) -> Vec<PlayerCommand> {
+        self.stopped_at_end = false;
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
@@ -494,6 +524,7 @@ impl Player {
     /// `>`: play the next entry; at the end of the queue, wrap around
     /// under [`RepeatMode::All`], else do nothing.
     pub fn play_next(&mut self) -> Vec<PlayerCommand> {
+        self.stopped_at_end = false;
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
@@ -523,6 +554,7 @@ impl Player {
     /// previous entry; at the first entry, restart the track. Restarting
     /// needs a started track; while loading it is a no-op.
     pub fn play_previous(&mut self) -> Vec<PlayerCommand> {
+        self.stopped_at_end = false;
         if self.refuse_if_unavailable() {
             return Vec::new();
         }
@@ -614,11 +646,13 @@ impl Player {
 
     /// Moves an entry one place up. Never changes `current` or playback.
     pub fn move_up(&mut self, id: QueueEntryId) -> bool {
+        self.stopped_at_end = false;
         self.queue.move_up(id)
     }
 
     /// Moves an entry one place down. Never changes `current` or playback.
     pub fn move_down(&mut self, id: QueueEntryId) -> bool {
+        self.stopped_at_end = false;
         self.queue.move_down(id)
     }
 
@@ -626,6 +660,7 @@ impl Player {
     /// Never changes `current` or playback; the caller re-syncs the
     /// gapless next (`resolve::dispatch`).
     pub fn move_entries(&mut self, ids: &[QueueEntryId], to: usize) -> bool {
+        self.stopped_at_end = false;
         self.queue.move_entries(ids, to)
     }
 
@@ -633,6 +668,7 @@ impl Player {
     /// current one). Never changes `current` or playback. Returns the
     /// number of entries shuffled.
     pub fn shuffle_upcoming(&mut self, rng: &mut Rng) -> usize {
+        self.stopped_at_end = false;
         self.queue.shuffle_after_current(|n| rng.below(n))
     }
 
@@ -646,6 +682,7 @@ impl Player {
         };
         self.queue.clear();
         self.failures_in_a_row = 0;
+        self.stopped_at_end = false;
         commands
     }
 
@@ -660,6 +697,7 @@ impl Player {
         repeat: RepeatMode,
         volume: u8,
     ) -> Vec<PlayerCommand> {
+        self.stopped_at_end = false;
         let ids: Vec<QueueEntryId> = tracks.into_iter().map_while(|t| self.enqueue(t)).collect();
         if let Some(id) = current.and_then(|i| ids.get(i)) {
             self.queue.set_current(*id);
@@ -679,6 +717,7 @@ impl Player {
     /// like `>` first (wrapping under [`RepeatMode::All`] to the first
     /// other entry); with no next entry, playback stops.
     pub fn remove(&mut self, id: QueueEntryId) -> Vec<PlayerCommand> {
+        self.stopped_at_end = false;
         let mut commands = Vec::new();
         if self.queue.current() == Some(id) && self.is_loaded() {
             let next = self
@@ -940,6 +979,12 @@ impl Player {
             }
             PlaybackEvent::Paused(paused) => {
                 self.paused = paused;
+                // A pause, from Space or from outside (mpv, media keys),
+                // cancels going on after the end; a later unpause does not
+                // bring it back.
+                if paused {
+                    self.stopped_at_end = false;
+                }
                 Vec::new()
             }
             PlaybackEvent::Volume(volume) => {
@@ -1017,7 +1062,12 @@ impl Player {
                     Vec::new()
                 }
             },
-            EndReason::Eof => self.advance(false),
+            EndReason::Eof => {
+                let commands = self.advance(false);
+                // A track that played reached the end of the queue.
+                self.stopped_at_end = self.current_load.is_none();
+                commands
+            }
             EndReason::Error(message) => {
                 let name = self
                     .queue
@@ -1089,6 +1139,7 @@ impl Player {
     }
 
     fn clear_load(&mut self) {
+        self.stopped_at_end = false;
         self.current_load = None;
         self.outgoing = None;
         self.started = false;
@@ -1114,6 +1165,7 @@ impl Player {
         let remote = matches!(source, TrackSource::Navidrome { .. });
         tracing::info!(%load, remote, "loading track");
         self.current_load = Some(load);
+        self.stopped_at_end = false;
         self.outgoing = None;
         self.started = false;
         self.proven = false;
@@ -1276,6 +1328,54 @@ mod tests {
         assert_eq!(p.queue().current(), Some(ids[1]));
         load_of(&p.toggle_pause());
         assert_eq!(p.queue().current(), Some(ids[1]));
+    }
+
+    #[test]
+    fn stopped_at_end_only_after_a_track_played_to_the_end() {
+        let (mut p, ids) = player_with(&["A", "B"]);
+        let l1 = play_through(&mut p, ids[1]);
+        assert!(!p.stopped_at_end(), "playing");
+        p.handle_event(ended(l1, EndReason::Eof));
+        assert!(p.stopped_at_end());
+        // Adding, volume and repeat changes keep it.
+        p.enqueue(t("C"));
+        p.set_repeat(RepeatMode::All);
+        p.set_volume(40);
+        assert!(p.stopped_at_end());
+        // Any queue or playback action clears it.
+        p.move_up(ids[1]);
+        assert!(!p.stopped_at_end());
+        // A track that ended without playing, or an error: not set.
+        let (mut p, ids) = player_with(&["A"]);
+        let l1 = start(&mut p, ids[0]);
+        p.handle_event(ended(l1, EndReason::Eof));
+        assert!(!p.stopped_at_end(), "never played");
+        let l1 = play_through(&mut p, ids[0]);
+        p.handle_event(ended(l1, EndReason::Error("bad".into())));
+        assert!(!p.stopped_at_end(), "error");
+        // Wrapping under Repeat All: not at the end.
+        p.set_repeat(RepeatMode::All);
+        let l1 = play_through(&mut p, ids[0]);
+        load_of(&p.handle_event(ended(l1, EndReason::Eof)));
+        assert!(!p.stopped_at_end(), "wrapped");
+        // A pause reported by the backend clears it; the unpause echo does
+        // not bring it back.
+        let (mut p, ids) = player_with(&["A"]);
+        let l1 = play_through(&mut p, ids[0]);
+        p.handle_event(ended(l1, EndReason::Eof));
+        assert!(p.stopped_at_end());
+        p.handle_event(PlaybackEvent::Paused(false));
+        assert!(p.stopped_at_end(), "an unpause is not a pause");
+        p.handle_event(PlaybackEvent::Paused(true));
+        assert!(!p.stopped_at_end(), "paused");
+        p.handle_event(PlaybackEvent::Paused(false));
+        assert!(!p.stopped_at_end(), "unpause echo");
+        // `<` at the first entry clears it even though it does nothing.
+        let (mut p, ids) = player_with(&["A"]);
+        let l1 = play_through(&mut p, ids[0]);
+        p.handle_event(ended(l1, EndReason::Eof));
+        assert!(p.play_previous().is_empty());
+        assert!(!p.stopped_at_end(), "previous");
     }
 
     #[test]
@@ -1670,6 +1770,26 @@ mod tests {
         assert_eq!(path, PathBuf::from("/m/C.flac"));
         assert_eq!(titles(&p), ["A", "C*"]);
         assert!(p.handle_event(ended(l1, EndReason::Stopped)).is_empty());
+    }
+
+    #[test]
+    fn queue_context_changes_when_the_queue_is_replaced_or_cleared() {
+        let (mut p, ids) = player_with(&["A", "B", "C"]);
+        let context = p.queue_context();
+        start(&mut p, ids[0]);
+        p.enqueue(t("D"));
+        p.enqueue_all(vec![t("E")], Placement::Next);
+        p.play_next();
+        p.remove(ids[2]);
+        assert_eq!(p.remove_played(1), 1);
+        p.move_down(ids[1]);
+        p.shuffle_upcoming(&mut Rng::from_seed(1));
+        assert_eq!(p.queue_context(), context, "edits and skips keep it");
+        load_of(&p.play_context(vec![t("X")], 0));
+        let replaced = p.queue_context();
+        assert_ne!(replaced, context);
+        p.clear_queue();
+        assert_ne!(p.queue_context(), replaced);
     }
 
     #[test]

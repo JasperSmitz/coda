@@ -70,20 +70,12 @@ pub enum ContextKind {
     Folder,
 }
 
-/// A Navidrome server's identity in the history: FNV-1a (64 bit, hex) of
-/// its base URL (normalised by the client) and user name. Stable across
-/// runs; neither is stored in plain text, though a known server's id can
-/// be confirmed by hashing (it is not a secret).
-pub fn server_id(client: &coda_core::navidrome::Client) -> String {
-    server_id_of(client.base_url().as_str(), client.username())
-}
-
-pub fn server_id_of(base_url: &str, username: &str) -> String {
-    format!("{:016x}", seed(&format!("{base_url}\n{username}")))
-}
+/// A Navidrome server's identity in the history (moved to core, which
+/// also keys mixes by it).
+pub use coda_core::navidrome::{server_id, server_id_of};
 
 fn valid_server(id: &str) -> bool {
-    id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())
+    coda_core::navidrome::is_server_id(id)
 }
 
 /// Which part of the history a view reads: the local library's, or one

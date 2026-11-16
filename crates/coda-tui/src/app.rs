@@ -6856,6 +6856,7 @@ mod tests {
             current: Some(2),
             tracks: vec![track("a.flac"), remote("r1"), track("c.flac")],
             visualizer: false,
+            mix: None,
         };
         let commands = app.restore_session(session, now);
         assert_eq!(commands, [PlaybackCommand::SetVolume(60)]);
