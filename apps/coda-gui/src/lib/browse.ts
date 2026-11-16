@@ -11,6 +11,8 @@ import type {
   ArtistDetail,
   BrowseError,
   Folder,
+  Genre,
+  GenreDetail,
   HomeHistory,
   LocalAlbumOrder,
   LyricsSearch,
@@ -101,6 +103,29 @@ export const browse = {
     // fresh pages (recently added/played shift between requests).
     const stable = sort === "name" || sort === "artist";
     return stable ? cached(`albums:${sort}:${offset}`, load) : load();
+  },
+
+  genres(source: SourceKind): Promise<Genre[]> {
+    return source === "local"
+      ? call("local_genres")
+      : cached("genres", () => call("navidrome_genres"));
+  },
+
+  /** Local only (Navidrome genre pages page their albums). */
+  localGenre(id: string): Promise<GenreDetail> {
+    return call("local_genre", { id });
+  },
+
+  /** A Navidrome genre's albums from `offset`; `genre` is its id. */
+  navidromeGenreAlbums(genre: string, offset: number): Promise<AlbumPage> {
+    return cached(`genreAlbums:${offset}:${genre}`, () =>
+      call("navidrome_genre_albums", { genre, offset }),
+    );
+  },
+
+  /** Fresh random songs of a Navidrome genre (never cached). */
+  genreRandomSongs(genre: string): Promise<Track[]> {
+    return call("navidrome_genre_random_songs", { genre });
   },
 
   folder(path: string[]): Promise<Folder> {

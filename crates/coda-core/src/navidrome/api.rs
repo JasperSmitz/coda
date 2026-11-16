@@ -19,7 +19,8 @@
 //! Each endpoint parses its own reply type ([`Reply`]: `status`, `error`
 //! and its one section; other keys are drained), and all objects built
 //! from one response share one budget ([`MAX_RESPONSE_OBJECTS`]), so
-//! nested lists cannot multiply the per-list caps.
+//! nested lists cannot multiply the per-list caps. A song's genre names
+//! are the one exception: capped per song, outside the budget.
 
 use std::cell::Cell;
 use std::fmt;
@@ -30,9 +31,11 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use super::{Access, Album, Artist, Playlist, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
+use super::{Access, Album, Artist, Genre, Playlist, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
 use crate::lyrics::{Lyrics, MAX_LINES, MAX_LYRICS_BYTES};
-use crate::model::{MAX_METADATA_CHARS, Track, TrackMetadata, clean_text};
+use crate::model::{
+    MAX_GENRES, MAX_METADATA_CHARS, Track, TrackMetadata, clean_text, split_genres,
+};
 use crate::queue::MAX_QUEUE_LEN;
 
 /// Ids longer than this are treated as invalid and their item is skipped
@@ -54,6 +57,11 @@ pub const MAX_PLAYLIST_ENTRIES: usize = MAX_QUEUE_LEN;
 /// The `size` of a `getRandomSongs` request (the Subsonic maximum), and
 /// the songs kept from one reply.
 pub const RANDOM_SONGS_SIZE: usize = 500;
+/// Upper bound on the genres read from one song's OpenSubsonic `genres`
+/// list (a track keeps at most [`MAX_GENRES`] of them anyway).
+pub const MAX_GENRES_PER_SONG: usize = MAX_GENRES;
+/// Upper bound on the genres kept from `getGenres`.
+pub const MAX_GENRES_LISTED: usize = 10_000;
 /// Upper bound on the OpenSubsonic extensions read from
 /// `getOpenSubsonicExtensions` (Navidrome lists about ten).
 pub const MAX_EXTENSIONS: usize = 100;
@@ -69,7 +77,8 @@ pub const UNKNOWN_PLAYLIST: &str = "Unnamed playlist";
 /// nests four deep, so per-list caps alone do not bound a response).
 /// Objects past it are drained, not built. Fits the largest legitimate
 /// responses: 10,000 playlist entries, a 50,000-artist index, an artist's
-/// albums.
+/// albums. A song's genre names do not count: at most
+/// [`MAX_GENRES_PER_SONG`] strings per song, which does count.
 pub const MAX_RESPONSE_OBJECTS: usize = 100_000;
 
 thread_local! {
@@ -167,6 +176,7 @@ reply!(AlbumListReply { "albumList2" => album_list2: AlbumList2 });
 reply!(PlaylistsReply { "playlists" => playlists: Playlists });
 reply!(PlaylistReply { "playlist" => playlist: RawPlaylist });
 reply!(RandomSongsReply { "randomSongs" => random_songs: RandomSongs });
+reply!(GenresReply { "genres" => genres: Genres });
 reply!(
     /// `createPlaylist`: the new playlist (Subsonic 1.14+). Only its id is
     /// read; its entries are drained unparsed.
@@ -320,6 +330,7 @@ reply!(
         "playlists" => playlists: Playlists,
         "playlist" => playlist: RawPlaylist,
         "randomSongs" => random_songs: RandomSongs,
+        "genres" => genres: Genres,
     }
 );
 
@@ -415,6 +426,61 @@ pub struct RawSong {
     pub album_id: Option<String>,
     #[serde(deserialize_with = "id")]
     pub artist_id: Option<String>,
+    /// Classic Subsonic: one string (Navidrome sends the first genre).
+    /// Read whole (bounded by the body cap) and split later by
+    /// [`split_genres`], which caps each genre, as for local tags: cutting
+    /// the string first would cut a later genre short.
+    #[serde(deserialize_with = "raw_text")]
+    pub genre: Option<String>,
+    /// OpenSubsonic: every genre, as `{"name": …}` items, already split
+    /// by the server. Preferred over `genre`.
+    #[serde(deserialize_with = "song_genres")]
+    pub genres: Vec<RawGenreName>,
+}
+
+/// One item of a song's OpenSubsonic `genres`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RawGenreName {
+    #[serde(deserialize_with = "text")]
+    pub name: Option<String>,
+}
+
+/// `getGenres`. Subsonic omits `genre` when there are none.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Genres {
+    #[serde(deserialize_with = "genre_items")]
+    pub genre: Counted<RawGenre>,
+}
+
+/// One genre of `getGenres`: its name is the item's `value`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RawGenre {
+    /// As sent (untrimmed, uncut; bounded by the body cap): it is what
+    /// the genre's albums and random songs are asked for by.
+    #[serde(deserialize_with = "raw_text")]
+    pub value: Option<String>,
+    #[serde(deserialize_with = "saturating_count")]
+    pub song_count: Option<u32>,
+    #[serde(deserialize_with = "saturating_count")]
+    pub album_count: Option<u32>,
+}
+
+impl RawGenre {
+    /// `None` if the name is missing or blank. The name shown is cleaned
+    /// ([`clean_text`]); requests use the value as sent, which the server
+    /// matches exactly.
+    pub fn into_genre(self) -> Option<Genre> {
+        let query = self.value?;
+        Some(Genre {
+            name: clean_text(Some(query.clone()))?,
+            query,
+            song_count: self.song_count,
+            album_count: self.album_count,
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -585,6 +651,12 @@ impl RawSong {
     /// `None` if the id is missing, empty or oversized.
     pub fn into_track(self) -> Option<Track> {
         let id = valid_id(self.id)?;
+        // The server's list as it is (it split the tags itself), else the
+        // classic string, split like local tags.
+        let mut genres: Vec<String> = self.genres.into_iter().filter_map(|g| g.name).collect();
+        if genres.iter().all(|g| g.trim().is_empty()) {
+            genres = split_genres(self.genre);
+        }
         let mut track = Track::navidrome(
             id,
             TrackMetadata {
@@ -596,6 +668,7 @@ impl RawSong {
                 disc_no: self.disc_number,
                 duration: self.duration,
                 cover_art: valid_id(self.cover_art),
+                genres,
             },
         );
         track.album_id = valid_id(self.album_id);
@@ -710,6 +783,15 @@ fn drain_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
 fn text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     scalar(deserializer, |value| match value {
         Scalar::Str(s) => Some(s.trim_start().chars().take(MAX_METADATA_CHARS).collect()),
+        _ => None,
+    })
+}
+
+/// A whole string, as sent: never trimmed or cut (what is copied never
+/// exceeds the body, which is capped).
+fn raw_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    scalar(deserializer, |value| match value {
+        Scalar::Str(s) => Some(s.to_owned()),
         _ => None,
     })
 }
@@ -844,11 +926,29 @@ fn saturating_secs<'de, D: Deserializer<'de>>(
 /// An object read straight into `T`; any other JSON type is drained and
 /// gives `None`. `T`'s fields must all be lenient (see the module docs);
 /// a malformed object (e.g. a duplicate key) fails the response.
-struct ObjectSeed<T>(PhantomData<T>);
+struct ObjectSeed<T> {
+    /// Whether the object takes one from the response budget; see
+    /// [`Self::unbudgeted`].
+    budgeted: bool,
+    item: PhantomData<T>,
+}
 
 impl<T> ObjectSeed<T> {
     fn new() -> Self {
-        Self(PhantomData)
+        Self {
+            budgeted: true,
+            item: PhantomData,
+        }
+    }
+
+    /// An object that does not take from the budget: only for a `T`
+    /// with no nested objects or lists, read from a list whose own cap
+    /// bounds it per budgeted parent (a song's genre names).
+    fn unbudgeted() -> Self {
+        Self {
+            budgeted: false,
+            item: PhantomData,
+        }
     }
 }
 
@@ -868,7 +968,7 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectSeed<T> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-        if !take_budget() {
+        if self.budgeted && !take_budget() {
             return drain_map(map).map(|()| None);
         }
         T::deserialize(MapAccessDeserializer::new(map)).map(Some)
@@ -933,8 +1033,23 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
+    capped_list_of(deserializer, cap, true)
+}
+
+/// [`capped_list`], whose items take from the response budget only if
+/// `budgeted` (see [`ObjectSeed::unbudgeted`]).
+fn capped_list_of<'de, D, T>(
+    deserializer: D,
+    cap: usize,
+    budgeted: bool,
+) -> Result<Counted<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     struct ListVisitor<T> {
         cap: usize,
+        budgeted: bool,
         item: PhantomData<T>,
     }
 
@@ -949,7 +1064,12 @@ where
             let mut list = Counted::default();
             loop {
                 if list.served < self.cap {
-                    match seq.next_element_seed(ObjectSeed::new())? {
+                    let seed = if self.budgeted {
+                        ObjectSeed::new()
+                    } else {
+                        ObjectSeed::unbudgeted()
+                    };
+                    match seq.next_element_seed(seed)? {
                         None => break,
                         Some(Some(item)) => list.items.push(item),
                         Some(None) => {}
@@ -1005,6 +1125,7 @@ where
 
     deserializer.deserialize_any(ListVisitor {
         cap,
+        budgeted,
         item: PhantomData,
     })
 }
@@ -1031,6 +1152,24 @@ where
     D: Deserializer<'de>,
 {
     capped_list(deserializer, RANDOM_SONGS_SIZE)
+}
+
+/// A song's genre names: at most [`MAX_GENRES_PER_SONG`] (the rest
+/// drained), outside the response budget. A name is one string, so the
+/// per-song cap bounds what each budgeted song may add; counting them
+/// would let well-tagged songs crowd out a 10,000-entry playlist.
+fn song_genres<'de, D>(deserializer: D) -> Result<Vec<RawGenreName>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list_of(deserializer, MAX_GENRES_PER_SONG, false).map(|list| list.items)
+}
+
+fn genre_items<'de, D>(deserializer: D) -> Result<Counted<RawGenre>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    capped_list(deserializer, MAX_GENRES_LISTED)
 }
 
 fn playlist_items<'de, D>(deserializer: D) -> Result<Counted<RawPlaylist>, D::Error>

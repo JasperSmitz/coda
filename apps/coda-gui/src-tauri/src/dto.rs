@@ -47,6 +47,8 @@ pub struct TrackDto {
     pub album_id: Option<String>,
     /// The artist to go to, like `album_id`.
     pub artist_id: Option<String>,
+    /// The genres, in tag order (`Track::genres`).
+    pub genres: Vec<String>,
 }
 
 /// A track the UI asks to play or enqueue: a [`TrackDto`] it received
@@ -79,6 +81,10 @@ pub struct TrackRef {
     pub album_id: Option<String>,
     #[serde(default)]
     pub artist_id: Option<String>,
+    /// Navidrome only: the song's genres, cleaned and capped like server
+    /// data by `Track::navidrome`.
+    #[serde(default)]
+    pub genres: Vec<String>,
 }
 
 /// One queue entry. `key` is stable for the entry's lifetime in this run
@@ -367,7 +373,7 @@ pub enum Intent {
     },
     /// Shuffle the entries after the current one.
     ShuffleUpcoming,
-    /// Play (or shuffle) a local folder or artist resolved in the engine,
+    /// Play (or shuffle) a local folder, artist or genre resolved in the engine,
     /// from track `start` of the context when given.
     PlayLocal {
         context: crate::browse::dto::LocalContextDto,
@@ -399,6 +405,7 @@ mod tests {
             cover_url: Some("coda://localhost/cover/00ff".into()),
             album_id: Some("al-1".into()),
             artist_id: None,
+            genres: vec!["Rock".into()],
         }
     }
 
@@ -419,6 +426,7 @@ mod tests {
                 "coverUrl": "coda://localhost/cover/00ff",
                 "albumId": "al-1",
                 "artistId": null,
+                "genres": ["Rock"],
             })
         );
         let local = SourceDto::Local {
@@ -437,6 +445,7 @@ mod tests {
         assert_eq!(back.title.as_deref(), Some("Song"));
         assert_eq!(back.duration_ms, Some(61_500));
         assert_eq!(back.album_id.as_deref(), Some("al-1"));
+        assert_eq!(back.genres, ["Rock"]);
         assert_eq!(
             back.source,
             SourceDto::Navidrome {

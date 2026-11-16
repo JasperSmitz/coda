@@ -3,7 +3,7 @@
 //! produces [`crate::model::Track`]s.
 //!
 //! [`Library`] holds everything the scan found: the folder tree (which
-//! owns the tracks), the tag index (artists and albums), the `.m3u`
+//! owns the tracks), the tag index (artists, albums and genres), the `.m3u`
 //! playlists and the lyrics index (when the scan reads lyrics), all
 //! updated as scan events arrive. It is plain synchronous
 //! data; nothing here does I/O except [`scan`] and [`m3u::read_playlist`].

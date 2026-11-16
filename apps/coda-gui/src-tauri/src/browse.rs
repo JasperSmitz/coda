@@ -253,6 +253,19 @@ pub fn check_id(id: &str) -> Result<(), BrowseError> {
     Ok(())
 }
 
+/// Longest Navidrome genre value taken from the UI (genre ids are the
+/// server's own values, which are not capped like display text).
+pub const MAX_GENRE_CHARS: usize = 1024;
+
+/// A Navidrome genre value from the UI: non-empty and bounded. Sent as
+/// given (the server matches it exactly), never trimmed or logged.
+pub fn check_genre(genre: &str) -> Result<(), BrowseError> {
+    if genre.is_empty() || genre.chars().count() > MAX_GENRE_CHARS {
+        return Err(BrowseError::not_found("Genre"));
+    }
+    Ok(())
+}
+
 /// A search query, trimmed and cut at [`MAX_INPUT_CHARS`].
 pub fn cap_query(query: &str) -> String {
     query.trim().chars().take(MAX_INPUT_CHARS).collect()
@@ -320,6 +333,7 @@ pub fn track_dto(track: &Track, local: Option<&LocalView<'_>>, covers: &CoverSer
         cover_url: covers.url_for(track),
         album_id,
         artist_id,
+        genres: track.genres.clone(),
     }
 }
 

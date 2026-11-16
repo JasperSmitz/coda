@@ -1,11 +1,11 @@
 // Navigation: one back stack of routes per source (DESIGN.md: Home →
-// Artists → Artist → Album). The sidebar resets the active source's stack
+// Artists → Artist → Album, or Genres → Genre → Album). The sidebar resets the active source's stack
 // to one of its roots; views push. Switching the source shows the other
 // stack where it was left. Each entry remembers its scroll position, so
 // Back returns to the same place.
 
 import { useSyncExternalStore } from "react";
-import type { Album, AlbumSort, LocalAlbumOrder, Playlist, SourceKind } from "../lib/types";
+import type { Album, AlbumSort, Genre, LocalAlbumOrder, Playlist, SourceKind } from "../lib/types";
 import type { ViewId } from "../views/viewList";
 
 export type Route =
@@ -15,11 +15,14 @@ export type Route =
   | { kind: "albums"; source: "local"; order: LocalAlbumOrder }
   | { kind: "albums"; source: "navidrome"; sort: AlbumSort }
   | { kind: "playlists"; source: SourceKind }
+  | { kind: "genres"; source: SourceKind }
   | { kind: "folder"; path: string[] }
   | { kind: "artist"; source: SourceKind; id: string; name: string }
   /** `hint`: the listing's data, shown while the album loads. */
   | { kind: "album"; source: SourceKind; id: string; name: string; hint?: Album }
   | { kind: "playlist"; source: SourceKind; id: string; name: string; hint?: Playlist }
+  /** `hint`: the genre list's row (its counts). */
+  | { kind: "genre"; source: SourceKind; id: string; name: string; hint?: Genre }
   | { kind: "settings" };
 
 export interface Entry {
@@ -156,6 +159,8 @@ export function routeFor(view: ViewId, source: SourceKind): Route {
       return { kind: "folder", path: [] };
     case "playlists":
       return { kind: "playlists", source };
+    case "genres":
+      return { kind: "genres", source };
     case "settings":
       return { kind: "settings" };
   }
@@ -181,5 +186,8 @@ export function viewFor(route: Route): ViewId {
     case "playlists":
     case "playlist":
       return "playlists";
+    case "genres":
+    case "genre":
+      return "genres";
   }
 }

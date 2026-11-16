@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-genres"
+description = "Enables the navidrome_genres command without any pre-configured scope."
+commands.allow = ["navidrome_genres"]
+
+[[permission]]
+identifier = "deny-navidrome-genres"
+description = "Denies the navidrome_genres command without any pre-configured scope."
+commands.deny = ["navidrome_genres"]

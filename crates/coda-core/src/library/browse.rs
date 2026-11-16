@@ -1,15 +1,16 @@
 //! Local browse navigation: a stack of views rooted at a static Home
-//! (Shuffle all, Playlists, Folders, Artists, Albums), over a [`Library`]. Plain
+//! (Shuffle all, Playlists, Folders, Artists, Albums, Genres), over a
+//! [`Library`]. Plain
 //! synchronous state with no I/O and no terminal types; separate from the
 //! Navidrome browser, whose views are fetched.
 //!
 //! The library grows while the scan runs. Ids (tracks, artists, albums,
-//! playlists) and folder paths stay valid as it grows, so views hold them
+//! genres, playlists) and folder paths stay valid as it grows, so views hold them
 //! directly; the selection is kept on its item by key
 //! ([`LocalBrowser::selected_key`] before a change,
 //! [`LocalBrowser::reselect`] after it).
 
-use super::tags::{Album, AlbumId, AlbumOrder, Artist, ArtistId};
+use super::tags::{Album, AlbumId, AlbumOrder, Artist, ArtistId, Genre, GenreId};
 use super::tree::{DirNode, TrackId};
 use super::{Library, LocalPlaylist, PlaylistId};
 use crate::model::Track;
@@ -24,6 +25,7 @@ pub enum HomeEntry {
     Folders,
     Artists,
     Albums,
+    Genres,
 }
 
 impl HomeEntry {
@@ -34,17 +36,19 @@ impl HomeEntry {
             Self::Folders => "Folders",
             Self::Artists => "Artists",
             Self::Albums => "Albums",
+            Self::Genres => "Genres",
         }
     }
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 5] = [
+pub const HOME_ENTRIES: [HomeEntry; 6] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Folders,
     HomeEntry::Artists,
     HomeEntry::Albums,
+    HomeEntry::Genres,
 ];
 
 /// What a local view shows.
@@ -63,6 +67,10 @@ pub enum View {
     Playlists,
     /// A playlist's matched tracks in file order.
     Playlist(PlaylistId),
+    /// Every genre, A–Z.
+    Genres,
+    /// A genre's albums, by artist then album.
+    Genre(GenreId),
 }
 
 /// One row of a local view.
@@ -75,6 +83,7 @@ pub enum Row<'a> {
     /// An album and its artist.
     Album(&'a Album, &'a Artist),
     Playlist(&'a LocalPlaylist),
+    Genre(&'a Genre),
 }
 
 /// Identity of a row, to keep the selection on its item while rows are
@@ -87,13 +96,14 @@ pub enum RowKey {
     Artist(ArtistId),
     Album(AlbumId),
     Playlist(PlaylistId),
+    Genre(GenreId),
 }
 
 /// What Enter or `s` plays: the tracks of the selection's context, in
 /// order, and where to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayContext {
-    /// The album, playlist, artist or folder name, or the track's name
+    /// The album, playlist, artist, genre or folder name, or the track's name
     /// when a track was selected (untrusted: from tags and file names).
     pub label: String,
     pub tracks: Vec<TrackId>,
@@ -218,7 +228,7 @@ impl LocalBrowser {
     }
 
     /// `l` (and Enter on what it cannot play): opens the selected Home
-    /// entry, folder, artist, album or playlist. Returns `false` (and
+    /// entry, folder, artist, album, playlist or genre. Returns `false` (and
     /// does nothing) on a track, on "Shuffle all" or in an empty view.
     pub fn open_selected(&mut self, library: &Library) -> bool {
         let Some(row) = self.selected_row(library) else {
@@ -230,6 +240,7 @@ impl LocalBrowser {
             Row::Home(HomeEntry::Folders) => View::Folder(Vec::new()),
             Row::Home(HomeEntry::Artists) => View::Artists,
             Row::Home(HomeEntry::Albums) => View::Albums(self.album_order),
+            Row::Home(HomeEntry::Genres) => View::Genres,
             Row::Dir(dir) => {
                 let mut path = self.folder_path().to_vec();
                 path.push(dir.name().to_owned());
@@ -238,6 +249,7 @@ impl LocalBrowser {
             Row::Artist(artist) => View::Artist(artist.id()),
             Row::Album(album, _) => View::Album(album.id()),
             Row::Playlist(playlist) => View::Playlist(playlist.id),
+            Row::Genre(genre) => View::Genre(genre.id()),
         };
         self.stack.push(Entry { view, selected: 0 });
         true
@@ -247,9 +259,10 @@ impl LocalBrowser {
     /// row plays. A track plays in the list the view shows (an album, a
     /// playlist with its duplicates, the tracks directly in a folder),
     /// from that track; an album or playlist plays whole. Only `s` plays
-    /// an artist (every album, A–Z) or a folder (every track below it, as
-    /// `a` adds them); Enter opens those. `None` for Home entries, for
-    /// Enter on an artist or folder, and in an empty view.
+    /// an artist (every album, A–Z), a genre (every track of it, as `a`
+    /// adds them) or a folder (every track below it, as `a` adds them);
+    /// Enter opens those. `None` for Home entries, for Enter on an artist,
+    /// genre or folder, and in an empty view.
     pub fn play_context(&self, library: &Library, shuffle: bool) -> Option<PlayContext> {
         let row = self.selected_row(library)?;
         let whole = |label: &str, tracks: Vec<TrackId>| PlayContext {
@@ -280,8 +293,9 @@ impl LocalBrowser {
             }
             Row::Album(album, _) => whole(album.name(), album.tracks().to_vec()),
             Row::Playlist(playlist) => whole(&playlist.name, playlist.tracks.clone()),
-            Row::Artist(_) | Row::Dir(_) if !shuffle => return None,
+            Row::Artist(_) | Row::Dir(_) | Row::Genre(_) if !shuffle => return None,
             Row::Artist(artist) => whole(artist.name(), self.selected_tracks(library)?),
+            Row::Genre(genre) => whole(genre.name(), self.selected_tracks(library)?),
             Row::Dir(dir) => whole(dir.name(), self.selected_tracks(library)?),
         })
     }
@@ -318,8 +332,9 @@ impl LocalBrowser {
 
     /// The tracks `a`/`A` adds for the selected row, in order: a track; a
     /// folder's tracks in browse order; an artist's albums A–Z, each in
-    /// album order; an album; a playlist with its duplicates. `None` for
-    /// Home entries and empty views.
+    /// album order; an album; a playlist with its duplicates; a genre's
+    /// tracks ([`super::tags::TagIndex::genre_tracks`]). `None` for Home
+    /// entries and empty views.
     pub fn selected_tracks(&self, library: &Library) -> Option<Vec<TrackId>> {
         let mut ids = Vec::new();
         match self.selected_row(library)? {
@@ -333,12 +348,13 @@ impl LocalBrowser {
             }
             Row::Album(album, _) => ids.extend_from_slice(album.tracks()),
             Row::Playlist(playlist) => ids.extend_from_slice(&playlist.tracks),
+            Row::Genre(genre) => ids = library.tags().genre_tracks(genre.id()),
         }
         Some(ids)
     }
 
     /// The selected row's name, for status messages: a track's display
-    /// name, or a folder, artist, album or playlist name.
+    /// name, or a folder, artist, album, playlist or genre name.
     pub fn selected_label(&self, library: &Library) -> Option<String> {
         Some(match self.selected_row(library)? {
             Row::Home(entry) => entry.label().to_owned(),
@@ -347,6 +363,7 @@ impl LocalBrowser {
             Row::Artist(artist) => artist.name().to_owned(),
             Row::Album(album, _) => album.name().to_owned(),
             Row::Playlist(playlist) => playlist.name.clone(),
+            Row::Genre(genre) => genre.name().to_owned(),
         })
     }
 
@@ -380,6 +397,8 @@ pub fn view_title(library: &Library, view: &View) -> Option<String> {
                 playlist.name.clone()
             }
         }
+        View::Genres => HomeEntry::Genres.label().to_owned(),
+        View::Genre(id) => library.tags().genre(*id).name().to_owned(),
     })
 }
 
@@ -397,6 +416,8 @@ fn opener_key(view: &View) -> Option<RowKey> {
         View::Artist(id) => RowKey::Artist(*id),
         View::Album(id) => RowKey::Album(*id),
         View::Playlist(id) => RowKey::Playlist(*id),
+        View::Genres => RowKey::Home(HomeEntry::Genres),
+        View::Genre(id) => RowKey::Genre(*id),
     })
 }
 
@@ -408,6 +429,7 @@ fn row_key(row: Row<'_>) -> RowKey {
         Row::Artist(artist) => RowKey::Artist(artist.id()),
         Row::Album(album, _) => RowKey::Album(album.id()),
         Row::Playlist(playlist) => RowKey::Playlist(playlist.id),
+        Row::Genre(genre) => RowKey::Genre(genre.id()),
     }
 }
 
@@ -433,6 +455,8 @@ fn view_len(library: &Library, view: &View) -> usize {
         View::Album(id) => tags.album(*id).tracks().len(),
         View::Playlists => library.playlists().len(),
         View::Playlist(id) => library.playlist(*id).tracks.len(),
+        View::Genres => tags.genres().len(),
+        View::Genre(id) => tags.genre(*id).albums().len(),
     }
 }
 
@@ -487,6 +511,14 @@ fn view_rows<'a>(library: &'a Library, view: &View, start: usize, len: usize) ->
             .iter()
             .map(track)
             .collect(),
+        View::Genres => window(tags.genres(), start, len)
+            .iter()
+            .map(|g| Row::Genre(tags.genre(*g)))
+            .collect(),
+        View::Genre(id) => window(tags.genre(*id).albums(), start, len)
+            .iter()
+            .map(album)
+            .collect(),
     }
 }
 
@@ -523,6 +555,171 @@ fn position(library: &Library, view: &View, key: &RowKey) -> Option<usize> {
             .tracks
             .iter()
             .position(|t| t == id),
+        (View::Genres, RowKey::Genre(id)) => tags.genres().iter().position(|g| g == id),
+        (View::Genre(genre), RowKey::Album(id)) => {
+            tags.genre(*genre).albums().iter().position(|a| a == id)
+        }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::TrackMetadata;
+
+    fn track(path: &str, artist: &str, album: &str, no: u32, genres: &[&str]) -> Track {
+        Track::local(
+            format!("/m/{path}").into(),
+            TrackMetadata {
+                artist: Some(artist.into()),
+                album: Some(album.into()),
+                track_no: Some(no),
+                genres: genres.iter().map(|g| (*g).to_owned()).collect(),
+                ..TrackMetadata::default()
+            },
+        )
+    }
+
+    fn library(tracks: Vec<Track>) -> Library {
+        let mut library = Library::new("/m".into());
+        library.extend(tracks);
+        library
+    }
+
+    /// Home → Genres, opened as a user does: down to the last Home entry.
+    fn genres_view(library: &Library) -> LocalBrowser {
+        let mut browser = LocalBrowser::new();
+        let at = HOME_ENTRIES
+            .iter()
+            .position(|e| *e == HomeEntry::Genres)
+            .unwrap();
+        browser.move_selection(library, at as isize);
+        assert_eq!(browser.selected_label(library).as_deref(), Some("Genres"));
+        assert!(browser.open_selected(library));
+        assert_eq!(*browser.current(), View::Genres);
+        browser
+    }
+
+    #[test]
+    fn home_lists_genres_after_albums() {
+        let library = library(Vec::new());
+        let browser = LocalBrowser::new();
+        let labels: Vec<&str> = browser
+            .rows(&library, 0, 10)
+            .into_iter()
+            .map(|row| match row {
+                Row::Home(entry) => entry.label(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Shuffle all",
+                "Playlists",
+                "Folders",
+                "Artists",
+                "Albums",
+                "Genres"
+            ]
+        );
+        // The entry itself only opens: nothing to play or add.
+        let mut home = LocalBrowser::new();
+        home.move_selection(&library, 5);
+        assert_eq!(
+            home.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Genres))
+        );
+        assert_eq!(home.play_context(&library, false), None);
+        assert_eq!(home.play_context(&library, true), None);
+        assert_eq!(home.selected_tracks(&library), None);
+        let mut genres = genres_view(&library);
+        assert_eq!(genres.path_titles(&library), ["Genres"]);
+        // `h` comes back to the Genres entry.
+        genres.go_up(&library);
+        assert_eq!(
+            genres.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Genres))
+        );
+    }
+
+    fn titles(library: &Library, ids: &[TrackId]) -> Vec<String> {
+        ids.iter()
+            .map(|t| library.track(*t).title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn genres_list_a_to_z_and_open_on_their_albums() {
+        let library = library(vec![
+            track("z/1.flac", "Zed", "Zz", 1, &["Rock"]),
+            track("a/1.flac", "Abe", "Aa", 1, &["rock", "Jazz"]),
+            track("a/2.flac", "Abe", "Aa", 2, &["Jazz"]),
+        ]);
+        let mut browser = genres_view(&library);
+        assert_eq!(browser.path_titles(&library), ["Genres"]);
+        assert_eq!(browser.len(&library), 2);
+        let names: Vec<String> = browser
+            .rows(&library, 0, 10)
+            .into_iter()
+            .map(|row| match row {
+                Row::Genre(genre) => genre.name().to_owned(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(names, ["Jazz", "Rock"]);
+        browser.move_selection(&library, 1);
+        assert_eq!(browser.selected_label(&library).as_deref(), Some("Rock"));
+        // Enter opens a genre; `s` plays all of it.
+        assert_eq!(browser.play_context(&library, false), None);
+        let shuffled = browser.play_context(&library, true).unwrap();
+        assert_eq!(shuffled.label, "Rock");
+        assert_eq!(titles(&library, &shuffled.tracks), ["1", "1"]);
+        assert_eq!(shuffled.start, None);
+        assert_eq!(
+            browser.selected_tracks(&library),
+            Some(shuffled.tracks.clone())
+        );
+        assert!(browser.open_selected(&library));
+        let View::Genre(rock) = *browser.current() else {
+            panic!("not a genre view");
+        };
+        assert_eq!(browser.path_titles(&library), ["Genres", "Rock"]);
+        let albums: Vec<&str> = browser
+            .rows(&library, 0, 10)
+            .into_iter()
+            .map(|row| match row {
+                Row::Album(album, _) => album.name(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(albums, ["Aa", "Zz"]);
+        // An album row plays the whole album, not only its Rock tracks.
+        let album = browser.play_context(&library, false).unwrap();
+        assert_eq!(album.label, "Aa");
+        assert_eq!(album.tracks.len(), 2);
+        // Back on the genre that was open.
+        browser.go_up(&library);
+        assert_eq!(browser.selected_key(&library), Some(RowKey::Genre(rock)));
+    }
+
+    #[test]
+    fn the_genre_selection_stays_on_its_genre_while_the_scan_adds_more() {
+        let mut library = library(vec![track("b/1.flac", "B", "B", 1, &["Blues"])]);
+        let mut browser = genres_view(&library);
+        let key = browser.selected_key(&library);
+        library.extend([track("a/1.flac", "A", "A", 1, &["Ambient"])]);
+        browser.reselect(&library, key);
+        assert_eq!(browser.selected(), 1);
+        assert_eq!(browser.selected_label(&library).as_deref(), Some("Blues"));
+    }
+
+    #[test]
+    fn an_empty_library_has_no_genres() {
+        let library = library(Vec::new());
+        let browser = genres_view(&library);
+        assert!(browser.is_empty(&library));
+        assert_eq!(browser.play_context(&library, true), None);
     }
 }

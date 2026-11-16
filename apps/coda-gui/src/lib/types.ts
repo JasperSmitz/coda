@@ -23,6 +23,8 @@ export interface Track {
   /** The album / artist to go to (same source as the track), if known. */
   albumId: string | null;
   artistId: string | null;
+  /** In tag order; a Navidrome track keeps them in the queue. */
+  genres: string[];
 }
 
 /**
@@ -162,7 +164,10 @@ export type PlayContext =
   | { kind: "folder"; path: string[] };
 
 /** A local context the engine resolves and plays itself. */
-export type LocalContext = { kind: "folder"; path: string[] } | { kind: "artist"; id: string };
+export type LocalContext =
+  | { kind: "folder"; path: string[] }
+  | { kind: "artist"; id: string }
+  | { kind: "genre"; id: string };
 
 // ----- Browse (src-tauri/src/browse/dto.rs) -----
 
@@ -207,9 +212,28 @@ export interface ArtistDetail {
   albums: Album[];
 }
 
+/**
+ * A genre. A Navidrome genre's `id` is the server's exact value (what its
+ * albums and songs are asked for by); `name` is for display.
+ */
+export interface Genre {
+  id: string;
+  name: string;
+  albumCount: number | null;
+  trackCount: number | null;
+}
+
 export interface AlbumDetail {
   album: Album;
   tracks: Track[];
+  /** The album's genres in tag order, linking to their genre pages. */
+  genres: Genre[];
+}
+
+/** A local genre and its albums (by artist, then album). */
+export interface GenreDetail {
+  genre: Genre;
+  albums: Album[];
 }
 
 export type Hidden = { kind: "none" } | { kind: "some"; count: number } | { kind: "suspect" };

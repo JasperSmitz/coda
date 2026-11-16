@@ -261,6 +261,8 @@ impl Engine {
                     cover_url: None,
                 }))
             }
+            // Genres are not in the play history (genres brief).
+            LocalContextDto::Genre { .. } => None,
         }
     }
 

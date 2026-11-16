@@ -1,17 +1,41 @@
 // An album: a header with the large cover, year, track count and length,
-// Play / Shuffle, and the track table grouped by disc.
+// its genres (links to their pages), Play / Shuffle, and the track table
+// grouped by disc.
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
 import { TrackTable } from "../components/TrackTable";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
-import { albumContext, playTracks, useShuffleContext } from "../lib/play";
-import type { Album, SourceKind } from "../lib/types";
+import { albumContext, openRoute, playTracks, useShuffleContext } from "../lib/play";
+import { resolveGenreLink } from "../lib/genres";
+import type { Album, Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { PlayButtons, SOURCE_LABEL, summary, ViewHeader } from "./common";
+
+/**
+ * Opens an album's genre. On Navidrome the chip is resolved against the
+ * server's genre listing (cached; one request at most, shared by every
+ * chip) for its exact value; unlisted, or if the listing fails, it opens
+ * by its cleaned name.
+ */
+function openGenreLink(source: SourceKind, genre: Genre, from: Entry) {
+  if (source === "local") {
+    openRoute({ kind: "genre", source, id: genre.id, name: genre.name });
+    return;
+  }
+  void browse
+    .genres("navidrome")
+    .catch((): Genre[] => [])
+    .then((listing) => {
+      // Moved on while the listing loaded: don't jump away.
+      if (nav.top().id !== from.id) return;
+      const link = resolveGenreLink(genre, listing);
+      openRoute({ kind: "genre", source, id: link.id, name: link.name, hint: link.hint });
+    });
+}
 
 interface Props {
   entry: Entry;
@@ -41,6 +65,12 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
       }
     : hint;
   const title = album?.name ?? name;
+  const genres = load.data?.genres ?? [];
+  const hasGenres = genres.length > 0;
+  // Warm the genre listing so a chip opens at once.
+  useEffect(() => {
+    if (source === "navidrome" && hasGenres) browse.genres("navidrome").catch(() => {});
+  }, [source, hasGenres]);
   const mixed = new Set(tracks.map((t) => t.artist)).size > 1;
   const artistId = album?.artistId ?? null;
   const artistName = album?.artist ?? null;
@@ -93,6 +123,21 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
             )}
           </span>
         </div>
+        {genres.length > 0 && (
+          <ul className="genre-links" aria-label="Genres">
+            {genres.map((genre) => (
+              <li key={genre.id}>
+                <button
+                  className="tag genre-link"
+                  title={genre.name}
+                  onClick={() => openGenreLink(source, genre, entry)}
+                >
+                  {genre.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </ViewHeader>
       <div className="view-body" ref={scroller}>
         {load.state === "loading" && <SkeletonRows />}

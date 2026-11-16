@@ -1,14 +1,15 @@
 // All albums of a source as a grid. Local: A–Z or by artist. Navidrome:
 // the six server orders, paged with infinite scroll.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
+import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
 import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
-import { browse, toBrowseError } from "../lib/browse";
+import { browse } from "../lib/browse";
 import { shuffleAll, useShuffleContext } from "../lib/play";
-import type { Album, AlbumSort, BrowseError, LocalAlbumOrder } from "../lib/types";
+import type { AlbumSort, LocalAlbumOrder } from "../lib/types";
 import { nav, type Entry, type Route } from "../state/nav";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
@@ -78,73 +79,13 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
   );
 }
 
-interface Pages {
-  albums: Album[];
-  next: number | null;
-  loading: boolean;
-  error: BrowseError | null;
-}
-
 function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
   const scroller = useRef<HTMLDivElement>(null);
-  const [pages, setPages] = useState<Pages>({ albums: [], next: 0, loading: false, error: null });
-  const [attempt, setAttempt] = useState(0);
-  const generation = useRef(0);
-  // Set at once (state updates later): two `onEnd`s before a render must
-  // not fetch the same page twice.
-  const inFlight = useRef(false);
+  const paged = usePagedAlbums((offset) => browse.navidromeAlbums(sort, offset), sort);
+  const { pages } = paged;
   useScroll(scroller, entry, pages.albums.length > 0);
   useShuffleContext(() => shuffleAll("navidrome"));
 
-  const loadMore = useCallback(
-    (from: Pages) => {
-      if (inFlight.current || from.loading || from.next === null) return;
-      const offset = from.next;
-      const mine = generation.current;
-      inFlight.current = true;
-      setPages({ ...from, loading: true, error: null });
-      browse.navidromeAlbums(sort, offset).then(
-        (page) => {
-          if (generation.current !== mine) return;
-          inFlight.current = false;
-          setPages((p) => {
-            // A random order may repeat albums across pages.
-            const seen = new Set(p.albums.map((a) => a.id));
-            const fresh = page.albums.filter((a) => !seen.has(a.id));
-            return {
-              albums: [...p.albums, ...fresh],
-              next: page.nextOffset,
-              loading: false,
-              error: null,
-            };
-          });
-        },
-        (error: unknown) => {
-          if (generation.current !== mine) return;
-          inFlight.current = false;
-          setPages((p) => ({ ...p, loading: false, error: toBrowseError(error) }));
-        },
-      );
-    },
-    [sort],
-  );
-
-  useEffect(() => {
-    generation.current += 1;
-    inFlight.current = false;
-    const start = { albums: [], next: 0, loading: false, error: null };
-    setPages(start);
-    loadMore(start);
-  }, [sort, attempt, loadMore]);
-
-  const pagesRef = useRef(pages);
-  pagesRef.current = pages;
-  const onEnd = useCallback(() => {
-    const p = pagesRef.current;
-    if (!p.error) loadMore(p);
-  }, [loadMore]);
-
-  const first = pages.albums.length === 0;
   return (
     <section className="view">
       <ViewHeader
@@ -161,7 +102,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
           </>
         }
       >
-        {!first && (
+        {pages.albums.length > 0 && (
           <div className="secondary">
             {plural(pages.albums.length, "album")}
             {pages.next !== null ? "+" : ""}
@@ -169,37 +110,12 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
         )}
       </ViewHeader>
       <div className="view-body" ref={scroller}>
-        {first && pages.loading && <SkeletonGrid />}
-        {first && pages.error && (
-          <ErrorState
-            error={pages.error}
-            onRetry={() => {
-              setAttempt((n) => n + 1);
-            }}
-          />
-        )}
-        {first && !pages.loading && !pages.error && pages.next === null && (
-          <Empty title="No albums">The server lists no albums.</Empty>
-        )}
-        {!first && (
-          <AlbumGrid
-            albums={pages.albums}
-            source="navidrome"
-            scroller={scroller}
-            onEnd={onEnd}
-            endKey={`${pages.next}:${pages.loading}`}
-            label="Albums"
-          />
-        )}
-        {!first && pages.loading && <div className="load-more secondary">Loading more…</div>}
-        {!first && pages.error && (
-          <div className="load-more">
-            <span className="secondary">{pages.error.message}</span>
-            <button className="button" onClick={() => loadMore({ ...pages, error: null })}>
-              Retry
-            </button>
-          </div>
-        )}
+        <PagedAlbumsBody
+          paged={paged}
+          scroller={scroller}
+          label="Albums"
+          empty="The server lists no albums."
+        />
       </div>
     </section>
   );

@@ -74,11 +74,36 @@ pub struct ArtistDetailDto {
     pub albums: Vec<AlbumDto>,
 }
 
+/// A genre. Local ids are library ids (`"<generation>:<n>"`); a
+/// Navidrome genre's id is the server's exact value for it (what its
+/// albums and songs are asked for by), `name` is cleaned for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenreDto {
+    pub id: String,
+    pub name: String,
+    /// Albums with any track of this genre (`None`: not known, e.g. on an
+    /// album page's genre links from Navidrome).
+    pub album_count: Option<u32>,
+    pub track_count: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlbumDetailDto {
     pub album: AlbumDto,
     pub tracks: Vec<TrackDto>,
+    /// The album's genres (any of its tracks'), in tag order, as links to
+    /// their genre pages.
+    pub genres: Vec<GenreDto>,
+}
+
+/// A local genre and its albums, by artist then album.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenreDetailDto {
+    pub genre: GenreDto,
+    pub albums: Vec<AlbumDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -163,7 +188,7 @@ pub struct IndexingDto {
 }
 
 /// A local context the engine resolves and plays itself (`playLocal`),
-/// so a whole-library folder or a big artist never crosses IPC.
+/// so a whole-library folder, a big artist or a genre never crosses IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(
     tag = "kind",
@@ -175,6 +200,9 @@ pub enum LocalContextDto {
     Folder { path: Vec<String> },
     /// Every album of an artist, A–Z.
     Artist { id: String },
+    /// Every track of a genre: its albums by artist then album, each
+    /// album's tracks of that genre in album order.
+    Genre { id: String },
 }
 
 /// The order of the local Albums list.

@@ -6,7 +6,7 @@ use coda_core::cover::CoverKey;
 use std::collections::HashSet;
 
 use coda_core::library::search;
-use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId};
+use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId, GenreId};
 use coda_core::library::tree::TrackId;
 use coda_core::library::{Library, PlaylistId};
 use coda_core::lyrics::index::{DEFAULT_LIMIT, Snippet};
@@ -87,6 +87,53 @@ pub(crate) fn album_id(view: &LocalView<'_>, id: &str) -> Result<AlbumId, Browse
         .ok_or_else(|| BrowseError::not_found("Album"))
 }
 
+pub(crate) fn genre_id(view: &LocalView<'_>, id: &str) -> Result<GenreId, BrowseError> {
+    let n = parse_local_id(id, view.generation)?;
+    // Genre ids are dense: every genre is in the A–Z list once.
+    ((n as usize) < view.library.tags().genres().len())
+        .then_some(GenreId(n))
+        .ok_or_else(|| BrowseError::not_found("Genre"))
+}
+
+fn genre_dto(view: &LocalView<'_>, id: GenreId) -> GenreDto {
+    let genre = view.library.tags().genre(id);
+    GenreDto {
+        id: local_id(view.generation, id.0),
+        name: genre.name().to_owned(),
+        album_count: u32_count(genre.albums().len()),
+        track_count: u32_count(genre.track_count()),
+    }
+}
+
+/// The genres of album `id` (those holding any of its tracks), in the
+/// order its tracks are tagged with them.
+fn album_genres(view: &LocalView<'_>, id: AlbumId) -> Vec<GenreDto> {
+    let tags = view.library.tags();
+    let tracks = tags.album(id).tracks();
+    let mut tagged: Vec<String> = Vec::new();
+    for track in tracks {
+        for genre in &view.library.track(*track).genres {
+            let key = genre.trim().to_lowercase();
+            if !tagged.contains(&key) {
+                tagged.push(key);
+            }
+        }
+    }
+    let mut found: Vec<(usize, GenreId)> = tags
+        .genres()
+        .iter()
+        .filter(|g| tracks.iter().any(|t| tags.genre(**g).contains(*t)))
+        .map(|g| {
+            let key = tags.genre(*g).name().to_lowercase();
+            let at = tagged.iter().position(|k| *k == key);
+            (at.unwrap_or(usize::MAX), *g)
+        })
+        .collect();
+    // Stable: anything not found by name stays A–Z, last.
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, g)| genre_dto(view, g)).collect()
+}
+
 pub(crate) fn playlist_id(view: &LocalView<'_>, id: &str) -> Result<PlaylistId, BrowseError> {
     let n = parse_local_id(id, view.generation)?;
     ((n as usize) < view.library.playlists().len())
@@ -155,6 +202,39 @@ pub fn album(
     Ok(AlbumDetailDto {
         album: album_dto(&view, id, covers),
         tracks,
+        genres: album_genres(&view, id),
+    })
+}
+
+/// Every genre, A–Z, with its album and track counts.
+pub fn genres(view: LocalView<'_>, _covers: &CoverService) -> Result<Vec<GenreDto>, BrowseError> {
+    Ok(view
+        .library
+        .tags()
+        .genres()
+        .iter()
+        .map(|g| genre_dto(&view, *g))
+        .collect())
+}
+
+/// A genre and its albums, by artist then album.
+pub fn genre(
+    view: LocalView<'_>,
+    id: &str,
+    covers: &CoverService,
+) -> Result<GenreDetailDto, BrowseError> {
+    let id = genre_id(&view, id)?;
+    let albums = view
+        .library
+        .tags()
+        .genre(id)
+        .albums()
+        .iter()
+        .map(|a| album_dto(&view, *a, covers))
+        .collect();
+    Ok(GenreDetailDto {
+        genre: genre_dto(&view, id),
+        albums,
     })
 }
 
@@ -177,8 +257,9 @@ pub fn folder(
 }
 
 /// The track ids a context plays (`playLocal`), in order: everything
-/// below a folder in browse order, or an artist's albums A–Z, each in
-/// album order (as Coda's `s`). Ids only: the engine clones just the
+/// below a folder in browse order, an artist's albums A–Z, each in
+/// album order (as Coda's `s`), or a genre's tracks
+/// (`TagIndex::genre_tracks`). Ids only: the engine clones just the
 /// tracks it queues, and nothing is sent to the webview.
 pub fn context_track_ids(
     view: &LocalView<'_>,
@@ -199,6 +280,10 @@ pub fn context_track_ids(
             for album in tags.artist(id).albums() {
                 ids.extend_from_slice(tags.album(*album).tracks());
             }
+        }
+        LocalContextDto::Genre { id } => {
+            let id = genre_id(view, id)?;
+            ids = view.library.tags().genre_tracks(id);
         }
     }
     Ok(ids)

@@ -29,6 +29,11 @@ pub struct TrackMetadata {
     /// Navidrome's `coverArt` id for the song (or its album). Opaque, like
     /// song ids; ignored for local tracks.
     pub cover_art: Option<String>,
+    /// The genres, in tag order. Sources fill it with [`split_genres`];
+    /// the `Track` constructors clean, dedupe and cap it again (not
+    /// split), so a list that was split once (a saved queue) is kept as
+    /// it is.
+    pub genres: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +56,10 @@ pub struct Track {
     pub album_id: Option<String>,
     /// Navidrome's artist id (`getArtist`), like [`Track::album_id`].
     pub artist_id: Option<String>,
+    /// The genres as tagged, in tag order: each cleaned like other text,
+    /// no two equal ignoring case (the first spelling kept), at most
+    /// [`MAX_GENRES`].
+    pub genres: Vec<String>,
 }
 
 impl Track {
@@ -71,6 +80,7 @@ impl Track {
             cover_art: None,
             album_id: None,
             artist_id: None,
+            genres: tidy_genres(metadata.genres),
             source: TrackSource::Local { path },
         }
     }
@@ -89,6 +99,7 @@ impl Track {
             cover_art: metadata.cover_art.filter(|id| !id.is_empty()),
             album_id: None,
             artist_id: None,
+            genres: tidy_genres(metadata.genres),
             source: TrackSource::Navidrome { song_id },
         }
     }
@@ -155,6 +166,62 @@ pub fn clean_text(value: Option<String>) -> Option<String> {
     value
         .map(|s| cap_chars(s.trim().to_owned()))
         .filter(|s| !s.is_empty())
+}
+
+/// Upper bound on the genres kept per track; later ones are dropped.
+pub const MAX_GENRES: usize = 16;
+
+/// What one genre tag value is split on: the separators Navidrome splits
+/// the `genre` tag on by default (`resources/mappings.yaml`), so a song
+/// has the same genres from both sources.
+pub const GENRE_SEPARATORS: [char; 3] = [';', '/', ','];
+
+/// Splits genre tag values on [`GENRE_SEPARATORS`] into a track's genre
+/// list: each part cleaned with [`clean_text`] (blank parts dropped), no
+/// two equal ignoring case (the first spelling kept), in order, at most
+/// [`MAX_GENRES`]. Used for local tags and Navidrome's `genre` string.
+pub fn split_genres<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut genres = Vec::new();
+    for value in values {
+        for part in value.as_ref().split(GENRE_SEPARATORS) {
+            if genres.len() == MAX_GENRES {
+                return genres;
+            }
+            add_genre(&mut genres, part);
+        }
+    }
+    genres
+}
+
+/// Cleans, dedupes and caps a genre list that is already split.
+fn tidy_genres(values: Vec<String>) -> Vec<String> {
+    let mut genres = Vec::new();
+    for value in &values {
+        if genres.len() == MAX_GENRES {
+            break;
+        }
+        add_genre(&mut genres, value);
+    }
+    genres
+}
+
+/// Appends `value`, cleaned, unless it is blank or already listed
+/// (ignoring case).
+fn add_genre(genres: &mut Vec<String>, value: &str) {
+    // Copies no more than is kept.
+    let Some(genre) = clean_text(Some(
+        value.trim().chars().take(MAX_METADATA_CHARS).collect(),
+    )) else {
+        return;
+    };
+    let key = genre.to_lowercase();
+    if !genres.iter().any(|g| g.to_lowercase() == key) {
+        genres.push(genre);
+    }
 }
 
 /// Truncates to at most [`MAX_METADATA_CHARS`] chars, on a char boundary.
@@ -252,6 +319,84 @@ mod tests {
         assert_eq!(track.title.chars().count(), MAX_METADATA_CHARS);
         assert_eq!(track.artist, None);
         assert!(!Track::local("/m/x.mp3".into(), TrackMetadata::default()).is_remote());
+    }
+
+    #[test]
+    fn genres_are_split_on_navidromes_separators() {
+        assert_eq!(
+            split_genres(["Rock;Progressive Rock", "Jazz/Fusion", "Pop, Synthpop"]),
+            [
+                "Rock",
+                "Progressive Rock",
+                "Jazz",
+                "Fusion",
+                "Pop",
+                "Synthpop"
+            ]
+        );
+        // Other punctuation is part of the name.
+        assert_eq!(
+            split_genres(["Drum & Bass", "R&B", "Hip-Hop"]),
+            ["Drum & Bass", "R&B", "Hip-Hop"]
+        );
+        assert!(split_genres(Vec::<String>::new()).is_empty());
+    }
+
+    #[test]
+    fn genre_duplicates_and_blanks_are_dropped_keeping_the_first_spelling() {
+        assert_eq!(
+            split_genres([
+                "rock",
+                "Rock; ROCK ",
+                " ;; / ,",
+                "",
+                "Jazz",
+                "jazz;Ärger",
+                "ärger"
+            ]),
+            ["rock", "Jazz", "Ärger"]
+        );
+    }
+
+    #[test]
+    fn genres_are_capped_in_count_and_length() {
+        let many: Vec<String> = (0..100).map(|i| format!("G{i}")).collect();
+        let genres = split_genres([many.join(";")]);
+        assert_eq!(genres.len(), MAX_GENRES);
+        assert_eq!(genres[0], "G0");
+        assert_eq!(genres[MAX_GENRES - 1], format!("G{}", MAX_GENRES - 1));
+        // One huge value, and a hostile run of separators and duplicates.
+        let huge = "é".repeat(100_000);
+        assert_eq!(
+            split_genres([huge.as_str()]),
+            ["é".repeat(MAX_METADATA_CHARS)]
+        );
+        let noise = "a;".repeat(200_000) + &"/".repeat(100_000);
+        assert_eq!(split_genres([noise]), ["a"]);
+        // Control characters and odd whitespace are kept as text, trimmed.
+        assert_eq!(split_genres(["\tBlues\n"]), ["Blues"]);
+    }
+
+    #[test]
+    fn track_constructors_clean_genres_without_splitting() {
+        let meta = |genres: &[&str]| TrackMetadata {
+            genres: genres.iter().map(|g| (*g).to_owned()).collect(),
+            ..TrackMetadata::default()
+        };
+        let local = Track::local(
+            "/m/x.flac".into(),
+            meta(&[" Rock ", "rock", "", "AC/DC Tribute"]),
+        );
+        assert_eq!(local.genres, ["Rock", "AC/DC Tribute"]);
+        let many: Vec<String> = (0..40).map(|i| format!("g{i}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let remote = Track::navidrome("s".into(), meta(&refs));
+        assert_eq!(remote.genres.len(), MAX_GENRES);
+        assert!(
+            Track::local("/m/y.flac".into(), TrackMetadata::default())
+                .genres
+                .is_empty()
+        );
     }
 
     #[test]

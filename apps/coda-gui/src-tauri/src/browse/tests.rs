@@ -164,6 +164,134 @@ async fn local_artists_albums_and_tracks() {
     assert!(!json.contains("/m/"), "{json}");
 }
 
+/// `local` with genres.
+fn tagged(rel: &str, artist: &str, album: &str, no: u32, genres: &[&str]) -> Track {
+    let mut track = local(rel, artist, album, no);
+    track.genres = genres.iter().map(|g| (*g).to_owned()).collect();
+    track
+}
+
+fn genre_handle() -> BrowseHandle {
+    let browse = handle();
+    let mut library = Library::new("/m".into());
+    library.extend([
+        tagged(
+            "Band/Second/2.flac",
+            "Band",
+            "Second",
+            2,
+            &["Rock", "Progressive Rock"],
+        ),
+        tagged("Band/Second/1.flac", "Band", "Second", 1, &["rock"]),
+        tagged("Band/First/1.flac", "Band", "First", 1, &["Jazz"]),
+        tagged("Solo/Only/1.flac", "Solo", "Only", 1, &["Rock"]),
+        tagged("loose.flac", "Solo", "Only", 2, &[]),
+    ]);
+    browse.replace_library(Some(library));
+    browse
+}
+
+#[tokio::test]
+async fn local_genres_their_albums_and_tracks() {
+    let browse = genre_handle();
+    let generation = browse.library_generation();
+    let genres = browse.local(local::genres).await.unwrap();
+    let rows: Vec<(&str, Option<u32>, Option<u32>)> = genres
+        .iter()
+        .map(|g| (g.name.as_str(), g.album_count, g.track_count))
+        .collect();
+    // A–Z, grouped ignoring case, shown in the most common spelling.
+    assert_eq!(
+        rows,
+        [
+            ("Jazz", Some(1), Some(1)),
+            ("Progressive Rock", Some(1), Some(1)),
+            ("Rock", Some(2), Some(3)),
+        ]
+    );
+    assert!(genres[2].id.starts_with(&format!("{generation}:")));
+
+    // A genre's page: its albums by artist, then album.
+    let id = genres[2].id.clone();
+    let rock = browse
+        .local(move |v, c| local::genre(v, &id, c))
+        .await
+        .unwrap();
+    assert_eq!(rock.genre, genres[2]);
+    let albums: Vec<&str> = rock.albums.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(albums, ["Second", "Only"]);
+
+    // Playing it: those albums' tracks of the genre, in album order.
+    let id = genres[2].id.clone();
+    let titles: Vec<(String, String)> = browse
+        .local(move |v, _| {
+            let ids = local::context_track_ids(&v, &LocalContextDto::Genre { id })?;
+            Ok(ids
+                .iter()
+                .map(|t| {
+                    let track = v.library.track(*t);
+                    (track.album.clone().unwrap(), track.title.clone())
+                })
+                .collect())
+        })
+        .await
+        .unwrap();
+    let titles: Vec<(&str, &str)> = titles
+        .iter()
+        .map(|(a, t)| (a.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(titles, [("Second", "T1"), ("Second", "T2"), ("Only", "T1")]);
+
+    // An album page links its genres in tag order, by the list's ids;
+    // its tracks carry their genres.
+    let id = rock.albums[0].id.clone();
+    let album = browse
+        .local(move |v, c| local::album(v, &id, c))
+        .await
+        .unwrap();
+    let links: Vec<(&str, &str)> = album
+        .genres
+        .iter()
+        .map(|g| (g.name.as_str(), g.id.as_str()))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("Rock", genres[2].id.as_str()),
+            ("Progressive Rock", genres[1].id.as_str())
+        ]
+    );
+    assert_eq!(album.tracks[1].genres, ["Rock", "Progressive Rock"]);
+    let id = rock.albums[1].id.clone();
+    let only = browse
+        .local(move |v, c| local::album(v, &id, c))
+        .await
+        .unwrap();
+    assert_eq!(only.genres.len(), 1);
+
+    // Ids: out of range, malformed, or from an older library.
+    for (bad, kind) in [
+        (format!("{generation}:3"), BrowseErrorKind::NotFound),
+        ("x".to_owned(), BrowseErrorKind::NotFound),
+        (format!("{}:0", generation + 1), BrowseErrorKind::Stale),
+    ] {
+        let id = bad.clone();
+        let error = browse
+            .local(move |v, c| local::genre(v, &id, c))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, kind, "{bad}");
+        let error = browse
+            .local(move |v, _| local::context_track_ids(&v, &LocalContextDto::Genre { id: bad }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, kind);
+    }
+    // No genres: an empty list, not an error.
+    let empty = library_handle().local(local::genres).await.unwrap();
+    assert!(empty.is_empty());
+}
+
 #[tokio::test]
 async fn ids_from_an_older_generation_or_out_of_range_fail() {
     let browse = library_handle();
@@ -601,6 +729,233 @@ async fn navidrome_search_and_random_songs() {
     assert!(blank.tracks.is_empty());
     let random = browse.navidrome_random_songs().await.unwrap();
     assert_eq!(random[0].title, "Lucky");
+}
+
+#[tokio::test]
+async fn navidrome_genres_by_the_servers_exact_value() {
+    let (server, browse) = server().await;
+    mount(
+        &server,
+        "getGenres",
+        json!({ "genres": { "genre": [
+            { "value": "Rock ", "songCount": 12, "albumCount": 3 },
+            { "value": "Ambient", "songCount": 2, "albumCount": 1 }
+        ]}}),
+    )
+    .await;
+    let full: Vec<Value> = (0..navidrome::ALBUM_PAGE)
+        .map(|i| json!({ "id": format!("al{i}"), "name": format!("Album {i}") }))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("type", "byGenre"))
+        .and(query_param("genre", "Rock "))
+        .and(query_param("offset", "0"))
+        .and(query_param("size", navidrome::ALBUM_PAGE.to_string()))
+        .respond_with(ok(json!({ "albumList2": { "album": full } })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("type", "byGenre"))
+        .and(query_param("genre", "Rock "))
+        .and(query_param("offset", navidrome::ALBUM_PAGE.to_string()))
+        .respond_with(ok(
+            json!({ "albumList2": { "album": [{ "id": "last", "name": "Last" }] } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getRandomSongs"))
+        .and(query_param("genre", "Rock "))
+        .and(query_param("size", "500"))
+        .respond_with(ok(json!({ "randomSongs": { "song": [
+            { "id": "s1", "title": "Loud", "genres": [{ "name": "Rock" }, { "name": "Grunge" }] }
+        ]}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbum"))
+        .and(query_param("id", "al1"))
+        .respond_with(ok(
+            json!({ "album": { "id": "al1", "name": "Arrival", "song": [
+                { "id": "s1", "title": "One", "genres": [{ "name": "Pop" }, { "name": "Disco" }] },
+                { "id": "s2", "title": "Two", "genre": "pop;Europop" }
+            ]}}),
+        ))
+        .mount(&server)
+        .await;
+
+    let genres = browse.navidrome_genres().await.unwrap();
+    assert_eq!(genres.len(), 2);
+    let rock = genres.iter().find(|g| g.name == "Rock").unwrap();
+    // Shown cleaned, asked for exactly as the server sent it.
+    assert_eq!(rock.id, "Rock ");
+    assert_eq!((rock.album_count, rock.track_count), (Some(3), Some(12)));
+
+    let page = browse
+        .navidrome_genre_albums(rock.id.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(page.albums.len(), navidrome::ALBUM_PAGE);
+    assert_eq!(page.next_offset, Some(navidrome::ALBUM_PAGE));
+    let page = browse
+        .navidrome_genre_albums(rock.id.clone(), navidrome::ALBUM_PAGE)
+        .await
+        .unwrap();
+    assert_eq!(page.albums.len(), 1);
+    assert_eq!(page.next_offset, None);
+    let past = browse
+        .navidrome_genre_albums(rock.id.clone(), coda_core::navidrome::browse::MAX_ALBUMS)
+        .await
+        .unwrap();
+    assert!(past.albums.is_empty() && past.next_offset.is_none());
+
+    let random = browse
+        .navidrome_genre_random_songs(rock.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(random[0].title, "Loud");
+    assert_eq!(random[0].genres, ["Rock", "Grunge"]);
+
+    // An album's genres come from its songs, each once.
+    let album = browse.navidrome_album("al1".into()).await.unwrap();
+    let names: Vec<&str> = album.genres.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, ["Pop", "Disco", "Europop"]);
+    assert_eq!(album.genres[0].id, "Pop");
+    assert_eq!(album.genres[0].album_count, None);
+
+    // Genre values from the UI are bounded.
+    let long = "x".repeat(MAX_GENRE_CHARS + 1);
+    for result in [
+        browse
+            .navidrome_genre_albums(String::new(), 0)
+            .await
+            .map(drop),
+        browse
+            .navidrome_genre_albums(long.clone(), 0)
+            .await
+            .map(drop),
+        browse.navidrome_genre_random_songs(long).await.map(drop),
+    ] {
+        assert_eq!(result.unwrap_err().kind, BrowseErrorKind::NotFound);
+    }
+}
+
+#[tokio::test]
+async fn navidrome_album_genre_links_follow_the_listed_value() {
+    let (server, browse) = server().await;
+    mount(
+        &server,
+        "getGenres",
+        json!({ "genres": { "genre": [
+            { "value": "Rock ", "songCount": 12, "albumCount": 3 }
+        ]}}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbum"))
+        .and(query_param("id", "al1"))
+        .respond_with(ok(
+            json!({ "album": { "id": "al1", "name": "Loud", "song": [
+                { "id": "s1", "title": "One", "genres": [{ "name": "Rock " }] }
+            ]}}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("type", "byGenre"))
+        .and(query_param("genre", "Rock "))
+        .respond_with(ok(
+            json!({ "albumList2": { "album": [{ "id": "al1", "name": "Loud" }] } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getRandomSongs"))
+        .and(query_param("genre", "Rock "))
+        .respond_with(ok(
+            json!({ "randomSongs": { "song": [{ "id": "s1", "title": "One" }] } }),
+        ))
+        .mount(&server)
+        .await;
+
+    // The album's chip carries the song's cleaned name...
+    let album = browse.navidrome_album("al1".into()).await.unwrap();
+    let chip = &album.genres[0];
+    assert_eq!((chip.id.as_str(), chip.name.as_str()), ("Rock", "Rock"));
+    // ...which the webview resolves against the listing by cleaned name,
+    // ignoring case (`resolveGenreLinks`, src/lib/genres.ts), taking the
+    // listed id: the server's exact value.
+    let listed = browse.navidrome_genres().await.unwrap();
+    let genre = listed
+        .iter()
+        .find(|g| g.name.to_lowercase() == chip.name.to_lowercase())
+        .unwrap();
+    assert_eq!(genre.id, "Rock ");
+    // That id finds the genre's albums and songs (the mocks match only
+    // the exact value).
+    let page = browse
+        .navidrome_genre_albums(genre.id.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(page.albums[0].id, "al1");
+    let songs = browse
+        .navidrome_genre_random_songs(genre.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(songs[0].title, "One");
+}
+
+#[tokio::test]
+async fn navidrome_genres_list_only_values_the_commands_accept() {
+    let (server, browse) = server().await;
+    let longest = "x".repeat(MAX_GENRE_CHARS);
+    let too_long = "y".repeat(MAX_GENRE_CHARS + 1);
+    mount(
+        &server,
+        "getGenres",
+        json!({ "genres": { "genre": [
+            { "value": longest, "songCount": 1, "albumCount": 1 },
+            { "value": too_long, "songCount": 1, "albumCount": 1 }
+        ]}}),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getAlbumList2"))
+        .and(query_param("genre", longest.as_str()))
+        .respond_with(ok(
+            json!({ "albumList2": { "album": [{ "id": "al1", "name": "A" }] } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/getRandomSongs"))
+        .and(query_param("genre", longest.as_str()))
+        .respond_with(ok(
+            json!({ "randomSongs": { "song": [{ "id": "s1", "title": "One" }] } }),
+        ))
+        .mount(&server)
+        .await;
+
+    // 1,024 characters is listed, 1,025 is left out.
+    let listed = browse.navidrome_genres().await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, [longest.as_str()]);
+    // Every listed id opens and shuffles.
+    for genre in &listed {
+        let page = browse
+            .navidrome_genre_albums(genre.id.clone(), 0)
+            .await
+            .unwrap();
+        assert_eq!(page.albums.len(), 1);
+        let songs = browse
+            .navidrome_genre_random_songs(genre.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(songs.len(), 1);
+    }
 }
 
 #[tokio::test]

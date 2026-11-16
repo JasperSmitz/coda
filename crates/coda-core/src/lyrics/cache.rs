@@ -273,6 +273,9 @@ impl Song {
                 disc_no: self.disc_no,
                 duration: self.duration_ms.map(|ms| Duration::from_millis(ms.into())),
                 cover_art: owned(&self.cover_art),
+                // Not cached (see the architecture notes): lyrics search
+                // results show no genres.
+                genres: Vec::new(),
             },
         );
         track.album_id = Some(self.album_id.to_string());
@@ -601,6 +604,7 @@ impl Cache {
                 disc_no: song.d,
                 duration: song.ms.map(|ms| Duration::from_millis(ms.into())),
                 cover_art: song.c.filter(|c| valid_id(c)),
+                genres: Vec::new(),
             },
         );
         track.artist_id = song.arid.filter(|a| valid_id(a));

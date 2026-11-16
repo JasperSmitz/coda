@@ -32,6 +32,7 @@ fn track_ref(source: SourceDto) -> TrackRef {
         duration_ms: None,
         album_id: None,
         artist_id: None,
+        genres: Vec::new(),
     }
 }
 

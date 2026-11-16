@@ -15,7 +15,7 @@ use coda_core::lyrics::index::IndexedLyrics;
 use coda_core::model::{MAX_METADATA_CHARS, Track};
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor, TagExt};
-use lofty::tag::{ItemKey, Tag, TagType};
+use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
 use tokio::sync::mpsc;
 
 struct Outcome {
@@ -545,4 +545,93 @@ fn a_fifo_sidecar_does_not_block_the_scan() {
         .recv_timeout(Duration::from_secs(10))
         .expect("blocked on the FIFO");
     assert_eq!(found, 0);
+}
+
+/// A WAV whose ID3v2 tag has one `Genre` item per value (lofty writes
+/// them as one `TCON` list).
+fn wav_with_genres(path: &Path, genres: &[&str]) {
+    common::write_wav(path, 100);
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.set_title("t".into());
+    for genre in genres {
+        tag.push(TagItem::new(
+            ItemKey::Genre,
+            ItemValue::Text((*genre).to_owned()),
+        ));
+    }
+    tag.save_to_path(path, WriteOptions::default()).unwrap();
+}
+
+#[test]
+fn genres_are_read_from_every_genre_item_and_split() {
+    let (_dir, root) = root();
+    // Repeated genre items.
+    wav_with_genres(
+        &root.join("1 repeated.wav"),
+        &["Rock", "Progressive Rock", "rock"],
+    );
+    // An ID3 `TCON` with a numeric (ID3v1) genre and a refinement.
+    wav_with_genres(&root.join("2 numeric.wav"), &["(17)Psychedelic"]);
+    // One value with separators, as in the owner's M4A album.
+    wav_with_genres(&root.join("3 single.wav"), &["Rock;Progressive Rock"]);
+    // No genre at all.
+    wav_with_genres(&root.join("4 none.wav"), &[]);
+    // Blank parts only.
+    wav_with_genres(&root.join("5 blank.wav"), &[" ; / "]);
+
+    let outcome = run_scan(&root);
+    let mut genres: Vec<(String, Vec<String>)> = outcome
+        .tracks()
+        .iter()
+        .map(|t| {
+            let name = t.local_path().unwrap().file_name().unwrap();
+            (name.to_string_lossy().into_owned(), t.genres.clone())
+        })
+        .collect();
+    genres.sort();
+    let expected: Vec<(String, Vec<String>)> = [
+        ("1 repeated.wav", &["Rock", "Progressive Rock"][..]),
+        ("2 numeric.wav", &["Rock", "Psychedelic"][..]),
+        ("3 single.wav", &["Rock", "Progressive Rock"][..]),
+        ("4 none.wav", &[][..]),
+        ("5 blank.wav", &[][..]),
+    ]
+    .iter()
+    .map(|(name, g)| {
+        (
+            (*name).to_owned(),
+            g.iter().map(|s| (*s).to_owned()).collect(),
+        )
+    })
+    .collect();
+    assert_eq!(genres, expected);
+}
+
+#[test]
+fn the_library_groups_scanned_genres() {
+    let (_dir, root) = root();
+    wav_with_genres(&root.join("a.wav"), &["Rock;Progressive Rock"]);
+    wav_with_genres(&root.join("b.wav"), &["rock", "Jazz"]);
+    let outcome = run_scan(&root);
+    let mut library = Library::new(root.clone());
+    library.extend(outcome.tracks().into_iter().cloned());
+    let tags = library.tags();
+    let names: Vec<(String, usize)> = tags
+        .genres()
+        .iter()
+        .map(|g| {
+            (
+                tags.genre(*g).name().to_owned(),
+                tags.genre(*g).track_count(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("Jazz".to_owned(), 1),
+            ("Progressive Rock".to_owned(), 1),
+            ("Rock".to_owned(), 2)
+        ]
+    );
 }

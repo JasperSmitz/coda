@@ -1,7 +1,7 @@
 //! Remote browse state for the Navidrome source: a navigation stack of
-//! views (Home → Playlists / Artists / Albums → …, plus search results), a
-//! session-only cache of fetched lists, paged album lists, the search
-//! input, and ordered background enqueue jobs. No Ratatui, no I/O.
+//! views (Home → Playlists / Artists / Albums / Genres → …, plus search
+//! results), a session-only cache of fetched lists, paged album lists, the
+//! search input, and ordered background enqueue jobs. No Ratatui, no I/O.
 //!
 //! [`Browser`] never fetches anything itself. Like the player emits
 //! playback commands, it queues [`FetchRequest`]s (taken with
@@ -16,15 +16,16 @@
 //! - A successful response always replaces the cache entry. A view only
 //!   changes if it is still awaiting that request id, so a response for a
 //!   view the user has left is cached but changes nothing on screen.
-//! - Album lists ([`Resource::Albums`]) are paged, one sort order each;
-//!   see [`Paging`]. At most one page request per list is in flight, and
+//! - Album lists ([`Resource::Albums`], one per sort order, and
+//!   [`Resource::Genre`], one per genre) are paged; see [`Paging`]. At most one page request per list is in flight, and
 //!   a page response is applied only if it is that request (same id and
 //!   offset) for the list as it is now; anything else is ignored. `R`
 //!   while a later page is in flight waits for it, drops it and then
 //!   starts over at the first page. Albums already in a list are skipped,
 //!   and a full page that adds none ends it. The random order is a single
 //!   page and never cached: it is dropped when no view shows it, and
-//!   opening it or `R` reshuffles.
+//!   opening it or `R` reshuffles. A genre's albums are cached like the
+//!   sorted lists.
 //! - Enqueue jobs complete strictly in the order they were created (key
 //!   presses), whatever order their responses arrive in. A job whose data
 //!   failed to load is dropped with an error, in its turn.
@@ -73,8 +74,8 @@ use tokio::sync::{Semaphore, mpsc};
 use super::api::{MAX_ALBUM_LIST_SIZE, MAX_PLAYLIST_ENTRIES};
 use super::edit::{EditId, EditOp, EditRequest, EditResponse, EditResult};
 use super::{
-    Access, Album, AlbumPage, AlbumSort, Artist, Client, Error, Hidden, Playlist, PlaylistSongs,
-    SearchResults,
+    Access, Album, AlbumPage, AlbumSort, Artist, Client, Error, Genre, Hidden, Playlist,
+    PlaylistSongs, SearchResults,
 };
 use crate::line_input::LineInput;
 use crate::model::{Track, thousands};
@@ -102,6 +103,7 @@ pub const DEFAULT_VIEWPORT_ROWS: usize = 40;
 pub const HOME_TITLE: &str = "Home";
 pub const ARTISTS_TITLE: &str = "Artists";
 pub const PLAYLISTS_TITLE: &str = "Playlists";
+pub const GENRES_TITLE: &str = "Genres";
 /// Upper bound on the songs one edit adds (the playlist entry cap).
 pub const MAX_EDIT_SONGS: usize = MAX_PLAYLIST_ENTRIES;
 /// After an edit refused because the playlist changed on the server.
@@ -155,6 +157,7 @@ pub enum HomeEntry {
     Playlists,
     Artists,
     Albums,
+    Genres,
 }
 
 impl HomeEntry {
@@ -164,16 +167,18 @@ impl HomeEntry {
             Self::Playlists => PLAYLISTS_TITLE,
             Self::Artists => ARTISTS_TITLE,
             Self::Albums => "Albums",
+            Self::Genres => GENRES_TITLE,
         }
     }
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 4] = [
+pub const HOME_ENTRIES: [HomeEntry; 5] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Artists,
     HomeEntry::Albums,
+    HomeEntry::Genres,
 ];
 
 /// The label of the "Shuffle all" Home entry (both sources).
@@ -213,6 +218,19 @@ pub enum Resource {
     /// Held only until the play request that asked for it takes it; never
     /// reused.
     RandomSongs,
+    /// Every genre (`getGenres`).
+    Genres,
+    /// A genre's albums, as loaded so far: a view and cache key, filled
+    /// page by page like [`Resource::Albums`]. Never fetched as such.
+    /// Genre strings here are as the server sent them (`Genre::query`),
+    /// not the cleaned name shown.
+    Genre(String),
+    /// One page of [`Resource::Genre`] (`getAlbumList2`, `type=byGenre`);
+    /// requested, never cached or shown.
+    GenreAlbums { genre: String, offset: usize },
+    /// A fresh set of random songs of one genre (`getRandomSongs` with
+    /// `genre`), for `s` on a genre; held like [`Resource::RandomSongs`].
+    GenreRandomSongs(String),
 }
 
 impl Resource {
@@ -226,8 +244,12 @@ impl Resource {
             Self::Search(_) => "search3",
             Self::Playlists => "getPlaylists",
             Self::Playlist(_) => "getPlaylist",
-            Self::Albums(_) | Self::AlbumPage { .. } => "getAlbumList2",
-            Self::RandomSongs => "getRandomSongs",
+            Self::Albums(_)
+            | Self::AlbumPage { .. }
+            | Self::Genre(_)
+            | Self::GenreAlbums { .. } => "getAlbumList2",
+            Self::RandomSongs | Self::GenreRandomSongs(_) => "getRandomSongs",
+            Self::Genres => "getGenres",
         }
     }
 }
@@ -270,6 +292,7 @@ pub enum Content {
     /// A page of an album list, as fetched; the cache holds the pages
     /// joined as [`Content::Albums`].
     AlbumPage(AlbumPage),
+    Genres(Vec<Genre>),
 }
 
 static HOME: Content = Content::Home;
@@ -302,6 +325,7 @@ pub enum Row<'a> {
     Album(&'a Album),
     Song(&'a Track),
     Playlist(&'a Playlist),
+    Genre(&'a Genre),
 }
 
 impl Row<'_> {
@@ -321,6 +345,7 @@ impl Content {
             Self::Playlists(v) => v.len(),
             Self::PlaylistSongs(p) => p.tracks.len(),
             Self::AlbumPage(page) => page.albums.len(),
+            Self::Genres(v) => v.len(),
         }
     }
 
@@ -352,6 +377,7 @@ impl Content {
                 .collect(),
             Self::Playlists(v) => window(v, start, len).iter().map(Row::Playlist).collect(),
             Self::Search(r) => search_rows(r).skip(start).take(len).collect(),
+            Self::Genres(v) => window(v, start, len).iter().map(Row::Genre).collect(),
         }
     }
 }
@@ -408,7 +434,53 @@ pub enum More {
     Failed(String),
 }
 
-/// Paging state of one album list (one sort order).
+/// A paged album list: every album in one sort order, or one genre's
+/// albums.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AlbumList {
+    Sorted(AlbumSort),
+    Genre(String),
+}
+
+impl AlbumList {
+    /// The paged list a view of `resource` shows, if it is one.
+    fn of(resource: &Resource) -> Option<Self> {
+        match resource {
+            Resource::Albums(sort) => Some(Self::Sorted(*sort)),
+            Resource::Genre(genre) => Some(Self::Genre(genre.clone())),
+            _ => None,
+        }
+    }
+
+    /// The view and cache key.
+    fn resource(&self) -> Resource {
+        match self {
+            Self::Sorted(sort) => Resource::Albums(*sort),
+            Self::Genre(genre) => Resource::Genre(genre.clone()),
+        }
+    }
+
+    /// The request for the page at `offset`.
+    fn page(&self, offset: usize) -> Resource {
+        match self {
+            Self::Sorted(sort) => Resource::AlbumPage {
+                sort: *sort,
+                offset,
+            },
+            Self::Genre(genre) => Resource::GenreAlbums {
+                genre: genre.clone(),
+                offset,
+            },
+        }
+    }
+
+    /// The random order: one page, never cached.
+    fn is_random(&self) -> bool {
+        *self == Self::Sorted(AlbumSort::Random)
+    }
+}
+
+/// Paging state of one album list (one sort order, or one genre).
 ///
 /// The list holds the pages `0..loaded` (by server offset). At most one
 /// page request of the list is in flight, `pending`, and a response is
@@ -487,8 +559,9 @@ enum JobTarget {
     /// The songs of an album or playlist.
     Songs(Resource),
     Artist(String),
-    /// A fresh [`Resource::RandomSongs`] (only ever a play request's).
-    RandomSongs,
+    /// A fresh set of random songs: [`Resource::RandomSongs`] or
+    /// [`Resource::GenreRandomSongs`] (only ever a play request's).
+    RandomSongs(Resource),
 }
 
 /// What a play request plays.
@@ -746,7 +819,7 @@ pub struct Browser {
     /// fetches still answer, but no longer hold the slot.
     play_fetches: HashSet<RequestId>,
     /// Paging state of each album list that has been opened.
-    pages: HashMap<AlbumSort, Paging>,
+    pages: HashMap<AlbumList, Paging>,
     /// The album order last chosen; Home → Albums opens it.
     album_sort: AlbumSort,
     /// List rows visible in the UI (0: not reported yet).
@@ -901,10 +974,10 @@ impl Browser {
 
     /// Loading state of the rest of a ready, paged view's list.
     pub fn more(&self, view: &View) -> More {
-        let Resource::Albums(sort) = view.resource else {
+        let Some(list) = AlbumList::of(&view.resource) else {
             return More::Idle;
         };
-        match self.pages.get(&sort) {
+        match self.pages.get(&list) {
             Some(paging) if view.load == Load::Ready => match (&paging.error, paging.pending) {
                 (Some(error), _) => More::Failed(error.clone()),
                 (None, Some((_, offset))) if offset > 0 => More::Loading,
@@ -955,7 +1028,7 @@ impl Browser {
     }
 
     /// `l` (and Enter on what it cannot play): opens the selected Home
-    /// entry, playlist, artist or album. Returns `false` (and does
+    /// entry, playlist, artist, album or genre. Returns `false` (and does
     /// nothing) on a song or a header.
     pub fn open_selected(&mut self) -> bool {
         let Some(row) = self.selected_row() else {
@@ -971,6 +1044,11 @@ impl Browser {
                 (Resource::Playlists, entry.label().to_owned())
             }
             Row::Home(entry @ HomeEntry::Artists) => (Resource::Artists, entry.label().to_owned()),
+            Row::Home(entry @ HomeEntry::Genres) => (Resource::Genres, entry.label().to_owned()),
+            Row::Genre(g) => {
+                self.open_genre(g.query.clone(), g.name.clone());
+                return true;
+            }
             Row::Playlist(p) => (Resource::Playlist(p.id.clone()), p.name.clone()),
             Row::Artist(a) => (Resource::Artist(a.id.clone()), a.name.clone()),
             Row::Album(a) => (Resource::Album(a.id.clone()), a.name.clone()),
@@ -998,7 +1076,8 @@ impl Browser {
     }
 
     /// `s`: like [`Browser::activate`], shuffled (the selected song
-    /// first). On an artist it plays all of the artist's songs. Does
+    /// first). On an artist it plays all of the artist's songs; on a genre,
+    /// a fresh set of random songs of the genre (like Shuffle all). Does
     /// nothing on a Home entry.
     pub fn play_shuffled(&mut self) -> Vec<JobOutcome> {
         match self.play_target(true) {
@@ -1066,10 +1145,16 @@ impl Browser {
         Some(match content.row(view.selected)? {
             Row::Home(HomeEntry::ShuffleAll) => (
                 RANDOM_SONGS_LABEL.to_owned(),
-                PlayTarget::Fetch(JobTarget::RandomSongs),
+                PlayTarget::Fetch(JobTarget::RandomSongs(Resource::RandomSongs)),
             ),
             Row::Header(_) | Row::Home(_) => return None,
-            Row::Artist(_) if !shuffle => return None,
+            Row::Artist(_) | Row::Genre(_) if !shuffle => return None,
+            Row::Genre(g) => (
+                g.name.clone(),
+                PlayTarget::Fetch(JobTarget::RandomSongs(Resource::GenreRandomSongs(
+                    g.query.clone(),
+                ))),
+            ),
             Row::Song(track) => {
                 let (tracks, start) = match content {
                     Content::Songs(songs) => (songs.clone(), view.selected),
@@ -1105,7 +1190,12 @@ impl Browser {
         // A random-songs request still in flight: its answer has never
         // been shown (unwanted answers are dropped, never cached), so it
         // is still a fresh set.
-        let random_in_flight = self.in_flight.get(&Resource::RandomSongs).copied();
+        let random_in_flight = match &target {
+            PlayTarget::Fetch(JobTarget::RandomSongs(random)) => {
+                self.in_flight.get(random).copied()
+            }
+            _ => None,
+        };
         self.end_play();
         let dropped = self.drop_queue_jobs();
         let mut outcomes = Vec::new();
@@ -1124,14 +1214,14 @@ impl Browser {
                 outcomes.extend(self.pump());
             }
             PlayTarget::Fetch(target) => {
-                if matches!(target, JobTarget::RandomSongs) {
+                if let JobTarget::RandomSongs(random) = &target {
                     // Every press plays a set not shown before: the one
                     // still in flight if there is one (repeated presses
                     // never pile up requests), else a new request.
-                    self.cache.remove(&Resource::RandomSongs);
+                    self.cache.remove(random);
                     let id = match random_in_flight {
                         Some(id) => id,
-                        None => self.request(Resource::RandomSongs),
+                        None => self.request(random.clone()),
                     };
                     self.play_fetches.insert(id);
                 }
@@ -1164,6 +1254,7 @@ impl Browser {
     /// cache when it has one). Returns `false` (and does nothing) in any
     /// other view.
     pub fn cycle_album_sort(&mut self) -> bool {
+        // Only the sorted lists: a genre's albums come in one order.
         let Some(Resource::Albums(sort)) = self.current().map(|v| v.resource.clone()) else {
             return false;
         };
@@ -1181,18 +1272,20 @@ impl Browser {
         let Some(resource) = self.current().map(|v| v.resource.clone()) else {
             return;
         };
-        let id = match resource {
-            Resource::Home => return,
-            Resource::Albums(sort) => {
-                let paging = self.pages.entry(sort).or_default();
+        if resource == Resource::Home {
+            return;
+        }
+        let id = match AlbumList::of(&resource) {
+            Some(list) => {
+                let paging = self.pages.entry(list.clone()).or_default();
                 if paging.error.take().is_some() {
                     let offset = paging.loaded;
-                    self.request_page(sort, offset);
+                    self.request_page(&list, offset);
                     return;
                 }
-                self.restart_albums(sort)
+                self.restart_albums(&list)
             }
-            _ => match self.in_flight.get(&resource) {
+            None => match self.in_flight.get(&resource) {
                 Some(id) => *id,
                 None => {
                     self.cache.remove(&resource);
@@ -1234,15 +1327,26 @@ impl Browser {
     /// (never for random), else from its first page.
     fn open_albums(&mut self, sort: AlbumSort) {
         self.album_sort = sort;
-        let resource = Resource::Albums(sort);
-        let load = if sort != AlbumSort::Random && self.cache.contains_key(&resource) {
+        self.open_list(AlbumList::Sorted(sort), albums_title(sort));
+    }
+
+    /// Opens a genre's albums: from the cache if it has them, else from
+    /// their first page.
+    /// `query` is the genre as the server sent it, `title` its cleaned name.
+    fn open_genre(&mut self, query: String, title: String) {
+        self.open_list(AlbumList::Genre(query), title);
+    }
+
+    fn open_list(&mut self, list: AlbumList, title: String) {
+        let resource = list.resource();
+        let load = if !list.is_random() && self.cache.contains_key(&resource) {
             Load::Ready
         } else {
-            Load::Loading(self.restart_albums(sort))
+            Load::Loading(self.restart_albums(&list))
         };
         self.stack.push(View {
             resource,
-            title: albums_title(sort),
+            title,
             selected: 0,
             load,
         });
@@ -1250,18 +1354,17 @@ impl Browser {
         self.load_more_if_needed();
     }
 
-    /// Drops the album list in `sort` order and starts it over at its
-    /// first page. Returns the request the list now awaits: the first page
+    /// Drops the album list `list` and starts it over at its first page. Returns the request the list now awaits: the first page
     /// if it is already in flight; a later page in flight, whose answer is
     /// then discarded and followed by the first page (see [`Paging`]); or
     /// a new first-page request.
-    fn restart_albums(&mut self, sort: AlbumSort) -> RequestId {
-        self.cache.remove(&Resource::Albums(sort));
-        let paging = self.pages.entry(sort).or_default();
+    fn restart_albums(&mut self, list: &AlbumList) -> RequestId {
+        self.cache.remove(&list.resource());
+        let paging = self.pages.entry(list.clone()).or_default();
         paging.start_over(true);
         match paging.pending {
             Some((id, _)) => id,
-            None => self.request_page(sort, 0),
+            None => self.request_page(list, 0),
         }
     }
 
@@ -1271,15 +1374,15 @@ impl Browser {
         let random = Resource::Albums(AlbumSort::Random);
         if !self.stack.iter().any(|v| v.resource == random) {
             self.cache.remove(&random);
-            if let Some(paging) = self.pages.get_mut(&AlbumSort::Random) {
+            if let Some(paging) = self.pages.get_mut(&AlbumList::Sorted(AlbumSort::Random)) {
                 paging.start_over(false);
             }
         }
     }
 
-    fn request_page(&mut self, sort: AlbumSort, offset: usize) -> RequestId {
-        let id = self.request(Resource::AlbumPage { sort, offset });
-        self.pages.entry(sort).or_default().pending = Some((id, offset));
+    fn request_page(&mut self, list: &AlbumList, offset: usize) -> RequestId {
+        let id = self.request(list.page(offset));
+        self.pages.entry(list.clone()).or_default().pending = Some((id, offset));
         id
     }
 
@@ -1287,7 +1390,7 @@ impl Browser {
     /// is within a screen of its end.
     fn load_more_if_needed(&mut self) {
         let Some(view) = self.current() else { return };
-        let Resource::Albums(sort) = view.resource else {
+        let Some(list) = AlbumList::of(&view.resource) else {
             return;
         };
         let Some(len) = self.content(view).map(Content::len) else {
@@ -1297,12 +1400,12 @@ impl Browser {
             0 => DEFAULT_VIEWPORT_ROWS,
             rows => rows,
         };
-        let Some(paging) = self.pages.get(&sort) else {
+        let Some(paging) = self.pages.get(&list) else {
             return;
         };
         if paging.wants_more(view.selected, len, lookahead) {
             let offset = paging.loaded;
-            self.request_page(sort, offset);
+            self.request_page(&list, offset);
         }
     }
 
@@ -1439,7 +1542,8 @@ impl Browser {
     /// What `a` (or "Add to playlist") on the selected row would add.
     fn selected_target(&self) -> Option<(String, JobTarget)> {
         Some(match self.selected_row()? {
-            Row::Header(_) | Row::Home(_) => return None,
+            // A genre is not added whole: it may hold thousands of albums.
+            Row::Header(_) | Row::Home(_) | Row::Genre(_) => return None,
             Row::Song(t) => (t.display_name(), JobTarget::Song(Box::new(t.clone()))),
             Row::Album(a) => (
                 a.name.clone(),
@@ -1495,11 +1599,11 @@ impl Browser {
                     vec![resource.clone()]
                 }
             }
-            JobTarget::RandomSongs => {
-                if self.cache.contains_key(&Resource::RandomSongs) {
+            JobTarget::RandomSongs(random) => {
+                if self.cache.contains_key(random) {
                     Vec::new()
                 } else {
-                    vec![Resource::RandomSongs]
+                    vec![random.clone()]
                 }
             }
             JobTarget::Artist(id) => match self.cache.get(&Resource::Artist(id.clone())) {
@@ -1524,7 +1628,7 @@ impl Browser {
             JobTarget::Song(track) => Some(vec![(**track).clone()]),
             JobTarget::Tracks(tracks) => Some(tracks.clone()),
             JobTarget::Songs(resource) => songs(resource),
-            JobTarget::RandomSongs => songs(&Resource::RandomSongs),
+            JobTarget::RandomSongs(random) => songs(random),
             JobTarget::Artist(id) => match self.cache.get(&Resource::Artist(id.clone()))? {
                 Content::Albums(albums) => {
                     let mut out = Vec::new();
@@ -1555,11 +1659,27 @@ impl Browser {
                     label: play.label,
                     error,
                 },
-                Ok(tracks) if matches!(play.target, JobTarget::RandomSongs) => {
+                Ok(tracks)
+                    if matches!(play.target, JobTarget::RandomSongs(Resource::RandomSongs)) =>
+                {
                     // Taken: the next press asks for a new set.
                     self.cache.remove(&Resource::RandomSongs);
                     JobOutcome::ShuffleAll {
                         tracks,
+                        generation: self.generation,
+                    }
+                }
+                Ok(tracks) if matches!(play.target, JobTarget::RandomSongs(_)) => {
+                    // A genre's random songs: taken like Shuffle all's,
+                    // and played as the genre.
+                    if let JobTarget::RandomSongs(random) = &play.target {
+                        self.cache.remove(random);
+                    }
+                    JobOutcome::Play {
+                        label: play.label,
+                        tracks,
+                        start: None,
+                        shuffle: play.shuffle,
                         generation: self.generation,
                     }
                 }
@@ -2361,18 +2481,28 @@ impl Browser {
             tracing::debug!(id = id.0, "superseded response ignored");
             return self.pump();
         }
-        let random_wanted = self
-            .play
-            .as_ref()
-            .is_some_and(|play| matches!(play.target, JobTarget::RandomSongs));
-        if resource == Resource::RandomSongs && !random_wanted {
+        let random_wanted = self.play.as_ref().is_some_and(
+            |play| matches!(&play.target, JobTarget::RandomSongs(random) if *random == resource),
+        );
+        let random = matches!(
+            resource,
+            Resource::RandomSongs | Resource::GenreRandomSongs(_)
+        );
+        if random && !random_wanted {
             // Its play request was replaced or cancelled: never kept for a
             // later press.
             tracing::debug!(id = id.0, "unwanted random songs dropped");
             return self.pump();
         }
-        if let Resource::AlbumPage { sort, offset } = resource {
-            self.apply_page(id, sort, offset, result);
+        let page = match &resource {
+            Resource::AlbumPage { sort, offset } => Some((AlbumList::Sorted(*sort), *offset)),
+            Resource::GenreAlbums { genre, offset } => {
+                Some((AlbumList::Genre(genre.clone()), *offset))
+            }
+            _ => None,
+        };
+        if let Some((list, offset)) = page {
+            self.apply_page(id, &list, offset, result);
             self.fix_selection();
             self.load_more_if_needed();
             return self.pump();
@@ -2424,31 +2554,31 @@ impl Browser {
         self.pump()
     }
 
-    /// Applies an album page response if it is the page `sort`'s list
-    /// awaits; ignores it otherwise.
+    /// Applies an album page response if it is the page `list` awaits;
+    /// ignores it otherwise.
     fn apply_page(
         &mut self,
         id: RequestId,
-        sort: AlbumSort,
+        list: &AlbumList,
         offset: usize,
         result: Result<Content, Error>,
     ) {
         let Some(paging) = self
             .pages
-            .get_mut(&sort)
+            .get_mut(list)
             .filter(|p| p.pending == Some((id, offset)))
         else {
             tracing::debug!(id = id.0, offset, "stale album page ignored");
             return;
         };
         paging.pending = None;
-        let resource = Resource::Albums(sort);
+        let resource = list.resource();
         if std::mem::take(&mut paging.discard) {
             // The list started over meanwhile: ask for its first page now,
             // for whichever views await it.
             tracing::debug!(id = id.0, offset, "album page of an old list discarded");
             if self.stack.iter().any(|v| v.load == Load::Loading(id)) {
-                let first = self.request_page(sort, 0);
+                let first = self.request_page(list, 0);
                 for view in &mut self.stack {
                     if view.load == Load::Loading(id) {
                         view.load = Load::Loading(first);
@@ -2464,7 +2594,7 @@ impl Browser {
         };
         let load = match result {
             Ok(page) => {
-                let albums = paging.add_page(offset, page, sort == AlbumSort::Random);
+                let albums = paging.add_page(offset, page, list.is_random());
                 // The first page starts the list (a restart dropped it).
                 if offset == 0 || !matches!(self.cache.get(&resource), Some(Content::Albums(_))) {
                     self.cache
@@ -2557,8 +2687,17 @@ pub async fn fetch(client: &Client, resource: &Resource) -> Result<Content, Erro
             .await
             .map(Content::AlbumPage),
         Resource::RandomSongs => client.random_songs().await.map(Content::Songs),
+        Resource::Genres => client.genres().await.map(Content::Genres),
+        Resource::GenreAlbums { genre, offset } => client
+            .albums_by_genre(genre, *offset, ALBUM_PAGE_SIZE)
+            .await
+            .map(Content::AlbumPage),
+        Resource::GenreRandomSongs(genre) => client
+            .random_songs_in_genre(genre)
+            .await
+            .map(Content::Songs),
         // Never requested: Home is static, album lists load by page.
-        Resource::Home | Resource::Albums(_) => {
+        Resource::Home | Resource::Albums(_) | Resource::Genre(_) => {
             Err(Error::Decode("not a fetchable resource".to_owned()))
         }
     }
@@ -3090,10 +3229,11 @@ mod tests {
             (Resource::Home, Load::Ready)
         );
         let rows: Vec<Row> = b.current_content().unwrap().rows(0, 10);
+        assert_eq!(rows, HOME_ENTRIES.map(Row::Home).to_vec());
+        let labels: Vec<&str> = HOME_ENTRIES.iter().map(|e| e.label()).collect();
         assert_eq!(
-            rows,
-            HOME_ENTRIES.map(Row::Home).to_vec(),
-            "Playlists, Artists, Albums"
+            labels,
+            ["Shuffle all", "Playlists", "Artists", "Albums", "Genres"]
         );
         // Nothing to add or refresh on Home, and it is the root.
         assert!(b.enqueue_selected(Placement::End).is_empty());
@@ -3109,6 +3249,7 @@ mod tests {
                 page_request(AlbumSort::Name, 0),
                 "Albums (A–Z)",
             ),
+            (HomeEntry::Genres, Resource::Genres, "Genres"),
         ] {
             open_home(&mut b, entry);
             assert_eq!(one(&mut b).resource, resource);
@@ -3827,5 +3968,184 @@ mod tests {
         assert!(b.cancel_play().is_empty());
         assert!(ok(&mut b, &random, Content::Songs(vec![song("r")])).is_empty());
         assert!(b.cached(&Resource::RandomSongs).is_none());
+    }
+
+    fn genre(name: &str, albums: u32) -> Genre {
+        Genre {
+            name: name.into(),
+            query: name.into(),
+            song_count: Some(albums * 10),
+            album_count: Some(albums),
+        }
+    }
+
+    fn genre_page(genre: &str, offset: usize) -> Resource {
+        Resource::GenreAlbums {
+            genre: genre.into(),
+            offset,
+        }
+    }
+
+    /// Opens Home → Genres and answers its request with `genres`.
+    fn open_genres(b: &mut Browser, genres: Vec<Genre>) {
+        open_home(b, HomeEntry::Genres);
+        assert_eq!(b.current().unwrap().title, "Genres");
+        let request = one(b);
+        assert_eq!(request.resource, Resource::Genres);
+        assert_eq!(request.resource.endpoint(), "getGenres");
+        ok(b, &request, Content::Genres(genres));
+    }
+
+    #[test]
+    fn a_genre_opens_on_its_albums_paged_and_cached() {
+        let mut b = Browser::new();
+        b.set_viewport_rows(10);
+        open_genres(&mut b, vec![genre("Jazz", 1), genre("Rock", 900)]);
+        assert_eq!(b.current().unwrap().title, GENRES_TITLE);
+        let rows = b.current_content().unwrap().rows(0, 10);
+        assert!(
+            matches!(rows.as_slice(), [Row::Genre(j), Row::Genre(r)] if j.name == "Jazz" && r.name == "Rock")
+        );
+        b.move_selection(1);
+        // Enter opens a genre (as `l`), on its first page of albums.
+        assert!(b.activate().is_empty());
+        let first = one(&mut b);
+        assert_eq!(first.resource, genre_page("Rock", 0));
+        assert_eq!(first.resource.endpoint(), "getAlbumList2");
+        assert_eq!(
+            b.current().unwrap().resource,
+            Resource::Genre("Rock".into())
+        );
+        assert_eq!(b.current().unwrap().title, "Rock");
+        ok(&mut b, &first, page(0, ALBUM_PAGE_SIZE));
+        assert_eq!(albums_len(&b), 500);
+        assert!(b.take_requests().is_empty(), "far from the end");
+        select(&mut b, 490);
+        let second = one(&mut b);
+        assert_eq!(second.resource, genre_page("Rock", 500));
+        assert_eq!(b.more(b.current().unwrap()), More::Loading);
+        ok(&mut b, &second, page(500, 3));
+        assert_eq!(albums_len(&b), 503);
+        select(&mut b, 502);
+        assert!(b.take_requests().is_empty(), "a short page ends it");
+        // Cached: reopening fetches nothing, and the album lists are
+        // separate.
+        b.go_up();
+        assert!(b.open_selected());
+        assert!(b.take_requests().is_empty());
+        assert_eq!(albums_len(&b), 503);
+        assert!(b.cached(&Resource::Albums(AlbumSort::Name)).is_none());
+        // `o` does nothing here; `R` starts the genre over.
+        assert!(!b.cycle_album_sort());
+        b.refresh();
+        assert_eq!(one(&mut b).resource, genre_page("Rock", 0));
+        assert!(b.cached(&Resource::Genre("Rock".into())).is_none());
+    }
+
+    /// A genre's view is titled by its cleaned name, but its albums and
+    /// random songs are asked for by the name as the server sent it.
+    #[test]
+    fn a_genre_is_requested_by_its_name_as_sent() {
+        let mut b = Browser::new();
+        b.set_viewport_rows(10);
+        let mut rock = genre("Rock", 2);
+        rock.query = "  Rock ".into();
+        open_genres(&mut b, vec![rock]);
+        assert!(b.activate().is_empty());
+        assert_eq!(one(&mut b).resource, genre_page("  Rock ", 0));
+        assert_eq!(b.current().unwrap().title, "Rock");
+        b.go_up();
+        let outcomes = b.play_shuffled();
+        assert_eq!(
+            outcomes,
+            [JobOutcome::Fetching {
+                label: "Rock".into()
+            }]
+        );
+        assert_eq!(
+            one(&mut b).resource,
+            Resource::GenreRandomSongs("  Rock ".into())
+        );
+    }
+
+    #[test]
+    fn s_on_a_genre_plays_fresh_random_songs_of_it() {
+        let mut b = Browser::with_generation(Generation(2));
+        open_genres(&mut b, vec![genre("Rock", 2)]);
+        // Not added whole: a genre can hold thousands of albums.
+        assert!(b.enqueue_selected(Placement::End).is_empty());
+        assert!(b.take_requests().is_empty());
+        for _ in 0..2 {
+            let outcomes = b.play_shuffled();
+            assert_eq!(
+                outcomes,
+                [JobOutcome::Fetching {
+                    label: "Rock".into()
+                }]
+            );
+            let request = one(&mut b);
+            assert_eq!(request.resource, Resource::GenreRandomSongs("Rock".into()));
+            assert_eq!(request.resource.endpoint(), "getRandomSongs");
+            let outcomes = ok(
+                &mut b,
+                &request,
+                Content::Songs(vec![song("s1"), song("s2")]),
+            );
+            assert_eq!(
+                outcomes,
+                [JobOutcome::Play {
+                    label: "Rock".into(),
+                    tracks: vec![song("s1"), song("s2")],
+                    start: None,
+                    shuffle: true,
+                    generation: Generation(2),
+                }]
+            );
+            // Taken, not kept: the next press asks again.
+            assert!(
+                b.cached(&Resource::GenreRandomSongs("Rock".into()))
+                    .is_none()
+            );
+            assert!(!b.play_pending());
+        }
+        // A press while one is in flight shares it.
+        b.play_shuffled();
+        let request = one(&mut b);
+        b.play_shuffled();
+        assert!(b.take_requests().is_empty());
+        // Cancelled: the answer is dropped, not cached.
+        assert!(b.cancel_play().is_empty());
+        assert!(ok(&mut b, &request, Content::Songs(vec![song("s3")])).is_empty());
+        assert!(
+            b.cached(&Resource::GenreRandomSongs("Rock".into()))
+                .is_none()
+        );
+        // A failure reports the play.
+        b.play_shuffled();
+        let request = one(&mut b);
+        let outcomes = err(&mut b, &request, Error::Http(500));
+        assert!(
+            matches!(outcomes.as_slice(), [JobOutcome::PlayFailed { label, .. }] if label == "Rock"),
+            "{outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn a_genre_random_reply_does_not_answer_shuffle_all() {
+        let mut b = Browser::new();
+        open_genres(&mut b, vec![genre("Rock", 2)]);
+        b.play_shuffled();
+        let genre_request = one(&mut b);
+        // Shuffle all supersedes the genre's play request.
+        select_home(&mut b, HomeEntry::ShuffleAll);
+        b.activate();
+        let all = one(&mut b);
+        assert_eq!(all.resource, Resource::RandomSongs);
+        assert!(ok(&mut b, &genre_request, Content::Songs(vec![song("g")])).is_empty());
+        assert!(b.play_pending());
+        assert_eq!(
+            ok(&mut b, &all, Content::Songs(vec![song("a")])),
+            [shuffle_all(vec![song("a")], Generation(0))]
+        );
     }
 }
