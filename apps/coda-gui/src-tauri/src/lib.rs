@@ -4,7 +4,8 @@
 //! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
 //! [`settings`] writes Coda's config and applies it live; [`media`] is
 //! the OS media controls; [`theme`] the colour themes (applied before
-//! the window's first paint by an initialization script).
+//! the window's first paint by an initialization script). [`mixes`] is
+//! the saved mixes' commands and the mix editor's searches.
 
 pub mod bootstrap;
 pub mod browse;
@@ -16,6 +17,7 @@ pub mod history;
 pub mod lyrics;
 pub mod lyrics_index;
 pub mod media;
+pub mod mixes;
 pub mod playlists;
 pub mod settings;
 pub mod theme;
@@ -255,6 +257,7 @@ pub fn run() {
             ));
             app.manage(engine);
             app.manage(browse);
+            app.manage(mixes::MixesFile(paths.mixes.clone()));
             app.manage(settings::SettingsLock::default());
             app.manage(playlists::PlaylistEditor::default());
             app.manage(Quit::default());
@@ -321,7 +324,14 @@ pub fn run() {
             theme::commands::ui_source_set,
             history::commands::home_history,
             history::commands::home_daily_picks,
-            lyrics::now_playing_lyrics
+            lyrics::now_playing_lyrics,
+            mixes::list_mixes,
+            mixes::add_mix,
+            mixes::update_mix,
+            mixes::delete_mix,
+            mixes::mix_search_genres,
+            mixes::mix_search_artists,
+            mixes::mix_search_albums
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

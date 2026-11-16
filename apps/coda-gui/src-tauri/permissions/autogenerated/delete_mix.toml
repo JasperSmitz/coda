@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-mix"
+description = "Enables the delete_mix command without any pre-configured scope."
+commands.allow = ["delete_mix"]
+
+[[permission]]
+identifier = "deny-delete-mix"
+description = "Denies the delete_mix command without any pre-configured scope."
+commands.deny = ["delete_mix"]

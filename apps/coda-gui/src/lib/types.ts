@@ -103,6 +103,17 @@ export interface Snapshot {
   browse: { library: number; server: number };
   /** The play history's revision: a change means Home's history rows may have changed. */
   historyRevision: number;
+  /** The mix that owns the queue (or is loading its songs), if any. */
+  mix: ActiveMix | null;
+}
+
+/** The active mix, for "Mix: <name>" (`ActiveMixDto`). */
+export interface ActiveMix {
+  name: string;
+  /** The saved mix's id; `null` for a quick mix. */
+  id: string | null;
+  /** Its songs are still being fetched (Navidrome): not playing yet. */
+  loading: boolean;
 }
 
 export interface Progress {
@@ -145,7 +156,52 @@ export type Intent =
   /** Moves the entries right after the current one. */
   | { type: "playNextEntries"; keys: string[] }
   | { type: "shuffleUpcoming" }
-  | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean };
+  | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean }
+  /** Plays the saved mix `id` (read again from the mixes file). */
+  | { type: "playMix"; id: string }
+  /** Plays a recipe without saving it (a quick mix). */
+  | { type: "playQuickMix"; mix: MixInput };
+
+// ----- Mixes (src-tauri/src/mixes.rs) -----
+
+/**
+ * One part of a mix. Local: by name. Navidrome: a genre by the server's
+ * exact value; an artist or album by id plus name (an album with its
+ * album artist).
+ */
+export type Ingredient =
+  | { kind: "genre"; name: string }
+  | { kind: "artist"; name: string; id?: string | null }
+  | { kind: "album"; artist: string; name: string; id?: string | null };
+
+/** A saved mix of one source (Navidrome: the current server's). */
+export interface Mix {
+  id: string;
+  name: string;
+  source: SourceKind;
+  ingredients: Ingredient[];
+}
+
+/** A recipe from the editor, to save or to play as a quick mix. */
+export interface MixInput {
+  name: string;
+  source: SourceKind;
+  ingredients: Ingredient[];
+}
+
+export type MixErrorKind =
+  | "invalid"
+  | "notFound"
+  | "otherSource"
+  | "full"
+  | "newer"
+  | "notConfigured"
+  | "failed";
+
+export interface MixError {
+  kind: MixErrorKind;
+  message: string;
+}
 
 /**
  * What a play intent plays from (`PlayContextDto`): an album, artist or

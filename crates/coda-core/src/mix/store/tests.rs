@@ -107,13 +107,40 @@ fn add_update_and_delete_round_trip() {
         Err(StoreError::Invalid(MixError::NoName))
     ));
 
-    assert_eq!(names(&delete(&path, &a.id).unwrap()), ["B"]);
+    assert_eq!(
+        names(&delete(&path, &a.id, &MixSource::Local).unwrap()),
+        ["B"]
+    );
     let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-    assert_eq!(names(&delete(&path, &a.id).unwrap()), ["B"], "already gone");
+    assert_eq!(
+        names(&delete(&path, &a.id, &MixSource::Local).unwrap()),
+        ["B"],
+        "already gone"
+    );
     assert_eq!(
         std::fs::metadata(&path).unwrap().modified().unwrap(),
         modified
     );
+
+    // A mix keeps its source: B (server 00c3…) is neither moved to another
+    // server or to local by an update, nor deleted for another source.
+    let moved = Mix {
+        source: MixSource::Navidrome {
+            server: "ffffffffffffffff".into(),
+        },
+        ..b.clone()
+    };
+    assert!(matches!(update(&path, moved), Err(StoreError::OtherSource)));
+    let local = Mix {
+        source: MixSource::Local,
+        ..b.clone()
+    };
+    assert!(matches!(update(&path, local), Err(StoreError::OtherSource)));
+    assert!(matches!(
+        delete(&path, &b.id, &MixSource::Local),
+        Err(StoreError::OtherSource)
+    ));
+    assert_eq!(load(&path).0, vec![b.clone()]);
 
     // Versioned, readable JSON; no temp files left behind.
     let text = std::fs::read_to_string(&path).unwrap();
@@ -221,7 +248,7 @@ fn a_newer_file_is_left_alone() {
     assert_eq!(load(&path), (Vec::new(), LoadOutcome::Newer { version: 2 }));
     assert!(matches!(add(&path, mix("A")), Err(StoreError::Newer)));
     assert!(matches!(
-        delete(&path, &mix("A").id),
+        delete(&path, &mix("A").id, &MixSource::Local),
         Err(StoreError::Newer)
     ));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
@@ -295,7 +322,12 @@ fn at_most_500_mixes_are_kept() {
     assert_eq!(outcome, LoadOutcome::Loaded { skipped: 3 });
     assert!(matches!(add(&path, mix("One more")), Err(StoreError::Full)));
     // Deleting still works (and drops the ones over the cap).
-    assert_eq!(delete(&path, &mixes[0].id).unwrap().len(), MAX_MIXES - 1);
+    assert_eq!(
+        delete(&path, &mixes[0].id, &MixSource::Local)
+            .unwrap()
+            .len(),
+        MAX_MIXES - 1
+    );
     assert_eq!(add(&path, mix("Room")).unwrap().len(), MAX_MIXES);
 }
 
@@ -372,7 +404,7 @@ fn a_file_near_the_cap_can_still_shrink() {
     assert_eq!(outcome, LoadOutcome::Loaded { skipped: 0 });
     assert_eq!(loaded.len(), mixes.len());
     assert!(matches!(add(&path, big(999)), Err(StoreError::TooLarge)));
-    let after = delete(&path, &mixes[0].id).unwrap();
+    let after = delete(&path, &mixes[0].id, &MixSource::Local).unwrap();
     assert_eq!(after.len(), mixes.len() - 1);
     let (loaded, outcome) = load(&path);
     assert_eq!(outcome, LoadOutcome::Loaded { skipped: 0 });

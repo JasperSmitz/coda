@@ -68,10 +68,7 @@ impl Engine {
                 );
                 commands
             }
-            SettingsChange::MusicDir(dir) => {
-                self.set_music_dir(dir, now);
-                Vec::new()
-            }
+            SettingsChange::MusicDir(dir) => self.set_music_dir(dir, now),
             SettingsChange::CoverArt(on) => {
                 self.covers.set_enabled(on);
                 // Every cover URL changes: send the queue again.
@@ -166,22 +163,25 @@ impl Engine {
         // Stream URLs signed by the old client must not start playing: a
         // remote next track is announced again, and one mpv opened but
         // nobody hears yet is loaded again, with the new client.
+        // A Navidrome mix of another server (or none) ends.
+        self.mix_client_changed(now);
         let commands = self.player.client_changed();
         self.dispatch(commands, now)
     }
 
     /// A new local library at `dir`, scanned from scratch. Queued local
     /// tracks keep playing from their paths.
-    fn set_music_dir(&mut self, dir: PathBuf, now: Instant) {
+    fn set_music_dir(&mut self, dir: PathBuf, now: Instant) -> Vec<PlaybackCommand> {
         self.problems
             .retain(|p| !matches!(p.kind, ProblemKind::NoConfig | ProblemKind::Config));
         // A new library generation: ids handed out before are stale.
-        self.replace_library(Some(dir.clone()), now);
+        let commands = self.replace_library(Some(dir.clone()), now);
         // Queued local tracks are named by ids of the new library.
         self.sent_queue = None;
         self.scan = ScanState::Scanning;
         self.rescan = Some(dir);
         self.notify("Scanning the new music folder", now);
+        commands
     }
 
     /// The scrobbler and ping to replace, once per change.

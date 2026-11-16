@@ -42,23 +42,29 @@ pub(crate) fn library_scan_options() -> scan::ScanOptions {
 impl Engine {
     /// A new library at `dir` (`None`: none), replacing the old one and
     /// anything still queued for it.
-    pub(crate) fn replace_library(&mut self, dir: Option<PathBuf>, now: Instant) {
+    pub(crate) fn replace_library(
+        &mut self,
+        dir: Option<PathBuf>,
+        now: Instant,
+    ) -> Vec<PlaybackCommand> {
         self.music_dir = dir.clone();
         self.library_ops.clear();
         self.library_ops
             .push(LibraryOp::Replace(dir.map(|d| Box::new(Library::new(d)))));
-        self.apply_library_ops(now);
+        self.apply_library_ops(now)
     }
 
-    pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) {
+    /// A scan event; returns what the mix's top-up plays (see
+    /// [`Engine::apply_library_ops`]).
+    pub fn handle_scan_event(&mut self, event: ScanEvent, now: Instant) -> Vec<PlaybackCommand> {
         self.library_ops.push(LibraryOp::Scan(event));
-        self.apply_library_ops(now);
+        self.apply_library_ops(now)
     }
 
     /// The scan channel closed; without `Finished` first, the scan failed.
-    pub fn scan_closed(&mut self, now: Instant) {
+    pub fn scan_closed(&mut self, now: Instant) -> Vec<PlaybackCommand> {
         self.library_ops.push(LibraryOp::Closed);
-        self.apply_library_ops(now);
+        self.apply_library_ops(now)
     }
 
     /// Changes queued while the library was being read.
@@ -67,17 +73,19 @@ impl Engine {
     }
 
     /// Applies the queued ops if the lock is free; else they wait for the
-    /// next event or tick.
-    pub(crate) fn apply_library_ops(&mut self, now: Instant) {
+    /// next event or tick. Once applied, the mix is checked: a local mix
+    /// waiting for songs (restored before the scan) tops up now, not at
+    /// the next intent or playback event.
+    pub(crate) fn apply_library_ops(&mut self, now: Instant) -> Vec<PlaybackCommand> {
         if self.library_ops.is_empty() {
-            return;
+            return Vec::new();
         }
         let Some(mut writer) = self.browse.try_write_local() else {
             tracing::trace!(
                 pending = self.library_ops.len(),
                 "library busy with a browse read; changes deferred"
             );
-            return;
+            return Vec::new();
         };
         let mut outcomes = Vec::new();
         for op in self.library_ops.drain(..) {
@@ -117,6 +125,11 @@ impl Engine {
             self.library_outcome(outcome, now);
         }
         self.dirty = true;
+        if self.phase == Phase::Ready {
+            self.check_mix(now)
+        } else {
+            Vec::new()
+        }
     }
 
     fn library_outcome(&mut self, outcome: Outcome, now: Instant) {

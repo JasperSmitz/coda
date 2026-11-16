@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{MAX_MIXES, Mix, MixError, MixFileOut, MixId, mix_from_value};
+use super::{MAX_MIXES, Mix, MixError, MixFileOut, MixId, MixSource, mix_from_value};
 use crate::fsio::{quarantine, read_bounded, write_atomic};
 
 /// The schema version this build reads and writes. Any new ingredient
@@ -66,6 +66,10 @@ pub enum StoreError {
     Invalid(#[from] MixError),
     #[error("that mix no longer exists")]
     NotFound,
+    /// The saved mix is of another source (local, or another Navidrome
+    /// server or account) than the change: a mix keeps its source.
+    #[error("that mix was made for another music source")]
+    OtherSource,
     #[error("a mix with that id already exists")]
     Exists,
     #[error("there are already {MAX_MIXES} mixes")]
@@ -178,8 +182,10 @@ pub fn add(path: &Path, mix: Mix) -> Result<Vec<Mix>, StoreError> {
     })
 }
 
-/// Replaces the saved mix with `mix`'s id, in place. Returns every mix as
-/// saved.
+/// Replaces the saved mix with `mix`'s id, in place. Refused with
+/// [`StoreError::OtherSource`] when the saved one has another source (a
+/// mix never moves to another server, checked under the lock). Returns
+/// every mix as saved.
 pub fn update(path: &Path, mix: Mix) -> Result<Vec<Mix>, StoreError> {
     let mix = mix.validated()?;
     change(path, |mixes| {
@@ -187,15 +193,22 @@ pub fn update(path: &Path, mix: Mix) -> Result<Vec<Mix>, StoreError> {
             .iter_mut()
             .find(|m| m.id == mix.id)
             .ok_or(StoreError::NotFound)?;
+        if slot.source != mix.source {
+            return Err(StoreError::OtherSource);
+        }
         *slot = mix;
         Ok(true)
     })
 }
 
-/// Deletes the saved mix `id`; one that is already gone is no error.
-/// Returns every mix as saved.
-pub fn delete(path: &Path, id: &MixId) -> Result<Vec<Mix>, StoreError> {
+/// Deletes the saved mix `id` of `source`; one that is already gone is no
+/// error, one of another source is refused ([`StoreError::OtherSource`],
+/// checked under the lock). Returns every mix as saved.
+pub fn delete(path: &Path, id: &MixId, source: &MixSource) -> Result<Vec<Mix>, StoreError> {
     change(path, |mixes| {
+        if mixes.iter().any(|m| &m.id == id && &m.source != source) {
+            return Err(StoreError::OtherSource);
+        }
         let before = mixes.len();
         mixes.retain(|m| &m.id != id);
         Ok(mixes.len() != before)

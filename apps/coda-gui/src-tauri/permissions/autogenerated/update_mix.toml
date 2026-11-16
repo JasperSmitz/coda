@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-mix"
+description = "Enables the update_mix command without any pre-configured scope."
+commands.allow = ["update_mix"]
+
+[[permission]]
+identifier = "deny-update-mix"
+description = "Denies the update_mix command without any pre-configured scope."
+commands.deny = ["update_mix"]

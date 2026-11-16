@@ -68,6 +68,14 @@ fn main() {
         "lyrics_index_status",
         "lyrics_index_rebuild",
         "lyrics_index_set_enabled",
+        // Mixes: the shared mixes file and the editor's searches.
+        "list_mixes",
+        "add_mix",
+        "update_mix",
+        "delete_mix",
+        "mix_search_genres",
+        "mix_search_artists",
+        "mix_search_albums",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");
