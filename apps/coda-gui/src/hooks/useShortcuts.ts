@@ -1,6 +1,8 @@
 // Global keyboard shortcuts (DESIGN.md), unless typing in a text field.
 // Space play/pause, n/p or Ctrl+→/← next/previous, ←/→ seek ∓5 s,
-// +/- volume, r repeat, q queue, f Now Playing, l lyrics (Now Playing only).
+// +/- volume, r repeat, q queue, f Now Playing (opening it also enters
+// full screen, App's `openNowPlayingFullscreen`; closing it leaves a full
+// screen it entered, `useFullscreen`), l lyrics (Now Playing only).
 
 import { useEffect, useRef } from "react";
 import { intent } from "../lib/ipc";

@@ -26,10 +26,13 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tracing.workspace = true
 coda-core.workspace = true
 tauri-plugin-dialog = "2"
-tauri-plugin-window-state = "2"
 tempfile.workspace = true
 toml = { workspace = true, features = ["display"] }
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+
+# Reads the window's real full-screen state on Linux (`frame`).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

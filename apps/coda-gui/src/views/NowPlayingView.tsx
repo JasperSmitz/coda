@@ -17,6 +17,8 @@ import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBa
 import { Visualizer } from "../components/Visualizer";
 import {
   CloseIcon,
+  ExitFullscreenIcon,
+  FullscreenIcon,
   LyricsIcon,
   NextIcon,
   PauseIcon,
@@ -26,6 +28,7 @@ import {
 } from "../components/icons";
 import { useLyrics } from "../hooks/useLyrics";
 import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
+import { dragRegion } from "../lib/platform";
 import type { QueueItem, Snapshot } from "../lib/types";
 
 interface Props {
@@ -40,6 +43,9 @@ interface Props {
   onToggleLyrics: () => void;
   /** The `QueuePanel` to show in the side panel. */
   queuePanel: ReactNode;
+  /** The window is full screen; the toolbar button enters or leaves it. */
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
 }
 
 // Visualizer requests go out one at a time, each carrying the latest
@@ -95,6 +101,8 @@ export function NowPlayingView({
   lyricsMode,
   onToggleLyrics,
   queuePanel,
+  fullscreen,
+  onToggleFullscreen,
 }: Props) {
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
@@ -244,6 +252,8 @@ export function NowPlayingView({
           {queuePanel}
         </div>
       )}
+      {/* macOS: the window buttons' row drags the window. */}
+      <div className="now-playing-titlebar" {...dragRegion} />
       <div className="now-playing-toolbar">
         <button
           className={`icon-button ${lyricsMode ? "is-active" : ""}`}
@@ -262,6 +272,14 @@ export function NowPlayingView({
           title="Queue (q)"
         >
           <QueueIcon />
+        </button>
+        <button
+          className="icon-button"
+          onClick={onToggleFullscreen}
+          aria-label={fullscreen ? "Exit full screen" : "Full screen"}
+          title={fullscreen ? "Exit full screen" : "Full screen"}
+        >
+          {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
         </button>
         <button
           className="icon-button"

@@ -68,6 +68,8 @@ fn main() {
         "lyrics_index_status",
         "lyrics_index_rebuild",
         "lyrics_index_set_enabled",
+        // The window's real full-screen state (`frame`).
+        "window_is_fullscreen",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

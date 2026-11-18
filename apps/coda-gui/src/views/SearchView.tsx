@@ -61,7 +61,9 @@ export function SearchView({ entry, source, query }: Props) {
   return (
     <section className="view">
       <ViewHeader eyebrow={SOURCE_LABEL[source]} title="Search">
-        <div className="search-box">
+        {/* A label: a click on its icon or padding focuses the field (and
+            does not drag the window from the header). */}
+        <label className="search-box">
           <SearchIcon size={16} />
           <input
             ref={input}
@@ -84,7 +86,7 @@ export function SearchView({ entry, source, query }: Props) {
             }}
             aria-label="Search"
           />
-        </div>
+        </label>
         {bothConfigured(sources) && (
           <button
             className="link-button search-other"

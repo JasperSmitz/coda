@@ -8,6 +8,12 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 **Genres** in the sidebar lists the genres of the library you browse (Local or Navidrome), A–Z with their album and track counts. Open one for its albums; **Play** or **Shuffle** (`s`) plays the whole genre (Navidrome: Shuffle plays random songs of the genre). An album's page shows its genres; click one to open it. Genres are read as tagged: a tag such as `Rock;Progressive Rock` counts as two genres (split on `;`, `/` and `,`, as Navidrome does), and Coda never changes or looks up genres.
 
+## Now Playing and the window
+
+`f` (or the Full screen button at the right of the bottom bar) opens Now Playing in full screen; closing it leaves full screen again, unless the window was already full screen before. A click on the bar's cover opens Now Playing in a window, and the button at its top right enters or leaves full screen without closing it. Coda always starts in a window, at the size and place it last had outside full screen (maximised if it was).
+
+On macOS the window has no separate title bar: the close, minimise and zoom buttons sit at the top of the sidebar (or over Now Playing), and you drag the window by a page's header, the queue's header or the top of the sidebar (double-click to zoom). Cmd+W, Cmd+M, Cmd+Q and the View and Window menus work as usual.
+
 ## Lyrics
 
 In Now Playing (`f`), press `l` (or the lyrics button at the top right) for lyrics mode: the player moves to a column on the left and the lyrics fill the middle. Timed (LRC) lyrics follow the song and a click on a line seeks there; plain lyrics scroll. The mode stays on until you turn it off, and is off again after a restart. Lyrics come from the file's tags (`LYRICS`/`UNSYNCEDLYRICS`, MP4 `©lyr`, ID3 `USLT`) or a `.lrc` file with the same name next to it, and for Navidrome tracks from the server (timed with a recent Navidrome that offers `getLyricsBySongId`, plain text otherwise). Nothing is fetched from online lyrics services.

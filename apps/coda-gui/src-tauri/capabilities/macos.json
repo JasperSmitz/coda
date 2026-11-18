@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-titlebar",
+  "description": "macOS only: the main window has no visible title bar, so its headers and the sidebar's top row (data-tauri-drag-region) drag the window and zoom it on double-click. Nothing else. tests/acl.rs checks the exact set.",
+  "windows": ["main"],
+  "platforms": ["macOS"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}
