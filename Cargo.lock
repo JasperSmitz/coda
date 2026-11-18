@@ -734,6 +734,7 @@ name = "coda-app"
 version = "0.1.0"
 dependencies = [
  "coda-core",
+ "dispatch2",
  "gtk",
  "image",
  "libc",
