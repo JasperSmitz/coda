@@ -2,10 +2,11 @@
 // while open (App hides the sidebar, browse area, queue column and bar).
 // Large cover over a blurred, darkened copy of it, title/artist/album, one
 // timeline with repeat beside it, one transport row with volume,
-// visualizer bars and an "Up next" card. The queue opens as a side panel
-// (`q` or the queue button) over the backdrop. Lyrics mode (`l` or the
-// lyrics button) stacks the player into a column on the left and shows
-// the lyrics in the middle (DESIGN.md). Visualizer readings are
+// visualizer bars and an "Up next" card (hidden, slot kept, while the
+// queue is open). The queue opens as a side panel (`q` or the queue
+// button) over the backdrop. Lyrics mode (`l` or the lyrics button)
+// stacks the player into a column on the left and shows the lyrics in the
+// middle (DESIGN.md). Visualizer readings are
 // asked for only while this view is shown and the window is not hidden or
 // minimised.
 
@@ -229,7 +230,7 @@ export function NowPlayingView({
                 <VolumeControl volume={snapshot.volume} disabled={unavailable} />
               </div>
               {snapshot.visualizerAvailable && <Visualizer active={status === "playing"} />}
-              {!queueOpen && <UpNext item={upNext} onOpen={onToggleQueue} />}
+              <UpNext item={upNext} onOpen={onToggleQueue} hidden={queueOpen} />
             </div>
           </div>
         ) : (
@@ -281,11 +282,25 @@ export function NowPlayingView({
   );
 }
 
-/** The next track as a small card; clicking it opens the queue panel. */
-function UpNext({ item, onOpen }: { item: QueueItem | undefined; onOpen: () => void }) {
+/**
+ * The next track as a small card; clicking it opens the queue panel.
+ * `hidden` (the panel is open) keeps its slot, so the centred column does
+ * not move, but takes it out of sight, the tab order and the
+ * accessibility tree.
+ */
+function UpNext({
+  item,
+  onOpen,
+  hidden,
+}: {
+  item: QueueItem | undefined;
+  onOpen: () => void;
+  hidden: boolean;
+}) {
+  const hiddenClass = hidden ? "is-hidden" : "";
   if (!item) {
     return (
-      <div className="now-playing-next">
+      <div className={`now-playing-next ${hiddenClass}`} inert={hidden}>
         <span className="eyebrow">End of queue</span>
       </div>
     );
@@ -293,7 +308,8 @@ function UpNext({ item, onOpen }: { item: QueueItem | undefined; onOpen: () => v
   const { track } = item;
   return (
     <button
-      className="now-playing-next is-card"
+      className={`now-playing-next is-card ${hiddenClass}`}
+      inert={hidden}
       onClick={onOpen}
       title="Show the queue (q)"
       aria-label={`Up next: ${[track.title, track.artist].filter(Boolean).join(" — ")}. Show the queue`}
