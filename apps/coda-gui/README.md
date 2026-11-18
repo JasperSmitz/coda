@@ -12,6 +12,12 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 A **mix** is a saved recipe of genres, artists and albums from one source, for example "Prog Rock and Indie Rock" or "King Crimson, Yes and Genesis". It plays as an endless shuffle in which the genres, artists and albums take turns, and it is resolved every time it plays, so music added later joins in. **Mixes** in the sidebar lists the saved mixes of the source you browse: **Play** starts one, the card's menu (right-click or "…") edits or deletes it, and **New mix…** opens the editor, where you name the mix, search for genres, artists and albums and either **Save** it or **Play** it once without saving (a quick mix). **Add to mix…** in the menu of a genre, artist or album (and on their pages) adds it to a saved mix or starts a new one. While a mix plays, Now Playing and the queue show "Mix: <name>"; playing anything else, or clearing the queue, ends it. An edit applies the next time the mix plays. Saved mixes live in `~/.local/share/coda/mixes.json`, shared with the terminal player.
 
+## Now Playing and the window
+
+`f` (or the Full screen button at the right of the bottom bar) opens Now Playing in full screen; closing it leaves full screen again, unless the window was already full screen before. A click on the bar's cover opens Now Playing in a window, and the button at its top right enters or leaves full screen without closing it. Coda always starts in a window, at the size and place it last had outside full screen (maximised if it was).
+
+On macOS the window has no separate title bar: the close, minimise and zoom buttons sit at the top of the sidebar (or over Now Playing), and you drag the window by a page's header, the queue's header or the top of the sidebar (double-click to zoom). Cmd+W, Cmd+M, Cmd+Q and the View and Window menus work as usual.
+
 ## Lyrics
 
 In Now Playing (`f`), press `l` (or the lyrics button at the top right) for lyrics mode: the player moves to a column on the left and the lyrics fill the middle. Timed (LRC) lyrics follow the song and a click on a line seeks there; plain lyrics scroll. The mode stays on until you turn it off, and is off again after a restart. Lyrics come from the file's tags (`LYRICS`/`UNSYNCEDLYRICS`, MP4 `©lyr`, ID3 `USLT`) or a `.lrc` file with the same name next to it, and for Navidrome tracks from the server (timed with a recent Navidrome that offers `getLyricsBySongId`, plain text otherwise). Nothing is fetched from online lyrics services.

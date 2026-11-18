@@ -195,8 +195,19 @@
   justify-content: center;
   height: 100%;
   padding: 24px;
+  /* Room for the macOS window buttons, outside the scrolling area (the
+     gradient fills it); `.onboarding-titlebar` drags the window there. */
+  border-top: var(--titlebar-h) solid transparent;
   overflow-y: auto;
-  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%);
+  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%) border-box;
+}
+
+.onboarding-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
 }
 
 .onboarding-card {
@@ -283,6 +294,8 @@
 .now-playing-main {
   position: absolute;
   inset: 0;
+  /* Below the macOS window buttons' row; the backdrop still reaches the top. */
+  top: var(--titlebar-h);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -435,6 +448,15 @@
 .now-playing-next-artist {
   color: var(--text-2);
   font-size: var(--text-small);
+}
+
+/* macOS: the window buttons' row over the backdrop drags the window. */
+.now-playing-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
 }
 
 .now-playing-toolbar {

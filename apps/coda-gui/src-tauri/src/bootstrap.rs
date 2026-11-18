@@ -27,6 +27,8 @@ pub struct Paths {
     pub session: Option<PathBuf>,
     /// `<state>/coda-app/history.json` (the play history for Home).
     pub history: Option<PathBuf>,
+    /// `<state>/coda-app/window.json` (the window's frame, `frame`).
+    pub window: Option<PathBuf>,
     /// `<state>/coda-app/coda-app.log`.
     pub log: Option<PathBuf>,
     /// Coda's cover cache folder (shared with the TUI).
@@ -66,6 +68,7 @@ impl Paths {
         Self {
             session: dir.as_ref().map(|d| d.join("session.json")),
             history: dir.as_ref().map(|d| d.join("history.json")),
+            window: dir.as_ref().map(|d| d.join("window.json")),
             log: dir.map(|d| d.join("coda-app.log")),
             tui_session: config::session_file_path(xdg_state_home, home.clone()),
             cover_cache: coda_core::cover::cache::cache_dir(xdg_cache_home.clone(), home.clone()),

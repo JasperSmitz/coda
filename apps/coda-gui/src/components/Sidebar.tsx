@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { dragRegion } from "../lib/platform";
 import type { Snapshot, SourceKind } from "../lib/types";
 import { bothConfigured, switchSource, useSources } from "../state/source";
 import type { ViewId } from "../views/viewList";
@@ -78,36 +79,40 @@ export function Sidebar({ view, onView, snapshot }: Props) {
   );
   return (
     <nav className="sidebar" aria-label="Library">
-      {bothConfigured(sources) ? (
-        <div className="source-switch-group">
-          <div className="source-switch" role="radiogroup" aria-label="Source">
-            {sourceButton("local", 1, <LocalIcon size={15} />)}
-            {sourceButton("navidrome", 2, <ServerIcon size={15} />)}
+      {/* macOS: the window buttons' row. */}
+      <div className="sidebar-titlebar" {...dragRegion} />
+      <div className="sidebar-body">
+        {bothConfigured(sources) ? (
+          <div className="source-switch-group">
+            <div className="source-switch" role="radiogroup" aria-label="Source">
+              {sourceButton("local", 1, <LocalIcon size={15} />)}
+              {sourceButton("navidrome", 2, <ServerIcon size={15} />)}
+            </div>
+            <div className="nav-heading source-status">
+              <span>{source === "local" ? "Local library" : "Server"}</span>
+              <SourceStatus source={source} snapshot={snapshot} />
+            </div>
           </div>
-          <div className="nav-heading source-status">
-            <span>{source === "local" ? "Local library" : "Server"}</span>
+        ) : (
+          <div className="nav-heading">
+            <span>{SOURCE_NAME[source]}</span>
             <SourceStatus source={source} snapshot={snapshot} />
           </div>
-        </div>
-      ) : (
-        <div className="nav-heading">
-          <span>{SOURCE_NAME[source]}</span>
-          <SourceStatus source={source} snapshot={snapshot} />
-        </div>
-      )}
-      <ul>
-        {item("home", "Home", <HomeIcon />)}
-        {item("search", "Search", <SearchIcon />)}
-      </ul>
-      <ul>
-        {item("albums", "Albums", <AlbumIcon />)}
-        {item("genres", "Genres", <GenreIcon />)}
-        {item("artists", "Artists", <ArtistIcon />)}
-        {item("playlists", "Playlists", <PlaylistIcon />)}
-        {item("mixes", "Mixes", <MixIcon />)}
-        {source === "local" && item("folders", "Folders", <FolderIcon />)}
-      </ul>
-      <ul className="nav-bottom">{item("settings", "Settings", <SettingsIcon />)}</ul>
+        )}
+        <ul>
+          {item("home", "Home", <HomeIcon />)}
+          {item("search", "Search", <SearchIcon />)}
+        </ul>
+        <ul>
+          {item("albums", "Albums", <AlbumIcon />)}
+          {item("genres", "Genres", <GenreIcon />)}
+          {item("artists", "Artists", <ArtistIcon />)}
+          {item("playlists", "Playlists", <PlaylistIcon />)}
+          {item("mixes", "Mixes", <MixIcon />)}
+          {source === "local" && item("folders", "Folders", <FolderIcon />)}
+        </ul>
+        <ul className="nav-bottom">{item("settings", "Settings", <SettingsIcon />)}</ul>
+      </div>
     </nav>
   );
 }

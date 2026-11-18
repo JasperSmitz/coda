@@ -92,6 +92,8 @@
   --sidebar-width: 220px;
   --queue-width: 320px;
   --bar-height: 76px;
+  /* Room for the macOS window buttons (app.css); 0 elsewhere. */
+  --titlebar-h: 0px;
   --row-height: 36px;
 
   --motion-fast: 120ms;

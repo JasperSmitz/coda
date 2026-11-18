@@ -1,5 +1,14 @@
 /* The app shell (DESIGN.md layout). */
 
+/* macOS: the window has no visible title bar, so the webview reaches the
+   top edge, and the native close/minimise/zoom buttons sit inset in the
+   sidebar's top row (`titlebar.rs` positions them: keep in step). The
+   page and panel headers there drag the window (`dragRegion`). In full
+   screen macOS hides the buttons, so no room is kept. */
+:root.is-macos:not(.is-fullscreen) {
+  --titlebar-h: 40px;
+}
+
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -81,10 +90,24 @@
   grid-area: sidebar;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px 10px;
+  min-height: 0;
   background: var(--surface-1);
   border-right: 1px solid var(--border);
+}
+
+/* macOS: the window buttons' row (a drag region); nothing scrolls under it. */
+.sidebar-titlebar {
+  flex: none;
+  height: var(--titlebar-h);
+}
+
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 10px;
   overflow-y: auto;
 }
 

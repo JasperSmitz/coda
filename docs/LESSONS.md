@@ -208,3 +208,9 @@ Each entry should state:
 - **Root cause:** the app manifest makes every command opt-in, and the three lists (handler, manifest, capability) are kept by hand in three files. Nothing at build or test time compared them.
 - **Rule:** when adding a command, touch all three; `apps/coda-gui/src-tauri/tests/acl.rs` now fails when they disagree (in either direction). Hand runtime-only behaviour (permissions, CSP) to the owner's smoke checks too.
 - **Where verified:** lyrics search slice 1 review (finding 1); `tests/acl.rs` fails with either entry removed.
+
+### Tauri's `is_fullscreen` on Linux is the value the app last set
+- **Context / symptom:** the GUI's Now Playing leaves full screen only if it entered it, and its toggle shows the window's state. With `getCurrentWindow().isFullscreen()`, a full screen entered with a window-manager key read as "not full screen" on Linux, so the toggle was stale and the "did we enter it" check was wrong.
+- **Root cause:** tao's Linux `Window::fullscreen()` returns a `RefCell` that only `set_fullscreen` writes (`tao 0.35.3`, `platform_impl/linux/window.rs`), so a getter call answers with what the app last asked for. tao's GTK `configure-event` does emit `Resized` when the window manager resizes the window, but that resize can arrive before GTK's window state changes, so querying any state on it can still read the old one.
+- **Rule:** for the real state read GDK's (`gtk_window().window().state()` contains `FULLSCREEN`, on the main thread) and push its changes from a `window-state-event` handler; do not trust Tauri getters for state the window manager can change, nor a resize as proof the state already changed. On macOS tao tracks it from AppKit's notifications.
+- **Where verified:** GUI full-screen Now Playing review (M1); `apps/coda-gui/src-tauri/src/frame.rs`.

@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { isMacos } from "./lib/platform";
 import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/app.css";
@@ -9,6 +10,10 @@ import "./styles/experience.css";
 import "./styles/edit.css";
 import "./styles/appearance.css";
 import "./styles/mixes.css";
+
+// macOS hides the window's title bar; `is-macos` makes room for its
+// buttons (app.css). Set before the first render.
+if (isMacos) document.documentElement.classList.add("is-macos");
 
 // A desktop app, not a page: no browser context menu outside our own.
 window.addEventListener("contextmenu", (e) => {

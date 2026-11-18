@@ -11,6 +11,7 @@ import { useDragReorder } from "../hooks/useDragReorder";
 import { useSelection } from "../hooks/useSelection";
 import { formatTime } from "../lib/format";
 import { intent } from "../lib/ipc";
+import { dragRegion } from "../lib/platform";
 import { isRemoveKey } from "../lib/keys";
 import { addToPlaylistFlow, canAddToPlaylist, saveQueueFlow, songIds } from "../lib/playlists";
 import type { ActiveMix, QueueItem, Status } from "../lib/types";
@@ -259,7 +260,7 @@ export function QueuePanel({
 
   return (
     <aside className="queue" aria-label="Queue">
-      <header className="panel-header">
+      <header className="panel-header" {...dragRegion}>
         <div>
           <h2>Queue</h2>
           <div className="secondary">

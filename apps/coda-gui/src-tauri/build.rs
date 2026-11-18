@@ -77,6 +77,8 @@ fn main() {
         "mix_search_genres",
         "mix_search_artists",
         "mix_search_albums",
+        // The window's real full-screen state (`frame`).
+        "window_is_fullscreen",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

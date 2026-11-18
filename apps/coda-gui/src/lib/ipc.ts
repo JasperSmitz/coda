@@ -43,6 +43,19 @@ export function onWindowMinimized(handler: (minimized: boolean) => void): Promis
   return listen<boolean>("window-minimized", (event) => handler(event.payload));
 }
 
+/**
+ * Whether the main window is full screen, however it got there (Tauri's
+ * own `isFullscreen` misses a window manager's full screen on Linux).
+ */
+export function windowIsFullscreen(): Promise<boolean> {
+  return invoke<boolean>("window_is_fullscreen");
+}
+
+/** Linux: the window manager put the window in or out of full screen. */
+export function onWindowFullscreen(handler: (fullscreen: boolean) => void): Promise<UnlistenFn> {
+  return listen<boolean>("window-fullscreen", (event) => handler(event.payload));
+}
+
 /** The full current state, queue included. */
 export function fetchSnapshot(): Promise<Snapshot> {
   return invoke<Snapshot>("snapshot");

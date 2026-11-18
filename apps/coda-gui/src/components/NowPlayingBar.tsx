@@ -7,6 +7,7 @@ import { Cover } from "./Cover";
 import { ArtistAlbumLine } from "./NameLink";
 import { Slider } from "./Slider";
 import {
+  FullscreenIcon,
   NextIcon,
   PauseIcon,
   PlayIcon,
@@ -25,6 +26,8 @@ interface Props {
   /** Opens or closes the Now Playing view (`f`). */
   nowPlayingOpen?: boolean;
   onToggleNowPlaying?: () => void;
+  /** Opens Now Playing in full screen (what `f` does). */
+  onFullscreen?: () => void;
 }
 
 export function NowPlayingBar({
@@ -33,6 +36,7 @@ export function NowPlayingBar({
   onToggleQueue,
   nowPlayingOpen = false,
   onToggleNowPlaying,
+  onFullscreen,
 }: Props) {
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
@@ -119,6 +123,16 @@ export function NowPlayingBar({
         >
           <QueueIcon />
         </button>
+        {onFullscreen && (
+          <button
+            className="icon-button"
+            onClick={onFullscreen}
+            aria-label="Full screen"
+            title="Full screen (f)"
+          >
+            <FullscreenIcon />
+          </button>
+        )}
       </div>
     </footer>
   );
