@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use coda_core::config::{self, Cli, Config, ConfigError, Env};
+use coda_core::mix::{Mix, SessionMix};
 use coda_core::navidrome::Client;
 use coda_core::playback::{self, PlaybackHandle};
 use coda_core::session::{self, Restored};
 
 use crate::dto::{ProblemDto, ProblemKind};
+use crate::engine::ReadMix;
 
 /// Where the GUI keeps its own files.
 #[derive(Debug, Clone, Default)]
@@ -25,6 +27,8 @@ pub struct Paths {
     pub session: Option<PathBuf>,
     /// `<state>/coda-app/history.json` (the play history for Home).
     pub history: Option<PathBuf>,
+    /// `<state>/coda-app/window.json` (the window's frame, `frame`).
+    pub window: Option<PathBuf>,
     /// `<state>/coda-app/coda-app.log`.
     pub log: Option<PathBuf>,
     /// Coda's cover cache folder (shared with the TUI).
@@ -34,15 +38,24 @@ pub struct Paths {
     /// The TUI's session (`<state>/state.json`), imported once when the
     /// GUI has none yet. Only ever read.
     pub tui_session: Option<PathBuf>,
+    /// The saved mixes, shared with the TUI
+    /// (`$XDG_DATA_HOME/coda/mixes.json`, ADR 0008).
+    pub mixes: Option<PathBuf>,
 }
 
 impl Paths {
     pub fn from_process() -> Self {
-        Self::new(
-            std::env::var_os("XDG_STATE_HOME"),
-            std::env::var_os("XDG_CACHE_HOME"),
-            std::env::var_os("HOME"),
-        )
+        Self {
+            mixes: config::mixes_file_path(
+                std::env::var_os("XDG_DATA_HOME"),
+                std::env::var_os("HOME"),
+            ),
+            ..Self::new(
+                std::env::var_os("XDG_STATE_HOME"),
+                std::env::var_os("XDG_CACHE_HOME"),
+                std::env::var_os("HOME"),
+            )
+        }
     }
 
     pub fn new(
@@ -55,10 +68,12 @@ impl Paths {
         Self {
             session: dir.as_ref().map(|d| d.join("session.json")),
             history: dir.as_ref().map(|d| d.join("history.json")),
+            window: dir.as_ref().map(|d| d.join("window.json")),
             log: dir.map(|d| d.join("coda-app.log")),
             tui_session: config::session_file_path(xdg_state_home, home.clone()),
             cover_cache: coda_core::cover::cache::cache_dir(xdg_cache_home.clone(), home.clone()),
             lyrics_cache: coda_core::lyrics::cache::cache_dir(xdg_cache_home, home),
+            mixes: None,
         }
     }
 }
@@ -86,6 +101,51 @@ pub struct Startup {
     pub playback: Result<PlaybackHandle, ProblemDto>,
     pub restored: Restored,
     pub history: crate::history::Loaded,
+    pub mixes: Mixes,
+}
+
+/// The mixes file, and the mix saved with the session.
+#[derive(Debug, Default)]
+pub struct Mixes {
+    pub path: Option<PathBuf>,
+    /// The session's active mix: a saved one read again from the file
+    /// (`true`), or a quick mix's recipe (`false`). `None` when there was
+    /// none, or the saved mix is gone.
+    pub restored: Option<(Mix, bool)>,
+    /// The mixes file was rejected while reading the session's mix: shown
+    /// as a notice at startup.
+    pub notice: Option<String>,
+}
+
+/// The session's mix as the engine resumes it: a saved mix is read again
+/// from `path` (blocking), so its latest recipe plays; gone, there is no
+/// mix (the queue plays as a plain queue). The second value is a notice
+/// for a mixes file rejected meanwhile ("Could not read the mixes file:
+/// …; kept as …").
+pub fn restore_mix(
+    session: Option<SessionMix>,
+    path: Option<&Path>,
+) -> (Option<(Mix, bool)>, Option<String>) {
+    let mix = match session {
+        None => None,
+        Some(SessionMix::Quick(mix)) => Some((mix, false)),
+        Some(SessionMix::Saved(id)) => match path.map(|p| crate::engine::read_saved_mix(p, &id)) {
+            None => None,
+            Some(ReadMix::Found(mix)) => Some((mix, true)),
+            Some(ReadMix::Gone) => {
+                tracing::info!("the saved mix of the session no longer exists");
+                None
+            }
+            Some(ReadMix::Newer) => {
+                tracing::warn!(
+                    "the saved mix of the session not resumed: the mixes file is from a newer Coda"
+                );
+                None
+            }
+            Some(ReadMix::Rejected(notice)) => return (None, Some(notice)),
+        },
+    };
+    (mix, None)
 }
 
 /// Loads the config and builds the Navidrome client (the password may
@@ -286,10 +346,20 @@ pub async fn restore(path: Option<PathBuf>, tui: Option<PathBuf>) -> Restored {
 /// All of startup, mpv and the password concurrently.
 pub async fn start(paths: &Paths) -> Startup {
     let history_path = paths.history.clone();
-    let (sources, playback, restored, history) = tokio::join!(
+    let mixes_path = paths.mixes.clone();
+    let (sources, playback, (restored, (mix, notice)), history) = tokio::join!(
         sources(),
         playback(),
-        restore(paths.session.clone(), paths.tui_session.clone()),
+        async {
+            let mut restored = restore(paths.session.clone(), paths.tui_session.clone()).await;
+            let session_mix = restored.session.mix.take();
+            let path = mixes_path.clone();
+            let mix =
+                tokio::task::spawn_blocking(move || restore_mix(session_mix, path.as_deref()))
+                    .await
+                    .unwrap_or_default();
+            (restored, mix)
+        },
         async move {
             tokio::task::spawn_blocking(move || crate::history::load(history_path))
                 .await
@@ -301,6 +371,11 @@ pub async fn start(paths: &Paths) -> Startup {
         playback,
         restored,
         history,
+        mixes: Mixes {
+            path: mixes_path,
+            restored: mix,
+            notice,
+        },
     }
 }
 

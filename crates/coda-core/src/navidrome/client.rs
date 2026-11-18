@@ -504,18 +504,40 @@ impl Client {
             .await
     }
 
+    /// Like [`Self::random_songs_in_genre`], with how many songs the
+    /// server sent (unusable ones included): fewer than
+    /// [`RANDOM_SONGS_SIZE`] served means the sample is the whole genre.
+    pub async fn random_songs_in_genre_counted(
+        &self,
+        genre: &str,
+    ) -> Result<api::Counted<Track>, Error> {
+        let size = RANDOM_SONGS_SIZE.to_string();
+        self.random_songs_counted(&[("size", size.as_str()), ("genre", genre)])
+            .await
+    }
+
     async fn random_songs_with(&self, params: &[(&str, &str)]) -> Result<Vec<Track>, Error> {
+        Ok(self.random_songs_counted(params).await?.items)
+    }
+
+    async fn random_songs_counted(
+        &self,
+        params: &[(&str, &str)],
+    ) -> Result<api::Counted<Track>, Error> {
         let songs = self
             .get::<api::RandomSongsReply>("getRandomSongs", params)
             .await?
             .random_songs
             .ok_or_else(|| Error::Decode("getRandomSongs: missing randomSongs".into()))?;
-        Ok(songs
-            .song
-            .items
-            .into_iter()
-            .filter_map(api::RawSong::into_track)
-            .collect())
+        Ok(api::Counted {
+            served: songs.song.served,
+            items: songs
+                .song
+                .items
+                .into_iter()
+                .filter_map(api::RawSong::into_track)
+                .collect(),
+        })
     }
 
     /// `search3` with bounded result counts. A response without a result

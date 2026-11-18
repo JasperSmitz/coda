@@ -195,8 +195,19 @@
   justify-content: center;
   height: 100%;
   padding: 24px;
+  /* Room for the macOS window buttons, outside the scrolling area (the
+     gradient fills it); `.onboarding-titlebar` drags the window there. */
+  border-top: var(--titlebar-h) solid transparent;
   overflow-y: auto;
-  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%);
+  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%) border-box;
+}
+
+.onboarding-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
 }
 
 .onboarding-card {
@@ -283,6 +294,8 @@
 .now-playing-main {
   position: absolute;
   inset: 0;
+  /* Below the macOS window buttons' row; the backdrop still reaches the top. */
+  top: var(--titlebar-h);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -404,6 +417,12 @@
   background: var(--np-surface-3);
 }
 
+/* The queue panel is open: the card keeps its slot (the centred content
+   does not move) but is not shown, focused or announced (also `inert`). */
+.now-playing-next.is-hidden {
+  visibility: hidden;
+}
+
 .now-playing-next-cover {
   width: 40px;
   height: 40px;
@@ -429,6 +448,15 @@
 .now-playing-next-artist {
   color: var(--text-2);
   font-size: var(--text-small);
+}
+
+/* macOS: the window buttons' row over the backdrop drags the window. */
+.now-playing-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
 }
 
 .now-playing-toolbar {
@@ -478,7 +506,8 @@
   }
 }
 
-/* Wide windows make room for the panel; narrow ones let it overlay. */
+/* Wide windows make room for the panel; narrow ones let it overlay.
+   Lyrics mode never does (below). */
 @media (min-width: 1180px) {
   .now-playing.has-queue .now-playing-main {
     right: calc(var(--np-panel-width) + 12px);
@@ -533,23 +562,42 @@
 }
 
 /* ----- lyrics mode (`l`) -----
-   The player stacks into a column on the left, the lyrics take the
-   middle, and the queue panel (when open) keeps the right: in wide
-   windows `.has-queue` already moves the main area left of it, narrower
-   ones let it overlay. The window's minimum width (900px) always leaves
-   room for the column beside the lyrics, so there is no stacked layout. */
+   The player stacks into a column on the left and the lyrics take the
+   rest, at any window width: the queue panel (when open) slides in over
+   the right of the lyrics area, which is mostly margin, so neither the
+   column nor the lyrics move. Only when the text would end up under the
+   panel does it move left (and, in narrow windows, wrap narrower), just
+   enough to clear it (`.lyrics-lines` below). The window's minimum width
+   (900px) always leaves room for the column beside the lyrics, so there
+   is no stacked layout. */
 
 .now-playing.is-lyrics .now-playing-main {
+  /* The main area's side padding, which the lyrics' room beside the
+     queue panel depends on. */
+  --np-lyrics-pad: clamp(24px, 3vw, 40px);
   display: grid;
   grid-template-columns: clamp(300px, 24vw, 340px) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   align-items: stretch;
   justify-content: stretch;
   gap: clamp(24px, 3vw, 48px);
-  padding: 56px clamp(24px, 3vw, 40px) 24px;
+  padding: 56px var(--np-lyrics-pad) 24px;
   overflow: hidden;
+  transition: none;
 }
 
+/* Full width with the queue open too (beats the wide-window rule).
+   `--np-lyrics-cover` is how far the panel reaches into the lyrics list,
+   plus a 24px gap (used by `.lyrics-lines` and `.lyrics-message`). */
+.now-playing.is-lyrics.has-queue .now-playing-main {
+  --np-lyrics-cover: calc(var(--np-panel-width) + 12px - var(--np-lyrics-pad) + 24px);
+  right: 0;
+}
+
+/* The column scrolls when it is too short. Its inline padding is offset
+   by a negative margin, so the content sits where the column is while a
+   slider thumb at either end (6px past its track) stays inside it and
+   never makes it scroll sideways. */
 .now-playing.is-lyrics .now-playing-content {
   flex-direction: column;
   align-items: stretch;
@@ -557,8 +605,9 @@
   gap: 18px;
   width: auto;
   min-height: 0;
-  margin: 0;
-  padding: 0 2px;
+  margin: 0 -8px;
+  padding: 0 10px;
+  overflow-x: hidden;
   overflow-y: auto;
   text-align: left;
 }
@@ -663,6 +712,29 @@
   font-size: clamp(17px, 1.5vw, 20px);
   font-weight: 500;
   line-height: 1.55;
+}
+
+/* With the queue panel open the text stays centred while it clears the
+   panel; otherwise it moves left just enough, and in narrow windows
+   wraps narrower too (down to 18ch; below that the panel covers its
+   right end, as any overlay would). Percentages are of the list's
+   width, and `ch` is this element's, so it holds for plain lyrics'
+   smaller text too. */
+.now-playing.has-queue .lyrics-lines {
+  --np-lyrics-width: min(40ch, max(100% - var(--np-lyrics-cover), 18ch));
+  max-width: var(--np-lyrics-width);
+  margin-left: max(
+    0px,
+    min((100% - var(--np-lyrics-width)) / 2, 100% - var(--np-lyrics-width) - var(--np-lyrics-cover))
+  );
+  margin-right: auto;
+}
+
+/* The same for the short messages ("No lyrics for this track"), centred
+   in the list: a right margin moves them left by half of it. 14em is
+   about the longest message's width. */
+.now-playing.has-queue .lyrics-message {
+  margin-right: max(0px, 14em + 2 * var(--np-lyrics-cover) - 100%);
 }
 
 /* Only the colour changes, so the current line never shifts the layout. */

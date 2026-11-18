@@ -56,7 +56,8 @@ struct RemoteState {
 struct Shared {
     local: RwLock<LocalState>,
     remote: RwLock<RemoteState>,
-    fetches: Semaphore,
+    /// The shared fetch limit (also taken by a mix's fetches, per request).
+    fetches: Arc<Semaphore>,
     /// Album fetches of one artist play-all (within `fetches`).
     play_fetches: Semaphore,
     covers: Arc<CoverService>,
@@ -102,7 +103,7 @@ impl BrowseHandle {
         Self(Arc::new(Shared {
             local: RwLock::new(LocalState::default()),
             remote: RwLock::new(RemoteState::default()),
-            fetches: Semaphore::new(MAX_CONCURRENT_FETCHES),
+            fetches: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
             play_fetches: Semaphore::new(coda_core::navidrome::browse::MAX_JOB_FETCHES),
             covers,
             lyrics,
@@ -179,6 +180,12 @@ impl BrowseHandle {
         })
         .await
         .map_err(|_| BrowseError::new(BrowseErrorKind::Failed, "The library read failed"))?
+    }
+
+    /// The shared fetch limit, for a mix's fetches (`Fetch::spawn` takes
+    /// a permit per request; never hold one around it).
+    pub fn fetch_limit(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.0.fetches)
     }
 
     /// The current client and its generation.

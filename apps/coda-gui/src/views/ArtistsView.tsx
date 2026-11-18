@@ -1,15 +1,20 @@
 // All artists of a source: an alphabetical, virtualized list with a
-// letter index on the right. ↑/↓ select, Enter or click opens.
+// letter index on the right. ↑/↓ select, Enter or click opens; a row's
+// menu (right-click or the context-menu key) offers "Add to mix…".
 
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
 import { useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { addToMixFlow } from "../lib/mixes";
+import { artistIngredient } from "../lib/mixRecipe";
 import { shuffleAll, useShuffleContext } from "../lib/play";
 import type { Artist, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useAppState } from "../state/store";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
 const ROW = 48;
@@ -33,6 +38,10 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   const { height } = useElementSize(scroller);
   const [selected, setSelected] = useState<number | null>(null);
   useShuffleContext(() => shuffleAll(source));
+  const [menu, setMenu] = useState<(MenuState & { artist: Artist }) | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
 
   const letters = useMemo(() => {
     const first = new Map<string, number>();
@@ -56,7 +65,9 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
     const at = selected ?? -1;
     const page = Math.max(1, Math.floor(height / ROW) - 1);
     let to: number | null = null;
-    switch (e.key) {
+    // Shift+F10 opens the row's menu like the context-menu key.
+    const key = e.shiftKey && e.key === "F10" ? "ContextMenu" : e.key;
+    switch (key) {
       case "ArrowDown":
         to = at + 1;
         break;
@@ -77,6 +88,13 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
         break;
       case "Enter":
         if (selected !== null) openArtist(source, artists[selected]);
+        break;
+      case "ContextMenu":
+        if (selected !== null) {
+          const row = document.getElementById(`artist-${selected}`)?.getBoundingClientRect();
+          const artist = artists[selected];
+          setMenu({ x: (row?.left ?? 0) + 40, y: row?.bottom ?? 0, key: artist.id, artist });
+        }
         break;
       default:
         // Letters stay global shortcuts; the index on the right jumps.
@@ -120,6 +138,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
           {artists.length > 0 && (
             <div
               className="artist-list"
+              ref={list}
               role="listbox"
               aria-label="Artists"
               tabIndex={0}
@@ -141,6 +160,11 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
                     onClick={() => {
                       setSelected(index);
                       openArtist(source, artist);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setSelected(index);
+                      setMenu({ x: e.clientX, y: e.clientY, key: artist.id, artist });
                     }}
                   >
                     <Cover
@@ -175,6 +199,23 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
           </nav>
         )}
       </div>
+      {menu && (
+        <ContextMenu
+          state={menu}
+          onClose={() => {
+            setMenu(null);
+            list.current?.focus();
+          }}
+          items={[
+            { label: "Open", action: () => openArtist(source, menu.artist) },
+            {
+              label: "Add to mix…",
+              disabled: !started,
+              action: () => void addToMixFlow(source, artistIngredient(source, menu.artist)),
+            },
+          ]}
+        />
+      )}
     </section>
   );
 }

@@ -228,6 +228,21 @@ pub struct Snapshot {
     /// The play history's revision: a change means Home's history rows
     /// (Recently played, Most played) may have changed (reload them).
     pub history_revision: u64,
+    /// The mix that owns the queue (or is loading its songs), if any.
+    pub mix: Option<ActiveMixDto>,
+}
+
+/// The mix loading, if one is (`loading`; the mix that played goes on
+/// meanwhile), else the one playing, for "Mix: <name>".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveMixDto {
+    pub name: String,
+    /// The saved mix's id; `None` for a quick mix.
+    pub id: Option<String>,
+    /// Its songs are still being fetched (Navidrome): not playing yet,
+    /// and the mix that played (if any) goes on until it starts.
+    pub loading: bool,
 }
 
 /// The library and Navidrome client generations (see `browse`).
@@ -381,6 +396,15 @@ pub enum Intent {
         start: Option<usize>,
         #[serde(default)]
         shuffle: bool,
+    },
+    /// Play the saved mix `id` (read again from the mixes file): replaces
+    /// the queue and tops it up while the mix owns it.
+    PlayMix {
+        id: String,
+    },
+    /// Play a recipe without saving it (a quick mix).
+    PlayQuickMix {
+        mix: crate::mixes::MixInputDto,
     },
 }
 
@@ -566,6 +590,11 @@ mod tests {
                 server: 1,
             },
             history_revision: 3,
+            mix: Some(ActiveMixDto {
+                name: "Prog".into(),
+                id: None,
+                loading: false,
+            }),
         };
         let value = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(value["browse"], json!({"library": 2, "server": 1}));
@@ -576,6 +605,10 @@ mod tests {
         assert_eq!(value["queue"][0]["key"], "q1");
         assert_eq!(value["queue"][0]["track"]["title"], "Song");
         assert_eq!(value["repeat"], "all");
+        assert_eq!(
+            value["mix"],
+            json!({"name": "Prog", "id": null, "loading": false})
+        );
         assert_eq!(value["scan"]["state"], "noLibrary");
         assert_eq!(value["navidrome"]["state"], "notConfigured");
         assert_eq!(value["problems"][0]["kind"], "mpvMissing");
@@ -588,7 +621,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 16, "{keys:?}");
+        assert_eq!(keys.len(), 17, "{keys:?}");
     }
 
     #[test]

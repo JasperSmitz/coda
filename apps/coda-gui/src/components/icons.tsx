@@ -96,6 +96,18 @@ export const CloseIcon = (p: IconProps) => (
     <path d="M6 6l12 12M18 6L6 18" />
   </Icon>
 );
+/** Full screen: four corners pointing out. */
+export const FullscreenIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />
+  </Icon>
+);
+/** Leave full screen: four corners pointing in. */
+export const ExitFullscreenIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" />
+  </Icon>
+);
 export const SearchIcon = (p: IconProps) => (
   <Icon {...p}>
     <circle cx="11" cy="11" r="6.5" />
@@ -211,5 +223,17 @@ export const ServerIcon = (p: IconProps) => (
     <rect x="4" y="4.5" width="16" height="6" rx="1.5" />
     <rect x="4" y="13.5" width="16" height="6" rx="1.5" />
     <path d="M7.5 7.5h.01M7.5 16.5h.01" strokeWidth={2.6} />
+  </Icon>
+);
+/** Mixes: two overlapping circles (ingredients blended). */
+export const MixIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="9" cy="12" r="5.5" />
+    <circle cx="15" cy="12" r="5.5" />
+  </Icon>
+);
+export const PlusIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 5v14M5 12h14" />
   </Icon>
 );

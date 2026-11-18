@@ -16,6 +16,30 @@ use std::time::Duration;
 
 pub use client::{Client, Error, Password};
 
+/// A Navidrome server's identity in files both frontends keep (the GUI's
+/// play history, a mix's source): FNV-1a (64 bit, 16 hex digits) of its
+/// base URL (normalised by the client) and user name. Stable across runs;
+/// neither is stored in plain text, though a known server's id can be
+/// confirmed by hashing (it is not a secret).
+pub fn server_id(client: &Client) -> String {
+    server_id_of(client.base_url().as_str(), client.username())
+}
+
+/// [`server_id`] of a base URL and user name.
+pub fn server_id_of(base_url: &str, username: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{base_url}\n{username}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// `true` for a string shaped like a [`server_id`].
+pub fn is_server_id(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// An artist as listed by `getArtists` or `search3`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artist {
@@ -276,3 +300,19 @@ pub struct SearchResults {
 pub const UNKNOWN_ARTIST: &str = "Unknown artist";
 /// Name shown for an album whose name is missing or blank.
 pub const UNKNOWN_ALBUM: &str = "Unknown album";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_id_hashes_url_and_user_and_is_stable() {
+        // The value the GUI history has stored since it introduced it.
+        let id = server_id_of("https://music.example/", "listener");
+        assert_eq!(id, "00c36aa1074c465c");
+        assert!(is_server_id(&id));
+        assert_ne!(id, server_id_of("https://music.example/", "other"));
+        assert!(!is_server_id("00c36aa1074c465"));
+        assert!(!is_server_id("00c36aa1074c465g"));
+    }
+}

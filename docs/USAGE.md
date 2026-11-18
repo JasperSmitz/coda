@@ -145,7 +145,7 @@ The keys on the screen:
 The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing on the screen.
 
 ## Local library
-- **The home menu:** Shuffle all, Playlists, Folders, Artists, Albums and Genres.
+- **The home menu:** Shuffle all, Playlists, Folders, Artists, Albums, Genres and Mixes.
 - **Grouping by tags:** artists and albums are grouped by the album artist, or by the artist when there is none. `o` in Albums switches between A–Z and by artist.
 - **Album rows** show the track count, and the running time when every track's length is known.
 - **Genres** come from your tags, as written: Coda never fetches or corrects them, and knows no hierarchy ("Rock" and "Progressive Rock" are two genres).
@@ -160,7 +160,7 @@ The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing 
     - Absolute entries must spell the music folder's real path, with symlinks resolved. On macOS that means `/private/tmp`, not `/tmp`.
 
 ## Navidrome library
-- **The home menu:** Shuffle all, Playlists, Artists, Albums and Genres.
+- **The home menu:** Shuffle all, Playlists, Artists, Albums, Genres and Mixes.
 - **Albums** load page by page as you scroll. Album rows show the year and the running time.
   - **`o` changes the order:** A–Z, by artist, newest, most played, recently played, or 500 at random.
   - **`R` reloads,** or retries a page that failed.
@@ -168,6 +168,14 @@ The keys for the lists (`j` `k`, `Enter`, `a`, `D`, `/`, `Tab`, …) do nothing 
   - **`s` on a genre** plays 500 random songs from it, a new set on every press, like Shuffle all.
   - **`a` / `A` / `P` don't add a genre:** it may hold thousands of albums. The status line says to open it and add albums instead.
 - **Search (`/`)** finds artists, albums and songs.
+
+## Mixes
+A mix is a recipe of genres, artists and albums from one source, played as an endless shuffle: the ingredients take turns, so "King Crimson, Yes and Genesis" plays about a third each, and no song repeats until many others have played. Songs added to your library later join in.
+- **Saved mixes** are made and edited in Coda's desktop app and kept in `$XDG_DATA_HOME/coda/mixes.json` (else `~/.local/share/coda/mixes.json`), which both apps read. **Mixes** in each Home menu lists that source's saved mixes (Navidrome: those made on the server you are connected to), read again whenever it is shown (opened, or switched to from the other source's Mixes view) or you press `R`. Enter or `s` plays one: it is read once more first, so a change made in the desktop app meanwhile plays, and a mix deleted there says "That mix no longer exists". If the mixes file cannot be read, it is set aside and the status line says "Could not read the mixes file: …; kept as …" (also at startup, when the saved queue's mix was in it).
+- **A quick mix** is not saved: `m` marks the selected genre, artist or album (a `✓` shows before it; `m` again unmarks it), in as many lists as you like, and `M` plays what is marked in the source shown as a mix named after it ("Jazz + Genesis"). The marks then clear. Each source keeps its own marks, up to 50. Marks work in the library's lists, not in local search results (which list songs; `M` still plays the marks from there). A Navidrome album the server lists without an artist cannot be marked.
+- **While it plays** the status bar shows `Mix: <name>` (or `Quick mix: <name>`). 25 songs are queued at first; whenever 5 or fewer are left after the current one, 20 more are added, so the mix never ends. A Navidrome mix fetches its songs first and shows `(loading…)` until it starts; playing something else meanwhile (even something that turns out empty) cancels it. On a narrow status bar the label is shortened, and left out when there is no room for it.
+- **It stops** when something replaces the queue (playing an album, a playlist, Shuffle all or another mix) or you clear it. Adding, moving, removing and skipping songs keep it going, and it carries on after a restart.
+- **Not found:** a genre, artist or album that matches nothing is left out and the status line names it.
 
 ### Editing playlists
 Only your own playlists can be edited; other users' playlists are read-only.

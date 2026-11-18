@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
 import { DialogHost } from "./components/Dialog";
+import { MixDialogHost } from "./components/MixDialogs";
 import { NowPlayingBar } from "./components/NowPlayingBar";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
+import { useFullscreen } from "./hooks/useFullscreen";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
@@ -125,6 +127,17 @@ export default function App() {
   const started = snapshot?.phase === "ready";
   const ready = started && snapshot.status !== "unavailable";
   const onboarding = started && snapshot.problems.some((p) => p.kind === "noConfig");
+  // Leaving Now Playing (any route) leaves a full screen it entered.
+  const fullscreen = useFullscreen(immersive && !onboarding);
+  const enterFullscreen = fullscreen.enter;
+  // `f` and the bar's Full screen button: Now Playing in full screen (the
+  // bar's cover opens it windowed). The one place that decides it.
+  const connected = snapshot !== null;
+  const openNowPlayingFullscreen = useCallback(() => {
+    setNowPlaying(true);
+    // Not before the view can show (no snapshot yet).
+    if (connected) void enterFullscreen();
+  }, [connected, enterFullscreen]);
   useBrowseKeys({
     enabled: ready && !onboarding,
     active: !onboarding,
@@ -136,7 +149,11 @@ export default function App() {
     enabled: ready,
     started,
     onToggleQueue: toggleQueue,
-    onToggleNowPlaying: onboarding ? undefined : toggleNowPlaying,
+    onToggleNowPlaying: onboarding
+      ? undefined
+      : nowPlaying
+        ? closeNowPlaying
+        : openNowPlayingFullscreen,
     onToggleLyrics: immersive && !onboarding ? toggleNpLyrics : undefined,
   });
 
@@ -158,6 +175,7 @@ export default function App() {
       disabled={!ready}
       locked={!started}
       serverConfigured={snapshot.navidrome.state !== "notConfigured"}
+      mix={snapshot.mix}
     />
   );
 
@@ -174,11 +192,14 @@ export default function App() {
             lyricsMode={npLyrics}
             onToggleLyrics={toggleNpLyrics}
             queuePanel={queuePanel}
+            fullscreen={fullscreen.fullscreen}
+            onToggleFullscreen={fullscreen.toggle}
           />
           {snapshot.phase === "starting" && <div className="starting secondary">Starting…</div>}
         </main>
         <Toasts notices={snapshot.notices} />
         <DialogHost />
+        <MixDialogHost />
       </div>
     );
   }
@@ -206,10 +227,12 @@ export default function App() {
           queueOpen={queueOpen}
           onToggleQueue={toggleLayoutQueue}
           onToggleNowPlaying={toggleNowPlaying}
+          onFullscreen={openNowPlayingFullscreen}
         />
       )}
       {snapshot && <Toasts notices={snapshot.notices} />}
       <DialogHost />
+      <MixDialogHost />
     </div>
   );
 }

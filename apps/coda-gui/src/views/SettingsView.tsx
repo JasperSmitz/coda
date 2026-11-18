@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
 import { AppearanceSection } from "./settings/AppearanceSection";
+import { dragRegion } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
 import type { LyricsIndexStatus, ServerInput, Settings, Snapshot } from "../lib/types";
 
@@ -66,7 +67,7 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
 
   return (
     <section className="view settings">
-      <header className="view-header">
+      <header className="view-header" {...dragRegion}>
         <h1>Settings</h1>
       </header>
       <div className="view-body settings-body">

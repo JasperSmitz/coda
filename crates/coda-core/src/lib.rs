@@ -6,7 +6,8 @@
 //! Navidrome client, session persistence, configuration, cover art
 //! (decoding, the disk cache and what to show; `cover`), lyrics (the LRC
 //! parser and a local file's lyrics; `lyrics`), the Now playing
-//! state (`now_playing`), the visualizer's display state, first-run setup
+//! state (`now_playing`), mixes (`mix`: recipes, the shared mixes file,
+//! picking and the queue top-up), the visualizer's display state, first-run setup
 //! state (`onboarding`) and its UI-free actions (`setup_actions`), the
 //! settings state (`settings`), text-field editing (`line_input`), logging
 //! setup and the OS credential store
@@ -16,10 +17,12 @@
 pub mod config;
 pub mod config_writer;
 pub mod cover;
+mod fsio;
 pub mod library;
 pub mod line_input;
 pub mod logging;
 pub mod lyrics;
+pub mod mix;
 pub mod model;
 pub mod navidrome;
 pub mod now_playing;

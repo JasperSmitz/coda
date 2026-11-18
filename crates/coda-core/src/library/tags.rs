@@ -308,6 +308,40 @@ impl TagIndex {
         self.artist_ids.get(&key).copied()
     }
 
+    /// The artist shown as `name`, matched like tracks are grouped
+    /// (trimmed, ignoring case), so it survives a rescan where
+    /// [`ArtistId`]s do not. [`UNKNOWN_ARTIST`] finds the artist of
+    /// untagged tracks unless an artist is really tagged that way (which
+    /// then wins: the two share a shown name).
+    pub fn artist_by_name(&self, name: &str) -> Option<ArtistId> {
+        let key = key_of(Some(name)).map(|(key, _)| key);
+        self.artist_ids.get(&key).copied().or_else(|| {
+            let unknown = name.trim().eq_ignore_ascii_case(UNKNOWN_ARTIST);
+            unknown
+                .then(|| self.artist_ids.get(&None).copied())
+                .flatten()
+        })
+    }
+
+    /// The album shown as `name` under `artist`, matched like
+    /// [`Self::artist_by_name`]; [`UNKNOWN_ALBUM`] finds the artist's
+    /// untagged tracks unless an album is really tagged that way.
+    pub fn album_by_name(&self, artist: ArtistId, name: &str) -> Option<AlbumId> {
+        let key = key_of(Some(name)).map(|(key, _)| key);
+        self.album_ids.get(&(artist, key)).copied().or_else(|| {
+            let unknown = name.trim().eq_ignore_ascii_case(UNKNOWN_ALBUM);
+            unknown
+                .then(|| self.album_ids.get(&(artist, None)).copied())
+                .flatten()
+        })
+    }
+
+    /// The genre shown as `name`, matched like [`Self::artist_by_name`].
+    pub fn genre_by_name(&self, name: &str) -> Option<GenreId> {
+        let (key, _) = key_of(Some(name))?;
+        self.genre_ids.get(&key).copied()
+    }
+
     /// The album `track` is grouped under, if it was inserted.
     pub fn album_of(&self, track: &Track) -> Option<AlbumId> {
         let artist = self.artist_of(track)?;
@@ -551,6 +585,76 @@ mod tests {
             index.insert(TrackId(i as u32), tracks);
         }
         index
+    }
+
+    #[test]
+    fn lookups_by_name_match_the_grouping_keys() {
+        let tracks = [
+            track(
+                "a",
+                Tags {
+                    artist: Some("Yes"),
+                    album: Some("Fragile"),
+                    genres: &["Prog Rock"],
+                    ..Tags::default()
+                },
+            ),
+            track(
+                "b",
+                Tags {
+                    artist: Some("YES "),
+                    album: Some("fragile"),
+                    ..Tags::default()
+                },
+            ),
+            track(
+                "c",
+                Tags {
+                    album_artist: Some("Genesis"),
+                    artist: Some("Peter"),
+                    ..Tags::default()
+                },
+            ),
+            track("d", Tags::default()),
+        ];
+        let index = index(&tracks);
+        let yes = index.artist_by_name("  yes").unwrap();
+        assert_eq!(index.artist(yes).name(), "Yes");
+        let fragile = index.album_by_name(yes, "FRAGILE").unwrap();
+        assert_eq!(index.album(fragile).tracks().len(), 2);
+        assert_eq!(index.album_by_name(yes, "Close to the Edge"), None);
+        let genesis = index.artist_by_name("genesis").unwrap();
+        assert_eq!(
+            index.artist_by_name("Peter"),
+            None,
+            "grouped by album artist"
+        );
+        let untitled = index.album_by_name(genesis, UNKNOWN_ALBUM).unwrap();
+        assert_eq!(index.album(untitled).tracks(), [TrackId(2)]);
+        let unknown = index.artist_by_name("unknown ARTIST").unwrap();
+        assert_eq!(index.artist(unknown).name(), UNKNOWN_ARTIST);
+        assert_eq!(index.genre_by_name("prog rock"), Some(index.genres()[0]));
+        assert_eq!(index.genre_by_name(" "), None);
+        assert_eq!(index.genre_by_name("Rock"), None);
+
+        // A real artist tagged "Unknown artist" wins over untagged tracks.
+        let tracks = [
+            track("a", Tags::default()),
+            track(
+                "b",
+                Tags {
+                    artist: Some("Unknown Artist"),
+                    ..Tags::default()
+                },
+            ),
+        ];
+        let index = super::tests::index(&tracks);
+        let found = index.artist_by_name(UNKNOWN_ARTIST).unwrap();
+        assert_eq!(index.artist(found).albums().len(), 1);
+        assert_eq!(
+            index.album(index.artist(found).albums()[0]).tracks(),
+            [TrackId(1)]
+        );
     }
 
     fn artist_names(index: &TagIndex) -> Vec<&str> {

@@ -8,5 +8,6 @@ export type ViewId =
   | "genres"
   | "artists"
   | "playlists"
+  | "mixes"
   | "folders"
   | "settings";

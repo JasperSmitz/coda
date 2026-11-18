@@ -11,12 +11,14 @@ import { useDragReorder } from "../hooks/useDragReorder";
 import { useSelection } from "../hooks/useSelection";
 import { formatTime } from "../lib/format";
 import { intent } from "../lib/ipc";
+import { dragRegion } from "../lib/platform";
 import { isRemoveKey } from "../lib/keys";
 import { addToPlaylistFlow, canAddToPlaylist, saveQueueFlow, songIds } from "../lib/playlists";
-import type { QueueItem, Status } from "../lib/types";
+import type { ActiveMix, QueueItem, Status } from "../lib/types";
 import { confirm } from "../state/dialogs";
 import { BroomIcon, CloseIcon, PlaylistAddIcon, ShuffleIcon } from "./icons";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
+import { ActiveMixLine } from "./MixParts";
 import { TrackArtist } from "./NameLink";
 
 const ROW = 36;
@@ -33,6 +35,8 @@ interface Props {
   locked: boolean;
   /** A Navidrome server is set up (Save as playlist, Add to playlist). */
   serverConfigured: boolean;
+  /** The active mix (or the one loading), shown under the header. */
+  mix: ActiveMix | null;
 }
 
 const plural = (n: number, noun: string) =>
@@ -46,6 +50,7 @@ export function QueuePanel({
   disabled,
   locked,
   serverConfigured,
+  mix,
 }: Props) {
   const list = useRef<HTMLDivElement>(null);
   const rowsEl = useRef<HTMLDivElement>(null);
@@ -255,7 +260,7 @@ export function QueuePanel({
 
   return (
     <aside className="queue" aria-label="Queue">
-      <header className="panel-header">
+      <header className="panel-header" {...dragRegion}>
         <div>
           <h2>Queue</h2>
           <div className="secondary">
@@ -302,6 +307,7 @@ export function QueuePanel({
           </button>
         </div>
       </header>
+      {mix && <ActiveMixLine mix={mix} className="queue-mix" />}
       <div
         className={`queue-list ${dragging ? "is-dragging" : ""}`}
         ref={list}

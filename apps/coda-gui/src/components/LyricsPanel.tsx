@@ -117,7 +117,9 @@ function LyricsText({ lyrics, canSeek }: { lyrics: Lyrics; canSeek: boolean }) {
     if (lyrics.timed && isFollowing(pausedUntil.current, performance.now())) follow(true);
   }, [current, lyrics, follow]);
 
-  // The list was resized (window, queue panel): keep the line in place.
+  // The list or its text was resized (window; the queue panel moving the
+  // text over, which rewraps it without resizing the list): keep the line
+  // in place.
   useEffect(() => {
     const element = scroller.current;
     if (!element || !lyrics.timed || typeof ResizeObserver === "undefined") return;
@@ -125,6 +127,8 @@ function LyricsText({ lyrics, canSeek }: { lyrics: Lyrics; canSeek: boolean }) {
       if (isFollowing(pausedUntil.current, performance.now())) follow(false);
     });
     observer.observe(element);
+    const lines = element.querySelector(".lyrics-lines");
+    if (lines) observer.observe(lines);
     return () => observer.disconnect();
   }, [lyrics, follow]);
 

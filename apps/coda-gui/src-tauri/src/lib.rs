@@ -4,7 +4,8 @@
 //! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
 //! [`settings`] writes Coda's config and applies it live; [`media`] is
 //! the OS media controls; [`theme`] the colour themes (applied before
-//! the window's first paint by an initialization script).
+//! the window's first paint by an initialization script). [`mixes`] is
+//! the saved mixes' commands and the mix editor's searches.
 
 pub mod bootstrap;
 pub mod browse;
@@ -12,13 +13,17 @@ pub mod commands;
 pub mod cover;
 pub mod dto;
 pub mod engine;
+pub mod frame;
 pub mod history;
 pub mod lyrics;
 pub mod lyrics_index;
 pub mod media;
+pub mod mixes;
 pub mod playlists;
 pub mod settings;
 pub mod theme;
+#[cfg(target_os = "macos")]
+mod titlebar;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -192,7 +197,6 @@ pub fn run() {
     );
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol(
             cover::SCHEME,
@@ -207,6 +211,8 @@ pub fn run() {
             // The main window is created here (not from the config) so the
             // chosen theme's colours are set before its first paint.
             app.manage(theme::Appearance::from_process());
+            app.manage(frame::FramePath(paths.window.clone()));
+            app.manage(frame::Tracker::default());
             let lyrics_on = app
                 .state::<theme::Appearance>()
                 .state
@@ -227,10 +233,28 @@ pub fn run() {
             // so nothing light flashes before the first paint: the dark one
             // at creation, the light one at once if the window is light.
             let bg = |c: theme::color::Rgba| tauri::window::Color(c.r, c.g, c.b, 255);
-            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                .initialization_script(startup.script)
-                .background_color(bg(startup.dark_bg))
-                .build()?;
+            let mut builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                    .initialization_script(startup.script)
+                    .background_color(bg(startup.dark_bg));
+            #[cfg(target_os = "macos")]
+            {
+                builder = titlebar::style(builder);
+            }
+            // The last windowed frame, set before the window first shows.
+            let saved = frame::saved(app.handle());
+            if let Some((saved, on_screen)) = saved {
+                builder = builder.inner_size(saved.width, saved.height);
+                if on_screen {
+                    builder = builder.position(saved.x, saved.y);
+                }
+            }
+            let window = builder.build()?;
+            if saved.is_some_and(|(saved, _)| saved.maximized) {
+                let _ = window.maximize();
+            }
+            #[cfg(target_os = "linux")]
+            frame::watch(&window);
             if startup.light_bg != startup.dark_bg
                 && matches!(window.theme(), Ok(tauri::Theme::Light))
             {
@@ -255,13 +279,20 @@ pub fn run() {
             ));
             app.manage(engine);
             app.manage(browse);
+            app.manage(mixes::MixesFile(paths.mixes.clone()));
             app.manage(settings::SettingsLock::default());
             app.manage(playlists::PlaylistEditor::default());
             app.manage(Quit::default());
             watch_signals(app.handle().clone());
             Ok(())
         })
-        .on_window_event(report_minimized)
+        .on_window_event(|window, event| {
+            report_minimized(window, event);
+            frame::track(window, event);
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                frame::save(window);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::intent,
             commands::snapshot,
@@ -321,13 +352,23 @@ pub fn run() {
             theme::commands::ui_source_set,
             history::commands::home_history,
             history::commands::home_daily_picks,
-            lyrics::now_playing_lyrics
+            lyrics::now_playing_lyrics,
+            mixes::list_mixes,
+            mixes::add_mix,
+            mixes::update_mix,
+            mixes::add_to_mix,
+            mixes::delete_mix,
+            mixes::mix_search_genres,
+            mixes::mix_search_artists,
+            mixes::mix_search_albums,
+            frame::commands::window_is_fullscreen
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");
 
     app.run(|app, event| match event {
         RunEvent::ExitRequested { api, .. } => {
+            frame::save(app);
             if !app.state::<Quit>().done.load(Ordering::SeqCst) {
                 api.prevent_exit();
                 begin_quit(app);
@@ -337,6 +378,9 @@ pub fn run() {
         // here, blocking the event loop, so mpv never outlives the app. The
         // engine runs on the async runtime's threads, not this one.
         RunEvent::Exit => {
+            // macOS Cmd+Q and the Dock's Quit (`terminate:`) arrive only
+            // here, never as `ExitRequested`.
+            frame::save(app);
             media::Media::stop();
             let quit = app.state::<Quit>();
             if !quit.done.load(Ordering::SeqCst) {

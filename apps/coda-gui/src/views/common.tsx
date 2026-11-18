@@ -4,6 +4,7 @@
 import type { ReactNode } from "react";
 import { BackIcon, PlayIcon, ShuffleIcon } from "../components/icons";
 import { formatTime } from "../lib/format";
+import { dragRegion } from "../lib/platform";
 import { nav, useNav } from "../state/nav";
 import { useAppState } from "../state/store";
 
@@ -40,7 +41,7 @@ export function ViewHeader({
 }) {
   const stack = useNav();
   return (
-    <header className="view-header browse-header">
+    <header className="view-header browse-header" {...dragRegion}>
       <div className="browse-header-main">
         {stack.length > 1 && (
           <button

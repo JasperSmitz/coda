@@ -202,6 +202,21 @@ pub struct Engine {
     /// Navidrome entries queued before the last server change: from
     /// another server, so their albums are not counted for this one.
     other_server_entries: HashSet<QueueEntryId>,
+    // Mixes (see [`mix`]).
+    /// The mix that plays (started, or adopted from the session).
+    mix: Option<mix::MixState>,
+    /// A Navidrome mix still loading; it replaces `mix` once it starts.
+    pending_mix: Option<mix::MixState>,
+    /// The last tag handed to a mix (its fetches carry it).
+    mix_tags: u64,
+    /// A saved mix to read for `playMix`, for the loop.
+    mix_load: Option<mix::MixLoad>,
+    /// Bumped by every mix request, so an older read does not start.
+    mix_request: u64,
+    /// The mixes' fetches to spawn (with their mix's tag), for the loop.
+    mix_fetch_queue: Vec<(u64, coda_core::mix::navidrome::Fetch)>,
+    /// The mixes file (`playMix` reads it).
+    mixes_path: Option<PathBuf>,
 }
 
 impl Engine {
@@ -252,6 +267,13 @@ impl Engine {
             played_from: None,
             server: None,
             other_server_entries: HashSet::new(),
+            mix: None,
+            pending_mix: None,
+            mix_tags: 0,
+            mix_load: None,
+            mix_request: 0,
+            mix_fetch_queue: Vec::new(),
+            mixes_path: None,
         }
     }
 
@@ -301,6 +323,7 @@ impl Engine {
         self.scrobbling
             .set_enabled(sources.scrobble && self.client.is_some());
         if let Some(dir) = sources.music_dir {
+            // Not ready yet: no mix to check.
             self.replace_library(Some(dir), now);
             self.scan = ScanState::Scanning;
         }
@@ -371,6 +394,15 @@ impl Engine {
             _ if self.phase != Phase::Ready => return Vec::new(),
             _ => {}
         }
+        if matches!(
+            intent,
+            Intent::PlayTracks { .. } | Intent::PlayLocal { .. } | Intent::ShuffleLibrary
+        ) {
+            // A play request: the mix loading or being read does not start,
+            // even if this request then finds nothing to play.
+            self.supersede_mix_requests(now);
+        }
+        let context = self.player.queue_context();
         let commands = match intent {
             Intent::TogglePause => self.player.toggle_pause(),
             Intent::Next => self.player.play_next(),
@@ -433,9 +465,25 @@ impl Engine {
                 }
                 commands
             }
+            Intent::PlayMix { id } => {
+                self.play_saved_mix(&id, now);
+                Vec::new()
+            }
+            Intent::PlayQuickMix { mix } => {
+                let mut commands = self.play_quick_mix(mix, now);
+                commands.extend(self.check_mix(now));
+                commands.extend(self.sync_visualizer());
+                return commands;
+            }
             Intent::SetVisualizerVisible { .. } | Intent::DismissNotice { .. } => Vec::new(),
         };
         let mut commands = self.dispatch(commands, now);
+        if self.player.queue_context() != context {
+            // Something else replaced or cleared the queue: a mix loading
+            // or being read does not start.
+            self.supersede_mix_requests(now);
+        }
+        commands.extend(self.check_mix(now));
         commands.extend(self.sync_visualizer());
         commands
     }
@@ -660,7 +708,9 @@ impl Engine {
             self.scrobbling.progressed(&self.player, position);
             self.heard_progressed(position, now);
         }
-        self.dispatch(commands, now)
+        let mut commands = self.dispatch(commands, now);
+        commands.extend(self.check_mix(now));
+        commands
     }
 
     /// Resolves the player's commands (and re-syncs the gapless next) and
@@ -753,14 +803,16 @@ impl Engine {
         self.dirty = true;
     }
 
-    /// Expires notices.
-    pub fn tick(&mut self, now: Instant) {
-        self.apply_library_ops(now);
+    /// Applies library changes that waited for a browse read (and checks
+    /// the mix against them), and expires notices.
+    pub fn tick(&mut self, now: Instant) -> Vec<PlaybackCommand> {
+        let commands = self.apply_library_ops(now);
         let before = self.notices.len();
         self.notices.retain(|n| n.expires_at > now);
         if self.notices.len() != before {
             self.dirty = true;
         }
+        commands
     }
 
     // ----- session saving ----------------------------------------------
@@ -814,7 +866,10 @@ impl Engine {
     fn save_snapshot(&mut self) -> Session {
         self.saved_revision = Some(self.player.revision());
         // The GUI's visualizer follows its views; nothing to restore.
-        Session::from_player(&self.player)
+        Session {
+            mix: self.session_mix(),
+            ..Session::from_player(&self.player)
+        }
     }
 
     pub fn set_shutting_down(&mut self) {
@@ -937,6 +992,7 @@ impl Engine {
                 server: self.browse.client_generation(),
             },
             history_revision: self.history.revision(),
+            mix: self.mix_dto(),
         }
     }
 
@@ -1033,6 +1089,14 @@ async fn next_scan(scan: &mut Option<mpsc::Receiver<ScanEvent>>) -> Option<ScanE
 async fn next_playback(playback: &mut Option<PlaybackHandle>) -> Option<PlaybackEvent> {
     match playback {
         Some(handle) => handle.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sleeps until `at` (forever without one).
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
         None => std::future::pending().await,
     }
 }
@@ -1142,9 +1206,62 @@ struct Io<S> {
     scrobble_failure: Option<oneshot::Receiver<navidrome::Error>>,
     saver: Saver,
     history: history::HistorySaver,
+    /// A mix's fetch results (see [`mix`]).
+    mix_tx: mpsc::UnboundedSender<MixFetched>,
+    mix_rx: mpsc::UnboundedReceiver<MixFetched>,
+    /// Saved mixes read for `playMix`.
+    loaded_tx: mpsc::UnboundedSender<LoadedMix>,
+    loaded_rx: mpsc::UnboundedReceiver<LoadedMix>,
+}
+
+/// A fetch result with the tag of the mix it is for.
+type MixFetched = (u64, Fetched);
+
+/// Starts what the active mix needs: a saved mix's read (blocking thread)
+/// and its fetches (`Fetch::spawn` with the current client and the shared
+/// fetch limit; never under a permit). Results come back through
+/// `fetched` and `loaded`, which the loop selects on.
+fn drive_mixes(
+    engine: &mut Engine,
+    fetched: &mpsc::UnboundedSender<MixFetched>,
+    loaded: &mpsc::UnboundedSender<LoadedMix>,
+    now: Instant,
+) {
+    if let Some(load) = engine.take_mix_load() {
+        let tx = loaded.clone();
+        tokio::task::spawn_blocking(move || {
+            let read = mix::read_saved_mix(&load.path, &load.id);
+            let _ = tx.send(LoadedMix {
+                serial: load.serial,
+                context: load.context,
+                read,
+            });
+        });
+    }
+    let fetches = engine.take_mix_fetches();
+    if fetches.is_empty() {
+        return;
+    }
+    let Some(client) = engine.client().cloned() else {
+        engine.mix_fetches_unsent(now);
+        return;
+    };
+    let limit = engine.browse().fetch_limit();
+    for (tag, fetch) in fetches {
+        let tx = fetched.clone();
+        // Detached: dropping the coordinator stops it, and it always
+        // answers once.
+        drop(fetch.spawn(client.clone(), limit.clone(), move |result| {
+            let _ = tx.send((tag, result));
+        }));
+    }
 }
 
 impl<S: Sink> Io<S> {
+    fn drive_mixes(&mut self, engine: &mut Engine, now: Instant) {
+        drive_mixes(engine, &self.mix_tx, &self.loaded_tx, now);
+    }
+
     fn send(&self, commands: Vec<PlaybackCommand>) {
         if commands.is_empty() {
             return;
@@ -1188,6 +1305,8 @@ where
     F: Future<Output = Startup> + Send + 'static,
 {
     let mut startup = Some(tokio::spawn(startup));
+    let (mix_tx, mix_rx) = mpsc::unbounded_channel();
+    let (loaded_tx, loaded_rx) = mpsc::unbounded_channel();
     let mut io = Io {
         sink,
         playback: None,
@@ -1200,12 +1319,17 @@ where
             in_flight: None,
         },
         history: history::HistorySaver::new(),
+        mix_tx,
+        mix_rx,
+        loaded_tx,
+        loaded_rx,
     };
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     io.flush(&mut engine, Instant::now());
 
     let reply = loop {
+        let retry = engine.mix_retry_at();
         tokio::select! {
             started = startup_done(&mut startup) => {
                 startup = None;
@@ -1270,10 +1394,14 @@ where
                 }
             },
             event = next_scan(&mut io.scan) => match event {
-                Some(event) => engine.handle_scan_event(event, Instant::now()),
+                Some(event) => {
+                    let commands = engine.handle_scan_event(event, Instant::now());
+                    io.send(commands);
+                }
                 None => {
                     io.scan = None;
-                    engine.scan_closed(Instant::now());
+                    let commands = engine.scan_closed(Instant::now());
+                    io.send(commands);
                 }
             },
             result = next_once(&mut io.ping) => {
@@ -1288,13 +1416,27 @@ where
                     engine.handle_scrobble_failure(error, Instant::now());
                 }
             }
+            Some((tag, fetched)) = io.mix_rx.recv() => {
+                let commands = engine.mix_fetched(tag, fetched, Instant::now());
+                io.send(commands);
+            }
+            Some(loaded) = io.loaded_rx.recv() => {
+                let commands = engine.mix_loaded(loaded, Instant::now());
+                io.send(commands);
+            }
+            _ = sleep_until(retry), if retry.is_some() => {
+                let commands = engine.mix_retry(Instant::now());
+                io.send(commands);
+            }
             _ = tick.tick() => {
                 let now = Instant::now();
-                engine.tick(now);
+                let commands = engine.tick(now);
+                io.send(commands);
                 io.saver.poll(&mut engine, now);
                 io.history.poll(&mut engine, now);
             }
         }
+        io.drive_mixes(&mut engine, Instant::now());
         // Visualizer frames go out at once; the rest is coalesced by the
         // snapshot comparison (and `progress` by its interval).
         io.flush(&mut engine, Instant::now());
@@ -1347,6 +1489,7 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
         playback,
         restored,
         history,
+        mixes,
     } = started;
     let (handle, problem) = match playback {
         Ok(handle) => (Some(handle), None),
@@ -1358,6 +1501,12 @@ fn apply_startup<S: Sink>(engine: &mut Engine, io: &mut Io<S>, started: Startup,
     io.playback = handle;
     let commands = engine.start(sources, problem, restored, now);
     io.send(commands);
+    engine.set_mixes_path(mixes.path);
+    engine.restore_mix(mixes.restored, now);
+    // The mixes file was rejected while reading the session's mix.
+    if let Some(notice) = mixes.notice {
+        engine.notify(notice, now);
+    }
     if let Some(dir) = engine.music_dir() {
         io.scan = Some(scan::spawn_scan(dir, library_scan_options()));
     }
@@ -1381,8 +1530,13 @@ use settings::{ClientChange, apply_settings_io};
 mod context;
 mod history;
 mod library;
+mod mix;
+use coda_core::mix::navidrome::Fetched;
 pub use history::HistoryMsg;
 use library::library_scan_options;
+pub(crate) use mix::{LoadedMix, ReadMix, read_saved_mix};
 
+#[cfg(test)]
+mod mix_tests;
 #[cfg(test)]
 mod tests;

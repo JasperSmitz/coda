@@ -5,6 +5,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
+import { dragRegion } from "../lib/platform";
 import { errorText, settingsApi } from "../lib/ipc";
 import type { ServerInput, Settings } from "../lib/types";
 
@@ -51,6 +52,8 @@ export function Onboarding() {
 
   return (
     <main className="onboarding">
+      {/* macOS: drags the window, clear of its buttons' row. */}
+      <div className="onboarding-titlebar" {...dragRegion} />
       <form className="onboarding-card" onSubmit={finish}>
         <h1>Welcome to Coda</h1>
         <p className="secondary">

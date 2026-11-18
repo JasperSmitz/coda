@@ -2,21 +2,25 @@
 // while open (App hides the sidebar, browse area, queue column and bar).
 // Large cover over a blurred, darkened copy of it, title/artist/album, one
 // timeline with repeat beside it, one transport row with volume,
-// visualizer bars and an "Up next" card. The queue opens as a side panel
-// (`q` or the queue button) over the backdrop. Lyrics mode (`l` or the
-// lyrics button) stacks the player into a column on the left and shows
-// the lyrics in the middle (DESIGN.md). Visualizer readings are
+// visualizer bars and an "Up next" card (hidden, slot kept, while the
+// queue is open). The queue opens as a side panel (`q` or the queue
+// button) over the backdrop. Lyrics mode (`l` or the lyrics button)
+// stacks the player into a column on the left and shows the lyrics in the
+// middle (DESIGN.md). Visualizer readings are
 // asked for only while this view is shown and the window is not hidden or
 // minimised.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Cover } from "../components/Cover";
 import { LyricsPanel } from "../components/LyricsPanel";
+import { ActiveMixLine } from "../components/MixParts";
 import { ArtistAlbumLine } from "../components/NameLink";
 import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBar";
 import { Visualizer } from "../components/Visualizer";
 import {
   CloseIcon,
+  ExitFullscreenIcon,
+  FullscreenIcon,
   LyricsIcon,
   NextIcon,
   PauseIcon,
@@ -26,6 +30,7 @@ import {
 } from "../components/icons";
 import { useLyrics } from "../hooks/useLyrics";
 import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
+import { dragRegion } from "../lib/platform";
 import type { QueueItem, Snapshot } from "../lib/types";
 
 interface Props {
@@ -40,6 +45,9 @@ interface Props {
   onToggleLyrics: () => void;
   /** The `QueuePanel` to show in the side panel. */
   queuePanel: ReactNode;
+  /** The window is full screen; the toolbar button enters or leaves it. */
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
 }
 
 // Visualizer requests go out one at a time, each carrying the latest
@@ -95,6 +103,8 @@ export function NowPlayingView({
   lyricsMode,
   onToggleLyrics,
   queuePanel,
+  fullscreen,
+  onToggleFullscreen,
 }: Props) {
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
@@ -178,6 +188,7 @@ export function NowPlayingView({
               className="now-playing-cover"
             />
             <div className="now-playing-info">
+              {snapshot.mix && <ActiveMixLine mix={snapshot.mix} className="now-playing-mix" />}
               <h1 className="now-playing-title" title={playing.title}>
                 {playing.title}
               </h1>
@@ -227,11 +238,14 @@ export function NowPlayingView({
                 <VolumeControl volume={snapshot.volume} disabled={unavailable} />
               </div>
               {snapshot.visualizerAvailable && <Visualizer active={status === "playing"} />}
-              {!queueOpen && <UpNext item={upNext} onOpen={onToggleQueue} />}
+              <UpNext item={upNext} onOpen={onToggleQueue} hidden={queueOpen} />
             </div>
           </div>
         ) : (
-          <p className="now-playing-nothing secondary">Nothing playing</p>
+          <div className="now-playing-nothing">
+            {snapshot.mix && <ActiveMixLine mix={snapshot.mix} className="now-playing-mix" />}
+            <p className="secondary">Nothing playing</p>
+          </div>
         )}
         {lyricsShown && (
           <div className={`now-playing-lyrics ${switchClass}`}>
@@ -244,6 +258,8 @@ export function NowPlayingView({
           {queuePanel}
         </div>
       )}
+      {/* macOS: the window buttons' row drags the window. */}
+      <div className="now-playing-titlebar" {...dragRegion} />
       <div className="now-playing-toolbar">
         <button
           className={`icon-button ${lyricsMode ? "is-active" : ""}`}
@@ -265,6 +281,14 @@ export function NowPlayingView({
         </button>
         <button
           className="icon-button"
+          onClick={onToggleFullscreen}
+          aria-label={fullscreen ? "Exit full screen" : "Full screen"}
+          title={fullscreen ? "Exit full screen" : "Full screen"}
+        >
+          {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
+        </button>
+        <button
+          className="icon-button"
           onClick={onClose}
           aria-label="Close Now Playing"
           title="Close (Esc or f)"
@@ -276,11 +300,25 @@ export function NowPlayingView({
   );
 }
 
-/** The next track as a small card; clicking it opens the queue panel. */
-function UpNext({ item, onOpen }: { item: QueueItem | undefined; onOpen: () => void }) {
+/**
+ * The next track as a small card; clicking it opens the queue panel.
+ * `hidden` (the panel is open) keeps its slot, so the centred column does
+ * not move, but takes it out of sight, the tab order and the
+ * accessibility tree.
+ */
+function UpNext({
+  item,
+  onOpen,
+  hidden,
+}: {
+  item: QueueItem | undefined;
+  onOpen: () => void;
+  hidden: boolean;
+}) {
+  const hiddenClass = hidden ? "is-hidden" : "";
   if (!item) {
     return (
-      <div className="now-playing-next">
+      <div className={`now-playing-next ${hiddenClass}`} inert={hidden}>
         <span className="eyebrow">End of queue</span>
       </div>
     );
@@ -288,7 +326,8 @@ function UpNext({ item, onOpen }: { item: QueueItem | undefined; onOpen: () => v
   const { track } = item;
   return (
     <button
-      className="now-playing-next is-card"
+      className={`now-playing-next is-card ${hiddenClass}`}
+      inert={hidden}
       onClick={onOpen}
       title="Show the queue (q)"
       aria-label={`Up next: ${[track.title, track.artist].filter(Boolean).join(" — ")}. Show the queue`}

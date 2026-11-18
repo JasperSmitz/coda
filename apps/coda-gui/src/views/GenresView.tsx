@@ -3,18 +3,24 @@
 // by the engine). Navidrome: Shuffle only, random songs of the genre (as
 // Shuffle all does); its albums are paged like the Albums view, in the
 // server's order. `s` shuffles the genre on its page, and everything on
-// the list.
+// the list. A row's menu (right-click or the context-menu key) and the
+// page's header offer "Add to mix…".
 
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
+import { ContextMenu, type MenuState } from "../components/ContextMenu";
+import { AddToMixButton } from "../components/MixParts";
 import { Empty, ErrorState, SkeletonGrid, SkeletonRows } from "../components/LoadState";
 import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
 import { useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { addToMixFlow } from "../lib/mixes";
+import { genreIngredient } from "../lib/mixRecipe";
 import { playFrom, playLocal, playTracks, shuffleAll, useShuffleContext } from "../lib/play";
 import type { Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useAppState } from "../state/store";
 import { showUiNotice } from "../state/uiNotices";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
@@ -47,6 +53,10 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
   const found = selectedId !== null ? genres.findIndex((g) => g.id === selectedId) : -1;
   const selected = found >= 0 ? found : null;
   useShuffleContext(() => shuffleAll(source));
+  const [menu, setMenu] = useState<(MenuState & { genre: Genre }) | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (genres.length === 0) return;
@@ -54,7 +64,9 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
     const row = document.getElementById(`${idPrefix}-0`)?.offsetHeight || 1;
     const page = Math.max(1, Math.floor(height / row) - 1);
     let to: number | null = null;
-    switch (e.key) {
+    // Shift+F10 opens the row's menu like the context-menu key.
+    const key = e.shiftKey && e.key === "F10" ? "ContextMenu" : e.key;
+    switch (key) {
       case "ArrowDown":
         to = at + 1;
         break;
@@ -75,6 +87,13 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
         break;
       case "Enter":
         if (selected !== null) openGenre(source, genres[selected], genres[selected]);
+        break;
+      case "ContextMenu":
+        if (selected !== null) {
+          const row = document.getElementById(`${idPrefix}-${selected}`)?.getBoundingClientRect();
+          const genre = genres[selected];
+          setMenu({ x: (row?.left ?? 0) + 40, y: row?.bottom ?? 0, key: genre.id, genre });
+        }
         break;
       default:
         return;
@@ -113,6 +132,7 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
         {genres.length > 0 && (
           <div
             className="genre-list"
+            ref={list}
             role="listbox"
             aria-label="Genres"
             tabIndex={0}
@@ -130,6 +150,11 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
                   setSelectedId(genre.id);
                   openGenre(source, genre, genre);
                 }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSelectedId(genre.id);
+                  setMenu({ x: e.clientX, y: e.clientY, key: genre.id, genre });
+                }}
               >
                 <span className="genre-name" title={genre.name}>
                   {genre.name}
@@ -140,6 +165,23 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
           </div>
         )}
       </div>
+      {menu && (
+        <ContextMenu
+          state={menu}
+          onClose={() => {
+            setMenu(null);
+            list.current?.focus();
+          }}
+          items={[
+            { label: "Open", action: () => openGenre(source, menu.genre, menu.genre) },
+            {
+              label: "Add to mix…",
+              disabled: !started,
+              action: () => void addToMixFlow(source, genreIngredient(source, menu.genre)),
+            },
+          ]}
+        />
+      )}
     </section>
   );
 }
@@ -173,11 +215,14 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
         eyebrow={`${SOURCE_LABEL.local} · Genre`}
         title={title}
         actions={
-          <PlayButtons
-            onPlay={() => play(false)}
-            onShuffle={() => play(true)}
-            disabled={albums.length === 0}
-          />
+          <>
+            <PlayButtons
+              onPlay={() => play(false)}
+              onShuffle={() => play(true)}
+              disabled={albums.length === 0}
+            />
+            <AddToMixButton source="local" ingredient={genreIngredient("local", { id, name: title })} />
+          </>
         }
       >
         <div className="secondary">{counts(genre)}</div>
@@ -220,7 +265,13 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
       <ViewHeader
         eyebrow={`${SOURCE_LABEL.navidrome} · Genre`}
         title={title}
-        actions={<PlayButtons onShuffle={shuffle} disabled={empty} />}
+        actions={
+          <>
+            <PlayButtons onShuffle={shuffle} disabled={empty} />
+            {/* The route's id is the server's exact value. */}
+            <AddToMixButton source="navidrome" ingredient={genreIngredient("navidrome", { id, name })} />
+          </>
+        }
       >
         <div className="secondary">
           {hint

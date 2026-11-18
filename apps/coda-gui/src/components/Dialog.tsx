@@ -267,5 +267,9 @@ export function DialogHost() {
       return <PromptDialog key={id} spec={dialog.spec} onAnswer={(v) => answer(id, v)} />;
     case "pickPlaylist":
       return <PlaylistPicker key={id} title={dialog.title} onAnswer={(c) => answer(id, c)} />;
+    case "pickMix":
+    case "mixEditor":
+      // Drawn by `MixDialogHost` (components/MixDialogs.tsx).
+      return null;
   }
 }

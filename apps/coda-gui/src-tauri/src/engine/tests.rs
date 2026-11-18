@@ -829,6 +829,12 @@ async fn the_loop_starts_degraded_and_answers_without_mpv() {
                     notice: None,
                 },
                 history: Default::default(),
+                // The mixes file was rejected while reading the session's
+                // mix: told at startup.
+                mixes: crate::bootstrap::Mixes {
+                    notice: Some("Could not read the mixes file: bad; kept as x".into()),
+                    ..Default::default()
+                },
             }
         }
     };
@@ -845,6 +851,14 @@ async fn the_loop_starts_degraded_and_answers_without_mpv() {
         snapshot = handle.snapshot().await.unwrap();
     }
     assert_eq!(snapshot.problems[0].kind, ProblemKind::MpvMissing);
+    assert!(
+        snapshot
+            .notices
+            .iter()
+            .any(|n| n.text == "Could not read the mixes file: bad; kept as x"),
+        "{:?}",
+        snapshot.notices
+    );
     handle.intent(Intent::CycleRepeat).await.unwrap();
     handle.shutdown().await;
     task.await.unwrap();
@@ -886,6 +900,7 @@ async fn shutdown_saves_and_leaves_no_mpv_process() {
                 playback: Ok(playback),
                 restored,
                 history: Default::default(),
+                mixes: Default::default(),
             }
         },
     ));
@@ -2274,6 +2289,7 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
                     history: Default::default(),
                     path: Some(history_path),
                 },
+                mixes: Default::default(),
             }
         }
     };

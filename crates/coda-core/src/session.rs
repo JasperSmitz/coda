@@ -14,17 +14,16 @@
 //!
 //! Blocking I/O: call [`save`] off the UI loop (`spawn_blocking`).
 
-use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::de::{Deserializer, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
+use crate::fsio::{quarantine, read_bounded, write_atomic};
+use crate::mix::{SessionMix, session_mix_from_value, session_mix_to_value};
 use crate::model::{MAX_METADATA_CHARS, Track, TrackMetadata, TrackSource};
 use crate::player::{DEFAULT_VOLUME, MAX_VOLUME, Player, RepeatMode};
 
@@ -47,6 +46,8 @@ pub struct Session {
     pub tracks: Vec<Track>,
     /// The visualizer is shown (off by default).
     pub visualizer: bool,
+    /// The mix that owns the queue, if any (the frontend fills it in).
+    pub mix: Option<SessionMix>,
 }
 
 impl Default for Session {
@@ -57,13 +58,14 @@ impl Default for Session {
             current: None,
             tracks: Vec::new(),
             visualizer: false,
+            mix: None,
         }
     }
 }
 
 impl Session {
     /// A snapshot of what `player` would restore to, with the visualizer
-    /// off (the application sets it).
+    /// off and no mix (the application sets them).
     pub fn from_player(player: &Player) -> Self {
         let queue = player.queue();
         Self {
@@ -72,6 +74,7 @@ impl Session {
             current: queue.current().and_then(|id| queue.position(id)),
             tracks: queue.entries().iter().map(|e| e.track.clone()).collect(),
             visualizer: false,
+            mix: None,
         }
     }
 }
@@ -159,6 +162,10 @@ struct FileV1Out {
     /// and without it are both version 1.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     visualizer: bool,
+    /// The active mix ([`SessionMix`]). Added after version 1 shipped,
+    /// like `visualizer`: written only when a mix is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mix: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +176,10 @@ struct FileV1In {
     queue: CappedQueue,
     #[serde(default, deserialize_with = "lenient_bool")]
     visualizer: bool,
+    /// Read leniently: an unusable mix is dropped (the queue then plays
+    /// as a plain queue), never the session.
+    #[serde(default)]
+    mix: Option<serde_json::Value>,
 }
 
 /// A display preference: anything but `true` is off, rather than making
@@ -417,6 +428,7 @@ fn encode(session: &Session) -> serde_json::Result<Vec<u8>> {
         current,
         queue,
         visualizer: session.visualizer,
+        mix: session.mix.as_ref().map(session_mix_to_value),
     })
 }
 
@@ -446,6 +458,13 @@ fn decode(bytes: &[u8]) -> Result<(Session, usize), String> {
         current,
         tracks,
         visualizer: file.visualizer,
+        mix: file.mix.and_then(|value| {
+            let mix = session_mix_from_value(value);
+            if mix.is_none() {
+                tracing::warn!("saved active mix unusable; the queue plays as a plain queue");
+            }
+            mix
+        }),
     };
     let skipped = total - session.tracks.len();
     Ok((session, skipped))
@@ -471,7 +490,7 @@ fn describe(error: serde_json::Error) -> String {
 /// `<path>.bad.<unix-seconds>[.n]`, logged, and an empty session is
 /// returned. Never panics on hostile content.
 pub fn load(path: &Path) -> (Session, LoadOutcome) {
-    let bytes = match read_bounded(path) {
+    let bytes = match read_bounded(path, MAX_FILE_BYTES) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return (Session::default(), LoadOutcome::Missing),
         Err(reason) => return (Session::default(), reject(path, reason)),
@@ -497,73 +516,8 @@ pub fn load(path: &Path) -> (Session, LoadOutcome) {
 /// importing another program's session (the desktop app copies the
 /// TUI's).
 pub fn read_valid(path: &Path) -> Option<Vec<u8>> {
-    let bytes = read_bounded(path).ok()??;
+    let bytes = read_bounded(path, MAX_FILE_BYTES).ok()??;
     decode(&bytes).ok().map(|_| bytes)
-}
-
-/// `Ok(None)` if there is no file. Opened non-blocking (so a FIFO cannot
-/// hang startup) and checked on the open handle, so the type cannot change
-/// between the check and the read.
-fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("cannot open: {}", error.kind())),
-    };
-    let metadata = file
-        .metadata()
-        .map_err(|e| format!("cannot inspect: {}", e.kind()))?;
-    if !metadata.is_file() {
-        return Err("not a regular file".into());
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err("too large".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read: {}", e.kind()))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("too large".into());
-    }
-    Ok(Some(bytes))
-}
-
-/// `<path>.bad.<secs>`, or with a `.<n>` suffix for the `n`th retry.
-fn bad_path(path: &Path, secs: u64, n: u32) -> PathBuf {
-    let mut bad = OsString::from(path.as_os_str());
-    bad.push(format!(".bad.{secs}"));
-    if n > 0 {
-        bad.push(format!(".{n}"));
-    }
-    PathBuf::from(bad)
-}
-
-/// Renames `path` to the first unused `bad_path`. Never replaces an
-/// existing file.
-fn quarantine(path: &Path) -> io::Result<PathBuf> {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    for n in 0..1000 {
-        let candidate = bad_path(path, secs, n);
-        match fs::symlink_metadata(&candidate) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::rename(path, &candidate)?;
-                return Ok(candidate);
-            }
-            Err(error) => return Err(error),
-            Ok(_) => continue,
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no free name to keep the file",
-    ))
 }
 
 fn reject(path: &Path, reason: String) -> LoadOutcome {
@@ -586,30 +540,15 @@ fn reject(path: &Path, reason: String) -> LoadOutcome {
 /// same directory is written, `fsync`ed and renamed over `path`, so a
 /// crash leaves either the old or the new file. Blocking.
 pub fn save(path: &Path, session: &Session) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    fs::create_dir_all(dir)?;
     let json = encode(session).map_err(io::Error::other)?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".state.json.")
-        .suffix(".tmp")
-        .permissions(Permissions::from_mode(0o600))
-        .tempfile_in(dir)?;
-    temp.write_all(&json)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|e| e.error)?;
-    // Make the rename itself durable; failure only weakens durability.
-    if let Ok(dir) = File::open(dir) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    write_atomic(path, &json)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn read_valid_never_changes_the_file() {
@@ -668,6 +607,7 @@ mod tests {
                 local("/music/c.mp3", "C"),
             ],
             visualizer: true,
+            mix: None,
         }
     }
 
@@ -807,6 +747,59 @@ mod tests {
         let (session, _) = decode(edited.as_bytes()).unwrap();
         assert_eq!(session.tracks[0].genres, ["AC/DC"]);
         assert_eq!(session.tracks[1].genres.len(), crate::model::MAX_GENRES);
+    }
+
+    #[test]
+    fn the_active_mix_is_optional_within_version_1_and_read_leniently() {
+        use crate::mix::{Ingredient, Mix, MixId, MixSource};
+        // Without a mix (an older file, or none active): left out.
+        let json = String::from_utf8(encode(&sample()).unwrap()).unwrap();
+        assert!(!json.contains("\"mix\""), "{json}");
+        // A saved mix by id, a quick mix by recipe: both round-trip.
+        let saved = Session {
+            mix: Some(SessionMix::Saved(MixId::parse("0123abcd0123abcd").unwrap())),
+            ..sample()
+        };
+        let json = encode(&saved).unwrap();
+        assert!(String::from_utf8_lossy(&json).contains(r#""version":1"#));
+        assert_eq!(decode(&json).unwrap().0, saved);
+        let quick = Mix::new(
+            "Quick mix",
+            MixSource::Navidrome {
+                server: "00c36aa1074c465c".into(),
+            },
+            vec![
+                Ingredient::Genre {
+                    name: "Prog Rock".into(),
+                },
+                Ingredient::Album {
+                    artist: "Yes".into(),
+                    name: "Fragile".into(),
+                    id: Some("al-1".into()),
+                },
+            ],
+        )
+        .unwrap();
+        let quick = Session {
+            mix: Some(SessionMix::Quick(quick)),
+            ..sample()
+        };
+        assert_eq!(decode(&encode(&quick).unwrap()).unwrap().0, quick);
+        // An unusable mix is dropped; the queue is kept.
+        for value in [
+            r#""x""#,
+            r#"{"saved":"bad id!"}"#,
+            r#"{"saved":"a","quick":{}}"#,
+            r#"{"quick":{"id":"a","name":" ","source":{"kind":"local"},"ingredients":[{"kind":"genre","name":"Rock"}]}}"#,
+            r#"{"other":1}"#,
+        ] {
+            let text = format!(
+                r#"{{"version":1,"volume":50,"repeat":"off","current":0,"queue":[{{"source":{{"local":"/m/a.flac"}}}}],"mix":{value}}}"#
+            );
+            let (session, _) = decode(text.as_bytes()).unwrap();
+            assert_eq!(session.mix, None, "{value}");
+            assert_eq!(session.tracks.len(), 1, "{value}");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Local browse navigation: a stack of views rooted at a static Home
-//! (Shuffle all, Playlists, Folders, Artists, Albums, Genres), over a
-//! [`Library`]. Plain
+//! (Shuffle all, Playlists, Folders, Artists, Albums, Genres, Mixes), over
+//! a [`Library`] and the local saved mixes the frontend hands over
+//! ([`LocalBrowser::set_mixes`]). Plain
 //! synchronous state with no I/O and no terminal types; separate from the
 //! Navidrome browser, whose views are fetched.
 //!
@@ -13,6 +14,7 @@
 use super::tags::{Album, AlbumId, AlbumOrder, Artist, ArtistId, Genre, GenreId};
 use super::tree::{DirNode, TrackId};
 use super::{Library, LocalPlaylist, PlaylistId};
+use crate::mix::{Ingredient, Mix, MixId};
 use crate::model::Track;
 
 /// An entry of the local Home view.
@@ -26,6 +28,9 @@ pub enum HomeEntry {
     Artists,
     Albums,
     Genres,
+    /// The saved local mixes (M12); the frontend reads them from the mixes
+    /// file when the view opens.
+    Mixes,
 }
 
 impl HomeEntry {
@@ -37,18 +42,20 @@ impl HomeEntry {
             Self::Artists => "Artists",
             Self::Albums => "Albums",
             Self::Genres => "Genres",
+            Self::Mixes => "Mixes",
         }
     }
 }
 
 /// The Home view's rows, in order.
-pub const HOME_ENTRIES: [HomeEntry; 6] = [
+pub const HOME_ENTRIES: [HomeEntry; 7] = [
     HomeEntry::ShuffleAll,
     HomeEntry::Playlists,
     HomeEntry::Folders,
     HomeEntry::Artists,
     HomeEntry::Albums,
     HomeEntry::Genres,
+    HomeEntry::Mixes,
 ];
 
 /// What a local view shows.
@@ -71,6 +78,8 @@ pub enum View {
     Genres,
     /// A genre's albums, by artist then album.
     Genre(GenreId),
+    /// The saved local mixes, in the file's order.
+    Mixes,
 }
 
 /// One row of a local view.
@@ -84,6 +93,31 @@ pub enum Row<'a> {
     Album(&'a Album, &'a Artist),
     Playlist(&'a LocalPlaylist),
     Genre(&'a Genre),
+    /// A saved mix (Enter or `s` plays it).
+    Mix(&'a Mix),
+}
+
+impl Row<'_> {
+    /// The row as a mix ingredient (a quick mix's marks): a genre or an
+    /// artist by name, an album by its artist and name (local ingredients
+    /// are matched by name, decision 3). `None` for anything else.
+    pub fn ingredient(&self) -> Option<Ingredient> {
+        Some(match self {
+            Row::Genre(genre) => Ingredient::Genre {
+                name: genre.name().to_owned(),
+            },
+            Row::Artist(artist) => Ingredient::Artist {
+                name: artist.name().to_owned(),
+                id: None,
+            },
+            Row::Album(album, artist) => Ingredient::Album {
+                artist: artist.name().to_owned(),
+                name: album.name().to_owned(),
+                id: None,
+            },
+            _ => return None,
+        })
+    }
 }
 
 /// Identity of a row, to keep the selection on its item while rows are
@@ -97,6 +131,7 @@ pub enum RowKey {
     Album(AlbumId),
     Playlist(PlaylistId),
     Genre(GenreId),
+    Mix(MixId),
 }
 
 /// What Enter or `s` plays: the tracks of the selection's context, in
@@ -124,6 +159,8 @@ pub struct LocalBrowser {
     stack: Vec<Entry>,
     /// The album order last chosen; Home → Albums opens it.
     album_order: AlbumOrder,
+    /// The saved local mixes, as last read ([`LocalBrowser::set_mixes`]).
+    mixes: Vec<Mix>,
 }
 
 impl Default for LocalBrowser {
@@ -140,6 +177,7 @@ impl LocalBrowser {
                 selected: 0,
             }],
             album_order: AlbumOrder::default(),
+            mixes: Vec::new(),
         }
     }
 
@@ -176,7 +214,10 @@ impl LocalBrowser {
 
     /// Number of rows in the shown view.
     pub fn len(&self, library: &Library) -> usize {
-        view_len(library, self.current())
+        match self.current() {
+            View::Mixes => self.mixes.len(),
+            view => view_len(library, view),
+        }
     }
 
     pub fn is_empty(&self, library: &Library) -> bool {
@@ -184,12 +225,40 @@ impl LocalBrowser {
     }
 
     /// At most `len` rows starting at `start`, without building the rest.
-    pub fn rows<'a>(&self, library: &'a Library, start: usize, len: usize) -> Vec<Row<'a>> {
-        view_rows(library, self.current(), start, len)
+    pub fn rows<'a>(&'a self, library: &'a Library, start: usize, len: usize) -> Vec<Row<'a>> {
+        match self.current() {
+            View::Mixes => window(&self.mixes, start, len)
+                .iter()
+                .map(Row::Mix)
+                .collect(),
+            view => view_rows(library, view, start, len),
+        }
     }
 
-    pub fn selected_row<'a>(&self, library: &'a Library) -> Option<Row<'a>> {
+    pub fn selected_row<'a>(&'a self, library: &'a Library) -> Option<Row<'a>> {
         self.rows(library, self.selected(), 1).pop()
+    }
+
+    /// The saved local mixes, as last read.
+    pub fn mixes(&self) -> &[Mix] {
+        &self.mixes
+    }
+
+    /// The saved local mixes, read again from the mixes file (the
+    /// frontend filters them to local ones). The selection stays on its
+    /// mix while the Mixes view is shown.
+    pub fn set_mixes(&mut self, library: &Library, mixes: Vec<Mix>) {
+        let key = self.selected_key(library);
+        self.mixes = mixes;
+        self.reselect(library, key);
+    }
+
+    /// The selected saved mix, in the Mixes view.
+    pub fn selected_mix<'a>(&'a self, library: &'a Library) -> Option<&'a Mix> {
+        match self.selected_row(library)? {
+            Row::Mix(mix) => Some(mix),
+            _ => None,
+        }
     }
 
     /// The key of the selected row, before the library changes.
@@ -203,9 +272,12 @@ impl LocalBrowser {
     /// playlist can hold a track twice).
     pub fn reselect(&mut self, library: &Library, key: Option<RowKey>) {
         let view = self.current().clone();
-        if !matches!(view, View::Home | View::Playlist(_))
-            && let Some(at) = key.and_then(|k| position(library, &view, &k))
-        {
+        let at = match (&view, key) {
+            (View::Mixes, Some(RowKey::Mix(id))) => self.mixes.iter().position(|m| m.id == id),
+            (View::Home | View::Playlist(_) | View::Mixes, _) => None,
+            (_, key) => key.and_then(|k| position(library, &view, &k)),
+        };
+        if let Some(at) = at {
             self.top_mut().selected = at;
         }
         self.clamp(library);
@@ -235,12 +307,13 @@ impl LocalBrowser {
             return false;
         };
         let view = match row {
-            Row::Track(..) | Row::Home(HomeEntry::ShuffleAll) => return false,
+            Row::Track(..) | Row::Mix(_) | Row::Home(HomeEntry::ShuffleAll) => return false,
             Row::Home(HomeEntry::Playlists) => View::Playlists,
             Row::Home(HomeEntry::Folders) => View::Folder(Vec::new()),
             Row::Home(HomeEntry::Artists) => View::Artists,
             Row::Home(HomeEntry::Albums) => View::Albums(self.album_order),
             Row::Home(HomeEntry::Genres) => View::Genres,
+            Row::Home(HomeEntry::Mixes) => View::Mixes,
             Row::Dir(dir) => {
                 let mut path = self.folder_path().to_vec();
                 path.push(dir.name().to_owned());
@@ -271,7 +344,7 @@ impl LocalBrowser {
             start: None,
         };
         Some(match row {
-            Row::Home(_) => return None,
+            Row::Home(_) | Row::Mix(_) => return None,
             Row::Track(_, track) => {
                 let (tracks, start) = match self.current() {
                     View::Folder(path) => {
@@ -316,6 +389,11 @@ impl LocalBrowser {
         self.clamp(library);
     }
 
+    /// The selected row as a mix ingredient ([`Row::ingredient`]).
+    pub fn selected_ingredient(&self, library: &Library) -> Option<Ingredient> {
+        self.selected_row(library)?.ingredient()
+    }
+
     /// `o` in the Albums list: shows the next order, keeping the selected
     /// album selected. Returns `false` (and does nothing) elsewhere.
     pub fn cycle_album_order(&mut self, library: &Library) -> bool {
@@ -338,7 +416,7 @@ impl LocalBrowser {
     pub fn selected_tracks(&self, library: &Library) -> Option<Vec<TrackId>> {
         let mut ids = Vec::new();
         match self.selected_row(library)? {
-            Row::Home(_) => return None,
+            Row::Home(_) | Row::Mix(_) => return None,
             Row::Track(id, _) => ids.push(id),
             Row::Dir(dir) => library.tree().for_each_id(dir, |id| ids.push(id)),
             Row::Artist(artist) => {
@@ -364,6 +442,7 @@ impl LocalBrowser {
             Row::Album(album, _) => album.name().to_owned(),
             Row::Playlist(playlist) => playlist.name.clone(),
             Row::Genre(genre) => genre.name().to_owned(),
+            Row::Mix(mix) => mix.name.clone(),
         })
     }
 
@@ -399,6 +478,7 @@ pub fn view_title(library: &Library, view: &View) -> Option<String> {
         }
         View::Genres => HomeEntry::Genres.label().to_owned(),
         View::Genre(id) => library.tags().genre(*id).name().to_owned(),
+        View::Mixes => HomeEntry::Mixes.label().to_owned(),
     })
 }
 
@@ -418,6 +498,7 @@ fn opener_key(view: &View) -> Option<RowKey> {
         View::Playlist(id) => RowKey::Playlist(*id),
         View::Genres => RowKey::Home(HomeEntry::Genres),
         View::Genre(id) => RowKey::Genre(*id),
+        View::Mixes => RowKey::Home(HomeEntry::Mixes),
     })
 }
 
@@ -430,6 +511,7 @@ fn row_key(row: Row<'_>) -> RowKey {
         Row::Album(album, _) => RowKey::Album(album.id()),
         Row::Playlist(playlist) => RowKey::Playlist(playlist.id),
         Row::Genre(genre) => RowKey::Genre(genre.id()),
+        Row::Mix(mix) => RowKey::Mix(mix.id.clone()),
     }
 }
 
@@ -457,6 +539,8 @@ fn view_len(library: &Library, view: &View) -> usize {
         View::Playlist(id) => library.playlist(*id).tracks.len(),
         View::Genres => tags.genres().len(),
         View::Genre(id) => tags.genre(*id).albums().len(),
+        // Held by the browser, not the library.
+        View::Mixes => 0,
     }
 }
 
@@ -519,6 +603,8 @@ fn view_rows<'a>(library: &'a Library, view: &View, start: usize, len: usize) ->
             .iter()
             .map(album)
             .collect(),
+        // Held by the browser, not the library.
+        View::Mixes => Vec::new(),
     }
 }
 
@@ -621,7 +707,8 @@ mod tests {
                 "Folders",
                 "Artists",
                 "Albums",
-                "Genres"
+                "Genres",
+                "Mixes"
             ]
         );
         // The entry itself only opens: nothing to play or add.
@@ -721,5 +808,96 @@ mod tests {
         let browser = genres_view(&library);
         assert!(browser.is_empty(&library));
         assert_eq!(browser.play_context(&library, true), None);
+    }
+
+    fn mix(id: &str, name: &str) -> Mix {
+        let mut mix = Mix::new(
+            name,
+            crate::mix::MixSource::Local,
+            vec![Ingredient::Genre {
+                name: "Rock".into(),
+            }],
+        )
+        .unwrap();
+        mix.id = MixId::parse(id).unwrap();
+        mix
+    }
+
+    #[test]
+    fn the_mixes_view_lists_the_mixes_handed_over_and_keeps_its_selection() {
+        let library = library(vec![track("a/1.flac", "A", "A", 1, &["Rock"])]);
+        let mut browser = LocalBrowser::new();
+        browser.move_selection(&library, 6);
+        assert_eq!(
+            browser.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Mixes))
+        );
+        assert_eq!(browser.selected_mix(&library), None);
+        assert!(browser.open_selected(&library));
+        assert_eq!(*browser.current(), View::Mixes);
+        assert_eq!(browser.path_titles(&library), ["Mixes"]);
+        assert!(browser.is_empty(&library));
+        browser.set_mixes(&library, vec![mix("a1", "Prog"), mix("b2", "Jazz")]);
+        assert_eq!(browser.len(&library), 2);
+        browser.move_selection(&library, 1);
+        assert_eq!(
+            browser.selected_mix(&library).map(|m| m.name.as_str()),
+            Some("Jazz")
+        );
+        assert_eq!(browser.selected_label(&library).as_deref(), Some("Jazz"));
+        // A mix is played by the frontend: nothing to open, play or add here.
+        assert!(!browser.open_selected(&library));
+        assert_eq!(browser.play_context(&library, false), None);
+        assert_eq!(browser.play_context(&library, true), None);
+        assert_eq!(browser.selected_tracks(&library), None);
+        assert_eq!(browser.selected_ingredient(&library), None);
+        // Read again: the selection follows its mix.
+        browser.set_mixes(
+            &library,
+            vec![mix("c3", "New"), mix("a1", "Prog"), mix("b2", "Jazz")],
+        );
+        assert_eq!(browser.selected(), 2);
+        browser.set_mixes(&library, vec![mix("a1", "Prog")]);
+        assert_eq!(browser.selected(), 0);
+        browser.go_up(&library);
+        assert_eq!(
+            browser.selected_key(&library),
+            Some(RowKey::Home(HomeEntry::Mixes))
+        );
+    }
+
+    #[test]
+    fn genres_artists_and_albums_are_ingredients_by_name() {
+        let library = library(vec![track("a/1.flac", "Yes", "Fragile", 1, &["Prog"])]);
+        let mut genres = genres_view(&library);
+        assert_eq!(
+            genres.selected_ingredient(&library),
+            Some(Ingredient::Genre {
+                name: "Prog".into()
+            })
+        );
+        genres.open_selected(&library);
+        assert_eq!(
+            genres.selected_ingredient(&library),
+            Some(Ingredient::Album {
+                artist: "Yes".into(),
+                name: "Fragile".into(),
+                id: None
+            })
+        );
+        let mut artists = LocalBrowser::new();
+        artists.move_selection(&library, 3);
+        assert_eq!(artists.selected_ingredient(&library), None, "a Home entry");
+        artists.open_selected(&library);
+        assert_eq!(
+            artists.selected_ingredient(&library),
+            Some(Ingredient::Artist {
+                name: "Yes".into(),
+                id: None
+            })
+        );
+        artists.open_selected(&library);
+        artists.open_selected(&library);
+        assert_eq!(artists.selected_ingredient(&library), None, "a track");
     }
 }

@@ -6,7 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::ui::render::REMOTE_MARKER;
+/// [`crate::ui::render::REMOTE_MARKER`] and
+/// [`crate::ui::render::MARK_MARKER`] (checked by a test).
+pub const MARKERS: &str = "☁ / ✓";
 
 /// Key column, description column.
 pub const BINDINGS: &[(&str, &str)] = &[
@@ -18,11 +20,11 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("1 / 2", "Local / Navidrome library"),
     ("/", "Search (Enter run, Esc cancel)"),
     ("R / o", "Refresh (Navidrome) / sort albums"),
-    ("D / J K", "Queue: remove / move down / up"),
+    ("D / J K", "Remove / move (queue, playlist)"),
     ("g / C C / S", "Queue: current / clear / save"),
     ("P", "Add to a Navidrome playlist"),
+    ("m / M", "Mark for a quick mix / play marked"),
     ("N / e / D", "Playlists: new / rename / delete"),
-    ("D / J K", "Playlist: remove / move song"),
     ("w / Esc", "Playlist: save / discard order"),
     ("r / v", "Repeat (off/all/one) / visualizer"),
     ("Space  < / >", "Pause / previous / next"),
@@ -31,7 +33,7 @@ pub const BINDINGS: &[(&str, &str)] = &[
     ("O", "Settings (Navidrome)"),
     ("?  Esc", "Close help"),
     ("q  Ctrl-C", "Quit"),
-    (REMOTE_MARKER, "Streamed from Navidrome"),
+    (MARKERS, "Streamed from Navidrome / marked"),
 ];
 
 const KEY_WIDTH: usize = 14;
