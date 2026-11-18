@@ -6,8 +6,11 @@
 // scrollbar held still is never pulled away. Clicking a timed line seeks there. Untimed lyrics
 // are plain text to scroll. Lines are not focusable (the timeline seeks
 // from the keyboard); the list itself is, to scroll it with the keys.
+// What it shows (lyrics, a message) fades in when it changes: loaded,
+// another track's lyrics, none; the follow scroll is not touched by it.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useFadeOnChange } from "../hooks/useFadeOnChange";
 import type { LyricsState } from "../hooks/useLyrics";
 import { intent } from "../lib/ipc";
 import {
@@ -20,12 +23,9 @@ import {
   followScrollTop,
   isFollowing,
 } from "../lib/lyrics";
+import { prefersReducedMotion } from "../lib/motion";
 import type { Lyrics } from "../lib/types";
 import { useProgress } from "../state/store";
-
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-}
 
 interface Props {
   state: LyricsState;
@@ -33,7 +33,16 @@ interface Props {
   canSeek: boolean;
 }
 
+/** What the panel shows; a change fades it in. */
+function shownBody(state: LyricsState): unknown {
+  if (state.status === "ready") return state.lyrics;
+  if (state.status === "loading") return state.slow ? "slow" : "loading";
+  return state.status;
+}
+
 export function LyricsPanel({ state, canSeek }: Props) {
+  const panel = useRef<HTMLDivElement>(null);
+  useFadeOnChange(shownBody(state), () => [panel.current]);
   let body;
   switch (state.status) {
     case "ready":
@@ -52,7 +61,7 @@ export function LyricsPanel({ state, canSeek }: Props) {
       body = null;
   }
   return (
-    <div className="lyrics">
+    <div className="lyrics" ref={panel}>
       {body}
     </div>
   );

@@ -260,6 +260,7 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  animation: np-open var(--motion-slow) var(--ease-out);
   /* Always dark over the blurred cover, whatever the theme. */
   background: var(--np-bg);
   color: var(--np-text);
@@ -280,8 +281,15 @@
   height: 120%;
   object-fit: cover;
   filter: blur(60px) saturate(1.3);
-  opacity: 0.85;
+  opacity: 0;
   transform: scale(1.1);
+  transition: opacity var(--motion-slow) var(--ease-in-out);
+}
+
+/* A new cover fades in over the old one once loaded (NowPlayingView's
+   Backdrop drops the old one when this has run). */
+.now-playing-backdrop.is-shown {
+  opacity: 0.85;
 }
 
 .now-playing-scrim {
@@ -300,11 +308,14 @@
   align-items: center;
   justify-content: center;
   overflow-y: auto;
-  transition: right var(--motion) ease-out;
+  /* Track changes slide the cover sideways: clip, never a scrollbar. */
+  overflow-x: hidden;
 }
 
 .now-playing-content {
+  /* The ghost of the outgoing track is placed in here (NowPlayingView). */
   position: relative;
+  --np-info-gap: 12px;
   display: flex;
   align-items: center;
   gap: clamp(24px, 4vw, 56px);
@@ -323,9 +334,36 @@
 .now-playing-info {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--np-info-gap);
   flex: 1;
   min-width: 0;
+}
+
+/* Mix line, title and subtitle: the part that slides on a track change. */
+.now-playing-heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--np-info-gap);
+  min-width: 0;
+}
+
+/* The outgoing track while it slides out: drawn where it was seen, not
+   in the layout, not focusable or announced (`inert`, `aria-hidden`). */
+.now-playing-ghost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.now-playing-ghost-part {
+  position: absolute;
+}
+
+.now-playing-ghost-cover {
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+  box-shadow: var(--shadow-big);
 }
 
 .now-playing-title {
@@ -400,6 +438,10 @@
 .now-playing-next {
   align-self: flex-start;
   max-width: 100%;
+  transition:
+    opacity var(--motion) var(--ease-out),
+    transform var(--motion) var(--ease-out),
+    visibility 0s linear 0s;
 }
 
 .now-playing-next.is-card {
@@ -410,7 +452,11 @@
   border-radius: var(--radius);
   background: var(--np-hover);
   text-align: left;
-  transition: background var(--motion-fast);
+  transition:
+    background var(--motion-fast),
+    opacity var(--motion) var(--ease-out),
+    transform var(--motion) var(--ease-out),
+    visibility 0s linear 0s;
 }
 
 .now-playing-next.is-card:hover {
@@ -418,9 +464,16 @@
 }
 
 /* The queue panel is open: the card keeps its slot (the centred content
-   does not move) but is not shown, focused or announced (also `inert`). */
+   does not move) but fades out, and is not focused or announced (also
+   `inert`; `visibility` follows once the fade has run). */
 .now-playing-next.is-hidden {
+  opacity: 0;
+  transform: translateY(6px);
   visibility: hidden;
+  transition:
+    opacity var(--motion) var(--ease-out),
+    transform var(--motion) var(--ease-out),
+    visibility 0s linear var(--motion);
 }
 
 .now-playing-next-cover {
@@ -467,7 +520,8 @@
   gap: 4px;
 }
 
-/* The queue as a translucent card sliding in from the right. */
+/* The queue as a translucent card sliding in from the right (and out
+   again: NowPlayingView's `usePresence`, Web Animations). */
 .now-playing-queue {
   position: absolute;
   top: 56px;
@@ -481,7 +535,6 @@
   border: 1px solid var(--np-border);
   box-shadow: var(--shadow-big);
   backdrop-filter: blur(24px);
-  animation: np-panel-in var(--motion) ease-out;
 }
 
 .now-playing-queue .queue {
@@ -499,10 +552,10 @@
   color: var(--np-text);
 }
 
-@keyframes np-panel-in {
+@keyframes np-open {
   from {
     opacity: 0;
-    transform: translateX(24px);
+    transform: scale(0.98);
   }
 }
 
@@ -552,12 +605,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .now-playing-backdrop {
-    transform: none;
+  .now-playing {
+    animation: none;
   }
 
-  .now-playing-queue {
-    animation: none;
+  .now-playing-backdrop {
+    transform: none;
   }
 }
 
@@ -583,7 +636,6 @@
   gap: clamp(24px, 3vw, 48px);
   padding: 56px var(--np-lyrics-pad) 24px;
   overflow: hidden;
-  transition: none;
 }
 
 /* Full width with the queue open too (beats the wide-window rule).
@@ -599,6 +651,7 @@
    slider thumb at either end (6px past its track) stays inside it and
    never makes it scroll sideways. */
 .now-playing.is-lyrics .now-playing-content {
+  --np-info-gap: 10px;
   flex-direction: column;
   align-items: stretch;
   justify-content: safe center;
@@ -622,7 +675,16 @@
 
 .now-playing.is-lyrics .now-playing-info {
   flex: none;
-  gap: 10px;
+}
+
+/* While the cover glides into the column (NowPlayingView), the column
+   does not clip it. Known: in a window short enough for the column to
+   scroll, a classic (non-overlay) scrollbar appears only when the glide
+   ends. `scrollbar-gutter: stable` would not help: it reserves nothing
+   while `overflow` is `visible`, so the shift would just move to the
+   end of the glide for every window, not only short ones. */
+.now-playing.is-lyrics .now-playing-content[data-gliding] {
+  overflow: visible;
 }
 
 .now-playing.is-lyrics .now-playing-title {
@@ -759,26 +821,13 @@
   color: var(--text);
 }
 
-/* Two identical animations, alternated per switch, so each switch runs
-   it again without remounting anything. */
-.now-playing-content.is-switched-a,
-.now-playing-lyrics.is-switched-a {
-  animation: np-layout-in-a var(--motion) ease-out;
+/* Lyrics mode switched on here (not when the view opens in it): the
+   lyrics fade in once the cover has mostly glided into the column. */
+.now-playing-lyrics.is-entering {
+  animation: np-lyrics-in var(--motion-slow) var(--ease-out) calc(var(--motion-slow) * 0.5) both;
 }
 
-.now-playing-content.is-switched-b,
-.now-playing-lyrics.is-switched-b {
-  animation: np-layout-in-b var(--motion) ease-out;
-}
-
-@keyframes np-layout-in-a {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-}
-
-@keyframes np-layout-in-b {
+@keyframes np-lyrics-in {
   from {
     opacity: 0;
     transform: translateY(6px);
@@ -786,10 +835,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .now-playing-content.is-switched-a,
-  .now-playing-content.is-switched-b,
-  .now-playing-lyrics.is-switched-a,
-  .now-playing-lyrics.is-switched-b {
+  .now-playing-lyrics.is-entering {
     animation: none;
   }
 

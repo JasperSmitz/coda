@@ -8,6 +8,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
 import { useFullscreen } from "./hooks/useFullscreen";
+import { usePresence } from "./hooks/usePresence";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
@@ -24,6 +25,13 @@ import { Onboarding } from "./views/Onboarding";
 const QUEUE_OPEN_KEY = "coda.queueOpen";
 /** The Now Playing view's queue panel, remembered apart from the layout's. */
 const NP_QUEUE_OPEN_KEY = "coda.nowPlayingQueueOpen";
+/** How the queue column looks out of view. */
+const QUEUE_HIDDEN: Keyframe = { opacity: 0, transform: "translateX(24px)" };
+
+/** Closing the queue column with the focus in it: the bar's queue button. */
+function focusQueueButton() {
+  document.querySelector<HTMLElement>('.bar-right [aria-label="Queue"]')?.focus();
+}
 
 function loadFlag(key: string, fallback: boolean): boolean {
   try {
@@ -121,6 +129,14 @@ export default function App() {
   const immersive = nowPlaying && snapshot !== null;
   const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
   useFocusAfterNowPlaying(immersive);
+  // The queue column slides in and out; while it leaves, the grid has
+  // already given its room back and it slides out over the main view.
+  const queueColumn = useRef<HTMLDivElement>(null);
+  const queueColumnShown = usePresence(layoutQueueOpen, queueColumn, {
+    hidden: QUEUE_HIDDEN,
+    duration: "--motion",
+    onFocusLeaving: focusQueueButton,
+  });
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -220,7 +236,11 @@ export default function App() {
         ) : null}
         {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
       </main>
-      {queueOpen && queuePanel}
+      {queueColumnShown && (
+        <div ref={queueColumn} className={`queue-column ${queueOpen ? "" : "is-leaving"}`}>
+          {queuePanel}
+        </div>
+      )}
       {snapshot && (
         <NowPlayingBar
           snapshot={snapshot}

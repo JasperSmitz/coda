@@ -10,6 +10,8 @@
 }
 
 .app {
+  /* The queue column slides out over the main view (below). */
+  position: relative;
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) var(--bar-height);
@@ -280,8 +282,32 @@
 
 /* ----- queue ----- */
 
-.queue {
+/* The column's slot in the grid; App slides it in and out (`usePresence`). */
+.queue-column {
   grid-area: queue;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.queue-column > .queue {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Closing: the grid has given the room back at once (one reflow, as
+   before); the panel slides out over the main view, then unmounts. */
+.app > .queue-column.is-leaving {
+  grid-area: auto;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: var(--bar-height);
+  width: var(--queue-width);
+  z-index: 1;
+}
+
+.queue {
   display: flex;
   flex-direction: column;
   min-height: 0;
