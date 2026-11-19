@@ -1,5 +1,5 @@
 // Library's per-section choices (DESIGN.md "Library"): Covers or List for
-// Albums, Artists and a genre's albums, and the Albums sort. Each is
+// Albums, Artists, Genres, Playlists and a genre's albums, and the Albums sort. Each is
 // remembered per source in `localStorage`; Covers / List falls back to
 // the Preferences default (`settings.toml` `libraryView`) until a section
 // has its own choice.
@@ -16,7 +16,7 @@ import type { AlbumSort, LibraryView, LocalAlbumOrder, SourceKind } from "../lib
 import { useAccent } from "./accent";
 
 /** The sections with a Covers / List choice. */
-export type ViewSection = "albums" | "artists" | "genreAlbums";
+export type ViewSection = "albums" | "artists" | "genres" | "playlists" | "genreAlbums";
 
 const viewKey = (source: SourceKind, section: ViewSection) =>
   `coda.libraryView.${source}.${section}`;

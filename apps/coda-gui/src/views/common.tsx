@@ -210,15 +210,37 @@ export function ToolRow({ children }: { children: ReactNode }) {
 
 /**
  * Up to four different covers as a 2×2 mosaic (a playlist without its
- * own cover, a genre); fewer: the first one alone.
+ * own cover, a genre); fewer: the first one alone. `className`: the
+ * page header's cover (default) or a card's; `morph`: the page it opens
+ * (`Cover`).
  */
-export function CoverMosaic({ urls, name }: { urls: (string | null)[]; name: string }) {
+export function CoverMosaic({
+  urls,
+  name,
+  className = "page-cover",
+  size = "large",
+  morph,
+}: {
+  urls: (string | null)[];
+  name: string;
+  className?: string;
+  size?: "small" | "large";
+  morph?: string;
+}) {
   const distinct = [...new Set(urls.filter((u): u is string => u !== null))].slice(0, 4);
   if (distinct.length < 4) {
-    return <Cover url={distinct[0] ?? null} name={name} size="large" className="page-cover" />;
+    return (
+      <Cover
+        url={distinct[0] ?? null}
+        name={name}
+        size={size}
+        className={className}
+        morph={morph}
+      />
+    );
   }
   return (
-    <div className="page-cover cover-mosaic" aria-hidden="true">
+    <div className={`${className} cover-mosaic`} aria-hidden="true" data-morph={morph}>
       {distinct.map((url) => (
         <Cover key={url} url={url} name={name} size="small" className="cover-mosaic-tile" />
       ))}

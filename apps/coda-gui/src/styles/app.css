@@ -213,8 +213,8 @@
 
 .topnav-mark.is-gliding {
   transition:
-    transform var(--motion-slow) var(--ease-standard),
-    width var(--motion-slow) var(--ease-standard),
+    transform var(--motion-nav) var(--ease),
+    width var(--motion-nav) var(--ease),
     opacity var(--motion-fast);
 }
 
@@ -480,11 +480,6 @@
   justify-content: center;
   gap: 6px;
   text-align: center;
-}
-
-.coming-soon {
-  font-size: 16px;
-  color: var(--text-2);
 }
 
 .starting {

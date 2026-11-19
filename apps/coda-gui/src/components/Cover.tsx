@@ -11,6 +11,11 @@ interface CoverProps {
   name: string;
   size: CoverSize;
   className?: string;
+  /**
+   * The page this cover opens (`lib/pageTransition.ts` `morphKey`): it
+   * morphs into that page's header cover and back.
+   */
+  morph?: string;
 }
 
 function hash(text: string): number {
@@ -39,11 +44,20 @@ export function placeholderColors(name: string): [number, number] {
   return [a + 1, b + 1];
 }
 
-export function Placeholder({ name, className = "" }: { name: string; className?: string }) {
+export function Placeholder({
+  name,
+  className = "",
+  morph,
+}: {
+  name: string;
+  className?: string;
+  morph?: string;
+}) {
   const [a, b] = placeholderColors(name);
   return (
     <div
       className={`cover cover-placeholder ${className}`}
+      data-morph={morph}
       style={{
         background: `linear-gradient(135deg, var(--cover-${a}), var(--cover-${b}))`,
       }}
@@ -54,17 +68,27 @@ export function Placeholder({ name, className = "" }: { name: string; className?
   );
 }
 
-export function Cover({ url, name, size, className = "" }: CoverProps) {
+export function Cover({ url, name, size, className = "", morph }: CoverProps) {
   // Keyed by URL: a new track's cover gets a fresh error state.
-  return <CoverImage key={url ?? ""} url={url} name={name} size={size} className={className} />;
+  return (
+    <CoverImage
+      key={url ?? ""}
+      url={url}
+      name={name}
+      size={size}
+      className={className}
+      morph={morph}
+    />
+  );
 }
 
-function CoverImage({ url, name, size, className }: CoverProps) {
+function CoverImage({ url, name, size, className, morph }: CoverProps) {
   const [failed, setFailed] = useState(false);
-  if (!url || failed) return <Placeholder name={name} className={className} />;
+  if (!url || failed) return <Placeholder name={name} className={className} morph={morph} />;
   return (
     <img
       className={`cover ${className}`}
+      data-morph={morph}
       src={coverSrc(url, size)}
       alt=""
       draggable={false}

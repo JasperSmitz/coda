@@ -1,10 +1,13 @@
-// Playlists of a source (local `.m3u` files or the server's), and one
-// playlist's tracks in order, duplicates kept. Navidrome playlists the
+// Playlists of a source (local `.m3u` files or the server's) as cards
+// (Covers: a 2×2 mosaic of its albums' covers, or its own cover; the
+// name and song count) or rows (List), and one playlist's tracks in
+// order, duplicates kept. Navidrome playlists the
 // user owns can be created, renamed and deleted here, and their tracks
 // removed and reordered (M3, `lib/playlists.ts`); read-only ones show
 // why instead.
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { gridKeyTarget } from "../components/AlbumGrid";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
@@ -15,6 +18,7 @@ import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayou
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { isRemoveKey } from "../lib/keys";
+import { morphKey } from "../lib/pageTransition";
 import { playlistContext, playTracks, useShuffleContext } from "../lib/play";
 import {
   createPlaylistFlow,
@@ -24,6 +28,7 @@ import {
   usePlaylistsVersion,
 } from "../lib/playlists";
 import type { Playlist, SourceKind } from "../lib/types";
+import { useLibraryView } from "../state/libraryView";
 import { nav, type Entry } from "../state/nav";
 import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
@@ -34,6 +39,7 @@ import {
   PageHeader,
   ScanLine,
   SOURCE_LABEL,
+  ViewToggle,
   songsSummary,
   summary,
   plural,
@@ -59,7 +65,8 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
   const scroller = usePageScroller();
   const list = useRef<HTMLDivElement>(null);
   const playlists = load.data ?? [];
-  useScroll(scroller, entry, playlists.length > 0);
+  const [view, setView, known] = useLibraryView(source, "playlists");
+  useScroll(scroller, entry, playlists.length > 0 && known, load.state !== "loading");
   const idPrefix = useId();
   const [selected, setSelected] = useState<number | null>(null);
   const [menu, setMenu] = useState<(MenuState & { playlist: Playlist }) | null>(null);
@@ -113,16 +120,19 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
         title="Playlists"
         meta={load.state === "ready" && plural(playlists.length, "playlist")}
         tools={
-          canEdit && (
-            <button className="button" onClick={() => void createPlaylistFlow()}>
-              New playlist…
-            </button>
-          )
+          <>
+            {canEdit && (
+              <button className="button" onClick={() => void createPlaylistFlow()}>
+                New playlist…
+              </button>
+            )}
+            <ViewToggle value={view} onChange={setView} />
+          </>
         }
       />
       {source === "local" && <ScanLine />}
       <div className="view-body">
-        {load.state === "loading" && <SkeletonRows />}
+        {(load.state === "loading" || (!known && playlists.length > 0)) && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && playlists.length === 0 && (
           <Empty title="No playlists">
@@ -131,7 +141,20 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
               : "The server has no playlists."}
           </Empty>
         )}
-        {playlists.length > 0 && (
+        {playlists.length > 0 && known && view === "covers" && (
+          <PlaylistCards
+            playlists={playlists}
+            source={source}
+            canEdit={canEdit}
+            onOpen={(playlist) => openPlaylist(source, playlist)}
+            onRename={rename}
+            onRemove={remove}
+            onMenu={(playlist, x, y) => {
+              if (canEdit) setMenu({ x, y, key: playlist.id, playlist });
+            }}
+          />
+        )}
+        {playlists.length > 0 && known && view === "list" && (
           <div
             className="playlist-list"
             ref={list}
@@ -201,7 +224,13 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
           state={menu}
           onClose={() => {
             setMenu(null);
-            list.current?.focus();
+            if (view === "list") {
+              list.current?.focus();
+              return;
+            }
+            // Covers: back to the playlist's card.
+            const at = playlists.findIndex((p) => p.id === menu.playlist.id);
+            document.querySelector<HTMLElement>(`.playlist-cards [data-index="${at}"]`)?.focus();
           }}
           items={[
             { label: "Open", action: () => openPlaylist(source, menu.playlist) },
@@ -211,6 +240,155 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
         />
       )}
     </section>
+  );
+}
+
+/**
+ * Playlists as cards (Covers): the arrow keys, Home and End move between
+ * them, Enter opens one, F2 renames, Delete removes (editable ones), the
+ * context-menu key (or Shift+F10) opens the menu.
+ */
+function PlaylistCards({
+  playlists,
+  source,
+  canEdit,
+  onOpen,
+  onRename,
+  onRemove,
+  onMenu,
+}: {
+  playlists: Playlist[];
+  source: SourceKind;
+  canEdit: boolean;
+  onOpen: (playlist: Playlist) => void;
+  onRename: (playlist: Playlist) => void;
+  onRemove: (playlist: Playlist) => void;
+  onMenu: (playlist: Playlist, x: number, y: number) => void;
+}) {
+  const grid = useRef<HTMLDivElement>(null);
+  const columns = () => {
+    const cards = grid.current?.querySelectorAll<HTMLElement>(".playlist-card");
+    if (!cards || cards.length === 0) return 1;
+    const top = cards[0].offsetTop;
+    let n = 0;
+    while (n < cards.length && cards[n].offsetTop === top) n++;
+    return Math.max(1, n);
+  };
+  const onKeyDown = (e: KeyboardEvent) => {
+    const target = e.target as HTMLElement;
+    const at = Number(target.dataset.index ?? -1);
+    if (at < 0) return;
+    const playlist = playlists[at];
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      const rect = target.getBoundingClientRect();
+      onMenu(playlist, rect.left + 24, rect.top + 40);
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "F2") {
+      onRename(playlist);
+      e.preventDefault();
+      return;
+    }
+    if (isRemoveKey(e)) {
+      onRemove(playlist);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const to = gridKeyTarget(e.key, at, columns(), playlists.length);
+    if (to === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = grid.current?.querySelector<HTMLElement>(`[data-index="${to}"]`);
+    el?.focus({ preventScroll: true });
+    el?.scrollIntoView({ block: "nearest" });
+  };
+  return (
+    <div
+      ref={grid}
+      className="playlist-cards"
+      role="list"
+      aria-label="Playlists"
+      onKeyDown={onKeyDown}
+    >
+      {playlists.map((playlist, index) => (
+        <PlaylistCard
+          key={playlist.id}
+          playlist={playlist}
+          index={index}
+          source={source}
+          canEdit={canEdit}
+          onOpen={onOpen}
+          onMenu={onMenu}
+        />
+      ))}
+    </div>
+  );
+}
+
+const PlaylistCard = memo(function PlaylistCard({
+  playlist,
+  index,
+  source,
+  canEdit,
+  onOpen,
+  onMenu,
+}: {
+  playlist: Playlist;
+  index: number;
+  source: SourceKind;
+  canEdit: boolean;
+  onOpen: (playlist: Playlist) => void;
+  onMenu: (playlist: Playlist, x: number, y: number) => void;
+}) {
+  const readOnly = source === "navidrome" && !playlist.editable;
+  const sub = [
+    playlist.trackCount !== null ? plural(playlist.trackCount, "song") : null,
+    readOnly || playlist.readonly ? "Read-only" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div role="listitem" className="playlist-card-item">
+      <button
+        className="playlist-card"
+        data-index={index}
+        title={playlist.name}
+        aria-keyshortcuts={canEdit && playlist.editable ? "F2 Delete" : undefined}
+        onClick={() => onOpen(playlist)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onMenu(playlist, e.clientX, e.clientY);
+        }}
+      >
+        <PlaylistCover playlist={playlist} source={source} />
+        <span className="playlist-card-name">{playlist.name}</span>
+        <span className="playlist-card-sub secondary">{sub}</span>
+      </button>
+    </div>
+  );
+});
+
+/** A playlist's cover on its card: its albums' mosaic (local), else its own (Navidrome's is a mosaic already). */
+function PlaylistCover({ playlist, source }: { playlist: Playlist; source: SourceKind }) {
+  const morph = morphKey("playlist", source, playlist.id);
+  return playlist.covers.length >= 4 ? (
+    <CoverMosaic
+      urls={playlist.covers}
+      name={playlist.name}
+      size="small"
+      className="playlist-card-cover"
+      morph={morph}
+    />
+  ) : (
+    <Cover
+      url={playlist.coverUrl}
+      name={playlist.name}
+      size="small"
+      className="playlist-card-cover"
+      morph={morph}
+    />
   );
 }
 
@@ -237,10 +415,12 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const scroller = usePageScroller();
   const detail = load.data;
   const tracks = detail?.tracks ?? [];
-  useScroll(scroller, entry, tracks.length > 0);
+  useScroll(scroller, entry, tracks.length > 0, load.state !== "loading");
   const title = renamed ?? (detail?.playlist.name || hint?.name || name);
   // Its own cover, else (header) a mosaic of its first covers.
   const ownCover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? null;
+  // Local: its albums' covers, as on its card (so the card's cover morphs into this one).
+  const mosaic = hint?.covers ?? detail?.playlist.covers ?? [];
   const cover = ownCover ?? tracks[0]?.coverUrl ?? null;
   const context = playlistContext(source, { id, name: title, coverUrl: cover });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
@@ -287,7 +467,9 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
     <section className="view">
       <PageHeader
         cover={
-          ownCover ? (
+          mosaic.length >= 4 ? (
+            <CoverMosaic urls={mosaic} name={title} />
+          ) : ownCover ? (
             <Cover url={ownCover} name={title} size="large" className="page-cover" />
           ) : (
             <CoverMosaic urls={tracks.slice(0, 50).map((t) => t.coverUrl)} name={title} />

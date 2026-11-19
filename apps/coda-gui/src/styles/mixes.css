@@ -66,10 +66,13 @@
 
 /* ----- the Mixes view ----- */
 
+/* Cards like Library's other tiles (2.0): glass with a soft shadow,
+   lifting on hover (transform only, `--spring`); the playing mix
+   outlined in the accent with its glow and the equaliser. */
 .mix-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  gap: 18px;
   list-style: none;
   padding-bottom: 24px;
 }
@@ -79,20 +82,27 @@
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-  padding: 18px 18px 16px 20px;
+  padding: 20px 20px 18px 22px;
   border-radius: var(--radius-card);
   background: var(--surface-1);
   border: 1px solid var(--border);
-  transition: border-color var(--motion-fast);
+  box-shadow: var(--shadow);
+  transition:
+    border-color var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .mix-card:hover,
 .mix-card:focus-within {
   border-color: var(--text-3);
+  transform: translateY(-2px);
 }
 
 .mix-card.is-active {
   border-color: var(--accent);
+  box-shadow:
+    var(--shadow),
+    0 10px 36px -10px var(--glow);
 }
 
 .mix-card-head {
@@ -115,6 +125,9 @@
 }
 
 .mix-card-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   flex: none;
   background: var(--accent-soft);
   color: var(--text);

@@ -25,7 +25,7 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
   const load = useLoad(() => browse.folder(path), JSON.stringify(path), version);
   const scroller = usePageScroller();
   const folder = load.data;
-  useScroll(scroller, entry, folder !== undefined);
+  useScroll(scroller, entry, folder !== undefined, load.state !== "loading");
 
   // Everything below the folder, resolved by the engine (a whole-library
   // folder never crosses IPC).

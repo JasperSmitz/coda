@@ -16,6 +16,7 @@ import { TrackTable } from "../components/TrackTable";
 import { SearchIcon } from "../components/icons";
 import { usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
+import { morphKey } from "../lib/pageTransition";
 import { browse } from "../lib/browse";
 import { playTracks, useShuffleContext } from "../lib/play";
 import { genreChips, topResult, type TopResult } from "../lib/search";
@@ -295,6 +296,7 @@ function SourceResults({
                   name={artist.name}
                   size="small"
                   className="artist-tile-cover"
+                  morph={morphKey("artist", source, artist.id)}
                 />
                 <span className="artist-tile-name">{artist.name}</span>
                 <span className="secondary">Artist</span>
@@ -342,6 +344,11 @@ function TopResultCard({ source, top }: { source: SourceKind; top: TopResult }) 
         name={name}
         size="large"
         className={`top-result-cover ${artist ? "round" : ""}`}
+        morph={
+          artist
+            ? morphKey("artist", source, top.artist.id)
+            : morphKey("album", source, top.album.id)
+        }
       />
       <span className="top-result-name">{name}</span>
       <span className="top-result-kind secondary">{kind}</span>

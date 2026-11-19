@@ -1,7 +1,8 @@
 // Motion, from the same tokens as the CSS (`--motion*`, `--ease-*` in
 // tokens.css): Web Animations for small things, View Transitions for Now
-// Playing's layout changes and track changes, and for the player's cover
-// morphing into Now Playing's. With reduced motion nothing
+// Playing's layout changes and track changes, for the player's cover
+// morphing into Now Playing's, and for page changes (`lib/pageTransition.ts`:
+// the page crossfades, a cover morphs into the page header's). With reduced motion nothing
 // animates: `animate` returns null and `viewTransition` applies the
 // change at once.
 
@@ -110,6 +111,12 @@ export interface ViewTransitionOptions {
   dir?: string;
   /** Awaited after the update (at most a moment: the screen is frozen meanwhile). */
   settle?: () => Promise<void>;
+  /**
+   * Called once the transition is over: finished, skipped (by a newer
+   * one) or never started. Not called without View Transitions (the
+   * update then runs at once and there is nothing to clean up).
+   */
+  onDone?: () => void;
 }
 
 /** The transition last started; an older one leaves the attributes alone. */
@@ -164,6 +171,7 @@ export function viewTransition(update: () => void, options: ViewTransitionOption
       ran = true;
       update();
     }
+    options.onDone?.();
     return NONE;
   }
   // Skipped (a newer one, a hidden window): `ready` rejects; the update
@@ -183,6 +191,7 @@ export function viewTransition(update: () => void, options: ViewTransitionOption
         }
       }
       unmark();
+      options.onDone?.();
     });
   return { skip: () => transition.skipTransition() };
 }

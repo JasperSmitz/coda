@@ -63,6 +63,9 @@ pub struct PlaylistDto {
     pub track_count: Option<u32>,
     pub duration_ms: Option<u64>,
     pub cover_url: Option<String>,
+    /// Local: the covers of its first different albums (up to four), for
+    /// a 2×2 mosaic. Navidrome: empty (the server's cover is a mosaic).
+    pub covers: Vec<String>,
     /// Navidrome: the owner, when the server says.
     pub owner: Option<String>,
     /// Navidrome: the server marks it read-only (another user's, smart).
@@ -93,6 +96,9 @@ pub struct GenreDto {
     /// album page's genre links from Navidrome).
     pub album_count: Option<u32>,
     pub track_count: Option<u32>,
+    /// Local: its first album's cover (the genre tile's colours and
+    /// corner cover). `None` for Navidrome and for an album's genre links.
+    pub cover_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

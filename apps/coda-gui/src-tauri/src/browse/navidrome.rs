@@ -79,6 +79,8 @@ fn playlist_dto(playlist: &Playlist, covers: &CoverService, username: &str) -> P
         track_count: playlist.song_count,
         duration_ms: playlist.duration.map(|d| d.as_millis() as u64),
         cover_url: remote_cover(covers, playlist.cover_art.as_ref()),
+        // The server's own playlist cover is already a mosaic.
+        covers: Vec::new(),
         owner: playlist.access.owner.clone(),
         readonly: playlist.access.readonly,
         editable,
@@ -96,6 +98,8 @@ fn genre_dto(genre: &Genre) -> GenreDto {
         name: genre.name.clone(),
         album_count: genre.album_count,
         track_count: genre.song_count,
+        // `getGenres` names no album: the genre tiles look one up.
+        cover_url: None,
     }
 }
 
@@ -116,6 +120,7 @@ fn album_genres(tracks: &[Track]) -> Vec<GenreDto> {
             name: g.clone(),
             album_count: None,
             track_count: None,
+            cover_url: None,
         })
         .collect()
 }
@@ -354,6 +359,7 @@ impl BrowseHandle {
             track_count: songs.song_count,
             duration_ms: durations.filter(|_| !songs.tracks.is_empty()),
             cover_url: None,
+            covers: Vec::new(),
             owner: songs.access.owner.clone(),
             readonly: songs.access.readonly,
             editable,

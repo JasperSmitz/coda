@@ -284,6 +284,8 @@ export interface Playlist {
   trackCount: number | null;
   durationMs: number | null;
   coverUrl: string | null;
+  /** Local: the covers of its first different albums (up to four, a 2×2 mosaic); Navidrome: none (its cover is the server's mosaic). */
+  covers: string[];
   owner: string | null;
   readonly: boolean;
   /** Navidrome: the connected user may change it (always `false` for local). */
@@ -306,6 +308,8 @@ export interface Genre {
   name: string;
   albumCount: number | null;
   trackCount: number | null;
+  /** Local: its first album's cover (its tile's colours); Navidrome: `null` (the tile looks one up). */
+  coverUrl: string | null;
 }
 
 export interface AlbumDetail {

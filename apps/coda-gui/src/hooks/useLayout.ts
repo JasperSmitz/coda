@@ -13,6 +13,7 @@ import {
   useState,
   type RefObject,
 } from "react";
+import { pageSettled } from "../lib/pageTransition";
 import type { Entry } from "../state/nav";
 import { useAppState } from "../state/store";
 
@@ -89,11 +90,18 @@ export function scrollToTop(el: HTMLElement, top: number) {
  * a page starts at the top until its own position is restored, and only
  * then records where it is (the scroll events of the page it replaced,
  * or of its own loading state, are not its position).
+ *
+ * `settled`: the page has finished loading, whatever came of it (its
+ * content, empty, or an error; `ready` implies it). A settled page tells
+ * a page transition waiting for it (`lib/pageTransition.ts`
+ * `pageSettled`), after the restore if there is one: a transition must
+ * not wait for content an empty or failed page never gets.
  */
 export function useScroll(
   ref: RefObject<HTMLElement | null>,
   entry: Entry,
   ready: boolean,
+  settled: boolean = ready,
 ): number {
   const [scrollTop, setScrollTop] = useState(0);
   const restored = useRef(false);
@@ -103,11 +111,20 @@ export function useScroll(
     if (ready) {
       restored.current = true;
       el.scrollTop = entry.scrollTop;
+      // Virtualized lists follow the scroll event, which the browser
+      // fires only at its next frame: tell them now, so the rows at the
+      // restored place render before anything is painted (and before a
+      // page transition takes its new screen).
+      el.dispatchEvent(new Event("scroll"));
     } else {
       el.scrollTop = 0;
     }
     setScrollTop(el.scrollTop);
   }, [ref, entry, ready]);
+  // After the restore above (same commit, declared after it).
+  useLayoutEffect(() => {
+    if (settled || ready) pageSettled(entry.id);
+  }, [entry, settled, ready]);
   // A layout effect: its cleanup runs as the page is replaced, before the
   // browser reports the scroll that the shorter content causes.
   useLayoutEffect(() => {

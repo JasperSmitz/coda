@@ -100,8 +100,9 @@ A design-led redesign on `main`: Home / Search / Library navigation, Home built 
 - Open for the brief: where genre-per-album comes from for the history's contexts (local tags; Navidrome album genres), and the exact pick and fallback rules (thin history, a genre with fewer than three albums).
 - Acceptance: the picks are deterministic per day and tested; Home renders before history and picks arrive (no layout jump); Resume continues the right track; nothing blocks the engine.
 
-### N7 — Motion and refinement
-- Cover morphs between pages, page crossfades, the carousel's glide, the queue's rise; reduced motion everywhere. The type exploration (a few pairings compared live, then one chosen), the flourish decision (the record, or none), the owner's nitpick round, the onboarding restyle, release notes (themes gone, ADR 0009) and **2.0.0**.
+### N7 — Motion and refinement (`docs/plans/n7-motion.md`; motion and polish done 2026-11-19, reviewed; runtime smoke "2.0 N7" for the owner; the owner-taste items below are open)
+- Done in the brief: page changes as View Transitions (crossfade; the top bar, player and queue panel unmoved), cover morphs into the page header's cover and back (album, artist, playlist; from grids, lists, Home's carousel and moods, Search), scroll restored before the new screen, rapid navigation never queues, instant without View Transitions or with reduced motion; the small motion's curves and durations aligned (`--ease`, `--spring`, `--motion-nav`, `--motion-page`), tiles' Play button scaling in; the onboarding restyle; Genres as tinted tiles and Playlists as mosaic cards (Covers / List each), Mixes cards restyled; a consistency pass (dead CSS removed).
+- **Still open (owner, refinement rounds):** the type exploration (a few pairings compared live, then one chosen), the flourish decision (the record, or none), the owner's nitpick round, release notes (themes gone, ADR 0009) and **2.0.0**.
 - Acceptance: the full `scripts/smoke.md` for 2.0 passes on Linux and macOS; docs (`DESIGN.md` marked shipped, `ARCHITECTURE.md`, `README.md`) match the code.
 
 ### Later

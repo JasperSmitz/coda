@@ -292,17 +292,25 @@
 
 /* ----- onboarding ----- */
 
+/* A glass card over the base, a soft glow in the accent behind it.
+   Contrast at the worst point (the glow's centre, 28% of the accent over
+   the base, under the card's glass at its opacity; an all-white custom
+   accent): text 13.4:1, text-2 6.4:1, text-3 4.1:1, danger 5.1:1; on a
+   field inside the card (surface-1) text 11.3:1, text-2 5.4:1. No text
+   lies on the glow outside the card. */
 .onboarding {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
   padding: 24px;
-  /* Room for the macOS window buttons, outside the scrolling area (the
-     gradient fills it); `.onboarding-titlebar` drags the window there. */
+  /* Room for the macOS window buttons, outside the scrolling area;
+     `.onboarding-titlebar` drags the window there. */
   border-top: var(--titlebar-h) solid transparent;
   overflow-y: auto;
-  background: radial-gradient(ellipse at top, var(--surface-3), var(--bg) 70%) border-box;
+  background: var(--bg) border-box;
+  isolation: isolate;
 }
 
 .onboarding-titlebar {
@@ -313,17 +321,55 @@
   height: var(--titlebar-h);
 }
 
+.onboarding-glow {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: -1;
+  width: min(1100px, 130vw);
+  height: min(820px, 120vh);
+  transform: translate(-50%, -54%);
+  background: radial-gradient(
+    closest-side,
+    color-mix(in srgb, var(--accent) 28%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+
 .onboarding-card {
   display: flex;
   flex-direction: column;
   gap: 18px;
   width: min(580px, 100%);
-  padding: 36px 36px 32px;
+  margin: auto;
+  padding: 32px 36px 32px;
   border-radius: var(--radius-panel);
-  background: var(--surface-1);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-big);
   line-height: 1.5;
+}
+
+.onboarding-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.onboarding-sign {
+  flex: none;
+  color: var(--accent);
+}
+
+.onboarding-wordmark {
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 22px;
+  font-weight: var(--display-weight);
 }
 
 .onboarding-card h1 {
@@ -339,11 +385,18 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
 }
 
 .onboarding-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.onboarding-actions .button {
+  height: 38px;
+  padding: 0 22px;
 }
 
 /* ----- now playing ----- */
@@ -937,7 +990,8 @@
    `queueToggleMovesContent`), "lyrics" for `l` (App), "slide" for a
    track change (NowPlayingView, with `data-vt-dir` "forward" or "back"),
    "np-morph" for opening and closing Now Playing windowed (App, with
-   `data-vt-dir` "open" or "close"; at the end of this file). Elements
+   `data-vt-dir` "open" or "close"; at the end of this file), and "page"
+   for a page change (lib/pageTransition.ts; the last section). Elements
    are named only then and, for the first three, only inside Now Playing;
    the morph names one cover on each side (`np-morph`, used by nothing
    else), so every name is unique. Everything unnamed (the
@@ -1242,4 +1296,85 @@
   from {
     opacity: 0;
   }
+}
+
+/* ----- view transitions (pages) -----
+   A page change (`lib/pageTransition.ts`, `data-vt="page"`): the new page
+   fades in over the old one (no dip through the base). The top bar, the
+   player and an open queue panel take their own names, so they are not
+   part of that crossfade: they show live, unmoved (their old image is
+   dropped). These names exist only for "page", Now Playing's only for
+   its own kinds, so the two never meet. The one cover that morphs carries
+   `data-vt-morph` (set and cleared by the script, on one element at a
+   time) and glides into the page header's cover or back into its tile
+   (`--motion-morph`, `--ease`), crossfading its two images. The chrome's
+   names cost its glass blur during the crossfade (a named element is
+   captured on its own, without its backdrop; ~89% opaque glass, so the
+   page shows faintly unblurred through it for ~0.35s), traded for the
+   chrome standing still and the indicator gliding live. With reduced
+   motion no transition runs at all (`viewTransitionsOn`), and the rule
+   above stops any animation. */
+:root[data-vt="page"] .topbar {
+  view-transition-name: topbar;
+}
+
+:root[data-vt="page"] .player {
+  view-transition-name: player;
+}
+
+:root[data-vt="page"] .queue-popover {
+  view-transition-name: queue-popover;
+}
+
+:root[data-vt="page"] [data-vt-morph] {
+  view-transition-name: page-cover;
+}
+
+:root[data-vt="page"]::view-transition-old(root) {
+  opacity: 1;
+  animation: none;
+}
+
+:root[data-vt="page"]::view-transition-new(root) {
+  animation: page-in var(--motion-page) var(--ease) both;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+  }
+}
+
+:root[data-vt="page"]::view-transition-group(topbar),
+:root[data-vt="page"]::view-transition-group(player),
+:root[data-vt="page"]::view-transition-group(queue-popover),
+:root[data-vt="page"]::view-transition-new(topbar),
+:root[data-vt="page"]::view-transition-new(player),
+:root[data-vt="page"]::view-transition-new(queue-popover) {
+  animation: none;
+}
+
+:root[data-vt="page"]::view-transition-old(topbar),
+:root[data-vt="page"]::view-transition-old(player),
+:root[data-vt="page"]::view-transition-old(queue-popover) {
+  display: none;
+}
+
+/* Coming in with the page (from Now Playing, which has no top bar or
+   player): fade in with it rather than pop in over the old screen. */
+:root[data-vt="page"]::view-transition-new(topbar):only-child,
+:root[data-vt="page"]::view-transition-new(player):only-child,
+:root[data-vt="page"]::view-transition-new(queue-popover):only-child {
+  animation: page-in var(--motion-page) var(--ease) both;
+}
+
+:root[data-vt="page"]::view-transition-group(page-cover) {
+  animation-duration: var(--motion-morph);
+  animation-timing-function: var(--ease);
+}
+
+:root[data-vt="page"]::view-transition-old(page-cover),
+:root[data-vt="page"]::view-transition-new(page-cover) {
+  animation-duration: var(--motion-morph);
+  animation-timing-function: var(--ease);
 }

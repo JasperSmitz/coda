@@ -20,6 +20,7 @@ import {
   useScroll,
 } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
+import { morphKey } from "../lib/pageTransition";
 import { usePendingFocus } from "../hooks/usePendingFocus";
 import { browse } from "../lib/browse";
 import { addToMixFlow } from "../lib/mixes";
@@ -50,7 +51,12 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   const artists = load.data ?? [];
   // `known`: the Covers / List to show (a List default never shows Covers first).
   const [view, setView, known] = useLibraryView(source, "artists");
-  const scrollTop = useScroll(scroller, entry, artists.length > 0 && known);
+  const scrollTop = useScroll(
+    scroller,
+    entry,
+    artists.length > 0 && known,
+    load.state !== "loading",
+  );
   const { height } = useElementSize(scroller);
   const [selected, setSelected] = useState<number | null>(null);
   useShuffleContext(() => shuffleAll(source));
@@ -208,6 +214,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
                       name={artist.name}
                       size="small"
                       className="artist-thumb"
+                      morph={morphKey("artist", source, artist.id)}
                     />
                     <span className="artist-name">{artist.name}</span>
                     <span className="secondary">{count}</span>
@@ -397,6 +404,7 @@ const ArtistTile = memo(function ArtistTile({
           name={artist.name}
           size="small"
           className="artist-cover"
+          morph={morphKey("artist", source, artist.id)}
         />
         <span className="artist-tile-name" style={{ maxWidth: cover }}>
           {artist.name}

@@ -1,5 +1,5 @@
-// Genres of a source, A–Z with album and track counts, and one genre's
-// albums. Local: Play and Shuffle play every track of the genre (resolved
+// Genres of a source, A–Z, as tiles (Covers: `GenreTiles`) or rows with
+// album and track counts (List), and one genre's albums. Local: Play and Shuffle play every track of the genre (resolved
 // by the engine). Navidrome: Shuffle only, random songs of the genre (as
 // Shuffle all does); its albums are paged like the Albums view, in the
 // server's order. `s` shuffles the genre on its page, and everything on
@@ -8,9 +8,10 @@
 
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { AlbumCollection } from "../components/AlbumCollection";
+import { GenreTiles } from "../components/GenreTiles";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Empty, ErrorState, SkeletonGrid, SkeletonRows } from "../components/LoadState";
-import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
+import { firstPageDone, PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
 import { clearHeight, useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
@@ -61,7 +62,8 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
   const load = useLoad(() => browse.genres(source), source, source === "local" ? version : null);
   const scroller = usePageScroller();
   const genres = load.data ?? [];
-  useScroll(scroller, entry, genres.length > 0);
+  const [view, setView, known] = useLibraryView(source, "genres");
+  useScroll(scroller, entry, genres.length > 0 && known, load.state !== "loading");
   const idPrefix = useId();
   // Kept by id, so a quiet refresh (the scan adding a genre above it)
   // keeps the same genre selected; cleared when it disappears.
@@ -130,11 +132,16 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
         eyebrow={SOURCE_LABEL[source]}
         title="Genres"
         meta={load.state === "ready" && plural(genres.length, "genre")}
-        tools={<PlayButtons onShuffle={() => shuffleAll(source)} />}
+        tools={
+          <>
+            <PlayButtons onShuffle={() => shuffleAll(source)} />
+            <ViewToggle value={view} onChange={setView} />
+          </>
+        }
       />
       {source === "local" && <ScanLine />}
       <div className="view-body">
-        {load.state === "loading" && <SkeletonRows />}
+        {(load.state === "loading" || (!known && genres.length > 0)) && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && genres.length === 0 && (
           <Empty title="No genres">
@@ -143,7 +150,16 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
               : "The server lists no genres."}
           </Empty>
         )}
-        {genres.length > 0 && (
+        {genres.length > 0 && known && view === "covers" && (
+          <GenreTiles
+            genres={genres}
+            source={source}
+            label="Genres"
+            onOpen={(genre) => openGenre(source, genre, genre)}
+            onMenu={(genre, x, y) => setMenu({ x, y, key: genre.id, genre })}
+          />
+        )}
+        {genres.length > 0 && known && view === "list" && (
           <div
             className="genre-list"
             ref={list}
@@ -184,7 +200,13 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
           state={menu}
           onClose={() => {
             setMenu(null);
-            list.current?.focus();
+            if (view === "list") {
+              list.current?.focus();
+              return;
+            }
+            // Covers: back to the genre's tile.
+            const at = genres.findIndex((g) => g.id === menu.genre.id);
+            document.querySelector<HTMLElement>(`.genre-grid [data-index="${at}"]`)?.focus();
           }}
           items={[
             { label: "Open", action: () => openGenre(source, menu.genre, menu.genre) },
@@ -218,7 +240,7 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
   const scroller = usePageScroller();
   const albums = load.data?.albums ?? [];
   const [view, setView, known] = useLibraryView("local", "genreAlbums");
-  useScroll(scroller, entry, albums.length > 0 && known);
+  useScroll(scroller, entry, albums.length > 0 && known, load.state !== "loading");
   const genre = load.data?.genre ?? hint;
   const title = genre?.name ?? name;
   usePageSubject(entry, albums[0]?.coverUrl ?? null);
@@ -281,7 +303,7 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
   const paged = usePagedAlbums((offset) => browse.navidromeGenreAlbums(id, offset), id);
   const { pages } = paged;
   const [view, setView, known] = useLibraryView("navidrome", "genreAlbums");
-  useScroll(scroller, entry, pages.albums.length > 0 && known);
+  useScroll(scroller, entry, pages.albums.length > 0 && known, firstPageDone(pages));
   const title = hint?.name ?? name;
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";

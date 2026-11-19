@@ -63,7 +63,7 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
   const started = snapshot?.phase === "ready";
   const server = snapshot !== null && snapshot.navidrome.state !== "notConfigured";
   const tracks = load.data?.tracks ?? [];
-  useScroll(scroller, entry, tracks.length > 0);
+  useScroll(scroller, entry, tracks.length > 0, load.state !== "loading");
   // The listing's data first (it knows the year), the album's own after.
   const loaded = load.data?.album;
   const album: Album | undefined = loaded

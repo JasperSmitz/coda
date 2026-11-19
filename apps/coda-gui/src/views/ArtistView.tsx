@@ -45,7 +45,7 @@ export function ArtistView({ entry, source, id, name }: Props) {
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";
   const albums = load.data?.albums ?? [];
-  useScroll(scroller, entry, albums.length > 0);
+  useScroll(scroller, entry, albums.length > 0, load.state !== "loading");
 
   const artist = load.data?.artist;
   const title = artist?.name || name;

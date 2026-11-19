@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
 import { PageGlow } from "./components/PageGlow";
 import { DialogHost } from "./components/Dialog";
+import { forgetGenreCovers } from "./components/GenreTiles";
 import { MixDialogHost } from "./components/MixDialogs";
 import { Player } from "./components/Player";
 import { QueuePanel } from "./components/QueuePanel";
@@ -82,6 +83,7 @@ function useBrowseGenerations(snapshot: Snapshot | null) {
     if (server !== last.server) {
       clearBrowseCache();
       clearLyricsCache();
+      forgetGenreCovers();
       sourceReplaced("navidrome");
     }
     if (library !== last.library) sourceReplaced("local");

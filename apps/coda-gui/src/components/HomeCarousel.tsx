@@ -14,6 +14,7 @@ import { useRef, type KeyboardEvent, type WheelEvent } from "react";
 import { useFadeOnChange } from "../hooks/useFadeOnChange";
 import { usePendingFocus } from "../hooks/usePendingFocus";
 import { quietLine, slot } from "../lib/home";
+import { morphKey } from "../lib/pageTransition";
 import type { HomeItem } from "../lib/types";
 import { Cover } from "./Cover";
 import { BackIcon, ForwardIcon, PlayIcon } from "./icons";
@@ -162,7 +163,13 @@ export function HomeCarousel({
                 }
               }}
             >
-              <Cover url={it.coverUrl} name={it.name} size="large" className="carousel-cover" />
+              <Cover
+                url={it.coverUrl}
+                name={it.name}
+                size="large"
+                className="carousel-cover"
+                morph={itemMorph(it)}
+              />
             </button>
           );
         })}
@@ -231,6 +238,13 @@ export function HomeCarousel({
       </div>
     </div>
   );
+}
+
+/** The page an item's cover morphs into (albums, artists, playlists open one with a header cover). */
+function itemMorph(item: HomeItem): string | undefined {
+  return item.kind === "album" || item.kind === "artist" || item.kind === "playlist"
+    ? morphKey(item.kind, item.source, item.id)
+    : undefined;
 }
 
 const KIND_SUBTITLE: Record<HomeItem["kind"], string> = {

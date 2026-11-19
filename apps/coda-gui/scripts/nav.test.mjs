@@ -13,6 +13,7 @@ import {
   initialNav,
   localOrderOf,
   openRootFor,
+  pageChange,
   push,
   replaceTop,
   resetSource,
@@ -274,4 +275,23 @@ test("a section's Albums route names no sort: the remembered one applies", () =>
   // A route's own sort (a choice just made) wins.
   assert.equal(localOrderOf("artist", "year"), "artist");
   assert.equal(serverSortOf("random", "newest"), "random");
+});
+
+test("a page change is a push, Back, or else (for the page transition's morph)", () => {
+  const s0 = selectRoot(start(), "library");
+  const s1 = push(s0, album("a"));
+  assert.equal(pageChange(s0, s1), "push");
+  const s2 = push(s1, artist("b"));
+  assert.equal(pageChange(s1, s2), "push");
+  assert.equal(pageChange(s2, back(s2)), "back");
+  // Two steps at once, a root switch, a section, the same page: no morph.
+  assert.equal(pageChange(s0, s2), "other");
+  assert.equal(pageChange(s2, toRoot(s2)), "other");
+  assert.equal(pageChange(s1, selectRoot(s1, "home")), "other");
+  assert.equal(pageChange(s1, setSection(s1, "genres")), "other");
+  assert.equal(pageChange(s1, s1), "other");
+  // Pushing the shown page again only shows it: nothing changes.
+  assert.equal(pageChange(s1, push(s1, album("a"))), "other");
+  // Replacing the top (a new sort) is no push.
+  assert.equal(pageChange(s1, replaceTop(s1, album("c"))), "other");
 });

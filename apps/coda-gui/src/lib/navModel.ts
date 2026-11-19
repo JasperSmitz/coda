@@ -359,3 +359,22 @@ export function resetSource(state: NavState, source: SourceKind): NavState {
     sources: { ...state.sources, [source]: { ...nav, stacks: freshStacks(source, nav.section) } },
   };
 }
+
+/** How the shown page changes from one state to the next (a page transition's kind of morph). */
+export type PageChange = "push" | "back" | "other";
+
+/**
+ * `push`: the new top was pushed onto the old top (on the same stack);
+ * `back`: the old top was popped, showing the entry below it; anything
+ * else (a root, a section, a source, several steps): `other`.
+ */
+export function pageChange(before: NavState, after: NavState): PageChange {
+  const was = currentStack(before);
+  const is = currentStack(after);
+  const from = was[was.length - 1];
+  const to = is[is.length - 1];
+  if (from === to) return "other";
+  if (is.length >= 2 && is[is.length - 2] === from) return "push";
+  if (was.length >= 2 && was[was.length - 2] === to) return "back";
+  return "other";
+}

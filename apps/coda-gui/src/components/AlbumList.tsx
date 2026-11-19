@@ -21,6 +21,7 @@ import {
 import { clearHeight, revealRow } from "../hooks/useLayout";
 import { formatTime } from "../lib/format";
 import { openRoute } from "../lib/play";
+import { morphKey } from "../lib/pageTransition";
 import type { Album, SourceKind } from "../lib/types";
 import { AlbumMenu, openAlbum, playAlbum, usePlayable, type AlbumMenuState } from "./AlbumMenu";
 import { Cover } from "./Cover";
@@ -291,7 +292,13 @@ const AlbumRow = memo(function AlbumRow({
         onMenu(album, e.clientX, e.clientY);
       }}
     >
-      <Cover url={album.coverUrl} name={album.name} size="small" className="album-row-cover" />
+      <Cover
+        url={album.coverUrl}
+        name={album.name}
+        size="small"
+        className="album-row-cover"
+        morph={morphKey("album", source, album.id)}
+      />
       <span className="album-row-title" title={album.name}>
         {album.name}
       </span>

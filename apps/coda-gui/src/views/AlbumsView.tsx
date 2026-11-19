@@ -5,7 +5,7 @@
 
 import { AlbumCollection, type ListSorts } from "../components/AlbumCollection";
 import { Empty, ErrorState, SkeletonGrid, SkeletonRows } from "../components/LoadState";
-import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
+import { firstPageDone, PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
 import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
@@ -71,7 +71,7 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
   // `known`: the Covers / List to show (a List default never shows Covers first).
   const [view, setView, known] = useLibraryView("local", "albums");
   const albums = load.data ?? [];
-  useScroll(scroller, entry, albums.length > 0 && known);
+  useScroll(scroller, entry, albums.length > 0 && known, load.state !== "loading");
   useShuffleContext(() => shuffleAll("local"));
   const list: ListSorts<LocalAlbumOrder> = {
     sort: order,
@@ -121,7 +121,7 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
   const paged = usePagedAlbums((offset) => browse.navidromeAlbums(sort, offset), sort);
   const { pages } = paged;
   const [view, setView, known] = useLibraryView("navidrome", "albums");
-  useScroll(scroller, entry, pages.albums.length > 0 && known);
+  useScroll(scroller, entry, pages.albums.length > 0 && known, firstPageDone(pages));
   useShuffleContext(() => shuffleAll("navidrome"));
   // The server's play counts, when its albums carry them.
   const plays = sort === "frequent" && pages.albums.some((a) => a.playCount !== null);

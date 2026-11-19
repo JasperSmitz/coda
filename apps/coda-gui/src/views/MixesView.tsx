@@ -7,6 +7,7 @@ import { useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Empty, SkeletonRows } from "../components/LoadState";
 import { IngredientChip } from "../components/MixParts";
+import { Equalizer } from "../components/QueuePanel";
 import { AlertIcon, MoreIcon, PlayIcon, PlusIcon } from "../components/icons";
 import { usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
@@ -45,7 +46,7 @@ export function MixesView({ entry, source }: { entry: Entry; source: SourceKind 
   const load = useLoad(() => listMixes(source), source, version);
   const scroller = usePageScroller();
   const mixes = load.data ?? [];
-  useScroll(scroller, entry, mixes.length > 0);
+  useScroll(scroller, entry, mixes.length > 0, load.state !== "loading");
   const [menu, setMenu] = useState<(MenuState & { mix: Mix }) | null>(null);
   const started = snapshot?.phase === "ready";
   const active = snapshot?.mix ?? null;
@@ -169,7 +170,10 @@ function MixCard({
           {mix.name}
         </h3>
         {active && (
-          <span className="tag mix-card-state">{active.loading ? "Loading…" : "Playing"}</span>
+          <span className="tag mix-card-state">
+            {!active.loading && <Equalizer animated={snapshot?.status === "playing"} />}
+            {active.loading ? "Loading…" : "Playing"}
+          </span>
         )}
       </div>
       <ul className="mix-chips" aria-label={`In ${mix.name}`}>

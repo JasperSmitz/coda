@@ -102,13 +102,23 @@ pub(crate) fn genre_id(view: &LocalView<'_>, id: &str) -> Result<GenreId, Browse
         .ok_or_else(|| BrowseError::not_found("Genre"))
 }
 
-fn genre_dto(view: &LocalView<'_>, id: GenreId) -> GenreDto {
-    let genre = view.library.tags().genre(id);
+/// A genre; with `covers`, its first album's cover too (the genre tiles'
+/// colours and corner cover; an album page's genre links need none).
+fn genre_dto(view: &LocalView<'_>, id: GenreId, covers: Option<&CoverService>) -> GenreDto {
+    let tags = view.library.tags();
+    let genre = tags.genre(id);
+    let cover_url = covers.and_then(|covers| {
+        genre
+            .albums()
+            .iter()
+            .find_map(|a| first_track_cover(view.library, tags.album(*a).tracks(), covers))
+    });
     GenreDto {
         id: local_id(view.generation, id.0),
         name: genre.name().to_owned(),
         album_count: u32_count(genre.albums().len()),
         track_count: u32_count(genre.track_count()),
+        cover_url,
     }
 }
 
@@ -138,7 +148,10 @@ fn album_genres(view: &LocalView<'_>, id: AlbumId) -> Vec<GenreDto> {
         .collect();
     // Stable: anything not found by name stays A–Z, last.
     found.sort_by_key(|(at, _)| *at);
-    found.into_iter().map(|(_, g)| genre_dto(view, g)).collect()
+    found
+        .into_iter()
+        .map(|(_, g)| genre_dto(view, g, None))
+        .collect()
 }
 
 pub(crate) fn playlist_id(view: &LocalView<'_>, id: &str) -> Result<PlaylistId, BrowseError> {
@@ -231,13 +244,13 @@ pub fn album(
 }
 
 /// Every genre, A–Z, with its album and track counts.
-pub fn genres(view: LocalView<'_>, _covers: &CoverService) -> Result<Vec<GenreDto>, BrowseError> {
+pub fn genres(view: LocalView<'_>, covers: &CoverService) -> Result<Vec<GenreDto>, BrowseError> {
     Ok(view
         .library
         .tags()
         .genres()
         .iter()
-        .map(|g| genre_dto(&view, *g))
+        .map(|g| genre_dto(&view, *g, Some(covers)))
         .collect())
 }
 
@@ -257,7 +270,7 @@ pub fn genre(
         .map(|a| album_dto(&view, *a, covers))
         .collect();
     Ok(GenreDetailDto {
-        genre: genre_dto(&view, id),
+        genre: genre_dto(&view, id, Some(covers)),
         albums,
     })
 }
@@ -313,6 +326,38 @@ pub fn context_track_ids(
     Ok(ids)
 }
 
+/// The covers of a playlist's first different albums, at most
+/// [`PLAYLIST_COVERS`] (its card's and header's 2×2 mosaic), looking at
+/// no more than its first [`PLAYLIST_COVER_SCAN`] tracks. Each album's
+/// cover is its first track's, as on the album's own tile, so the same
+/// album is never shown twice.
+fn playlist_covers(view: &LocalView<'_>, tracks: &[TrackId], covers: &CoverService) -> Vec<String> {
+    let tags = view.library.tags();
+    let mut albums: Vec<AlbumId> = Vec::new();
+    let mut urls = Vec::new();
+    for track in tracks.iter().take(PLAYLIST_COVER_SCAN) {
+        let Some(album) = tags.album_of(view.library.track(*track)) else {
+            continue;
+        };
+        if albums.contains(&album) {
+            continue;
+        }
+        albums.push(album);
+        if let Some(url) = first_track_cover(view.library, tags.album(album).tracks(), covers) {
+            urls.push(url);
+            if urls.len() == PLAYLIST_COVERS {
+                break;
+            }
+        }
+    }
+    urls
+}
+
+/// A playlist mosaic's covers.
+pub const PLAYLIST_COVERS: usize = 4;
+/// How far into a playlist its mosaic looks for different albums.
+const PLAYLIST_COVER_SCAN: usize = 200;
+
 fn playlist_dto(view: &LocalView<'_>, id: PlaylistId, covers: &CoverService) -> PlaylistDto {
     let playlist = view.library.playlist(id);
     let durations: Option<u64> = playlist
@@ -331,6 +376,7 @@ fn playlist_dto(view: &LocalView<'_>, id: PlaylistId, covers: &CoverService) -> 
         track_count: u32_count(playlist.tracks.len()),
         duration_ms: durations.filter(|_| !playlist.tracks.is_empty()),
         cover_url: first_track_cover(view.library, &playlist.tracks, covers),
+        covers: playlist_covers(view, &playlist.tracks, covers),
         owner: None,
         readonly: false,
         editable: false,

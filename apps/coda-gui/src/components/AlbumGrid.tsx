@@ -17,6 +17,7 @@ import {
   type RefObject,
 } from "react";
 import { openRoute } from "../lib/play";
+import { morphKey } from "../lib/pageTransition";
 import type { Album, Palette, SourceKind } from "../lib/types";
 import { revealRow } from "../hooks/useLayout";
 import { usePendingFocus } from "../hooks/usePendingFocus";
@@ -290,7 +291,13 @@ const AlbumTile = memo(function AlbumTile({
         title={album.name}
         aria-keyshortcuts="Shift+Enter"
       >
-        <Cover url={album.coverUrl} name={album.name} size="small" className="album-cover" />
+        <Cover
+          url={album.coverUrl}
+          name={album.name}
+          size="small"
+          className="album-cover"
+          morph={morphKey("album", source, album.id)}
+        />
         <span className="album-title" style={{ maxWidth: cover }}>
           {album.name}
         </span>

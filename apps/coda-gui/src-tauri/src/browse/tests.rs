@@ -219,6 +219,9 @@ async fn local_genres_their_albums_and_tracks() {
         .await
         .unwrap();
     assert_eq!(rock.genre, genres[2]);
+    // Its tile's cover: its first album's (as that album's own tile).
+    assert!(rock.genre.cover_url.is_some());
+    assert_eq!(rock.genre.cover_url, rock.albums[0].cover_url);
     let albums: Vec<&str> = rock.albums.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(albums, ["Second", "Only"]);
 
@@ -380,6 +383,55 @@ async fn local_playlists_keep_duplicates_and_warn_about_missing_entries() {
         detail.warning.as_deref(),
         Some("2 entries not found in the library")
     );
+}
+
+#[tokio::test]
+async fn local_playlist_covers_are_its_first_different_albums() {
+    let browse = handle();
+    let mut library = Library::new("/m".into());
+    library.extend([
+        local("A/1.flac", "Band", "A", 1),
+        local("A/2.flac", "Band", "A", 2),
+        local("B/1.flac", "Band", "B", 1),
+        local("C/1.flac", "Band", "C", 1),
+        local("D/1.flac", "Band", "D", 1),
+        local("E/1.flac", "Band", "E", 1),
+    ]);
+    let entries = ["A/2", "A/1", "B/1", "A/1", "C/1", "D/1", "E/1"];
+    library.add_playlist(PlaylistFile {
+        path: "/m/mix.m3u".into(),
+        name: "mix".into(),
+        entries: entries
+            .iter()
+            .map(|e| format!("/m/{e}.flac").into())
+            .collect(),
+        unresolved: 0,
+        cut: false,
+    });
+    browse.replace_library(Some(library));
+    let playlists = browse.local(local::playlists).await.unwrap();
+    let albums = browse
+        .local(|v, c| local::albums(v, LocalAlbumOrder::Name, &HashMap::new(), c))
+        .await
+        .unwrap();
+    let cover = |name: &str| {
+        albums
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.cover_url.clone())
+            .unwrap()
+    };
+    // Each album once, by its own cover, four at most, in playlist order.
+    assert_eq!(
+        playlists[0].covers,
+        [cover("A"), cover("B"), cover("C"), cover("D")]
+    );
+    let id = playlists[0].id.clone();
+    let detail = browse
+        .local(move |v, c| local::playlist(v, &id, c))
+        .await
+        .unwrap();
+    assert_eq!(detail.playlist.covers, playlists[0].covers);
 }
 
 #[tokio::test]

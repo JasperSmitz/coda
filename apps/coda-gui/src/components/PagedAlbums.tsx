@@ -16,6 +16,11 @@ interface Pages {
   error: BrowseError | null;
 }
 
+/** The first page has come back (albums, none at all, or an error): the page is settled. */
+export function firstPageDone(pages: Pages): boolean {
+  return pages.albums.length > 0 || pages.next === null || pages.error !== null;
+}
+
 export interface PagedAlbums {
   pages: Pages;
   /** The grid reached its end: the next page, unless one failed. */

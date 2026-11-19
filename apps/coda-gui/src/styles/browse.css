@@ -681,7 +681,7 @@
   height: auto;
   margin-bottom: 6px;
   transition:
-    transform var(--motion),
+    transform var(--motion) var(--spring),
     box-shadow var(--motion);
 }
 
@@ -712,7 +712,7 @@
   color: var(--accent-text);
   box-shadow: var(--shadow);
   opacity: 0;
-  transform: translateY(4px);
+  transform: translateY(2px) scale(0.6);
   transition:
     opacity var(--motion-fast),
     transform var(--motion) var(--spring);
@@ -730,6 +730,10 @@
 
 .album-play:not(:disabled):hover {
   transform: translateY(-3px) scale(1.06);
+}
+
+.album-play:not(:disabled):active {
+  transform: translateY(-3px) scale(var(--press-scale));
 }
 
 .album-title,
@@ -923,7 +927,7 @@
   margin-bottom: 8px;
   border-radius: 50%;
   transition:
-    transform var(--motion),
+    transform var(--motion) var(--spring),
     box-shadow var(--motion);
 }
 
@@ -1070,6 +1074,69 @@
   font-weight: 600;
 }
 
+/* Covers: cards with the playlist's cover (a 2×2 mosaic of its albums,
+   or its own), the name and the song count. Hover lifts the cover
+   (transform only, `--spring`). */
+.playlist-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  gap: 22px;
+  padding-bottom: 24px;
+}
+
+.playlist-card-item {
+  min-width: 0;
+}
+
+.playlist-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border-radius: var(--radius);
+}
+
+.playlist-card-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  height: auto;
+  margin-bottom: 6px;
+  border-radius: var(--radius-cover);
+  box-shadow: var(--cover-shadow);
+  font-size: 28px;
+  transition:
+    transform var(--motion) var(--spring),
+    box-shadow var(--motion);
+}
+
+.playlist-card:hover .playlist-card-cover,
+.playlist-card:focus-visible .playlist-card-cover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-big);
+}
+
+.playlist-card:active .playlist-card-cover {
+  transform: scale(var(--press-scale));
+}
+
+.playlist-card-name,
+.playlist-card-sub {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-card-name {
+  font-weight: 600;
+}
+
+.playlist-card-sub {
+  font-size: var(--text-small);
+}
+
 /* ----- genres ----- */
 
 .genre-list {
@@ -1101,6 +1168,117 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* Covers (components/GenreTiles): tinted tiles, the name in display
+   type, the album count above it, the first album's cover peeking,
+   tilted, from the top-right corner (clipped by the tile; the text keeps
+   below it). The wash runs from the cover's tint to a mix of it with the
+   base, so no point is lighter than the tint. Tints are OKLCH L 0.20 with
+   chroma ≤ 0.05 (core `cover::palette`): the lightest of every hue
+   (about #001c0b) gives text 16.3:1, text-2 7.8:1. Until the tint is
+   known, the house glass: surface-2 over the base gives text 14.4:1,
+   text-2 6.9:1. Hover lifts the tile (transform only, `--spring`). */
+.genre-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 18px;
+  padding-bottom: 24px;
+}
+
+.genre-tile-item {
+  min-width: 0;
+}
+
+.genre-tile {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 176px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: linear-gradient(150deg, var(--surface-2) 0%, var(--surface-1) 100%);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  isolation: isolate;
+  text-align: left;
+  transition:
+    transform var(--motion) var(--spring),
+    border-color var(--motion-fast);
+}
+
+.genre-tile.is-tinted {
+  background: linear-gradient(
+    150deg,
+    var(--genre-tint) 0%,
+    color-mix(in srgb, var(--genre-tint) 45%, var(--bg)) 100%
+  );
+}
+
+.genre-tile:hover,
+.genre-tile:focus-visible {
+  transform: translateY(-3px);
+  border-color: var(--text-3);
+}
+
+.genre-tile:active {
+  transform: scale(var(--press-scale));
+}
+
+.genre-tile:focus-visible {
+  border-radius: var(--radius-card);
+}
+
+.genre-tile-peek {
+  position: absolute;
+  top: -16px;
+  right: -18px;
+  z-index: -1;
+  width: 104px;
+  height: 104px;
+  transform: rotate(12deg);
+  transition: transform var(--motion-slow) var(--ease);
+}
+
+.genre-tile:hover .genre-tile-peek,
+.genre-tile:focus-visible .genre-tile-peek {
+  transform: rotate(8deg) translate(-4px, 4px);
+}
+
+.genre-tile-cover {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-cover);
+  box-shadow: var(--cover-shadow);
+  font-size: 22px;
+}
+
+.genre-tile-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+}
+
+.genre-tile-count {
+  color: var(--text-2);
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.genre-tile-name {
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 26px;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.01em;
+  line-height: 1.12;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* An album's genres in its meta line: links to their pages. */
@@ -1608,7 +1786,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--text-3);
-  transition: transform var(--motion) var(--ease-out);
+  transition: transform var(--motion) var(--ease);
 }
 
 .carousel-dot.is-current {
@@ -1699,7 +1877,7 @@
   height: 136px;
   padding: 0;
   border-radius: var(--radius-cover);
-  transition: transform var(--motion-slow) var(--ease-out);
+  transition: transform var(--motion-slow) var(--ease);
 }
 
 .mood-cover {

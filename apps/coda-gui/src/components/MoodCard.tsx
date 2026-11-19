@@ -10,6 +10,7 @@ import { moodEyebrow, moodFacts } from "../lib/home";
 import type { Mood, MoodAlbum, SourceKind } from "../lib/types";
 import { accentStyle, usePalettes } from "../state/palettes";
 import { useAccent, musicAccentOn } from "../state/accent";
+import { morphKey } from "../lib/pageTransition";
 import { Cover } from "./Cover";
 import { PlayIcon } from "./icons";
 
@@ -58,7 +59,13 @@ export function MoodCard({
             aria-label={`Open album ${album.name}`}
             onClick={() => onOpenAlbum(album)}
           >
-            <Cover url={album.coverUrl} name={album.name} size="small" className="mood-cover" />
+            <Cover
+              url={album.coverUrl}
+              name={album.name}
+              size="small"
+              className="mood-cover"
+              morph={morphKey("album", source, album.id)}
+            />
           </button>
         ))}
       </div>

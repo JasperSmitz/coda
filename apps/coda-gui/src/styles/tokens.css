@@ -219,21 +219,27 @@
      player's cover morphing into it (View Transitions): `--motion-morph`;
      a track change: `--motion-slide`. The queue panel rising out of the
      player: `--motion-rise` (with `--spring`), going: `--motion-sink`.
+     A page change crossfades (`--motion-page`) while a cover morphs
+     into the page header's (`--motion-morph`); the navigation's indicator
+     glides (`--motion-nav`). Glides use `--ease`.
      Soft curves (lib/motion.ts reads these for the Web Animations API);
      `--spring`, a slight overshoot, only for small direct responses (a
-     button press, the queue rising). */
+     button press, the queue rising, a cover lifting on hover). */
   --motion-fast: 120ms;
   --motion: 180ms;
   --motion-slow: 320ms;
   --motion-slide: 350ms;
   --motion-morph: 380ms;
+  --motion-page: 350ms;
+  --motion-nav: 500ms;
   --motion-rise: 500ms;
   --motion-sink: 250ms;
   --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
   --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  /* Glides (DESIGN.md "Motion"): Home's carousel. */
+  /* Glides (DESIGN.md "Motion"): Home's carousel, the navigation's
+     indicator, page changes and cover morphs. */
   --ease: cubic-bezier(0.22, 0.7, 0.18, 1);
   --motion-carousel: 900ms;
   --press-scale: 0.96;
@@ -260,6 +266,8 @@
     --motion-slow: 0ms;
     --motion-slide: 0ms;
     --motion-morph: 0ms;
+    --motion-page: 0ms;
+    --motion-nav: 0ms;
     --motion-rise: 0ms;
     --motion-sink: 0ms;
     --motion-carousel: 0ms;

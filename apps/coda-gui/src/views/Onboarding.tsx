@@ -1,10 +1,13 @@
 // First run (no music folder and no server configured): pick a music
 // folder and/or connect a Navidrome server, then continue. Saved like
 // `coda --setup`; the engine starts using it at once and the app shell
-// replaces this screen.
+// replaces this screen. The 2.0 look (DESIGN.md "Preferences"): a glass
+// card over the base with a soft glow in the accent, the coda sign and
+// wordmark, display type for its headings, pill buttons.
 
 import { useEffect, useState, type FormEvent } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
+import { CodaSignIcon } from "../components/icons";
 import { dragRegion } from "../lib/platform";
 import { errorText, settingsApi } from "../lib/ipc";
 import type { ServerInput, Settings } from "../lib/types";
@@ -54,7 +57,12 @@ export function Onboarding() {
     <main className="onboarding">
       {/* macOS: drags the window, clear of its buttons' row. */}
       <div className="onboarding-titlebar" {...dragRegion} />
+      <div className="onboarding-glow" aria-hidden="true" />
       <form className="onboarding-card" onSubmit={finish}>
+        <div className="onboarding-brand" aria-hidden="true">
+          <CodaSignIcon size={22} className="onboarding-sign" />
+          <span className="onboarding-wordmark">coda</span>
+        </div>
         <h1>Welcome to Coda</h1>
         <p className="secondary">
           Play music from a folder on this computer, a Navidrome server, or both. You can change
