@@ -1,0 +1,264 @@
+//! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
+//! from Coda's shared `config.toml`: the accent colour (DESIGN.md
+//! "Preferences"), the source the app browses and the Navidrome lyrics
+//! index switch. Written atomically; an unreadable or invalid file means
+//! the defaults (and is kept as `settings.toml.bad` when it is next
+//! replaced). Keys this version does not know, such as 1.x's theme
+//! settings (`mode`, `theme`, `lightTheme`, `darkTheme`, `accents`,
+//! `visualizer`), are ignored on read and dropped by the next write
+//! (ADR 0009).
+//!
+//! A chosen accent reaches the webview before its first paint as an
+//! initialization script ([`PrefsStore::init_script`]); Preferences
+//! changes it through [`commands`].
+
+pub mod commands;
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::fsio;
+use crate::history::SourceKind;
+use crate::palette::color::{Rgba, contrast, text_on};
+use crate::palette::{BASE, HOUSE_ACCENT, SWATCHES, Swatch};
+
+const MAX_PREFS_BYTES: u64 = 256 * 1024;
+
+/// The accent colour: the house accent, or one fixed colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum Accent {
+    #[default]
+    House,
+    Color(Rgba),
+}
+
+impl Accent {
+    /// `"house"` or `#rrggbb` (any case; the `#` is optional). The house
+    /// accent's own colour typed as hex is the house accent.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text == "house" {
+            return Some(Self::House);
+        }
+        Rgba::parse_rgb(text).map(|color| {
+            if color == HOUSE_ACCENT {
+                Self::House
+            } else {
+                Self::Color(color)
+            }
+        })
+    }
+
+    /// The colour it stands for.
+    pub fn color(self) -> Rgba {
+        match self {
+            Self::House => HOUSE_ACCENT,
+            Self::Color(color) => color,
+        }
+    }
+}
+
+/// An unknown value in the file falls back to the house accent.
+impl From<String> for Accent {
+    fn from(text: String) -> Self {
+        Self::parse(&text).unwrap_or_else(|| {
+            tracing::info!("settings.toml: the accent is not a colour; using the house accent");
+            Self::House
+        })
+    }
+}
+
+impl From<Accent> for String {
+    fn from(accent: Accent) -> Self {
+        match accent {
+            Accent::House => "house".to_owned(),
+            Accent::Color(color) => color.to_string(),
+        }
+    }
+}
+
+/// The preferences as saved (camelCase keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Prefs {
+    pub accent: Accent,
+    /// The source the app browses (`None`: Navidrome if configured, else
+    /// local). Changed only by `ui_source_set`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceKind>,
+    /// "Index lyrics for search" (Preferences › Navidrome; see
+    /// `crate::lyrics_index`). Changed only by `lyrics_index_set_enabled`.
+    pub lyrics_index: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            accent: Accent::House,
+            source: None,
+            lyrics_index: true,
+        }
+    }
+}
+
+/// What Preferences shows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsDto {
+    /// `"house"` or `#rrggbb`, as saved.
+    pub accent: String,
+    /// The accent's colour, `#rrggbb`.
+    pub accent_color: String,
+    /// Black or white, whichever reads better on the accent.
+    pub accent_text: String,
+    /// The accent's contrast with the base (WCAG ratio, two decimals).
+    pub accent_contrast: f64,
+    /// The curated accents.
+    pub swatches: &'static [Swatch],
+    pub source: Option<SourceKind>,
+    pub lyrics_index: bool,
+}
+
+impl PrefsDto {
+    pub fn new(prefs: &Prefs) -> Self {
+        let color = prefs.accent.color();
+        Self {
+            accent: prefs.accent.into(),
+            accent_color: color.to_string(),
+            accent_text: text_on(color).to_string(),
+            accent_contrast: (contrast(color, BASE) * 100.0).round() / 100.0,
+            swatches: &SWATCHES,
+            source: prefs.source,
+            lyrics_index: prefs.lyrics_index,
+        }
+    }
+}
+
+/// The preferences the commands share (managed state).
+pub struct PrefsStore {
+    pub path: Option<PathBuf>,
+    /// The preferences, and whether the file on disk was invalid. One
+    /// change at a time.
+    pub state: tokio::sync::Mutex<(Prefs, bool)>,
+}
+
+impl PrefsStore {
+    pub fn from_process() -> Self {
+        let config = config_dir(
+            std::env::var_os("HOME"),
+            std::env::var_os("XDG_CONFIG_HOME"),
+        );
+        Self::new(path(config.as_deref()))
+    }
+
+    /// Loads the file at `path` (blocking: call at startup).
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let loaded = load(path.as_deref());
+        Self {
+            path,
+            state: tokio::sync::Mutex::new(loaded),
+        }
+    }
+
+    /// The preferences now (at startup, when nothing else holds the lock).
+    pub fn current(&self) -> Prefs {
+        self.state
+            .try_lock()
+            .map(|s| s.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// The main window's initialization script, `None` with the house
+    /// accent (`tokens.css` has it).
+    pub fn init_script(&self) -> Option<String> {
+        init_script(&self.current())
+    }
+}
+
+/// A script that sets a chosen accent on `<html>` before the document
+/// paints (`--accent`, `--accent-text`; `--accent-soft` and the
+/// visualizer's `--viz` follow in `tokens.css`). Only two hex values go
+/// in, as JSON. `None` with the house accent.
+pub fn init_script(prefs: &Prefs) -> Option<String> {
+    let Accent::Color(color) = prefs.accent else {
+        return None;
+    };
+    let payload = serde_json::json!({
+        "accent": color.to_string(),
+        "accentText": text_on(color).to_string(),
+    });
+    Some(format!(
+        r#"(function () {{
+  var a = {payload};
+  function apply() {{
+    var root = document.documentElement;
+    if (!root) return false;
+    root.style.setProperty("--accent", a.accent);
+    root.style.setProperty("--accent-text", a.accentText);
+    return true;
+  }}
+  if (!apply()) {{
+    new MutationObserver(function (_, observer) {{
+      if (apply()) observer.disconnect();
+    }}).observe(document, {{ childList: true }});
+  }}
+}})();"#
+    ))
+}
+
+/// `$XDG_CONFIG_HOME` if absolute, else `~/.config` (on macOS too).
+pub fn config_dir(home: Option<OsString>, xdg_config_home: Option<OsString>) -> Option<PathBuf> {
+    xdg_config_home
+        .filter(|d| !d.is_empty() && Path::new(d).is_absolute())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+}
+
+/// `<config>/coda-app/settings.toml`.
+pub fn path(config_dir: Option<&Path>) -> Option<PathBuf> {
+    config_dir.map(|c| c.join("coda-app").join("settings.toml"))
+}
+
+/// The saved preferences, or the defaults (logged) if the file is missing,
+/// unreadable or invalid. The flag says the file exists but was not valid.
+pub fn load(path: Option<&Path>) -> (Prefs, bool) {
+    let Some(path) = path else {
+        return (Prefs::default(), false);
+    };
+    let text = match fsio::read_regular(path, MAX_PREFS_BYTES) {
+        Ok(None) => return (Prefs::default(), false),
+        Ok(Some(text)) => Ok(text),
+        Err(error) => Err(error.to_string()),
+    };
+    match text.and_then(|t| toml::from_str::<Prefs>(&t).map_err(|e| e.to_string())) {
+        Ok(prefs) => (prefs, false),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "settings.toml is not valid; using the defaults");
+            (Prefs::default(), true)
+        }
+    }
+}
+
+/// Writes `prefs` atomically (a temporary file renamed over the old one).
+/// `keep_bad` first copies an invalid existing file to `.bad`.
+/// A symlinked `settings.toml` (dotfile managers) stays a link: its
+/// target is written.
+pub fn save(path: &Path, prefs: &Prefs, keep_bad: bool) -> std::io::Result<()> {
+    let target = fsio::write_target(path);
+    if keep_bad && target.is_file() {
+        let _ = std::fs::copy(&target, path.with_extension("toml.bad"));
+    }
+    let text = toml::to_string(prefs).map_err(std::io::Error::other)?;
+    let mut bytes = b"# Coda (desktop app) preferences. Written by the app.\n".to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    fsio::write_atomic(&target, &bytes)
+}
+
+#[cfg(test)]
+mod tests;

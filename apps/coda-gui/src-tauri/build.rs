@@ -47,17 +47,9 @@ fn main() {
         "playlist_delete",
         "playlist_remove",
         "playlist_reorder",
-        // Appearance (themes, the GUI's own preferences).
-        "appearance_get",
-        "appearance_set",
-        "theme_list",
-        "theme_resolve",
-        "theme_save_custom",
-        "theme_rename",
-        "theme_duplicate",
-        "theme_delete",
-        "theme_reveal_folder",
-        "theme_window_background",
+        // Preferences (settings.toml: the accent).
+        "prefs_get",
+        "prefs_set_accent",
         // The browsed source (settings.toml) and the Home view.
         "ui_source_get",
         "ui_source_set",

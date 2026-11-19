@@ -12,7 +12,7 @@ import { HomeView } from "./HomeView";
 import { MixesView } from "./MixesView";
 import { PlaylistView, PlaylistsView } from "./PlaylistsView";
 import { SearchView } from "./SearchView";
-import { SettingsView } from "./SettingsView";
+import { PreferencesView } from "./PreferencesView";
 
 export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapshot }) {
   const { route } = entry;
@@ -79,6 +79,6 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
       );
     case "settings":
       // One page for both sources: a source switch there keeps it.
-      return <SettingsView key="settings" snapshot={snapshot} />;
+      return <PreferencesView key="settings" snapshot={snapshot} />;
   }
 }

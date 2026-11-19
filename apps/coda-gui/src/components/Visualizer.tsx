@@ -1,13 +1,12 @@
 // Visualizer bars on a canvas: raw readings from `visualizer` events are
 // smoothed and decayed here (requestAnimationFrame), and the 7 bands are
 // spread into ~32–48 bars. With reduced motion the bars update a few
-// times a second instead of animating. Colours come from the theme's
-// tokens: `--viz`, or palette 1→6 across the bars (`data-visualizer` on
-// <html> is "palette"); re-read when the theme changes.
+// times a second instead of animating. The bars are `--viz` (the
+// accent), re-read when the accent changes.
 
 import { useEffect, useRef } from "react";
 import { onVisualizer } from "../lib/ipc";
-import { THEME_EVENT } from "../lib/theme";
+import { ACCENT_EVENT } from "../lib/accent";
 import { prefersReducedMotion } from "../lib/motion";
 import { Meter, spreadBands } from "../lib/visualizer";
 
@@ -26,18 +25,12 @@ export function Visualizer({ active }: { active: boolean }) {
     let frame = 0;
     let drawn = false;
     let color = "";
-    let stops: string[] = [];
     const readColor = () => {
-      const style = getComputedStyle(element);
-      color = style.getPropertyValue("--viz").trim();
-      stops =
-        document.documentElement.dataset.visualizer === "palette"
-          ? [1, 2, 3, 4, 5, 6].map((n) => style.getPropertyValue(`--palette-${n}`).trim()).filter(Boolean)
-          : [];
+      color = getComputedStyle(element).getPropertyValue("--viz").trim();
       drawn = false;
     };
     readColor();
-    window.addEventListener(THEME_EVENT, readColor);
+    window.addEventListener(ACCENT_EVENT, readColor);
     const unlisten = onVisualizer((f) => {
       latest = f.bands;
     });
@@ -71,13 +64,7 @@ export function Visualizer({ active }: { active: boolean }) {
       const bars = Math.max(32, Math.min(48, Math.round(width / 14)));
       const gap = 3;
       const barWidth = Math.max(2, (width - gap * (bars - 1)) / bars);
-      if (stops.length > 1) {
-        const gradient = context.createLinearGradient(0, 0, width, 0);
-        stops.forEach((stop, i) => gradient.addColorStop(i / (stops.length - 1), stop));
-        context.fillStyle = gradient;
-      } else {
-        context.fillStyle = color;
-      }
+      context.fillStyle = color;
       const floor = 2;
       spreadBands(meter.bands, bars).forEach((value, i) => {
         if (value == null) return;
@@ -91,7 +78,7 @@ export function Visualizer({ active }: { active: boolean }) {
     frame = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener(THEME_EVENT, readColor);
+      window.removeEventListener(ACCENT_EVENT, readColor);
       unlisten.then((f) => f()).catch(() => {});
     };
   }, []);

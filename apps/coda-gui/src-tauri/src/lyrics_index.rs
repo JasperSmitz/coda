@@ -29,7 +29,7 @@ use tauri::State as TauriState;
 use tokio::sync::watch;
 
 use crate::browse::BrowseHandle;
-use crate::theme::Appearance;
+use crate::prefs::PrefsStore;
 
 /// How long after launch the first sync starts (startup traffic first).
 pub const LAUNCH_DELAY: Duration = Duration::from_secs(30);
@@ -448,11 +448,11 @@ pub async fn lyrics_index_rebuild(browse: TauriState<'_, BrowseHandle>) -> Resul
 /// the new status (so the switch never shows the old value meanwhile).
 #[tauri::command]
 pub async fn lyrics_index_set_enabled(
-    appearance: TauriState<'_, Appearance>,
+    prefs: TauriState<'_, PrefsStore>,
     browse: TauriState<'_, BrowseHandle>,
     enabled: bool,
 ) -> Result<LyricsIndexDto, String> {
-    crate::theme::commands::save_prefs(&appearance, |prefs| prefs.lyrics_index = enabled).await?;
+    crate::prefs::commands::save_prefs(&prefs, |p| p.lyrics_index = enabled).await?;
     browse.lyrics().set_enabled(enabled);
     Ok(browse.lyrics().status())
 }

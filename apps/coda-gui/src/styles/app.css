@@ -37,7 +37,49 @@
   bottom: 16px;
 }
 
-/* ----- buttons ----- */
+/* ----- buttons (DESIGN.md "Shape and surfaces") -----
+   Primary: an accent pill; secondary: a glass pill; icon buttons round.
+   A press scales them slightly with `--spring` (none with reduced
+   motion: `--press-scale` is 1 then). */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background var(--motion-fast),
+    transform var(--motion) var(--spring);
+}
+
+.button:not(:disabled):hover {
+  background: var(--surface-3);
+}
+
+.button-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-text);
+}
+
+.button-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text) 12%);
+}
+
+.button-danger,
+.button-danger:not(:disabled):hover {
+  background: var(--danger);
+  border-color: transparent;
+  color: var(--danger-text);
+}
 
 .icon-button {
   display: inline-flex;
@@ -47,7 +89,10 @@
   height: 32px;
   border-radius: 50%;
   color: var(--text-2);
-  transition: color var(--motion-fast), background var(--motion-fast);
+  transition:
+    color var(--motion-fast),
+    background var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .icon-button:not(:disabled):hover {
@@ -73,8 +118,8 @@
 }
 
 .text-button {
-  padding: 4px 10px;
-  border-radius: var(--radius-small);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
   color: var(--text-2);
   font-size: var(--text-small);
 }
@@ -82,6 +127,16 @@
 .text-button:not(:disabled):hover {
   color: var(--text);
   background: var(--hover);
+}
+
+.button:not(:disabled):active,
+.icon-button:not(:disabled):active,
+.topnav-item:active,
+.section-option:active,
+.source-option:active,
+.accent-swatch:active,
+.home-card-play:not(:disabled):active {
+  transform: scale(var(--press-scale));
 }
 
 /* ----- top bar ----- */
@@ -129,9 +184,11 @@
 }
 
 .topbar-wordmark {
-  font-size: 15px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 19px;
+  font-weight: var(--display-weight);
+  letter-spacing: 0;
 }
 
 .topnav-pill {
@@ -139,12 +196,12 @@
   display: flex;
   gap: 2px;
   padding: 3px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--glass);
   border: 1px solid var(--border);
-  box-shadow: var(--cover-shadow);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 /* The active entry's lighter pill: one element gliding between entries
@@ -154,9 +211,8 @@
   top: 3px;
   bottom: 3px;
   left: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
-  box-shadow: var(--cover-shadow);
   pointer-events: none;
 }
 
@@ -173,11 +229,13 @@
   align-items: center;
   gap: 7px;
   height: 30px;
-  padding: 0 14px;
-  border-radius: 999px;
+  padding: 0 15px;
+  border-radius: var(--radius-pill);
   color: var(--text-2);
-  font-weight: 550;
-  transition: color var(--motion-fast);
+  font-weight: 600;
+  transition:
+    color var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .topnav-item:hover,
@@ -193,10 +251,11 @@
 .topbar-prefs {
   width: 36px;
   height: 36px;
-  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+  background: var(--glass);
   border: 1px solid var(--border);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .topbar-prefs.is-active,
@@ -221,22 +280,24 @@
   display: inline-flex;
   flex-wrap: wrap;
   gap: 2px;
-  margin: 10px 0 6px;
-  padding: 2px;
-  border-radius: var(--radius);
-  background: var(--surface-3);
+  margin: 12px 0 6px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
 }
 
 .section-option {
-  height: 26px;
-  padding: 0 12px;
-  border-radius: var(--radius-small);
+  height: 28px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
   color: var(--text-2);
   font-size: var(--text-small);
-  font-weight: 550;
+  font-weight: 600;
   transition:
     background var(--motion-fast),
-    color var(--motion-fast);
+    color var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .section-option:hover {
@@ -244,9 +305,8 @@
 }
 
 .section-option.is-active {
-  background: var(--surface-1);
+  background: var(--surface-3);
   color: var(--text);
-  box-shadow: var(--shadow);
 }
 
 /* ----- source status (Settings) ----- */
@@ -291,29 +351,34 @@
 }
 
 .view-header {
-  padding: 24px 28px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 22px 32px 14px;
 }
 
 .view-header h1 {
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
   font-size: var(--text-title);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.015em;
+  line-height: 1.08;
 }
 
+/* The small label above a title ("Local · Album"): the display face in
+   italic, sentence case (DESIGN.md "Type"). */
 .eyebrow {
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   margin-bottom: 2px;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: var(--text-eyebrow);
+  font-style: italic;
+  font-weight: 500;
 }
 
 .view-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 28px;
+  padding: 20px 32px;
 }
 
 .placeholder {
@@ -340,17 +405,20 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 28px 0;
+  padding: 12px 32px 0;
 }
 
+/* Glass, tinted with what it is about. */
 .banner {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  background: var(--danger-soft);
+  padding: 12px 16px;
+  border-radius: var(--radius-card);
+  background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--glass);
   border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   line-height: 1.45;
 }
 
@@ -361,7 +429,7 @@
 }
 
 .banner-noConfig {
-  background: var(--accent-soft);
+  background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--glass);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
@@ -382,15 +450,19 @@
   flex-direction: column;
   width: min(var(--queue-panel-width), calc(100% - 24px));
   max-height: 60%;
-  border-radius: calc(var(--radius) * 2);
+  border-radius: var(--radius-panel);
+  background: var(--glass);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-big);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   overflow: hidden;
 }
 
 .queue-popover > .queue {
   flex: 0 1 auto;
   min-height: 0;
+  background: transparent;
   border-left: none;
 }
 
@@ -410,13 +482,15 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 12px 10px 16px;
+  padding: 16px 12px 10px 20px;
   border-bottom: 1px solid var(--border);
 }
 
 .panel-header h2 {
-  font-size: 15px;
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 22px;
+  font-weight: var(--display-weight);
 }
 
 .queue-list {
@@ -486,7 +560,7 @@
 }
 
 .queue-artist {
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .queue-remove {
@@ -559,8 +633,11 @@
   align-items: center;
   gap: 16px;
   padding: 0 16px;
-  background: var(--surface-2);
+  /* A glass strip for now (N4 replaces it with the floating player). */
+  background: var(--glass);
   border-top: 1px solid var(--border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .bar-track {
@@ -571,7 +648,7 @@
 }
 
 .cover {
-  border-radius: var(--radius);
+  border-radius: var(--radius-cover);
   box-shadow: var(--cover-shadow);
   object-fit: cover;
   flex: none;
@@ -580,6 +657,7 @@
 .bar-cover {
   width: 52px;
   height: 52px;
+  border-radius: var(--radius-cover-small);
 }
 
 .cover-placeholder {
@@ -596,7 +674,7 @@
 }
 
 .bar-title {
-  font-weight: 560;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -632,7 +710,7 @@
 
 .seek .time {
   color: var(--text-2);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .seek .time:first-child {
@@ -739,10 +817,13 @@
   align-items: center;
   gap: 8px;
   max-width: 380px;
-  padding: 8px 6px 8px 14px;
-  border-radius: var(--radius);
-  background: var(--surface-3);
+  padding: 8px 8px 8px 16px;
+  border-radius: var(--radius-card);
+  background: var(--glass-strong);
+  border: 1px solid var(--border);
   box-shadow: var(--shadow);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   pointer-events: auto;
   animation: toast-in var(--motion) ease-out;
 }
@@ -763,18 +844,20 @@
 .context-menu {
   position: fixed;
   z-index: 20;
-  min-width: 180px;
-  padding: 4px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  min-width: 190px;
+  padding: 6px;
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--glass-strong);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-big);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .context-menu button {
   display: block;
   width: 100%;
-  padding: 6px 10px;
+  padding: 7px 12px;
   border-radius: var(--radius-small);
   text-align: left;
 }
@@ -792,11 +875,12 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
-  width: 280px;
+  width: 300px;
   max-width: 100%;
-  padding: 2px;
-  border-radius: var(--radius);
-  background: var(--surface-3);
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
 }
 
 .source-option {
@@ -804,16 +888,17 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 28px;
+  height: 30px;
   min-width: 0;
-  padding: 0 6px;
-  border-radius: var(--radius-small);
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
   color: var(--text-2);
   font-size: var(--text-small);
-  font-weight: 550;
+  font-weight: 600;
   transition:
     background var(--motion-fast),
-    color var(--motion-fast);
+    color var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .source-option span {
@@ -827,9 +912,8 @@
 }
 
 .source-option.is-active {
-  background: var(--surface-1);
+  background: var(--surface-3);
   color: var(--text);
-  box-shadow: var(--shadow);
 }
 
 .source-status {

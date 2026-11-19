@@ -4,19 +4,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  Appearance,
-  AppearancePrefs,
-  ColorEdits,
   Intent,
   Lyrics,
   LyricsIndexStatus,
+  Prefs,
   Progress,
-  ResolvedTheme,
   ServerInput,
   Settings,
   Snapshot,
   SourceKind,
-  ThemeSummary,
   TrackRef,
   VisualizerFrame,
 } from "./types";
@@ -117,22 +113,12 @@ export const settingsApi = {
     invoke<void>("onboarding_finish", { musicDir, server }),
 };
 
-// ----- appearance (each rejects with a message to show) -----
+// ----- Preferences (`settings.toml`; each rejects with a message to show) -----
 
-export const themeApi = {
-  get: () => invoke<Appearance>("appearance_get"),
-  set: (prefs: AppearancePrefs) => invoke<Appearance>("appearance_set", { prefs }),
-  list: () => invoke<ThemeSummary[]>("theme_list"),
-  resolve: (name: string, edits?: ColorEdits) => invoke<ResolvedTheme>("theme_resolve", { name, edits }),
-  saveCustom: (base: string, name: string, edits: ColorEdits, replacing: string | null) =>
-    invoke<Appearance>("theme_save_custom", { base, name, edits, replacing }),
-  rename: (from: string, to: string) => invoke<Appearance>("theme_rename", { from, to }),
-  duplicate: (name: string, to: string) => invoke<Appearance>("theme_duplicate", { name, to }),
-  remove: (name: string) => invoke<Appearance>("theme_delete", { name }),
-  /** Opens the custom themes folder in the file manager. */
-  revealFolder: () => invoke<void>("theme_reveal_folder"),
-  /** The native window's background behind the webview (`#rrggbb`). */
-  windowBackground: (color: string) => invoke<void>("theme_window_background", { color }),
+export const prefsApi = {
+  get: () => invoke<Prefs>("prefs_get"),
+  /** `"house"` or `#rrggbb`; answers with the new state. */
+  setAccent: (accent: string) => invoke<Prefs>("prefs_set_accent", { accent }),
 };
 
 // ----- the browsed source (`settings.toml`) -----

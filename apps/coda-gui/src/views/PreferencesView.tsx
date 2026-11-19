@@ -1,16 +1,18 @@
-// Settings: the music source (the Local | Navidrome switch, Ctrl/Cmd+1/2,
-// and its status), music folder (native picker), Navidrome server (test, save,
-// disconnect; the lyrics index's status, Rebuild and switch), cover art
-// and scrobbling, and Appearance (themes; the
-// GUI's own settings.toml, see views/settings/AppearanceSection). Every change is saved to Coda's
-// config.toml (shared with the TUI) and the keychain by the backend, then
-// applied live.
+// Preferences ("Make it yours"), glass cards in this order: the accent
+// (curated swatches or a custom colour; the GUI's own settings.toml, see
+// state/accent), the music source (the Local | Navidrome switch,
+// Ctrl/Cmd+1/2, and its status), music folder (native picker), Navidrome
+// server (test, save, disconnect; the lyrics index's status, Rebuild and
+// switch), cover art and scrobbling. Those after the accent are saved to
+// Coda's config.toml (shared with the TUI) and the keychain by the
+// backend, then applied live.
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
 import { LocalIcon, ServerIcon } from "../components/icons";
 import { bothConfigured, switchSource, useSources } from "../state/source";
-import { AppearanceSection } from "./settings/AppearanceSection";
+import { accent, useAccent } from "../state/accent";
+import { HOUSE, MIN_ACCENT_CONTRAST, normalizeHex } from "../lib/accent";
 import { dragRegion, isMacos } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
 import type { LyricsIndexStatus, ServerInput, Settings, Snapshot, SourceKind } from "../lib/types";
@@ -54,7 +56,7 @@ const CONNECTION_TEXT = {
   failed: "Not reachable",
 } as const;
 
-export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
+export function PreferencesView({ snapshot }: { snapshot: Snapshot }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const reload = useCallback(() => {
@@ -71,7 +73,8 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
   return (
     <section className="view settings">
       <header className="view-header" {...dragRegion}>
-        <h1>Settings</h1>
+        <div className="eyebrow">Preferences</div>
+        <h1>Make it yours</h1>
       </header>
       <div className="view-body settings-body">
         {loadError && <p className="settings-status settings-status-error">{loadError}</p>}
@@ -80,11 +83,11 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
             {settings.problem && (
               <p className="settings-status settings-status-error">{settings.problem}</p>
             )}
+            <AccentSection />
             <SourceSection snapshot={snapshot} />
             <MusicSection settings={settings} snapshot={snapshot} reload={reload} />
             <ServerSection settings={settings} snapshot={snapshot} reload={reload} />
             <OptionsSection settings={settings} reload={reload} />
-            <AppearanceSection />
             {settings.configIsLink && (
               <p className="settings-status settings-status-error">
                 The config file is a symbolic link. Saving here replaces the link with a regular
@@ -101,6 +104,158 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
           </>
         )}
       </div>
+    </section>
+  );
+}
+
+/** Arrow keys among a radio group's options (not the global seek). */
+function radioArrow(e: KeyboardEvent): -1 | 1 | 0 {
+  if (e.key === "ArrowLeft" || e.key === "ArrowUp") return -1;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") return 1;
+  return 0;
+}
+
+/**
+ * The accent: six curated swatches (the first is the house amber) and a
+ * custom colour (hex field and the native picker). Applied and saved at
+ * once; a custom colour under 3:1 on the base gets a note.
+ */
+function AccentSection() {
+  const { prefs, shown, error } = useAccent();
+  const [draft, setDraft] = useState<string | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  // The colour picker's own value while it is used: React never writes an
+  // older value back into it (WebKit would push that to the open native
+  // picker and make it jump back mid-drag).
+  const [picking, setPicking] = useState<string | null>(null);
+  if (!prefs || !shown) {
+    return (
+      <section className="settings-section" aria-labelledby="settings-accent">
+        <h2 id="settings-accent">Accent</h2>
+        {error && <p className="settings-status settings-status-error">{error}</p>}
+      </section>
+    );
+  }
+  // What is shown is the latest choice, even while it is being saved.
+  const curated = prefs.swatches.find((s) => s.value === shown);
+  const custom = !curated;
+  const shownColor = curated ? curated.color : shown;
+  const chosenName = curated ? curated.name : `Custom ${shownColor}`;
+  const choose = (value: string) => {
+    setDraft(null);
+    setInvalid(false);
+    accent.choose(value);
+  };
+  const commitDraft = () => {
+    if (draft === null) return;
+    if (draft.trim() === "") {
+      setDraft(null);
+      return;
+    }
+    const hex = normalizeHex(draft);
+    if (!hex) {
+      setInvalid(true);
+      return;
+    }
+    choose(hex);
+  };
+  // Roving focus: arrows move to and choose the next swatch.
+  const onKeyDown = (e: KeyboardEvent) => {
+    const step = radioArrow(e);
+    if (step === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const index = curated ? prefs.swatches.indexOf(curated) : step > 0 ? -1 : 0;
+    const count = prefs.swatches.length;
+    const next = prefs.swatches[(index + step + count) % count];
+    choose(next.value);
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>(`.accent-swatches [data-value="${next.value}"]`)?.focus(),
+    );
+  };
+  return (
+    <section className="settings-section" aria-labelledby="settings-accent">
+      <h2 id="settings-accent">Accent</h2>
+      <div className="accent-row">
+        <div
+          className="accent-swatches"
+          role="radiogroup"
+          aria-labelledby="settings-accent"
+          onKeyDown={onKeyDown}
+        >
+          {prefs.swatches.map((swatch, i) => {
+            const checked = swatch === curated;
+            return (
+              <button
+                key={swatch.value}
+                role="radio"
+                aria-checked={checked}
+                aria-label={swatch.name}
+                title={swatch.value === HOUSE ? `${swatch.name} (Coda’s own)` : swatch.name}
+                data-value={swatch.value}
+                tabIndex={checked || (custom && i === 0) ? 0 : -1}
+                className={`accent-swatch ${checked ? "is-active" : ""}`}
+                style={{ background: swatch.color }}
+                onClick={() => choose(swatch.value)}
+              />
+            );
+          })}
+        </div>
+        <span className="accent-name">{chosenName}</span>
+      </div>
+      <div className="accent-custom">
+        <label htmlFor="accent-hex">Custom colour</label>
+        <input
+          id="accent-hex"
+          type="text"
+          className={invalid ? "is-invalid" : ""}
+          spellCheck={false}
+          autoComplete="off"
+          maxLength={7}
+          placeholder="#rrggbb"
+          aria-invalid={invalid}
+          aria-describedby={invalid ? "accent-hex-error" : undefined}
+          value={draft ?? (custom ? shownColor : "")}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setInvalid(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitDraft();
+            if (e.key === "Escape" && draft !== null) {
+              // Back to the saved value, not the global Esc (Back).
+              e.stopPropagation();
+              setDraft(null);
+              setInvalid(false);
+            }
+          }}
+          onBlur={commitDraft}
+        />
+        <input
+          type="color"
+          className="accent-picker"
+          aria-label="Pick a custom colour"
+          title="Pick a custom colour"
+          value={picking ?? shownColor}
+          onChange={(e) => {
+            setPicking(e.target.value);
+            choose(e.target.value);
+          }}
+          onBlur={() => setPicking(null)}
+        />
+      </div>
+      {invalid && (
+        <p id="accent-hex-error" className="settings-status settings-status-error">
+          Type a colour as #rrggbb.
+        </p>
+      )}
+      {custom && prefs.accent === shown && prefs.accentContrast < MIN_ACCENT_CONTRAST && (
+        <p className="secondary accent-note">
+          This colour is hard to see on the dark background (contrast{" "}
+          {prefs.accentContrast.toFixed(1)}:1; 3:1 or more reads well). It is used as you chose it.
+        </p>
+      )}
+      {error && <p className="settings-status settings-status-error">{error}</p>}
     </section>
   );
 }
@@ -388,7 +543,7 @@ const STATE_ANNOUNCEMENT: Record<LyricsIndexStatus["state"], string> = {
   paused: "Lyrics indexing paused",
 };
 
-/** Settings › Navidrome › Lyrics search: status, Rebuild and the switch. */
+/** Preferences › Navidrome › Lyrics search: status, Rebuild and the switch. */
 function LyricsIndexBlock() {
   const [status, setStatus] = useState<LyricsIndexStatus | null>(null);
   const [error, setError] = useState<string | null>(null);

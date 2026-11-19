@@ -1,4 +1,5 @@
-//! File access for untrusted theme folders and our own small files.
+//! File access for our own small files (settings.toml, history, the
+//! window frame), which a user may have replaced with anything.
 //!
 //! Reading: only regular files. The type is checked from the path first
 //! (following symlinks), then the file is opened non-blocking and checked

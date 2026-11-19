@@ -18,7 +18,7 @@ Ratatui + Crossterm        Tauri 2
 - **In `coda-tui`:** `app`, `setup`, `ui::*` and `main`, the only code that uses Ratatui or Crossterm.
 - **Frontend-specific on purpose:**
   - TUI: drawing, keymap, terminal cover-art rendering and detection (`ui::cover`), the setup and app event loops, and mpv looked up on `PATH` only (`mpv::spawn(MpvOptions::default())`; the TUI's CLI tests rely on it).
-  - GUI: the engine actor, serializable DTOs and Tauri commands, the browse/history/playlist caches, media keys (souvlaki), themes, mpv lookup with fallbacks for desktop launchers (`playback::spawn_backend`, `mpv::process::default_program`), and its own session, history and log under `$XDG_STATE_HOME/coda/coda-app/`.
+  - GUI: the engine actor, serializable DTOs and Tauri commands, the browse/history/playlist caches, media keys (souvlaki), its look (fixed design tokens, bundled fonts, the accent preference), mpv lookup with fallbacks for desktop launchers (`playback::spawn_backend`, `mpv::process::default_program`), and its own session, history and log under `$XDG_STATE_HOME/coda/coda-app/`.
   - Shared by both: the config file, the keychain entries and the cover cache.
   - Visualizer: the band measurement (`playback::mpv::visualizer`) and the smoothed bars (`visualizer::Meter`) are in core; each frontend draws them its own way.
   - Lyrics: parsing, reading, searching and the Navidrome lyrics cache (`lyrics`, `lyrics::index`, `lyrics::cache`, `navidrome::Client::lyrics`) are in core; only the GUI shows and searches them (its Now Playing lyrics mode, its Search page's Lyrics section), so the TUI could add either without engine work.

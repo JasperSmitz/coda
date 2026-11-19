@@ -11,7 +11,7 @@
 - **The music is the decoration.** Covers, their colours and the visualizer carry the look; the chrome stays quiet glass.
 
 ## Layout
-*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column. Still to come: the floating player (N4; until then the 1.x bar stays docked at the bottom and `q` opens the queue as a panel above its right end), the glass and the page's glow (N2/N3), and the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar.)*
+*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column; N2: the glass. Still to come: the floating player (N4; until then the 1.x bar stays docked at the bottom as a glass strip and `q` opens the queue as a panel above its right end), the page's glow (N3), and the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar.)*
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -90,6 +90,8 @@ Carried over from 1.x, which this design grew from, with three changes: it opens
 - Motion: as 1.x (Motion below).
 
 ## Preferences
+*(Partly shipped, N2: the page, its title and glass cards; Accent with the house amber, five more curated colours and a custom colour (hex field and the native picker, a contrast note under 3:1), saved in `settings.toml` and applied before the first paint; Music source; the server, folder, cover art/scrobbling and lyrics search sections restyled. Still to come: "From the music" (N3, then the default) and the Library default view (N5).)*
+
 One page of grouped glass cards, the title "Make it yours":
 - **Accent**: "From the music" (default; a page takes the colours of the album it shows, the player those of the song that plays) or one of ~6 curated colours, or a custom colour (hex + picker). A fixed colour is used everywhere.
 - **Music source**: Navidrome / Local folder (when both are set up), with the status line (connection, or the scan's "N tracks" / "Scanning… N"); the server's and the folder's settings (1.x Settings, restyled).
@@ -98,6 +100,8 @@ One page of grouped glass cards, the title "Make it yours":
 - Onboarding (first run) keeps its 1.x flow, restyled to this design.
 
 ## Colour
+*(Partly shipped, N2: the base, the text levels, glass and the house accent, in `tokens.css`; the native window background is the base. Still to come: the music colours, who takes which, blending and glows (N3).)*
+
 - **Base**: a dim, slightly violet-tinted near-black (`--base`, ~`hsl(256 14% 7%)`), never a neutral grey. Text: a warm white (`--ink`) with two quieter levels (`--ink-2` ~68%, `--ink-3` ~44%). Surfaces are **glass**: translucent white (5–11%) with a hairline border (9%) and a backdrop blur where something floats over content. There is no light or dark mode.
 - **Music colours**: for every cover the backend computes a small palette (`tint`: a deep dark of its dominant hue for backgrounds; `accent`: its most vivid colour, kept within a lightness and chroma band so it reads on the base and on its own tint; `accentInk`: black or white by contrast; `glow`: the accent, translucent). They are computed once per cover and cached with it.
 - **Who takes which colours** (with "From the music"):
@@ -109,12 +113,12 @@ One page of grouped glass cards, the title "Make it yours":
 - **Contrast**: body text ≥4.5:1 on the base, on glass and on every tint; secondary text ≥4.5:1; faint text, accent and danger ≥3:1. Tints are dark enough by construction; computed accents are nudged in OKLCH lightness until they pass on the base and on their tint. A custom accent the listener picks is used as is, with a small contrast warning in Preferences.
 - **No colour literals outside the token layer** (as 1.x): components use `var(--…)`; the values live in `src/styles/tokens.css`; `pnpm check:colors` enforces it. Danger and success keep their own colours, separate from the accent.
 
-## Type
-- **Provisional; a separate exploration picks the final pair.** The mockup's pairing: **Fraunces** (soft, slightly quirky serif, `SOFT 100, WONK 1`, ~620–640 weight) for display text: page titles, album and genre names, section headings, the wordmark; **Figtree** (friendly rounded sans) for everything else. Both OFL; **bundled with the app** (woff2 in the frontend), never loaded from the web.
+## Type *(shipped, N2)*
+- **Provisional; a separate exploration may pick another pair.** The mockup's pairing, bundled in N2: **Fraunces** (soft, slightly quirky serif, `SOFT 100, WONK 1`, ~620–640 weight) for display text: page titles, album and genre names, section headings, the wordmark; **Figtree** (friendly rounded sans) for everything else. Both OFL; **bundled with the app** (the variable TrueType files from the google/fonts repository in `public/fonts/`, with their `OFL.txt`), never loaded from the web.
 - Small labels (the "eyebrows" above titles: "Album · 1977", "Thursday evening") are the display face in italic at ~15px, sentence case; no tracked-out uppercase labels.
 - Tabular numerals for times, counts and track numbers. Scale: 14.5px body, 13px secondary; section headings ~30px; page titles 36–72px by width; the carousel title ~32px.
 
-## Shape and surfaces
+## Shape and surfaces *(shipped, N2, except the accent glow on covers (N3) and the flourish (open))*
 - Radii: covers 14–18px (12px in the player, round for artists), cards and panels 22–30px, buttons and the navigation fully round (pills).
 - Shadows are soft and long; a focused or featured cover also casts a glow in its accent.
 - Buttons: **primary** a pill in the accent with `accentInk` text; **secondary** a glass pill; icon buttons round, glass where they float.

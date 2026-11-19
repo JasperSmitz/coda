@@ -4,8 +4,8 @@
 // Rendered through a portal into `document.body`: an ancestor with
 // `backdrop-filter`, `transform` or `overflow: hidden` (the Now Playing
 // queue panel) would otherwise become the containing block of the
-// `position: fixed` menu and offset or clip it. A hidden anchor stays in
-// place so the menu can still take the immersive view's dark colours.
+// `position: fixed` menu and offset or clip it. One glass look everywhere
+// (Now Playing included), so it needs nothing from where it was opened.
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
@@ -30,14 +30,7 @@ interface Props {
 
 export function ContextMenu({ state, items, onClose }: Props) {
   const menu = useRef<HTMLDivElement>(null);
-  const anchor = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState({ left: state.x, top: state.y });
-  const [immersive, setImmersive] = useState(false);
-
-  useLayoutEffect(() => {
-    setImmersive(anchor.current?.closest(".now-playing") != null);
-  }, []);
-
   // Keep the menu inside the window.
   useLayoutEffect(() => {
     const el = menu.current;
@@ -78,33 +71,22 @@ export function ContextMenu({ state, items, onClose }: Props) {
     e.stopPropagation();
   };
 
-  return (
-    <>
-      <span ref={anchor} hidden />
-      {createPortal(
-        <div
-          className={immersive ? "context-menu is-immersive" : "context-menu"}
-          ref={menu}
-          role="menu"
-          style={pos}
-          onKeyDown={onKeyDown}
+  return createPortal(
+    <div className="context-menu" ref={menu} role="menu" style={pos} onKeyDown={onKeyDown}>
+      {items.map((item) => (
+        <button
+          key={item.label}
+          role="menuitem"
+          disabled={item.disabled}
+          onClick={() => {
+            onClose();
+            item.action();
+          }}
         >
-          {items.map((item) => (
-            <button
-              key={item.label}
-              role="menuitem"
-              disabled={item.disabled}
-              onClick={() => {
-                onClose();
-                item.action();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>,
-        document.body,
-      )}
-    </>
+          {item.label}
+        </button>
+      ))}
+    </div>,
+    document.body,
   );
 }

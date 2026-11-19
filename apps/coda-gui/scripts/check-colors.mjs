@@ -1,6 +1,7 @@
 // Fails when a colour value appears in `src/` (or `index.html`) outside
 // the token layer (`src/styles/tokens.css`): components and stylesheets
-// use `var(--…)` tokens only, so every theme can recolour all of the UI.
+// use `var(--…)` tokens only, so the look is defined in one place (and
+// the accent and, later, the music colours reach all of the UI).
 //
 // Flagged everywhere: hex colours and colour functions (`rgb(`, `hsl(`,
 // `oklch(`, `color(`, …). Named colours (all CSS named colours and the

@@ -1,46 +1,10 @@
-/* Now Playing view, settings, onboarding (the experience slice). */
+/* Now Playing view, Preferences, onboarding (the experience slice). */
 
 :root {
   --field-bg: var(--surface-1);
 }
 
-/* ----- buttons and fields ----- */
-
-.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 30px;
-  padding: 0 14px;
-  border-radius: var(--radius);
-  background: var(--surface-3);
-  color: var(--text);
-  white-space: nowrap;
-  transition: background var(--motion-fast);
-}
-
-.button:not(:disabled):hover {
-  background: color-mix(in srgb, var(--surface-3) 80%, var(--text) 20%);
-}
-
-.button-primary {
-  background: var(--accent);
-  color: var(--accent-text);
-  font-weight: 600;
-}
-
-.button-primary:not(:disabled):hover {
-  background: color-mix(in srgb, var(--accent) 88%, var(--text) 12%);
-}
-
-.button-danger {
-  background: var(--danger);
-  color: var(--danger-text);
-}
-
-.button-danger:not(:disabled):hover {
-  background: var(--danger);
-}
+/* ----- fields ----- */
 
 .server-fields {
   display: grid;
@@ -54,18 +18,26 @@
   color: var(--text-2);
 }
 
+/* Rounded glass fields with an accent focus ring. */
 .server-fields input,
 .settings input[type="text"] {
-  height: 30px;
-  padding: 0 10px;
+  height: 34px;
+  padding: 0 12px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--field-bg);
   color: var(--text);
+  font: inherit;
+  transition:
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast);
 }
 
-.server-fields input:focus-visible {
+.server-fields input:focus-visible,
+.settings input[type="text"]:focus-visible {
   border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .server-test {
@@ -89,25 +61,33 @@
   overflow-wrap: anywhere;
 }
 
-/* ----- settings ----- */
+/* ----- Preferences ----- */
 
 .settings-body {
   display: flex;
   flex-direction: column;
-  gap: 28px;
-  max-width: 760px;
+  gap: 18px;
+  max-width: 780px;
+  padding-bottom: 32px;
 }
 
+/* Each section a glass card. */
 .settings-section {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  padding: 22px 24px 24px;
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
 }
 
 .settings-section h2,
 .onboarding-step h2 {
-  font-size: 14px;
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 22px;
+  font-weight: var(--display-weight);
 }
 
 /* Read by screen readers, not shown. */
@@ -123,6 +103,92 @@
   border: 0;
 }
 
+/* The accent: round swatches, then the custom colour. */
+.accent-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+
+.accent-swatches {
+  display: flex;
+  gap: 10px;
+}
+
+.accent-swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    var(--cover-shadow);
+  transition: transform var(--motion) var(--spring);
+}
+
+.accent-swatch:not(:active):hover {
+  transform: scale(1.08);
+}
+
+/* The chosen one: a ring in the base colour, then one in the text. */
+.accent-swatch.is-active {
+  box-shadow:
+    0 0 0 3px var(--bg),
+    0 0 0 5px var(--text);
+}
+
+.accent-swatch:focus-visible {
+  outline-offset: 6px;
+  border-radius: 50%;
+}
+
+.accent-name {
+  color: var(--text-2);
+}
+
+.accent-custom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.accent-custom label {
+  color: var(--text-2);
+}
+
+.accent-custom input[type="text"] {
+  width: 120px;
+  font-variant-numeric: tabular-nums;
+}
+
+.accent-custom input.is-invalid {
+  border-color: var(--danger);
+}
+
+/* The native picker as a round swatch of the current accent. */
+.accent-picker {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: none;
+  overflow: hidden;
+}
+
+.accent-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.accent-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.accent-note {
+  max-width: 60ch;
+}
+
 .settings-subsection {
   display: flex;
   flex-direction: column;
@@ -131,8 +197,12 @@
 }
 
 .settings-subsection h3 {
-  font-size: 13px;
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-style: italic;
+  font-size: var(--text-eyebrow);
+  font-weight: 500;
+  color: var(--text-2);
 }
 
 .settings-row {
@@ -140,9 +210,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 14px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  padding: 12px 16px;
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--surface-1);
   border: 1px solid var(--border);
   line-height: 1.5;
 }
@@ -199,7 +269,7 @@
      gradient fills it); `.onboarding-titlebar` drags the window there. */
   border-top: var(--titlebar-h) solid transparent;
   overflow-y: auto;
-  background: radial-gradient(ellipse at top, var(--surface-2), var(--bg) 70%) border-box;
+  background: radial-gradient(ellipse at top, var(--surface-3), var(--bg) 70%) border-box;
 }
 
 .onboarding-titlebar {
@@ -214,18 +284,22 @@
   display: flex;
   flex-direction: column;
   gap: 18px;
-  width: min(560px, 100%);
-  padding: 32px;
-  border-radius: 10px;
+  width: min(580px, 100%);
+  padding: 36px 36px 32px;
+  border-radius: var(--radius-panel);
   background: var(--surface-1);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-big);
   line-height: 1.5;
 }
 
 .onboarding-card h1 {
-  font-size: var(--text-title);
-  font-weight: 650;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 40px;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
 }
 
 .onboarding-step {
@@ -243,7 +317,7 @@
 
 .bar-cover-button {
   flex: none;
-  border-radius: var(--radius);
+  border-radius: var(--radius-cover-small);
 }
 
 .bar-cover-button:not(:disabled):hover .bar-cover {
@@ -261,17 +335,15 @@
   min-height: 0;
   overflow: hidden;
   animation: np-open var(--motion-slow) var(--ease-out);
-  /* Always dark over the blurred cover, whatever the theme. */
-  background: var(--np-bg);
-  color: var(--np-text);
-  --text-2: var(--np-text-2);
-  --text-3: var(--np-text-3);
-  --hover: var(--np-hover);
-  --selected: var(--np-surface-3);
-  --surface-3: var(--np-surface-3);
-  --border: var(--np-border);
-  --text: var(--np-text);
-  --bg: var(--np-bg);
+  /* The base tokens: dark by design, as Now Playing always was. The
+     quieter text levels are translucent here, so they take some of the
+     cover's colour; with `--np-scrim` over the blurred cover (shown at
+     0.85) they keep their contrast even over a white cover: text 6.7:1,
+     text-2 4.7:1, text-3 3.3:1 (over a mid-grey cover 12.2, 7.8, 5.0). */
+  background: var(--bg);
+  color: var(--text);
+  --text-2: color-mix(in srgb, var(--text) 76%, transparent);
+  --text-3: color-mix(in srgb, var(--text) 56%, transparent);
 }
 
 .now-playing-backdrop {
@@ -329,7 +401,7 @@
 .now-playing-cover {
   width: min(44vh, 40vw, 440px);
   height: min(44vh, 40vw, 440px);
-  border-radius: 10px;
+  border-radius: 18px;
   box-shadow: var(--shadow-big);
 }
 
@@ -355,8 +427,10 @@
    and the controls never move between tracks (and a track change's
    snapshot of the heading keeps its height). */
 .now-playing-title {
-  font-size: clamp(22px, 2.6vw, 32px);
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: clamp(24px, 2.8vw, 36px);
+  font-weight: var(--display-weight);
   letter-spacing: -0.01em;
   line-height: 1.2;
   display: flex;
@@ -443,9 +517,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 14px 8px 8px;
-  border-radius: var(--radius);
-  background: var(--np-hover);
+  padding: 8px 16px 8px 8px;
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
   text-align: left;
   transition:
     background var(--motion-fast),
@@ -455,7 +530,7 @@
 }
 
 .now-playing-next.is-card:hover {
-  background: var(--np-surface-3);
+  background: var(--surface-3);
 }
 
 /* The queue panel is open: the card keeps its slot (the centred content
@@ -474,6 +549,7 @@
 .now-playing-next-cover {
   width: 40px;
   height: 40px;
+  border-radius: var(--radius-cover-small);
 }
 
 .now-playing-next-text {
@@ -524,12 +600,13 @@
   bottom: 12px;
   width: min(var(--np-panel-width), calc(100% - 24px));
   display: flex;
-  border-radius: 10px;
+  border-radius: var(--radius-panel);
   overflow: hidden;
   background: var(--np-panel);
-  border: 1px solid var(--np-border);
+  border: 1px solid var(--border);
   box-shadow: var(--shadow-big);
-  backdrop-filter: blur(24px);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .now-playing-queue .queue {
@@ -537,14 +614,6 @@
   min-width: 0;
   background: transparent;
   border-left: 0;
-}
-
-/* Menus opened from the view stay on the view's dark colours (the menu
-   is portaled to <body>, so it cannot inherit them from .now-playing). */
-.context-menu.is-immersive {
-  background: var(--np-menu);
-  border-color: var(--np-border);
-  color: var(--np-text);
 }
 
 @keyframes np-open {
@@ -748,12 +817,12 @@
   overflow-y: auto;
   border-radius: var(--radius);
   scrollbar-width: thin;
-  scrollbar-color: var(--np-border) transparent;
+  scrollbar-color: var(--border) transparent;
   mask-image: linear-gradient(
     to bottom,
     transparent,
-    var(--np-text) 10%,
-    var(--np-text) 88%,
+    var(--text) 10%,
+    var(--text) 88%,
     transparent
   );
 }

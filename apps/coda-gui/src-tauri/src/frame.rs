@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, Runtime};
 
-use crate::theme::fsio;
+use crate::fsio;
 
 /// The saved file stays tiny; anything bigger is not ours.
 const MAX_FILE_BYTES: u64 = 4096;

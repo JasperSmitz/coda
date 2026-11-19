@@ -437,75 +437,28 @@ export interface ServerInput {
   password: string;
 }
 
-// ----- appearance (src-tauri/src/theme/) -----
+// ----- Preferences (src-tauri/src/prefs.rs) -----
 
-export type ThemeSource = "builtIn" | "ghostty" | "custom";
-export type Scheme = "light" | "dark";
-export type ThemeMode = "single" | "system" | "ghostty";
-export type VisualizerColors = "accent" | "palette";
-
-export interface ContrastWarning {
-  /** Rounded down to one decimal. */
-  ratio: number;
-  min: number;
-  /** The token it was measured against (`bg`, `accent`, …). */
-  against: string;
-}
-
-/** One UI token: `key` is the CSS custom property without `--`. */
-export interface ThemeToken {
-  key: string;
-  /** `#rrggbb` or `#rrggbbaa`. */
+/** A curated accent. */
+export interface Swatch {
+  name: string;
+  /** What choosing it saves: `"house"` or `#rrggbb`. */
   value: string;
-  /** Set by the theme file, the user or the editor rather than computed. */
-  overridden: boolean;
-  contrast: ContrastWarning | null;
-}
-
-export interface ResolvedTheme {
-  name: string;
-  source: ThemeSource;
-  scheme: Scheme;
-  tokens: ThemeToken[];
-}
-
-export interface ThemeSummary {
-  name: string;
-  source: ThemeSource;
-  scheme: Scheme;
-  bg: string;
-  fg: string;
-  accent: string;
-  /** Palette 1–6. */
-  swatches: string[];
+  /** `#rrggbb`, to draw it. */
+  color: string;
 }
 
 /** The GUI's own preferences (`~/.config/coda-app/settings.toml`). */
-export interface AppearancePrefs {
-  mode: ThemeMode;
-  theme: string;
-  lightTheme: string;
-  darkTheme: string;
-  /** Accent override (`#rrggbb`) by theme name. */
-  accents: Record<string, string>;
-  visualizer: VisualizerColors;
-  /** The browsed source (kept by the backend; see `sourceApi`). */
-  source?: SourceKind | null;
-  /** Index Navidrome lyrics for search (kept by the backend; see `lyricsIndexApi`). */
-  lyricsIndex?: boolean;
+export interface Prefs {
+  /** `"house"` or `#rrggbb`, as saved. */
+  accent: string;
+  /** The accent's colour, `#rrggbb`. */
+  accentColor: string;
+  /** Black or white, whichever reads on the accent. */
+  accentText: string;
+  /** WCAG contrast of the accent with the base. */
+  accentContrast: number;
+  swatches: Swatch[];
+  source: SourceKind | null;
+  lyricsIndex: boolean;
 }
-
-export interface Appearance {
-  prefs: AppearancePrefs;
-  light: ResolvedTheme;
-  dark: ResolvedTheme;
-  /** What Ghostty's config names, in Ghostty mode. */
-  ghostty: { light: string; dark: string } | null;
-  /** Why something else than asked is shown. */
-  notes: string[];
-  /** Where custom themes are saved. */
-  themesFolder: string | null;
-}
-
-/** Colour editor changes: a hex value, or `null` to drop an override. */
-export type ColorEdits = Record<string, string | null>;

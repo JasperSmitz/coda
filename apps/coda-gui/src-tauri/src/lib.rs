@@ -3,9 +3,10 @@
 //! intents, and it emits `snapshot`, `progress` and `visualizer` events
 //! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
 //! [`settings`] writes Coda's config and applies it live; [`media`] is
-//! the OS media controls; [`theme`] the colour themes (applied before
-//! the window's first paint by an initialization script). [`mixes`] is
-//! the saved mixes' commands and the mix editor's searches.
+//! the OS media controls; [`prefs`] the app's own preferences (the
+//! accent, applied before the window's first paint by an initialization
+//! script; the browsed source) and [`palette`] its fixed colours.
+//! [`mixes`] is the saved mixes' commands and the mix editor's searches.
 
 pub mod bootstrap;
 pub mod browse;
@@ -14,14 +15,16 @@ pub mod cover;
 pub mod dto;
 pub mod engine;
 pub mod frame;
+pub mod fsio;
 pub mod history;
 pub mod lyrics;
 pub mod lyrics_index;
 pub mod media;
 pub mod mixes;
+pub mod palette;
 pub mod playlists;
+pub mod prefs;
 pub mod settings;
-pub mod theme;
 #[cfg(target_os = "macos")]
 mod titlebar;
 
@@ -208,19 +211,15 @@ pub fn run() {
             },
         )
         .setup(move |app| {
-            // The main window is created here (not from the config) so the
-            // chosen theme's colours are set before its first paint.
-            app.manage(theme::Appearance::from_process());
+            // The main window is created here (not from the config) so a
+            // chosen accent is set before its first paint.
+            app.manage(prefs::PrefsStore::from_process());
             app.manage(frame::FramePath(paths.window.clone()));
             app.manage(frame::Tracker::default());
-            let lyrics_on = app
-                .state::<theme::Appearance>()
-                .state
-                .try_lock()
-                .map_or(true, |state| state.0.lyrics_index);
+            let lyrics_on = app.state::<prefs::PrefsStore>().current().lyrics_index;
             browse.lyrics().set_enabled_at_start(lyrics_on);
             forward_lyrics_index(app.handle().clone(), browse.lyrics().subscribe());
-            let startup = app.state::<theme::Appearance>().startup();
+            let accent_script = app.state::<prefs::PrefsStore>().init_script();
             let window_config = app
                 .config()
                 .app
@@ -229,14 +228,16 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .ok_or("no main window in tauri.conf.json")?;
-            // The native window and webview backgrounds are the theme's too,
-            // so nothing light flashes before the first paint: the dark one
-            // at creation, the light one at once if the window is light.
-            let bg = |c: theme::color::Rgba| tauri::window::Color(c.r, c.g, c.b, 255);
+            // The native window and webview backgrounds are the base colour
+            // (`palette::BASE`, `--bg` in tokens.css), so nothing else shows
+            // before the first paint or while resizing.
+            let base = palette::BASE;
             let mut builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
-                    .initialization_script(startup.script)
-                    .background_color(bg(startup.dark_bg));
+                    .background_color(tauri::window::Color(base.r, base.g, base.b, 255));
+            if let Some(script) = accent_script {
+                builder = builder.initialization_script(script);
+            }
             #[cfg(target_os = "macos")]
             {
                 builder = titlebar::style(builder);
@@ -255,11 +256,6 @@ pub fn run() {
             }
             #[cfg(target_os = "linux")]
             frame::watch(&window);
-            if startup.light_bg != startup.dark_bg
-                && matches!(window.theme(), Ok(tauri::Theme::Light))
-            {
-                let _ = window.set_background_color(Some(bg(startup.light_bg)));
-            }
             let media = Arc::new(OnceLock::new());
             let sink = TauriSink(app.handle().clone(), media.clone());
             let startup_paths = paths.clone();
@@ -340,18 +336,10 @@ pub fn run() {
             settings::settings_set_music_dir,
             settings::settings_set_options,
             settings::onboarding_finish,
-            theme::commands::appearance_get,
-            theme::commands::appearance_set,
-            theme::commands::theme_list,
-            theme::commands::theme_resolve,
-            theme::commands::theme_save_custom,
-            theme::commands::theme_rename,
-            theme::commands::theme_duplicate,
-            theme::commands::theme_delete,
-            theme::commands::theme_reveal_folder,
-            theme::commands::theme_window_background,
-            theme::commands::ui_source_get,
-            theme::commands::ui_source_set,
+            prefs::commands::prefs_get,
+            prefs::commands::prefs_set_accent,
+            prefs::commands::ui_source_get,
+            prefs::commands::ui_source_set,
             history::commands::home_history,
             history::commands::home_daily_picks,
             lyrics::now_playing_lyrics,

@@ -1,5 +1,5 @@
 // A track's cover from our `coda` scheme, or a generated placeholder
-// (initials on a gradient of two theme cover colours, picked from the album
+// (initials on a gradient of two house cover colours, picked from the album
 // name) when there is none.
 
 import { useState } from "react";
@@ -28,7 +28,7 @@ function initials(name: string): string {
   return letters.join("").toUpperCase() || "♪";
 }
 
-/** The theme's cover colours (`--cover-1` … `--cover-6`, from palette 1–6). */
+/** The house placeholder colours (`--cover-1` … `--cover-6`, tokens.css). */
 const COVER_COLORS = 6;
 
 /** Two different cover colours (1-based) for `name`. */

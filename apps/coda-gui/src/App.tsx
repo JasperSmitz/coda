@@ -16,7 +16,7 @@ import { viewTransition } from "./lib/motion";
 import { sourceReplaced, useNav } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
-import { startTheme } from "./state/theme";
+import { startAccent } from "./state/accent";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
 import { NowPlayingView, queueToggleMovesContent } from "./views/NowPlayingView";
@@ -98,7 +98,7 @@ function useConfiguredSources(snapshot: Snapshot | null) {
 
 export default function App() {
   useEffect(() => connect(), []);
-  useEffect(() => startTheme(), []);
+  useEffect(() => startAccent(), []);
   useEffect(() => startSources(), []);
   const sources = useSources();
   const { snapshot, queue } = useAppState();

@@ -20,7 +20,7 @@ pkgrel=1
 pkgdesc='A desktop music player for local files and Navidrome (Tauri GUI for Coda)'
 arch=('x86_64' 'aarch64')
 url='https://github.com/JasperSmitz/coda-app'
-license=('MIT')
+license=('MIT' 'OFL-1.1')
 # mpv is not linked but run as a process; namcap cannot see that.
 depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2' 'libsoup3' 'dbus'
          'hicolor-icon-theme' 'libgcc' 'glibc' 'mpv')
@@ -66,5 +66,8 @@ package() {
   install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/coda-app.png"
   install -Dm644 src-tauri/icons/source/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/coda-app.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The bundled fonts (also inside the binary's frontend, dist/fonts/).
+  install -Dm644 public/fonts/fraunces/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/fraunces/OFL.txt"
+  install -Dm644 public/fonts/figtree/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/figtree/OFL.txt"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

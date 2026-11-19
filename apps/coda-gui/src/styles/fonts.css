@@ -1,0 +1,29 @@
+/* The bundled fonts (DESIGN.md "Type"): variable TrueType files from the
+   google/fonts repository, served with the app from `public/fonts/`
+   (their OFL licences beside them), never from the web. Fraunces for
+   display text (`--font-display`, with `--display-axes`), Figtree for
+   everything else (`--font-ui`). */
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/fonts/fraunces/Fraunces.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/fonts/fraunces/Fraunces-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("/fonts/figtree/Figtree.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+}

@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::browse::dto::AlbumDto;
 use crate::browse::{LocalView, local, local_id};
 use crate::cover::CoverService;
-use crate::theme::fsio;
+use crate::fsio;
 
 /// Context plays kept (newest last).
 pub const MAX_PLAYS: usize = 500;

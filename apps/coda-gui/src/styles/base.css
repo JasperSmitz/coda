@@ -18,9 +18,9 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font);
+  font-family: var(--font-ui);
   font-size: var(--text-body);
-  line-height: 1.4;
+  line-height: 1.45;
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
@@ -42,9 +42,16 @@ textarea {
 
 h1,
 h2,
+h3,
 p {
   margin: 0;
   font-weight: inherit;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
 }
 
 button {

@@ -58,7 +58,7 @@ export function Onboarding() {
         <h1>Welcome to Coda</h1>
         <p className="secondary">
           Play music from a folder on this computer, a Navidrome server, or both. You can change
-          this later in Settings.
+          this later in Preferences.
         </p>
 
         <section className="onboarding-step">

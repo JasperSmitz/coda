@@ -1,6 +1,6 @@
 //! Colours: strict hex parsing, OKLab mixing (the same maths as CSS
 //! `color-mix(in oklab, …)`), WCAG contrast and an OKLCH lightness nudge
-//! for the contrast guard.
+//! (kept for the music colours' contrast limits, DESIGN.md "Colour").
 
 use std::fmt;
 
@@ -21,8 +21,8 @@ impl Rgba {
         Self { r, g, b, a: 255 }
     }
 
-    /// `#rrggbb` (Ghostty also accepts it without `#`). Nothing else: no
-    /// names, no short form, no alpha.
+    /// `#rrggbb` (or without `#`). Nothing else: no names, no short form,
+    /// no alpha.
     pub fn parse_rgb(text: &str) -> Option<Self> {
         let hex = text.strip_prefix('#').unwrap_or(text);
         if hex.len() != 6 {
@@ -31,7 +31,7 @@ impl Rgba {
         Self::parse_hex_digits(hex)
     }
 
-    /// `#rrggbb` or `#rrggbbaa` (Coda's own keys may carry alpha).
+    /// `#rrggbb` or `#rrggbbaa`.
     pub fn parse(text: &str) -> Option<Self> {
         let hex = text.strip_prefix('#').unwrap_or(text);
         match hex.len() {
