@@ -284,6 +284,9 @@
   opacity: 0;
   transform: scale(1.1);
   transition: opacity var(--motion-slow) var(--ease-in-out);
+  /* Its own layer, painted once: the blur is the costliest thing in the
+     window, and nothing moving over it should repaint it. */
+  will-change: opacity;
 }
 
 /* A new cover fades in over the old one once loaded (NowPlayingView's
@@ -308,12 +311,11 @@
   align-items: center;
   justify-content: center;
   overflow-y: auto;
-  /* Track changes slide the cover sideways: clip, never a scrollbar. */
+  /* Never a sideways scrollbar (a slider thumb at an edge). */
   overflow-x: hidden;
 }
 
 .now-playing-content {
-  /* The ghost of the outgoing track is placed in here (NowPlayingView). */
   position: relative;
   --np-info-gap: 12px;
   display: flex;
@@ -339,7 +341,8 @@
   min-width: 0;
 }
 
-/* Mix line, title and subtitle: the part that slides on a track change. */
+/* Mix line, title and subtitle: the part that slides on a track change
+   (with the cover; view transitions below). */
 .now-playing-heading {
   display: flex;
   flex-direction: column;
@@ -347,30 +350,22 @@
   min-width: 0;
 }
 
-/* The outgoing track while it slides out: drawn where it was seen, not
-   in the layout, not focusable or announced (`inert`, `aria-hidden`). */
-.now-playing-ghost {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.now-playing-ghost-part {
-  position: absolute;
-}
-
-.now-playing-ghost-cover {
-  width: 100%;
-  height: 100%;
-  border-radius: 10px;
-  box-shadow: var(--shadow-big);
-}
-
+/* Always two lines tall (at its own size, whichever layout), the text at
+   the bottom: a one-line title leaves the gap above it, so the subtitle
+   and the controls never move between tracks (and a track change's
+   snapshot of the heading keeps its height). */
 .now-playing-title {
   font-size: clamp(22px, 2.6vw, 32px);
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.2;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: calc(2 * 1.2em);
+}
+
+.now-playing-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -633,7 +628,10 @@
   grid-template-rows: minmax(0, 1fr);
   align-items: stretch;
   justify-content: stretch;
-  gap: clamp(24px, 3vw, 48px);
+  /* Between the column and the lyrics; the column's room for the cover's
+     shadow stays inside it on the right (below). */
+  --np-lyrics-gap: clamp(24px, 3vw, 48px);
+  gap: var(--np-lyrics-gap);
   padding: 56px var(--np-lyrics-pad) 24px;
   overflow: hidden;
 }
@@ -646,10 +644,16 @@
   right: 0;
 }
 
-/* The column scrolls when it is too short. Its inline padding is offset
-   by a negative margin, so the content sits where the column is while a
-   slider thumb at either end (6px past its track) stays inside it and
-   never makes it scroll sideways. */
+/* The column scrolls when it is too short, so it clips. Its padding is
+   offset by a negative margin, so the content sits exactly where the
+   column is (2px narrower each side, as before) while the room around it
+   holds the cover's shadow (`--shadow-big`, ~50px sideways, ~32px above)
+   and a slider thumb at either end (6px past its track), so neither is
+   cut off nor makes it scroll sideways. On the left it reaches into the
+   main area's padding; on the right only into the grid gap (gap − 4px,
+   23–44px of shadow room there), so a classic scrollbar sits beside the
+   column, not under the lyrics; top and bottom stay inside the main
+   area's padding (56px, 24px). */
 .now-playing.is-lyrics .now-playing-content {
   --np-info-gap: 10px;
   flex-direction: column;
@@ -658,8 +662,8 @@
   gap: 18px;
   width: auto;
   min-height: 0;
-  margin: 0 -8px;
-  padding: 0 10px;
+  margin: -32px calc(4px - var(--np-lyrics-gap)) -24px -40px;
+  padding: 32px calc(var(--np-lyrics-gap) - 2px) 24px 42px;
   overflow-x: hidden;
   overflow-y: auto;
   text-align: left;
@@ -675,16 +679,6 @@
 
 .now-playing.is-lyrics .now-playing-info {
   flex: none;
-}
-
-/* While the cover glides into the column (NowPlayingView), the column
-   does not clip it. Known: in a window short enough for the column to
-   scroll, a classic (non-overlay) scrollbar appears only when the glide
-   ends. `scrollbar-gutter: stable` would not help: it reserves nothing
-   while `overflow` is `visible`, so the shift would just move to the
-   end of the glide for every window, not only short ones. */
-.now-playing.is-lyrics .now-playing-content[data-gliding] {
-  overflow: visible;
 }
 
 .now-playing.is-lyrics .now-playing-title {
@@ -720,6 +714,10 @@
 
 .now-playing-lyrics {
   position: relative;
+  /* Its own layer for as long as it is shown: the rise-in ends without a
+     layer change (and a re-rendering of the text). Below the queue panel
+     still (a later sibling of the main area). */
+  will-change: transform;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -821,25 +819,277 @@
   color: var(--text);
 }
 
-/* Lyrics mode switched on here (not when the view opens in it): the
-   lyrics fade in once the cover has mostly glided into the column. */
-.now-playing-lyrics.is-entering {
-  animation: np-lyrics-in var(--motion-slow) var(--ease-out) calc(var(--motion-slow) * 0.5) both;
+@media (prefers-reduced-motion: reduce) {
+  .lyrics-line {
+    transition: none;
+  }
 }
 
-@keyframes np-lyrics-in {
+/* ----- view transitions (Now Playing) -----
+   `lib/motion.ts` `viewTransition` sets `data-vt` on <html> while one
+   runs: "queue" for `q` (only where the content moves with the panel:
+   `queueToggleMovesContent`), "lyrics" for `l` (App), "slide" for a
+   track change (NowPlayingView, with `data-vt-dir` "forward" or "back").
+   Elements are named only then and only inside Now Playing, so every name
+   is unique (the main layout names nothing). Everything unnamed (the
+   backdrop, the visualizer, the queue panel) is swapped at once: the page
+   itself is not crossfaded as one image. Named parts are drawn above
+   everything else while they move, so nothing is named where it would be
+   drawn over the queue panel. The overlay lets clicks and the wheel
+   through to the page. */
+
+::view-transition {
+  pointer-events: none;
+}
+
+/* Lyrics switch timing, in one place (also read by NowPlayingView's
+   fallback without View Transitions). The cover leads, the text follows:
+   everything but the cover fades out where it is (`--np-lx-out`), the
+   cover alone glides (`--np-lx-glide`), and as it lands the new layout's
+   parts rise in, staggered by `--np-lx-step`: heading; timeline and
+   transport; visualizer and Up next. The lyrics (the live element, not a
+   snapshot, so they stay under the queue panel) rise in from below once
+   the cover has nearly landed (`--np-lx-lyrics-*`). About 1s: slow
+   enough to read as a deliberate fade. */
+:root {
+  --np-lx-out: 160ms;
+  --np-lx-glide: 380ms;
+  --np-lx-in: 400ms;
+  --np-lx-step: 70ms;
+  --np-lx-rise: 10px;
+  /* The first part starts as the cover is landing. */
+  --np-lx-land: calc(var(--np-lx-out) + var(--np-lx-glide) * 0.55);
+  /* The lyrics start at `out + glide × at` (without the glide: after the
+     last stagger step), rising from `rise` below. */
+  --np-lx-lyrics-at: 0.85;
+  --np-lx-lyrics-in: 500ms;
+  --np-lx-lyrics-rise: 40px;
+}
+
+:root[data-vt] .now-playing-content > .now-playing-cover {
+  view-transition-name: np-cover;
+}
+
+:root[data-vt] .now-playing-heading {
+  view-transition-name: np-heading;
+}
+
+:root[data-vt="queue"] .now-playing-info {
+  view-transition-name: np-info;
+}
+
+/* The lyrics switch names each part, to fade it out where it is and in
+   at its own moment (and leaves `.now-playing-info` unnamed). */
+:root[data-vt="lyrics"] .now-playing-timeline {
+  view-transition-name: np-timeline;
+}
+
+:root[data-vt="lyrics"] .now-playing-transport {
+  view-transition-name: np-transport;
+}
+
+:root[data-vt="lyrics"] .now-playing-info > .visualizer {
+  view-transition-name: np-visualizer;
+}
+
+:root[data-vt="lyrics"] .now-playing-next {
+  view-transition-name: np-next;
+}
+
+/* Leaving only (entering, NowPlayingView animates the live element), and
+   not with the queue panel open: it lies over the lyrics' right side
+   (they then go at once). */
+:root[data-vt="lyrics"][data-vt-dir="leave"] .now-playing:not(.has-queue) .now-playing-lyrics {
+  view-transition-name: np-lyrics;
+}
+
+/* A narrow window: the queue panel lies over the content (outside lyrics
+   mode), so nothing there is drawn above it (it just changes). */
+@media (max-width: 1179.98px) {
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-content > .now-playing-cover,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-heading,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-info,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-timeline,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-transport,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-info > .visualizer,
+  :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-next {
+    view-transition-name: none;
+  }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  opacity: 0;
+}
+
+/* Entering lyrics mode: the lyrics (live, in the new root image) rise in
+   until after the last snapshot has landed. Keep the transition until
+   they have settled, so they never switch from being drawn in the
+   overlay to being drawn directly mid-motion. A no-op animation as long
+   as their delay plus duration (NowPlayingView's useStaggeredEntrance),
+   plus a margin; the overlay lets input through, so it costs nothing. */
+:root[data-vt="lyrics"][data-vt-dir="enter"]::view-transition-new(root) {
+  animation: np-hold
+    calc(var(--np-lx-out) + var(--np-lx-glide) * var(--np-lx-lyrics-at) + var(--np-lx-lyrics-in) + 80ms)
+    linear both;
+}
+
+@keyframes np-hold {
+  from,
+  to {
+    opacity: 1;
+  }
+}
+
+/* Queue (wide windows): the cover morphs to its new place and size; the
+   text blocks move with their boxes and crossfade, drawn at their own
+   size (not stretched with the box). */
+:root[data-vt="queue"]::view-transition-group(np-cover),
+:root[data-vt="queue"]::view-transition-group(np-info),
+:root[data-vt="queue"]::view-transition-group(np-heading),
+:root[data-vt="queue"]::view-transition-old(np-cover),
+:root[data-vt="queue"]::view-transition-new(np-cover),
+:root[data-vt="queue"]::view-transition-old(np-info),
+:root[data-vt="queue"]::view-transition-new(np-info),
+:root[data-vt="queue"]::view-transition-old(np-heading),
+:root[data-vt="queue"]::view-transition-new(np-heading) {
+  animation-duration: var(--motion-morph);
+  animation-timing-function: var(--ease-standard);
+}
+
+::view-transition-old(np-info),
+::view-transition-new(np-info),
+::view-transition-old(np-heading),
+::view-transition-new(np-heading),
+::view-transition-old(np-timeline),
+::view-transition-new(np-timeline),
+::view-transition-old(np-transport),
+::view-transition-new(np-transport),
+::view-transition-old(np-visualizer),
+::view-transition-new(np-visualizer),
+::view-transition-old(np-next),
+::view-transition-new(np-next) {
+  width: auto;
+  height: auto;
+}
+
+/* Lyrics switch. The cover: waits for the text to go, then glides. */
+:root[data-vt="lyrics"]::view-transition-group(np-cover),
+:root[data-vt="lyrics"]::view-transition-old(np-cover),
+:root[data-vt="lyrics"]::view-transition-new(np-cover) {
+  animation-duration: var(--np-lx-glide);
+  animation-delay: var(--np-lx-out);
+  animation-timing-function: var(--ease-in-out);
+  animation-fill-mode: both;
+}
+
+/* The other parts do not travel: their boxes stay put while the old
+   snapshot fades, then jump (unseen) to the new place. */
+:root[data-vt="lyrics"]::view-transition-group(np-heading),
+:root[data-vt="lyrics"]::view-transition-group(np-timeline),
+:root[data-vt="lyrics"]::view-transition-group(np-transport),
+:root[data-vt="lyrics"]::view-transition-group(np-visualizer),
+:root[data-vt="lyrics"]::view-transition-group(np-next),
+:root[data-vt="lyrics"]::view-transition-group(np-lyrics) {
+  animation-duration: 1ms;
+  animation-delay: var(--np-lx-out);
+  animation-fill-mode: both;
+}
+
+:root[data-vt="lyrics"]::view-transition-old(np-heading),
+:root[data-vt="lyrics"]::view-transition-old(np-timeline),
+:root[data-vt="lyrics"]::view-transition-old(np-transport),
+:root[data-vt="lyrics"]::view-transition-old(np-visualizer),
+:root[data-vt="lyrics"]::view-transition-old(np-next),
+:root[data-vt="lyrics"]::view-transition-old(np-lyrics) {
+  animation: np-lx-out var(--np-lx-out) var(--ease-out) both;
+  mix-blend-mode: normal;
+}
+
+:root[data-vt="lyrics"]::view-transition-new(np-heading),
+:root[data-vt="lyrics"]::view-transition-new(np-timeline),
+:root[data-vt="lyrics"]::view-transition-new(np-transport),
+:root[data-vt="lyrics"]::view-transition-new(np-visualizer),
+:root[data-vt="lyrics"]::view-transition-new(np-next) {
+  animation: np-lx-in var(--np-lx-in) var(--ease-out) both;
+  animation-delay: var(--np-lx-land);
+  mix-blend-mode: normal;
+}
+
+:root[data-vt="lyrics"]::view-transition-new(np-timeline),
+:root[data-vt="lyrics"]::view-transition-new(np-transport) {
+  animation-delay: calc(var(--np-lx-land) + var(--np-lx-step));
+}
+
+:root[data-vt="lyrics"]::view-transition-new(np-visualizer),
+:root[data-vt="lyrics"]::view-transition-new(np-next) {
+  animation-delay: calc(var(--np-lx-land) + 2 * var(--np-lx-step));
+}
+
+@keyframes np-lx-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes np-lx-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(var(--np-lx-rise));
+  }
+}
+
+/* Slide: the old cover and title lines leave to one side while the new
+   ones come in from the other (a later track: out to the left). */
+:root[data-vt="slide"] {
+  --np-slide: 64px;
+}
+
+:root[data-vt="slide"][data-vt-dir="back"] {
+  --np-slide: -64px;
+}
+
+:root[data-vt="slide"]::view-transition-group(np-cover),
+:root[data-vt="slide"]::view-transition-group(np-heading) {
+  animation-duration: var(--motion-slide);
+  animation-timing-function: var(--ease-in-out);
+}
+
+:root[data-vt="slide"]::view-transition-old(np-cover),
+:root[data-vt="slide"]::view-transition-old(np-heading) {
+  animation: np-slide-out var(--motion-slide) var(--ease-in-out) both;
+  mix-blend-mode: normal;
+}
+
+:root[data-vt="slide"]::view-transition-new(np-cover),
+:root[data-vt="slide"]::view-transition-new(np-heading) {
+  animation: np-slide-in var(--motion-slide) var(--ease-in-out) both;
+  mix-blend-mode: normal;
+}
+
+@keyframes np-slide-out {
+  to {
+    opacity: 0;
+    transform: translateX(calc(-1 * var(--np-slide)));
+  }
+}
+
+@keyframes np-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--np-slide));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .now-playing-lyrics.is-entering {
-    animation: none;
-  }
-
-  .lyrics-line {
-    transition: none;
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
   }
 }

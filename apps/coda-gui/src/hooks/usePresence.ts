@@ -76,6 +76,9 @@ export function usePresence(
     }
     const entry = { animation, leaving: !open, element };
     motion.current = entry;
+    // Its own layer while it moves (the queue panel's backdrop blur is
+    // costly to repaint every frame).
+    element.style.willChange = "transform, opacity";
     animation.addEventListener("finish", () => {
       if (motion.current !== entry) return;
       if (entry.leaving) {
@@ -85,6 +88,7 @@ export function usePresence(
         // Shown: drop the effect, so no transform lingers.
         motion.current = null;
         animation.cancel();
+        element.style.willChange = "";
       }
     });
   }, [open, ref]);

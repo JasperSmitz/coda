@@ -219,4 +219,4 @@ Each entry should state:
 - **Context / symptom:** in the GUI's Now Playing, a track-change slide (`translateX`) and a FLIP glide (`translate` + `scale`) can run on the cover at the same time; the newer animation's transform wiped out the other's, so the cover jumped.
 - **Root cause:** by default (`composite: "replace"`) the effect created last wins for a property on an element; transforms of overlapping animations do not combine. `composite: "add"` adds onto the result below, but for `opacity` it sums values, so it cannot fade from 0.
 - **Rule:** when two animations can overlap on one element, give the later-starting transform `composite: "add"` (and run its opacity as a separate, replacing animation), or animate separate elements (a wrapper); otherwise cancel one deliberately.
-- **Where verified:** GUI Now Playing motion slice review (L2); `apps/coda-gui/src/views/NowPlayingView.tsx` slide, `hooks/useFlip.ts`.
+- **Where verified:** GUI Now Playing motion slice review (L2), commit e426368. That code (`hooks/useFlip.ts` and the WAAPI slide) was later replaced by View Transitions; the rule still holds for Web Animations.

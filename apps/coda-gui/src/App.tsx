@@ -12,6 +12,7 @@ import { usePresence } from "./hooks/usePresence";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
+import { viewTransition } from "./lib/motion";
 import { nav, routeFor, sourceReplaced, useNav, viewFor } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
@@ -19,7 +20,7 @@ import { startTheme } from "./state/theme";
 import type { ViewId } from "./views/viewList";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
-import { NowPlayingView } from "./views/NowPlayingView";
+import { NowPlayingView, queueToggleMovesContent } from "./views/NowPlayingView";
 import { Onboarding } from "./views/Onboarding";
 
 const QUEUE_OPEN_KEY = "coda.queueOpen";
@@ -111,11 +112,27 @@ export default function App() {
   useConfiguredSources(snapshot);
   useBrowseGenerations(snapshot);
   const [layoutQueueOpen, toggleLayoutQueue] = useStoredFlag(QUEUE_OPEN_KEY, true);
-  const [npQueueOpen, toggleNpQueue] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
+  const [npQueueOpen, toggleNpQueueNow] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
   const [nowPlaying, setNowPlaying] = useState(false);
   // Lyrics mode in Now Playing: sticky for the session, off at launch.
   const [npLyrics, setNpLyrics] = useState(false);
-  const toggleNpLyrics = useCallback(() => setNpLyrics((on) => !on), []);
+  // Now Playing's layout switches (`q`, `l`, their buttons, the Up next
+  // card) run as view transitions (experience.css). `q`: the cover morphs
+  // and the text crossfades, only where the content moves with the panel;
+  // elsewhere the panel's own slide is all there is. `l`: the text fades
+  // out, the cover glides, then the parts and the lyrics rise in.
+  const toggleNpQueue = useCallback(() => {
+    if (queueToggleMovesContent(npLyrics)) viewTransition(toggleNpQueueNow, { kind: "queue" });
+    else toggleNpQueueNow();
+  }, [toggleNpQueueNow, npLyrics]);
+  // The state each request asks for, so a quick second `l` (whose update
+  // may run before the first one's has) gets the right direction.
+  const npLyricsTarget = useRef(npLyrics);
+  const toggleNpLyrics = useCallback(() => {
+    const target = !npLyricsTarget.current;
+    npLyricsTarget.current = target;
+    viewTransition(() => setNpLyrics(target), { kind: "lyrics", dir: target ? "enter" : "leave" });
+  }, []);
   const toggleNowPlaying = useCallback(() => setNowPlaying((open) => !open), []);
   const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
   const showView = (next: ViewId) => {

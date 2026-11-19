@@ -10,15 +10,21 @@
 // asked for only while this view is shown and the window is not hidden or
 // minimised.
 //
-// Motion (DESIGN.md, all off with reduced motion; transforms and opacity
-// only, nothing remounted): the view fades and scales in when it opens.
-// The queue panel slides in and out (`usePresence`); when it or lyrics
-// mode changes the layout, the cover and the info glide to their new
-// place (`useFlip`), and the lyrics fade in after. A new track slides the
-// cover and the title lines: the outgoing ones are drawn once more as an
-// inert "ghost" at the place they were seen, sliding out to the left
-// while the new ones come in from the right (the other way round for an
-// earlier track in the queue); the backdrop crossfades.
+// Motion (DESIGN.md, all off with reduced motion; nothing remounted):
+// the view fades and scales in when it opens; the queue panel slides in
+// and out (`usePresence`). Switching the layout (`q`, `l`) and a new track
+// are View Transitions (`lib/motion.ts` `viewTransition`; App wraps the
+// toggles, this view the track change): the browser takes the old and the
+// new screen. `q` (wide windows): the cover morphs to its new place and
+// size, the text crossfades. `l`: the text fades out where it is, the
+// cover glides, then the parts rise in staggered and the lyrics (the live
+// element, `useStaggeredEntrance`) rise in last. A track change: the
+// cover and the title lines slide (the old ones out to the left, the new
+// ones in from the right; the other way round for an earlier track in the
+// queue). The names (`view-transition-name`) and the animations are in
+// experience.css, keyed by `data-vt` on <html>. Without View Transitions:
+// a short crossfade for `q` and track changes, the same staggered
+// entrance (no glide) for `l`.
 
 import {
   useCallback,
@@ -26,8 +32,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { Cover } from "../components/Cover";
 import { LyricsPanel } from "../components/LyricsPanel";
@@ -47,11 +53,18 @@ import {
   QueueIcon,
 } from "../components/icons";
 import { useFadeOnChange } from "../hooks/useFadeOnChange";
-import { useFlip } from "../hooks/useFlip";
 import { useLyrics } from "../hooks/useLyrics";
 import { usePresence } from "../hooks/usePresence";
 import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
-import { animate, easing, motionMs, prefersReducedMotion } from "../lib/motion";
+import {
+  type TransitionHandle,
+  cssMs,
+  decodedWithin,
+  easing,
+  motionMs,
+  viewTransition,
+  viewTransitionsOn,
+} from "../lib/motion";
 import { dragRegion } from "../lib/platform";
 import type { ActiveMix, QueueItem, Snapshot, Track } from "../lib/types";
 
@@ -118,68 +131,119 @@ function useVisualizerReadings(wanted: boolean) {
 
 /** How the queue panel looks out of view. */
 const PANEL_HIDDEN: Keyframe = { opacity: 0, transform: "translateX(40px)" };
-/** How far the cover and title lines slide on a track change. */
-const SLIDE_PX = 64;
-/** The longest wait for the new cover to decode before sliding anyway. */
+/** The longest wait for the new cover to decode (the screen is frozen meanwhile). */
 const DECODE_WAIT_MS = 150;
 
-/** A box in `.now-playing-content`'s coordinates (its padding box, scrolled). */
-interface Box {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
+/**
+ * Whether opening or closing the queue panel moves the cover and info:
+ * only in a wide window (the panel takes room beside them) and not in
+ * lyrics mode (the panel lies over the lyrics). Keep in step with the
+ * `min-width: 1180px` rules in experience.css (`.has-queue`). Elsewhere
+ * the panel slides over the content, which stays put, so App toggles it
+ * without a view transition (named parts would be drawn above the panel).
+ */
+export function queueToggleMovesContent(lyricsMode: boolean): boolean {
+  return !lyricsMode && (window.matchMedia?.("(min-width: 1180px)").matches ?? false);
 }
 
-/** The outgoing track, drawn where it was seen while it slides out. */
-interface Ghost {
-  id: number;
-  track: Track;
+/**
+ * Without View Transitions: after a lyrics switch the new layout's parts
+ * rise in, staggered like the view transition's (experience.css
+ * `--np-lx-*`): heading; timeline and transport; visualizer and Up next;
+ * the lyrics. The cover does not move. With or without View Transitions,
+ * entering lyrics mode lets the lyrics element itself rise in from below
+ * once the cover has (nearly) moved away: the live element, so it stays
+ * under the queue panel, and lyrics loading meanwhile appear inside it.
+ * A transform does not change `offsetTop`, so the follow scroll is not
+ * affected. Not when the view opens already in lyrics mode.
+ */
+function useStaggeredEntrance(
+  lyricsShown: boolean,
+  content: RefObject<HTMLDivElement | null>,
+  heading: RefObject<HTMLDivElement | null>,
+  lyricsArea: RefObject<HTMLDivElement | null>,
+) {
+  const seen = useRef(lyricsShown);
+  const running = useRef<Animation[]>([]);
+  useLayoutEffect(() => {
+    if (seen.current === lyricsShown) return;
+    seen.current = lyricsShown;
+    for (const a of running.current) a.cancel();
+    running.current = [];
+    const root = content.current;
+    const duration = cssMs("--np-lx-in", 400);
+    if (!root || duration <= 0) return;
+    const step = cssMs("--np-lx-step", 70);
+    const style = getComputedStyle(document.documentElement);
+    const value = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback;
+    const transitions = viewTransitionsOn();
+
+    const lyricsEl = lyricsArea.current;
+    const lyricsIn = cssMs("--np-lx-lyrics-in", 500);
+    if (lyricsShown && lyricsEl && typeof lyricsEl.animate === "function" && lyricsIn > 0) {
+      const at = Number(value("--np-lx-lyrics-at", "0.85"));
+      // After the cover's glide only when a lyrics switch is really
+      // running (not when playback starting shows them in lyrics mode).
+      const switching = transitions && document.documentElement.dataset.vt === "lyrics";
+      const delay = switching
+        ? cssMs("--np-lx-out", 160) + cssMs("--np-lx-glide", 380) * (Number.isFinite(at) ? at : 0.85)
+        : 3 * step;
+      running.current.push(
+        lyricsEl.animate(
+          [
+            { opacity: 0, transform: `translateY(${value("--np-lx-lyrics-rise", "40px")})` },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: lyricsIn, delay, easing: easing("--ease-out"), fill: "backwards" },
+        ),
+      );
+    }
+
+    // The rest: the view transition staggers its snapshots itself.
+    if (transitions) return;
+    const rise = value("--np-lx-rise", "10px");
+    const stages: (Element | null)[][] = [
+      [heading.current],
+      [root.querySelector(".now-playing-timeline"), root.querySelector(".now-playing-transport")],
+      [root.querySelector(".now-playing-info > .visualizer"), root.querySelector(".now-playing-next")],
+    ];
+    stages.forEach((elements, i) => {
+      for (const element of elements) {
+        if (!element || typeof element.animate !== "function") continue;
+        running.current.push(
+          element.animate(
+            [
+              { opacity: 0, transform: `translateY(${rise})` },
+              { opacity: 1, transform: "none" },
+            ],
+            { duration, delay: i * step, easing: easing("--ease-out"), fill: "backwards" },
+          ),
+        );
+      }
+    });
+  }, [lyricsShown, content, heading, lyricsArea]);
+  useLayoutEffect(
+    () => () => {
+      for (const a of running.current) a.cancel();
+    },
+    [],
+  );
+}
+
+/** The track whose cover and title lines are shown. */
+interface Shown {
+  key: string | null;
+  track: Track | null;
   mix: ActiveMix | null;
-  /** 1: it leaves to the left (a later track); -1: to the right. */
-  dir: 1 | -1;
-  cover: Box | null;
-  heading: Box | null;
-  /** Its opacity when it was replaced (mid-slide, after a fast `n`). */
-  opacity: number;
-  /** The layout (`useFlip`'s key) its boxes were measured in. */
-  layout: string;
 }
 
-let ghostIds = 0;
-
-function boxIn(content: HTMLElement, origin: DOMRect, part: Element | null): Box | null {
-  if (!part) return null;
-  const rect = part.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return null;
-  return {
-    left: rect.left - origin.left - content.clientLeft + content.scrollLeft,
-    top: rect.top - origin.top - content.clientTop + content.scrollTop,
-    width: rect.width,
-    height: rect.height,
-  };
-}
-
-function boxStyle(box: Box): CSSProperties {
-  return { left: box.left, top: box.top, width: box.width, height: box.height };
-}
-
-/** The cover itself (not the ghost's copy): a direct child of the content. */
+/** The cover itself: a direct child of the content. */
 function coverIn(content: HTMLElement | null): HTMLElement | null {
   return content?.querySelector<HTMLElement>(":scope > .now-playing-cover") ?? null;
 }
 
-/** Resolves once every `<img>` in `images` is decoded, or after `ms`. */
-function decodedWithin(images: (Element | null | undefined)[], ms: number): Promise<void> {
-  const decodes = images
-    .filter((img): img is HTMLImageElement => img instanceof HTMLImageElement)
-    .map((img) => img.decode().catch(() => {}));
-  if (decodes.length === 0) return Promise.resolve();
-  return Promise.race([
-    Promise.all(decodes).then(() => {}),
-    new Promise<void>((resolve) => window.setTimeout(resolve, ms)),
-  ]);
-}
+/** Slides started; an older one's update does nothing (the newest wins). */
+let slides = 0;
 
 export function NowPlayingView({
   snapshot,
@@ -200,183 +264,91 @@ export function NowPlayingView({
   const panel = useRef<HTMLDivElement>(null);
   const view = useRef<HTMLElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const info = useRef<HTMLDivElement>(null);
   const heading = useRef<HTMLDivElement>(null);
-  const ghostEl = useRef<HTMLDivElement>(null);
+  const lyricsArea = useRef<HTMLDivElement>(null);
   const lyricsShown = lyricsMode && playing != null;
   const lyrics = useLyrics(playing, lyricsMode, snapshot.browse.server);
 
-  // The lyrics fade in after a switch made here, not when the view opens
-  // already in lyrics mode. Decided while rendering, so the first frame
-  // of the lyrics already has it.
-  const [modeSeen, setModeSeen] = useState(lyricsMode);
-  const [lyricsSwitched, setLyricsSwitched] = useState(false);
-  if (lyricsMode !== modeSeen) {
-    setModeSeen(lyricsMode);
-    setLyricsSwitched(true);
-  }
-
-  // Entering lyrics mode, the cover glides into the column, which clips
-  // its overflow (it scrolls): let it show while the glide runs.
-  // (A data attribute, which React does not manage.) Before `useFlip`,
-  // so its measurements see the same overflow.
-  useLayoutEffect(() => {
-    const element = content.current;
-    if (!element || !lyricsShown || !lyricsSwitched) return;
-    const ms = motionMs("--motion-slow");
-    if (ms <= 0) return;
-    element.dataset.gliding = "";
-    const timer = window.setTimeout(() => delete element.dataset.gliding, ms);
-    return () => {
-      window.clearTimeout(timer);
-      delete element.dataset.gliding;
-    };
-  }, [lyricsShown, lyricsSwitched]);
-
-  // The queue panel or lyrics mode moved the cover and info: glide.
-  const layout = `${queueOpen}|${lyricsShown}`;
-  useFlip(layout, () => {
-    const cover = coverIn(content.current);
-    return [
-      ...(cover ? [{ element: cover, scale: true }] : []),
-      ...(info.current ? [{ element: info.current }] : []),
-    ];
-  });
+  // Without View Transitions (App wraps `q` and `l` in one): a short
+  // crossfade of the player after the queue panel moved it, and the
+  // lyrics switch's staggered entrance (no cover glide).
+  useFadeOnChange(
+    queueOpen,
+    () => (viewTransitionsOn() || !queueToggleMovesContent(lyricsShown) ? [] : [content.current]),
+    { duration: "--motion" },
+  );
+  useStaggeredEntrance(lyricsShown, content, heading, lyricsArea);
 
   // ----- track change: slide -----
+  // The cover, the title lines and the backdrop show `shown`, which
+  // follows `playingKey` through a view transition (CSS: the old ones
+  // slide out, the new ones in). Everything else follows the snapshot.
   const playingKey = playing ? snapshot.playingKey : null;
-  /** The track shown in the last commit (the one that slides out). */
-  const shown = useRef<{
-    key: string | null;
-    upNext: string | null;
-    track: Track | null;
-    mix: ActiveMix | null;
-    layout: string;
-  }>({
-    key: playingKey,
-    upNext: snapshot.upNextKey,
-    track: playing,
-    mix: snapshot.mix,
-    layout,
-  });
-  const [slideKey, setSlideKey] = useState(playingKey);
-  const [ghost, setGhost] = useState<Ghost | null>(null);
-  /** The slide has begun (not still waiting for the new cover). */
-  const slideStarted = useRef(true);
-  if (playingKey !== slideKey) {
-    // Measured while rendering: the DOM still shows the outgoing track
-    // (and, after a fast `n`, where the previous slide had got to).
-    setSlideKey(playingKey);
-    setGhost(outgoingGhost());
-  } else if (ghost && ghost.layout !== layout) {
-    // The layout changed under a slide: the ghost's boxes are stale. Drop
-    // it (the slide is cancelled, the new track is in place) and let the
-    // glide run.
-    setGhost(null);
-  }
+  const [shown, setShown] = useState<Shown>({ key: playingKey, track: playing, mix: snapshot.mix });
+  const current = shown.key === playingKey;
+  const shownTrack = (current ? playing : shown.track) ?? playing;
+  const shownMix = current ? snapshot.mix : shown.mix;
+  /** The up-next key of the last commit (before this snapshot). */
+  const lastUpNext = useRef(snapshot.upNextKey);
+  const latest = useRef<Shown>({ key: playingKey, track: playing, mix: snapshot.mix });
+  /** The slide still running or waiting, if any. */
+  const slide = useRef<TransitionHandle | null>(null);
+  latest.current = { key: playingKey, track: playing, mix: snapshot.mix };
 
-  function outgoingGhost(): Ghost | null {
-    const before = shown.current;
-    const element = content.current;
-    if (!before.key || !before.track || !playingKey || !element || prefersReducedMotion()) return null;
-    const origin = element.getBoundingClientRect();
-    const cover = coverIn(element);
-    const opacity = Number(getComputedStyle(cover ?? heading.current ?? element).opacity);
+  useLayoutEffect(() => {
+    const from = shown.key;
+    // Any change makes a slide still waiting to apply stale (e.g. `p`
+    // back to the shown track before the slide to the next one ran).
+    const id = ++slides;
+    // Ended before anything newer starts (skipping later would end that).
+    slide.current?.skip();
+    slide.current = null;
+    if (from === playingKey) return;
+    const next = latest.current;
+    // Only the newest slide's update counts: a skipped one running late
+    // must not bring back a track that is no longer playing.
+    const apply = () => {
+      if (id === slides) setShown(next);
+    };
+    // Nothing to slide from or to; or the lyrics column is scrolled, so
+    // the cover or title is partly out of its view, and a transition
+    // would draw it whole, unclipped.
+    if (!from || !playingKey || (lyricsShown && (content.current?.scrollTop ?? 0) > 0)) {
+      apply();
+      return;
+    }
     // The track that was up next is a later one, also when repeat all
     // wraps to the start (core's `up_next` wraps; same keys as
     // `playingKey`). Otherwise compare queue places; a track not in the
     // queue counts as later. With two entries under repeat all, `p` to
     // the other entry is also its up next, so it slides as forward.
-    const from = queue.findIndex((q) => q.key === before.key);
-    const to = queue.findIndex((q) => q.key === playingKey);
-    const forward = before.upNext != null && before.upNext === playingKey;
-    const dir = forward ? 1 : from >= 0 && to >= 0 && to < from ? -1 : 1;
-    // Still waiting for the last cover (fast `n`): the track on screen is
-    // the last ghost's, the new one was never shown.
-    if (ghost && !slideStarted.current && ghost.layout === layout) {
-      return { ...ghost, id: ++ghostIds, dir };
-    }
-    if (before.layout !== layout) return null;
-    return {
-      id: ++ghostIds,
-      track: before.track,
-      mix: before.mix,
-      dir,
-      cover: boxIn(element, origin, cover),
-      heading: boxIn(element, origin, heading.current),
-      opacity: Number.isFinite(opacity) ? opacity : 1,
-      layout,
-    };
-  }
+    const fromIndex = queue.findIndex((q) => q.key === from);
+    const toIndex = queue.findIndex((q) => q.key === playingKey);
+    const forward = lastUpNext.current != null && lastUpNext.current === playingKey;
+    const back = !forward && fromIndex >= 0 && toIndex >= 0 && toIndex < fromIndex;
+    slide.current = viewTransition(apply, {
+      kind: "slide",
+      dir: back ? "back" : "forward",
+      // The new cover (and backdrop) drawn before the new screen is taken.
+      settle: () =>
+        decodedWithin(
+          [coverIn(content.current), view.current?.querySelector(".now-playing-backdrop:last-of-type")],
+          DECODE_WAIT_MS,
+        ),
+    });
+    // `shown` is read for the key it had when `playingKey` changed.
+  }, [playingKey]);
 
   useLayoutEffect(() => {
-    shown.current = {
-      key: playingKey,
-      upNext: snapshot.upNextKey,
-      track: playing,
-      mix: snapshot.mix,
-      layout,
-    };
+    lastUpNext.current = snapshot.upNextKey;
   });
 
-  useLayoutEffect(() => {
-    const out = ghostEl.current;
-    if (!ghost || !out) return;
-    const done = () => setGhost((g) => (g?.id === ghost.id ? null : g));
-    const d = SLIDE_PX * ghost.dir;
-    const cover = coverIn(content.current);
-    const animations: Animation[] = [];
-    for (const part of [cover, heading.current]) {
-      if (!part) continue;
-      // The move adds onto a glide (`useFlip`) the cover may be running,
-      // instead of replacing it; opacity on its own (adding would sum).
-      const move = animate(
-        part,
-        [{ transform: `translateX(${d}px)` }, { transform: "translateX(0)" }],
-        "--motion-slow",
-        { fill: "both", composite: "add" },
-      );
-      const fade = animate(part, [{ opacity: 0 }, { opacity: 1 }], "--motion-slow", {
-        fill: "both",
-      });
-      if (move) animations.push(move);
-      if (fade) animations.push(fade);
-    }
-    const leave = animate(
-      out,
-      [
-        { opacity: ghost.opacity, transform: "none" },
-        { opacity: 0, transform: `translateX(${-d}px)` },
-      ],
-      "--motion-slow",
-      { fill: "both", easing: easing("--ease-in-out") },
-    );
-    if (leave) animations.push(leave);
-    if (animations.length === 0) {
-      slideStarted.current = true;
-      done();
-      return;
-    }
-    // Held at their start (new track hidden, old one shown) until the new
-    // cover is decoded, so it does not slide in blank.
-    for (const a of animations) a.pause();
-    slideStarted.current = false;
-    let live = true;
-    void decodedWithin([cover, out.querySelector("img")], DECODE_WAIT_MS).then(() => {
-      if (!live) return;
-      slideStarted.current = true;
-      for (const a of animations) a.play();
-      const end = () => {
-        if (live) done();
-      };
-      Promise.all(animations.map((a) => a.finished)).then(end, end);
-    });
-    return () => {
-      // Replaced by the next slide or finished: nothing stays mid-way.
-      live = false;
-      for (const a of animations) a.cancel();
-    };
-  }, [ghost]);
+  // Without View Transitions: the new cover and title lines fade in.
+  useFadeOnChange(
+    shown.key,
+    () => (viewTransitionsOn() ? [] : [coverIn(content.current), heading.current]),
+    { duration: "--motion" },
+  );
 
   // ----- queue panel -----
   const panelShown = usePresence(queueOpen, panel, {
@@ -426,20 +398,20 @@ export function NowPlayingView({
       }`}
       aria-label="Now Playing"
     >
-      <Backdrop url={playing?.coverUrl ?? null} />
+      <Backdrop url={shownTrack?.coverUrl ?? null} />
       <div className="now-playing-scrim" />
       <div className="now-playing-main">
-        {playing ? (
+        {playing && shownTrack ? (
           <div className="now-playing-content" ref={content}>
             <Cover
-              url={playing.coverUrl}
-              name={playing.album ?? playing.title}
+              url={shownTrack.coverUrl}
+              name={shownTrack.album ?? shownTrack.title}
               size="large"
               className="now-playing-cover"
             />
-            <div className="now-playing-info" ref={info}>
+            <div className="now-playing-info">
               <div className="now-playing-heading" ref={heading}>
-                <Heading track={playing} mix={snapshot.mix} onGo={onClose} />
+                <Heading track={shownTrack} mix={shownMix} onGo={onClose} />
               </div>
               <div className="now-playing-timeline">
                 <SeekBar
@@ -484,25 +456,6 @@ export function NowPlayingView({
               {snapshot.visualizerAvailable && <Visualizer active={status === "playing"} />}
               <UpNext item={upNext} onOpen={onToggleQueue} hidden={queueOpen} />
             </div>
-            {ghost && (
-              <div key={ghost.id} ref={ghostEl} className="now-playing-ghost" aria-hidden="true" inert>
-                {ghost.cover && (
-                  <div className="now-playing-ghost-part" style={boxStyle(ghost.cover)}>
-                    <Cover
-                      url={ghost.track.coverUrl}
-                      name={ghost.track.album ?? ghost.track.title}
-                      size="large"
-                      className="now-playing-ghost-cover"
-                    />
-                  </div>
-                )}
-                {ghost.heading && (
-                  <div className="now-playing-ghost-part now-playing-heading" style={boxStyle(ghost.heading)}>
-                    <Heading track={ghost.track} mix={ghost.mix} />
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         ) : (
           <div className="now-playing-nothing">
@@ -511,7 +464,7 @@ export function NowPlayingView({
           </div>
         )}
         {lyricsShown && (
-          <div className={`now-playing-lyrics ${lyricsSwitched ? "is-entering" : ""}`}>
+          <div className="now-playing-lyrics" ref={lyricsArea}>
             <LyricsPanel state={lyrics} canSeek={!unavailable} />
           </div>
         )}
@@ -570,7 +523,7 @@ function Heading({ track, mix, onGo }: { track: Track; mix: ActiveMix | null; on
     <>
       {mix && <ActiveMixLine mix={mix} className="now-playing-mix" />}
       <h1 className="now-playing-title" title={track.title}>
-        {track.title}
+        <span className="now-playing-title-text">{track.title}</span>
       </h1>
       {subtitle && (
         <div className="now-playing-subtitle">
