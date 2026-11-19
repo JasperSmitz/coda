@@ -47,14 +47,51 @@ fn round_trips_through_the_file() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("accent = \"#c99cff\""), "{text}");
     assert_eq!(load(Some(&path)), (prefs, false));
-    // The house accent is saved by name.
+    // The default (from the music) and the house accent are saved by name.
     save(&path, &Prefs::default(), false).unwrap();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("accent = \"music\"")
+    );
+    assert_eq!(load(Some(&path)), (Prefs::default(), false));
+    let house = Prefs {
+        accent: Accent::House,
+        ..Prefs::default()
+    };
+    save(&path, &house, false).unwrap();
     assert!(
         std::fs::read_to_string(&path)
             .unwrap()
             .contains("accent = \"house\"")
     );
-    assert_eq!(load(Some(&path)), (Prefs::default(), false));
+    assert_eq!(load(Some(&path)), (house, false));
+}
+
+/// N3: "From the music" is the default, also for N2's files without an
+/// accent; N2's `"house"` stays the house accent.
+#[test]
+fn the_music_is_the_default_and_an_n2_house_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    std::fs::write(&path, "lyricsIndex = false\n").unwrap();
+    assert_eq!(load(Some(&path)).0.accent, Accent::Music);
+    std::fs::write(&path, "accent = \"house\"\n").unwrap();
+    assert_eq!(load(Some(&path)).0.accent, Accent::House);
+    std::fs::write(&path, "accent = \"music\"\n").unwrap();
+    assert_eq!(load(Some(&path)).0.accent, Accent::Music);
+    let dto = PrefsDto::new(&Prefs::default());
+    assert_eq!(dto.accent, "music");
+    assert_eq!(dto.accent_color, HOUSE_ACCENT.to_string());
+    let music = init_script(&Prefs::default());
+    assert!(music.contains(r#"{"mode":"music"}"#), "{music}");
+    let house = Prefs {
+        accent: Accent::House,
+        ..Prefs::default()
+    };
+    let house = init_script(&house);
+    assert!(house.contains(r#"{"mode":"house"}"#), "{house}");
+    assert!(!house.contains('#'), "no colour: {house}");
 }
 
 /// 1.x's file: its theme keys are ignored, the source and the lyrics
@@ -83,7 +120,7 @@ fn a_1x_file_with_theme_keys_keeps_the_source_and_lyrics_switch() {
     assert_eq!(
         prefs,
         Prefs {
-            accent: Accent::House,
+            accent: Accent::Music,
             source: Some(SourceKind::Navidrome),
             lyrics_index: false,
         }
@@ -137,14 +174,14 @@ fn missing_or_invalid_files_mean_defaults() {
 }
 
 #[test]
-fn a_bad_accent_falls_back_to_the_house_accent() {
+fn a_bad_accent_falls_back_to_the_default() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
-    for bad in ["red", "#fff", "#11223344", "music", ""] {
+    for bad in ["red", "#fff", "#11223344", "Music", ""] {
         std::fs::write(&path, format!("accent = \"{bad}\"\nlyricsIndex = false\n")).unwrap();
         let (prefs, invalid) = load(Some(&path));
         assert!(!invalid, "{bad}");
-        assert_eq!(prefs.accent, Accent::House, "{bad}");
+        assert_eq!(prefs.accent, Accent::Music, "{bad}");
         assert!(!prefs.lyrics_index, "{bad}");
     }
     std::fs::write(&path, "accent = \"#FF7D8E\"\n").unwrap();
@@ -183,16 +220,27 @@ fn the_house_colour_typed_as_hex_is_the_house_accent() {
 #[test]
 fn accents_parse_strictly() {
     assert_eq!(Accent::parse("house"), Some(Accent::House));
+    assert_eq!(Accent::parse("music"), Some(Accent::Music));
     assert_eq!(Accent::parse(" #8EA9FF "), Some(accent("#8ea9ff")));
     assert_eq!(Accent::parse("8ea9ff"), Some(accent("#8ea9ff")));
-    for bad in ["House", "#8ea9f", "#8ea9ffcc", "periwinkle", "rgb(1,2,3)"] {
+    for bad in [
+        "House",
+        "MUSIC",
+        "#8ea9f",
+        "#8ea9ffcc",
+        "periwinkle",
+        "rgb(1,2,3)",
+    ] {
         assert_eq!(Accent::parse(bad), None, "{bad}");
     }
 }
 
 #[test]
 fn the_dto_carries_the_colour_its_ink_and_contrast() {
-    let house = PrefsDto::new(&Prefs::default());
+    let house = PrefsDto::new(&Prefs {
+        accent: Accent::House,
+        ..Prefs::default()
+    });
     assert_eq!(house.accent, "house");
     assert_eq!(house.accent_color, "#f0a83a");
     assert_eq!(house.accent_text, "#000000");
@@ -220,14 +268,15 @@ fn the_dto_carries_the_colour_its_ink_and_contrast() {
 }
 
 #[test]
-fn the_init_script_sets_only_a_chosen_accent() {
-    assert_eq!(init_script(&Prefs::default()), None);
+fn the_init_script_marks_the_mode_and_sets_only_a_chosen_accent() {
+    assert!(!init_script(&Prefs::default()).contains("\"accent\""));
     let script = init_script(&Prefs {
         accent: accent("#ff7d8e"),
         source: Some(SourceKind::Local),
         lyrics_index: true,
-    })
-    .unwrap();
+    });
+    assert!(script.contains("\"mode\":\"custom\""), "{script}");
+    assert!(script.contains("accentMode"), "{script}");
     assert!(script.contains("\"accent\":\"#ff7d8e\""), "{script}");
     assert!(script.contains("\"accentText\":\"#000000\""), "{script}");
     assert!(script.contains("--accent-text"));
@@ -241,8 +290,12 @@ fn the_store_loads_at_startup() {
     std::fs::write(&path, "accent = \"#e9e3d2\"\n").unwrap();
     let store = PrefsStore::new(Some(path));
     assert_eq!(store.current().accent, accent("#e9e3d2"));
-    assert!(store.init_script().unwrap().contains("#e9e3d2"));
-    assert_eq!(PrefsStore::new(None).init_script(), None);
+    assert!(store.init_script().contains("#e9e3d2"));
+    assert!(
+        PrefsStore::new(None)
+            .init_script()
+            .contains(r#"{"mode":"music"}"#)
+    );
 }
 
 #[test]

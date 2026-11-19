@@ -1,12 +1,13 @@
 //! The app's fixed colours (DESIGN.md "Colour", ADR 0009): the base
 //! behind everything, the house accent and the curated accents offered in
-//! Preferences, plus the colour maths ([`color`]) that the accent's
-//! contrast note (and, later, the music colours) use.
+//! Preferences. The colour maths ([`color`]) and the covers' palettes
+//! (the music colours, served by `cover::palettes`) are in
+//! `coda_core::cover::palette`.
 //!
 //! The frontend's token layer (`src/styles/tokens.css`) holds the same
 //! base and house accent; a test keeps the two in step.
 
-pub mod color;
+pub use coda_core::cover::palette::color;
 
 use serde::Serialize;
 
@@ -14,8 +15,9 @@ use self::color::Rgba;
 
 /// The base colour (`--bg` in `tokens.css`, ~`hsl(256 14% 7%)`): the
 /// native window and webview background, so nothing else shows before
-/// the first paint or while resizing.
-pub const BASE: Rgba = Rgba::rgb(0x11, 0x0f, 0x14);
+/// the first paint or while resizing. Core's palettes compute accent
+/// contrast on the same constant.
+pub const BASE: Rgba = coda_core::cover::palette::BASE;
 
 /// The house accent, Coda amber (`--accent` in `tokens.css`).
 pub const HOUSE_ACCENT: Rgba = Rgba::rgb(0xf0, 0xa8, 0x3a);

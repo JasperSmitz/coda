@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
+import { PageGlow } from "./components/PageGlow";
 import { DialogHost } from "./components/Dialog";
 import { MixDialogHost } from "./components/MixDialogs";
 import { NowPlayingBar } from "./components/NowPlayingBar";
@@ -17,6 +18,8 @@ import { sourceReplaced, useNav } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
 import { startAccent } from "./state/accent";
+import { usePageCover } from "./state/pageSubject";
+import { useColourScope } from "./state/palettes";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
 import { NowPlayingView, queueToggleMovesContent } from "./views/NowPlayingView";
@@ -140,6 +143,11 @@ export default function App() {
   const immersive = nowPlaying && snapshot !== null;
   const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
   useFocusAfterNowPlaying(immersive);
+  // The page takes the colours of its subject (an album page its cover…);
+  // Now Playing takes the playing cover's itself.
+  const mainRef = useRef<HTMLElement>(null);
+  const pageCover = usePageCover(immersive ? null : top.id);
+  useColourScope(mainRef, pageCover);
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -232,7 +240,8 @@ export default function App() {
   return (
     <div className="app">
       <TopBar />
-      <main className="main">
+      <main className="main" ref={mainRef}>
+        <PageGlow url={pageCover} />
         {snapshot ? (
           <>
             <Banner problems={snapshot.problems} />
@@ -245,7 +254,11 @@ export default function App() {
         {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
       </main>
       {snapshot && (
-        <QueuePopover open={queueOpen} onClose={closeLayoutQueue}>
+        <QueuePopover
+          open={queueOpen}
+          onClose={closeLayoutQueue}
+          coverUrl={snapshot.playing?.coverUrl ?? null}
+        >
           {queuePanel(true)}
         </QueuePopover>
       )}

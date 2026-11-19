@@ -15,7 +15,8 @@ pub async fn prefs_get(store: State<'_, PrefsStore>) -> Result<PrefsDto> {
     Ok(PrefsDto::new(&store.state.lock().await.0))
 }
 
-/// Saves the accent: `"house"` or `#rrggbb`. Answers with the new state.
+/// Saves the accent: `"music"`, `"house"` or `#rrggbb`. Answers with the
+/// new state.
 #[tauri::command]
 pub async fn prefs_set_accent(store: State<'_, PrefsStore>, accent: String) -> Result<PrefsDto> {
     let accent =

@@ -20,6 +20,7 @@ import { genreIngredient } from "../lib/mixRecipe";
 import { playFrom, playLocal, playTracks, shuffleAll, useShuffleContext } from "../lib/play";
 import type { Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
 import { showUiNotice } from "../state/uiNotices";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
@@ -206,6 +207,7 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
   useScroll(scroller, entry, albums.length > 0);
   const genre = load.data?.genre ?? hint;
   const title = genre?.name ?? name;
+  usePageSubject(entry, albums[0]?.coverUrl ?? null);
   // The engine resolves the genre (no track list over IPC).
   const play = (shuffle: boolean) => playLocal({ kind: "genre", id }, shuffle);
   useShuffleContext(load.state === "ready" && albums.length > 0 ? () => play(true) : null);
@@ -251,6 +253,7 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
   const { pages } = paged;
   useScroll(scroller, entry, pages.albums.length > 0);
   const title = hint?.name ?? name;
+  usePageSubject(entry, pages.albums[0]?.coverUrl ?? null);
   // Random songs of the genre, as served (already random).
   const shuffle = () =>
     playFrom(async () => {

@@ -15,6 +15,7 @@ import { resolveGenreLink } from "../lib/genres";
 import { albumIngredient } from "../lib/mixRecipe";
 import type { Album, Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { usePageSubject } from "../state/pageSubject";
 import { PlayButtons, SOURCE_LABEL, summary, ViewHeader } from "./common";
 
 /**
@@ -83,6 +84,7 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
     coverUrl: album?.coverUrl ?? null,
   });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
+  usePageSubject(entry, album?.coverUrl ?? null);
 
   return (
     <section className="view">

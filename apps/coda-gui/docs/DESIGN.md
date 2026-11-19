@@ -11,7 +11,7 @@
 - **The music is the decoration.** Covers, their colours and the visualizer carry the look; the chrome stays quiet glass.
 
 ## Layout
-*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column; N2: the glass. Still to come: the floating player (N4; until then the 1.x bar stays docked at the bottom as a glass strip and `q` opens the queue as a panel above its right end), the page's glow (N3), and the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar.)*
+*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column; N2: the glass; N3: the page's glow. Still to come: the floating player (N4; until then the 1.x bar stays docked at the bottom, with the playing cover blurred under its tint as its background, and `q` opens the queue as a panel above its right end), and the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar and its glow stays put.)*
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -73,7 +73,7 @@ The landing page. Two things, and room around them.
 
 ## Player
 - The strip, left to right: the cover (54px, rounded; a click opens Now Playing windowed), title and "artist · album" (names are links as in 1.x); centred: previous / play-pause (a filled circle) / next over the timeline (elapsed, seek bar, total, **repeat** after the total time as in 1.x); right: a small visualizer (5 bars, the playing accent), volume, **Queue**, **Now Playing** (full screen).
-- **Its background is the playing cover**, enlarged and heavily blurred under a tint of the playing colours, over the frosted glass; it crossfades (~1.6s) on a track change. Text stays at body contrast over it (the tint guarantees it; see Colour).
+- **Its background is the playing cover**, enlarged and heavily blurred under a tint of the playing colours, over the frosted glass; it crossfades (~1.8s, the glows' crossfade; its colours blend in ~1.6s, the tint in ~2s) on a track change. *(Shipped in N3 on the docked bar.)* Text stays at body contrast over it (the tint guarantees it; see Colour).
 - Narrow windows drop the volume and visualizer, then the timeline and previous/next.
 
 ## Queue
@@ -90,7 +90,7 @@ Carried over from 1.x, which this design grew from, with three changes: it opens
 - Motion: as 1.x (Motion below).
 
 ## Preferences
-*(Partly shipped, N2: the page, its title and glass cards; Accent with the house amber, five more curated colours and a custom colour (hex field and the native picker, a contrast note under 3:1), saved in `settings.toml` and applied before the first paint; Music source; the server, folder, cover art/scrobbling and lyrics search sections restyled. Still to come: "From the music" (N3, then the default) and the Library default view (N5).)*
+*(Partly shipped, N2: the page, its title and glass cards; Accent with the house amber, five more curated colours and a custom colour (hex field and the native picker, a contrast note under 3:1), saved in `settings.toml` and applied before the first paint; Music source; the server, folder, cover art/scrobbling and lyrics search sections restyled. N3: "From the music", first and the default. Still to come: the Library default view (N5).)*
 
 One page of grouped glass cards, the title "Make it yours":
 - **Accent**: "From the music" (default; a page takes the colours of the album it shows, the player those of the song that plays) or one of ~6 curated colours, or a custom colour (hex + picker). A fixed colour is used everywhere.
@@ -100,16 +100,16 @@ One page of grouped glass cards, the title "Make it yours":
 - Onboarding (first run) keeps its 1.x flow, restyled to this design.
 
 ## Colour
-*(Partly shipped, N2: the base, the text levels, glass and the house accent, in `tokens.css`; the native window background is the base. Still to come: the music colours, who takes which, blending and glows (N3).)*
+*(Shipped: N2 the base, the text levels, glass and the house accent, in `tokens.css`; the native window background is the base. N3 the music colours, who takes which (the player, the queue, Now Playing and pages; Home's carousel in N6 and small things in N5 still to come), blending and the page glow. "From the music" is the default accent.)*
 
 - **Base**: a dim, slightly violet-tinted near-black (`--base`, ~`hsl(256 14% 7%)`), never a neutral grey. Text: a warm white (`--ink`) with two quieter levels (`--ink-2` ~68%, `--ink-3` ~44%). Surfaces are **glass**: translucent white (5–11%) with a hairline border (9%) and a backdrop blur where something floats over content. There is no light or dark mode.
-- **Music colours**: for every cover the backend computes a small palette (`tint`: a deep dark of its dominant hue for backgrounds; `accent`: its most vivid colour, kept within a lightness and chroma band so it reads on the base and on its own tint; `accentInk`: black or white by contrast; `glow`: the accent, translucent). They are computed once per cover and cached with it.
-- **Who takes which colours** (with "From the music"):
+- **Music colours** *(shipped, N3)*: for every cover the backend computes a small palette (`tint`: a deep dark of its dominant hue for backgrounds; `accent`: its most vivid colour, kept within a lightness and chroma band so it reads on the base and on its own tint; `accentInk` (`accentText` in the code): black or white by contrast; `glow`: the accent, translucent; a greyscale cover is not `vivid` and keeps the house accent). They are computed once per cover and cached with it (in memory, by cover).
+- **Who takes which colours** (with "From the music"; *shipped in N3* for the player, the queue, Now Playing and the album, artist, genre and playlist pages; Home's focused album in N6, small things in N5; until N5 the glow stays put under the page's fixed header instead of scrolling):
   - The **player, the queue and Now Playing**: the playing cover's.
   - A **page** (`#view`): what it shows: Home the carousel's focused album; an album, artist, genre or playlist page its (first) cover's. The page's **glow** is that cover, very blurred, behind the top of the page, fading out over ~600px so the rest of the page (Moods, track lists) rests on the base. It scrolls with the page.
   - **Small things that stand for one album** (a grid tile's Play button, a mood card) use that album's accent.
   - Pages without one subject (Search, Library lists, Preferences): the base and the **house accent** (Coda amber, ~`#f0a83a`).
-- **Blending**: colour changes are transitions of registered custom properties (`@property` for `--accent`, `--glow`, `--tint`): ~1.6s for accents and glows, ~2s for tints; covers crossfade. Where the webview cannot animate custom properties, colours switch at once while the covers still crossfade.
+- **Blending** *(shipped, N3)*: colour changes are transitions of registered custom properties (`@property` for `--accent`, `--glow`, `--tint`): ~1.6s for accents and glows, ~2s for tints; covers crossfade. Where the webview cannot animate custom properties, colours switch at once while the covers still crossfade.
 - **Contrast**: body text ≥4.5:1 on the base, on glass and on every tint; secondary text ≥4.5:1; faint text, accent and danger ≥3:1. Tints are dark enough by construction; computed accents are nudged in OKLCH lightness until they pass on the base and on their tint. A custom accent the listener picks is used as is, with a small contrast warning in Preferences.
 - **No colour literals outside the token layer** (as 1.x): components use `var(--…)`; the values live in `src/styles/tokens.css`; `pnpm check:colors` enforces it. Danger and success keep their own colours, separate from the accent.
 
@@ -118,7 +118,7 @@ One page of grouped glass cards, the title "Make it yours":
 - Small labels (the "eyebrows" above titles: "Album · 1977", "Thursday evening") are the display face in italic at ~15px, sentence case; no tracked-out uppercase labels.
 - Tabular numerals for times, counts and track numbers. Scale: 14.5px body, 13px secondary; section headings ~30px; page titles 36–72px by width; the carousel title ~32px.
 
-## Shape and surfaces *(shipped, N2, except the accent glow on covers (N3) and the flourish (open))*
+## Shape and surfaces *(shipped, N2, except the accent glow on covers (N5, with the per-album accents on grid tiles) and the flourish (open))*
 - Radii: covers 14–18px (12px in the player, round for artists), cards and panels 22–30px, buttons and the navigation fully round (pills).
 - Shadows are soft and long; a focused or featured cover also casts a glow in its accent.
 - Buttons: **primary** a pill in the accent with `accentInk` text; **secondary** a glass pill; icon buttons round, glass where they float.

@@ -5,10 +5,11 @@
 // `useBrowseKeys`), `q`, the button, or a pointer-down outside it, unless
 // a menu or dialog is open (one may have been opened from the queue) or a
 // drag in it is under way. Closing with the focus inside gives it to the
-// queue button.
+// queue button. It takes the playing cover's colours (useColourScope).
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { usePresence } from "../hooks/usePresence";
+import { useColourScope } from "../state/palettes";
 
 /** How the panel looks out of view. */
 const HIDDEN: Keyframe = { opacity: 0, transform: "translateY(12px)" };
@@ -21,11 +22,14 @@ function focusQueueButton() {
 interface Props {
   open: boolean;
   onClose: () => void;
+  /** The playing track's cover, for its colours. */
+  coverUrl: string | null;
   children: ReactNode;
 }
 
-export function QueuePopover({ open, onClose, children }: Props) {
+export function QueuePopover({ open, onClose, coverUrl, children }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  useColourScope(ref, coverUrl);
   const shown = usePresence(open, ref, {
     hidden: HIDDEN,
     duration: "--motion",

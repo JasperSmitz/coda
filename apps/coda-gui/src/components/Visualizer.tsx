@@ -2,15 +2,19 @@
 // smoothed and decayed here (requestAnimationFrame), and the 7 bands are
 // spread into ~32–48 bars. With reduced motion the bars update a few
 // times a second instead of animating. The bars are `--viz` (the
-// accent), re-read when the accent changes.
+// accent, or the playing cover's), re-read every frame while a colour
+// change blends (after the accent or a scope's palette changes).
 
 import { useEffect, useRef } from "react";
 import { onVisualizer } from "../lib/ipc";
 import { ACCENT_EVENT } from "../lib/accent";
+import { PALETTE_EVENT } from "../lib/palette";
 import { prefersReducedMotion } from "../lib/motion";
 import { Meter, spreadBands } from "../lib/visualizer";
 
 const REDUCED_INTERVAL_MS = 250;
+/** How long `--viz` is re-read after a change: its blend (`--motion-accent`) and a margin. */
+const BLEND_READ_MS = 2000;
 
 export function Visualizer({ active }: { active: boolean }) {
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -25,12 +29,22 @@ export function Visualizer({ active }: { active: boolean }) {
     let frame = 0;
     let drawn = false;
     let color = "";
+    /** Until when the colour is re-read each frame (it may be blending). */
+    let blendUntil = 0;
     const readColor = () => {
-      color = getComputedStyle(element).getPropertyValue("--viz").trim();
-      drawn = false;
+      const next = getComputedStyle(element).getPropertyValue("--viz").trim();
+      if (next !== color) {
+        color = next;
+        drawn = false;
+      }
+    };
+    const colourChanged = () => {
+      blendUntil = performance.now() + BLEND_READ_MS;
+      readColor();
     };
     readColor();
-    window.addEventListener(ACCENT_EVENT, readColor);
+    window.addEventListener(ACCENT_EVENT, colourChanged);
+    window.addEventListener(PALETTE_EVENT, colourChanged);
     const unlisten = onVisualizer((f) => {
       latest = f.bands;
     });
@@ -40,6 +54,7 @@ export function Visualizer({ active }: { active: boolean }) {
       const reduced = prefersReducedMotion();
       if (reduced && now - lastReduced < REDUCED_INTERVAL_MS) return;
       lastReduced = now;
+      if (now < blendUntil) readColor();
       let moved: boolean;
       if (latest) {
         meter.update(latest, now);
@@ -78,7 +93,8 @@ export function Visualizer({ active }: { active: boolean }) {
     frame = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener(ACCENT_EVENT, readColor);
+      window.removeEventListener(ACCENT_EVENT, colourChanged);
+      window.removeEventListener(PALETTE_EVENT, colourChanged);
       unlisten.then((f) => f()).catch(() => {});
     };
   }, []);

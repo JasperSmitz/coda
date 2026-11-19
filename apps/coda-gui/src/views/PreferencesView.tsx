@@ -1,6 +1,6 @@
 // Preferences ("Make it yours"), glass cards in this order: the accent
-// (curated swatches or a custom colour; the GUI's own settings.toml, see
-// state/accent), the music source (the Local | Navidrome switch,
+// (from the music, the default; curated swatches or a custom colour; the
+// GUI's own settings.toml, see state/accent), the music source (the Local | Navidrome switch,
 // Ctrl/Cmd+1/2, and its status), music folder (native picker), Navidrome
 // server (test, save, disconnect; the lyrics index's status, Rebuild and
 // switch), cover art and scrobbling. Those after the accent are saved to
@@ -13,6 +13,7 @@ import { LocalIcon, ServerIcon } from "../components/icons";
 import { bothConfigured, switchSource, useSources } from "../state/source";
 import { accent, useAccent } from "../state/accent";
 import { HOUSE, MIN_ACCENT_CONTRAST, normalizeHex } from "../lib/accent";
+import { MUSIC } from "../lib/palette";
 import { dragRegion, isMacos } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
 import type { LyricsIndexStatus, ServerInput, Settings, Snapshot, SourceKind } from "../lib/types";
@@ -116,8 +117,10 @@ function radioArrow(e: KeyboardEvent): -1 | 1 | 0 {
 }
 
 /**
- * The accent: six curated swatches (the first is the house amber) and a
- * custom colour (hex field and the native picker). Applied and saved at
+ * The accent: "From the music" (the default: pages, the player and the
+ * queue take their covers' colours), six curated swatches (the first is
+ * the house amber) and a custom colour (hex field and the native picker).
+ * One radio group: music first, then the swatches. Applied and saved at
  * once; a custom colour under 3:1 on the base gets a note.
  */
 function AccentSection() {
@@ -137,10 +140,14 @@ function AccentSection() {
     );
   }
   // What is shown is the latest choice, even while it is being saved.
+  const music = shown === MUSIC;
   const curated = prefs.swatches.find((s) => s.value === shown);
-  const custom = !curated;
-  const shownColor = curated ? curated.color : shown;
-  const chosenName = curated ? curated.name : `Custom ${shownColor}`;
+  const custom = !curated && !music;
+  // From the music: the picker starts at the house colour.
+  const shownColor = curated ? curated.color : music ? prefs.swatches[0].color : shown;
+  const chosenName = music ? "From the music" : curated ? curated.name : `Custom ${shownColor}`;
+  /** The radio group's options: music, then the swatches. */
+  const options = [MUSIC, ...prefs.swatches.map((s) => s.value)];
   const choose = (value: string) => {
     setDraft(null);
     setInvalid(false);
@@ -159,18 +166,19 @@ function AccentSection() {
     }
     choose(hex);
   };
-  // Roving focus: arrows move to and choose the next swatch.
+  // Roving focus: arrows move to and choose the next option.
   const onKeyDown = (e: KeyboardEvent) => {
     const step = radioArrow(e);
     if (step === 0) return;
     e.preventDefault();
     e.stopPropagation();
-    const index = curated ? prefs.swatches.indexOf(curated) : step > 0 ? -1 : 0;
-    const count = prefs.swatches.length;
-    const next = prefs.swatches[(index + step + count) % count];
-    choose(next.value);
+    const at = options.indexOf(shown);
+    const index = at >= 0 ? at : step > 0 ? -1 : 0;
+    const count = options.length;
+    const next = options[(index + step + count) % count];
+    choose(next);
     requestAnimationFrame(() =>
-      document.querySelector<HTMLElement>(`.accent-swatches [data-value="${next.value}"]`)?.focus(),
+      document.querySelector<HTMLElement>(`.accent-swatches [data-value="${next}"]`)?.focus(),
     );
   };
   return (
@@ -183,7 +191,19 @@ function AccentSection() {
           aria-labelledby="settings-accent"
           onKeyDown={onKeyDown}
         >
-          {prefs.swatches.map((swatch, i) => {
+          <button
+            role="radio"
+            aria-checked={music}
+            aria-describedby="accent-music-note"
+            data-value={MUSIC}
+            tabIndex={music || custom ? 0 : -1}
+            className={`accent-music ${music ? "is-active" : ""}`}
+            onClick={() => choose(MUSIC)}
+          >
+            <span className="accent-music-dot" aria-hidden="true" />
+            From the music
+          </button>
+          {prefs.swatches.map((swatch) => {
             const checked = swatch === curated;
             return (
               <button
@@ -193,7 +213,7 @@ function AccentSection() {
                 aria-label={swatch.name}
                 title={swatch.value === HOUSE ? `${swatch.name} (Coda’s own)` : swatch.name}
                 data-value={swatch.value}
-                tabIndex={checked || (custom && i === 0) ? 0 : -1}
+                tabIndex={checked ? 0 : -1}
                 className={`accent-swatch ${checked ? "is-active" : ""}`}
                 style={{ background: swatch.color }}
                 onClick={() => choose(swatch.value)}
@@ -203,6 +223,10 @@ function AccentSection() {
         </div>
         <span className="accent-name">{chosenName}</span>
       </div>
+      <p id="accent-music-note" className="secondary accent-note">
+        A page takes the colours of the album it shows, the player those of the song that’s
+        playing.
+      </p>
       <div className="accent-custom">
         <label htmlFor="accent-hex">Custom colour</label>
         <input

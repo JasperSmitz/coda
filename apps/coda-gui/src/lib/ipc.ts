@@ -7,6 +7,7 @@ import type {
   Intent,
   Lyrics,
   LyricsIndexStatus,
+  Palette,
   Prefs,
   Progress,
   ServerInput,
@@ -84,6 +85,18 @@ export function coverSrc(coverUrl: string, size: CoverSize): string {
   return `${coverUrl}/${size}`;
 }
 
+/** Cover URLs one `cover_palettes` call may carry (the backend's `MAX_BATCH`). */
+export const PALETTE_BATCH = 64;
+
+/**
+ * The palettes of up to `PALETTE_BATCH` cover URLs (as the DTOs carry
+ * them): `null` for an unknown URL or a cover without art; a URL whose
+ * cover failed to load is missing from the answer (ask again later).
+ */
+export function fetchPalettes(urls: string[]): Promise<Record<string, Palette | null>> {
+  return invoke<Record<string, Palette | null>>("cover_palettes", { urls });
+}
+
 // ----- the Navidrome lyrics index (each rejects with a message to show) -----
 
 export const lyricsIndexApi = {
@@ -117,7 +130,7 @@ export const settingsApi = {
 
 export const prefsApi = {
   get: () => invoke<Prefs>("prefs_get"),
-  /** `"house"` or `#rrggbb`; answers with the new state. */
+  /** `"music"`, `"house"` or `#rrggbb`; answers with the new state. */
   setAccent: (accent: string) => invoke<Prefs>("prefs_set_accent", { accent }),
 };
 

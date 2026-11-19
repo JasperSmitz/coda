@@ -13,6 +13,7 @@ import { artistIngredient } from "../lib/mixRecipe";
 import { artistContext, playFrom, playLocal, playTracks, useShuffleContext } from "../lib/play";
 import type { SourceKind } from "../lib/types";
 import type { Entry } from "../state/nav";
+import { usePageSubject } from "../state/pageSubject";
 import { PlayButtons, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
 interface Props {
@@ -36,6 +37,7 @@ export function ArtistView({ entry, source, id, name }: Props) {
   const artist = load.data?.artist;
   const title = artist?.name || name;
   const cover = artist?.coverUrl ?? albums[0]?.coverUrl ?? null;
+  usePageSubject(entry, cover);
 
   // Local: the engine resolves the artist (no track list over IPC) and
   // records it in the play history itself.

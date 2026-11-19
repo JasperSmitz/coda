@@ -25,6 +25,7 @@ import {
 } from "../lib/playlists";
 import type { Playlist, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
 import { PlayButtons, ScanLine, SOURCE_LABEL, summary, ViewHeader, plural } from "./common";
 
@@ -234,6 +235,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const cover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? tracks[0]?.coverUrl ?? null;
   const context = playlistContext(source, { id, name: title, coverUrl: cover });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
+  usePageSubject(entry, cover);
 
   // The detail has no name (`getPlaylist` sends none here): use the shown one.
   const playlist: Playlist | null = detail ? { ...detail.playlist, name: title } : null;

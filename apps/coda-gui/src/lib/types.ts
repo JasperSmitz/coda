@@ -450,9 +450,9 @@ export interface Swatch {
 
 /** The GUI's own preferences (`~/.config/coda-app/settings.toml`). */
 export interface Prefs {
-  /** `"house"` or `#rrggbb`, as saved. */
+  /** `"music"` (from the music, the default), `"house"` or `#rrggbb`, as saved. */
   accent: string;
-  /** The accent's colour, `#rrggbb`. */
+  /** The accent's colour, `#rrggbb` (the house accent's for `"music"`). */
   accentColor: string;
   /** Black or white, whichever reads on the accent. */
   accentText: string;
@@ -461,4 +461,18 @@ export interface Prefs {
   swatches: Swatch[];
   source: SourceKind | null;
   lyricsIndex: boolean;
+}
+
+/** A cover's colours (`cover_palettes`; backend `cover::palettes::PaletteDto`). */
+export interface Palette {
+  /** A deep dark of the dominant hue, `#rrggbb`. */
+  tint: string;
+  /** The most vivid colour, readable on the base and the tint, `#rrggbb`. */
+  accent: string;
+  /** Black or white on the accent, `#rrggbb`. */
+  accentText: string;
+  /** The accent, translucent, `#rrggbbaa`. */
+  glow: string;
+  /** `false`: a greyscale cover (the house accent is used). */
+  vivid: boolean;
 }

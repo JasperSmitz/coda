@@ -8,6 +8,9 @@
 //! path or reach anything but covers of tracks it was shown. Images come
 //! from `coda_core::cover::load` (tags / folder image for local tracks,
 //! `getCoverArt` + Coda's disk cache for Navidrome) and are sent as JPEG.
+//! [`palettes`] answers the covers' colours for the same URLs.
+
+pub mod palettes;
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, VecDeque};
@@ -139,6 +142,9 @@ pub struct CoverService {
     large: Option<Arc<DiskCache>>,
     loads: Semaphore,
     enabled: RwLock<bool>,
+    palettes: Mutex<palettes::PaletteCache>,
+    /// Palette loads' own limit, so they never queue covers on screen.
+    palette_loads: Semaphore,
 }
 
 impl CoverService {
@@ -152,6 +158,8 @@ impl CoverService {
             large: cache_dir.map(|dir| Arc::new(DiskCache::large(cover::cache::large_dir(&dir)))),
             loads: Semaphore::new(MAX_LOADS),
             enabled: RwLock::new(true),
+            palettes: Mutex::new(palettes::PaletteCache::default()),
+            palette_loads: Semaphore::new(palettes::PALETTE_LOADS),
         }
     }
 
@@ -160,6 +168,12 @@ impl CoverService {
         // old token and load it with the new client.
         self.registry.client_changed();
         *self.client.write().unwrap_or_else(|e| e.into_inner()) = client;
+        // After the swap: a palette loaded with the old client (its
+        // generation is older) is not kept, and those kept are dropped.
+        self.palettes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .client_changed();
     }
 
     /// The cover behind a cover URL this service handed out (for the OS
@@ -187,7 +201,12 @@ impl CoverService {
     }
 
     async fn load(&self, key: &CoverKey, size: CoverSize) -> Outcome {
-        let Ok(_permit) = self.loads.acquire().await else {
+        self.load_within(&self.loads, key, size).await
+    }
+
+    /// [`Self::load`] within `limit`'s permits.
+    async fn load_within(&self, limit: &Semaphore, key: &CoverKey, size: CoverSize) -> Outcome {
+        let Ok(_permit) = limit.acquire().await else {
             return Outcome::Failed;
         };
         let client = self

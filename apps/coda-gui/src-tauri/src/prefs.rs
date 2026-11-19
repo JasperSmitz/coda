@@ -1,16 +1,16 @@
 //! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
 //! from Coda's shared `config.toml`: the accent colour (DESIGN.md
-//! "Preferences"), the source the app browses and the Navidrome lyrics
-//! index switch. Written atomically; an unreadable or invalid file means
+//! "Preferences"; `"music"` by default, also when the key is missing),
+//! the source the app browses and the Navidrome lyrics index switch. Written atomically; an unreadable or invalid file means
 //! the defaults (and is kept as `settings.toml.bad` when it is next
 //! replaced). Keys this version does not know, such as 1.x's theme
 //! settings (`mode`, `theme`, `lightTheme`, `darkTheme`, `accents`,
 //! `visualizer`), are ignored on read and dropped by the next write
 //! (ADR 0009).
 //!
-//! A chosen accent reaches the webview before its first paint as an
-//! initialization script ([`PrefsStore::init_script`]); Preferences
-//! changes it through [`commands`].
+//! The accent mode, and a chosen accent, reach the webview before its
+//! first paint as an initialization script ([`PrefsStore::init_script`]);
+//! Preferences changes them through [`commands`].
 
 pub mod commands;
 
@@ -26,22 +26,27 @@ use crate::palette::{BASE, HOUSE_ACCENT, SWATCHES, Swatch};
 
 const MAX_PREFS_BYTES: u64 = 256 * 1024;
 
-/// The accent colour: the house accent, or one fixed colour.
+/// The accent colour: from the music (the default: each cover's own
+/// accent where a cover is the subject, the house accent elsewhere), the
+/// house accent, or one fixed colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum Accent {
     #[default]
+    Music,
     House,
     Color(Rgba),
 }
 
 impl Accent {
-    /// `"house"` or `#rrggbb` (any case; the `#` is optional). The house
-    /// accent's own colour typed as hex is the house accent.
+    /// `"music"`, `"house"` or `#rrggbb` (any case; the `#` is optional).
+    /// The house accent's own colour typed as hex is the house accent.
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
-        if text == "house" {
-            return Some(Self::House);
+        match text {
+            "music" => return Some(Self::Music),
+            "house" => return Some(Self::House),
+            _ => {}
         }
         Rgba::parse_rgb(text).map(|color| {
             if color == HOUSE_ACCENT {
@@ -52,21 +57,23 @@ impl Accent {
         })
     }
 
-    /// The colour it stands for.
+    /// The colour it stands for (from the music: the house accent, shown
+    /// where no cover is the subject).
     pub fn color(self) -> Rgba {
         match self {
-            Self::House => HOUSE_ACCENT,
+            Self::Music | Self::House => HOUSE_ACCENT,
             Self::Color(color) => color,
         }
     }
 }
 
-/// An unknown value in the file falls back to the house accent.
+/// An unknown value in the file falls back to the default (from the
+/// music).
 impl From<String> for Accent {
     fn from(text: String) -> Self {
         Self::parse(&text).unwrap_or_else(|| {
-            tracing::info!("settings.toml: the accent is not a colour; using the house accent");
-            Self::House
+            tracing::info!("settings.toml: the accent is not a colour; using the music's");
+            Self::default()
         })
     }
 }
@@ -74,6 +81,7 @@ impl From<String> for Accent {
 impl From<Accent> for String {
     fn from(accent: Accent) -> Self {
         match accent {
+            Accent::Music => "music".to_owned(),
             Accent::House => "house".to_owned(),
             Accent::Color(color) => color.to_string(),
         }
@@ -97,7 +105,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Self {
-            accent: Accent::House,
+            accent: Accent::Music,
             source: None,
             lyrics_index: true,
         }
@@ -108,9 +116,9 @@ impl Default for Prefs {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrefsDto {
-    /// `"house"` or `#rrggbb`, as saved.
+    /// `"music"`, `"house"` or `#rrggbb`, as saved.
     pub accent: String,
-    /// The accent's colour, `#rrggbb`.
+    /// The accent's colour, `#rrggbb` (the house accent's for `"music"`).
     pub accent_color: String,
     /// Black or white, whichever reads better on the accent.
     pub accent_text: String,
@@ -171,33 +179,40 @@ impl PrefsStore {
             .unwrap_or_default()
     }
 
-    /// The main window's initialization script, `None` with the house
-    /// accent (`tokens.css` has it).
-    pub fn init_script(&self) -> Option<String> {
+    /// The main window's initialization script.
+    pub fn init_script(&self) -> String {
         init_script(&self.current())
     }
 }
 
-/// A script that sets a chosen accent on `<html>` before the document
-/// paints (`--accent`, `--accent-text`; `--accent-soft` and the
-/// visualizer's `--viz` follow in `tokens.css`). Only two hex values go
-/// in, as JSON. `None` with the house accent.
-pub fn init_script(prefs: &Prefs) -> Option<String> {
-    let Accent::Color(color) = prefs.accent else {
-        return None;
+/// A script that marks the accent mode on `<html>` before the document
+/// paints (`data-accent-mode`: `music`, `house` or `custom`; the colour
+/// scopes read it until the preferences have loaded, so a "From the
+/// music" start never blends from amber) and sets a chosen accent
+/// (`--accent`, `--accent-text`; `--accent-soft` and the visualizer's
+/// `--viz` follow in `tokens.css`). Only the mode and two hex values go
+/// in, as JSON.
+pub fn init_script(prefs: &Prefs) -> String {
+    let payload = match prefs.accent {
+        Accent::Color(color) => serde_json::json!({
+            "mode": "custom",
+            "accent": color.to_string(),
+            "accentText": text_on(color).to_string(),
+        }),
+        Accent::Music => serde_json::json!({ "mode": "music" }),
+        Accent::House => serde_json::json!({ "mode": "house" }),
     };
-    let payload = serde_json::json!({
-        "accent": color.to_string(),
-        "accentText": text_on(color).to_string(),
-    });
-    Some(format!(
+    format!(
         r#"(function () {{
   var a = {payload};
   function apply() {{
     var root = document.documentElement;
     if (!root) return false;
-    root.style.setProperty("--accent", a.accent);
-    root.style.setProperty("--accent-text", a.accentText);
+    root.dataset.accentMode = a.mode;
+    if (a.accent) {{
+      root.style.setProperty("--accent", a.accent);
+      root.style.setProperty("--accent-text", a.accentText);
+    }}
     return true;
   }}
   if (!apply()) {{
@@ -206,7 +221,7 @@ pub fn init_script(prefs: &Prefs) -> Option<String> {
     }}).observe(document, {{ childList: true }});
   }}
 }})();"#
-    ))
+    )
 }
 
 /// `$XDG_CONFIG_HOME` if absolute, else `~/.config` (on macOS too).

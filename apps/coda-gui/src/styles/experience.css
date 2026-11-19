@@ -146,6 +146,38 @@
   color: var(--text-2);
 }
 
+/* "From the music": a pill with a ring of the curated accents. */
+.accent-music {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text);
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.accent-music:not(.is-active):hover {
+  background: var(--surface-3);
+}
+
+.accent-music.is-active {
+  box-shadow:
+    0 0 0 3px var(--bg),
+    0 0 0 5px var(--text);
+}
+
+.accent-music-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--music-swatch);
+}
+
 .accent-custom {
   display: flex;
   align-items: center;
@@ -340,7 +372,8 @@
      cover's colour; with `--np-scrim` over the blurred cover (shown at
      0.85) they keep their contrast even over a white cover: text 6.7:1,
      text-2 4.7:1, text-3 3.3:1 (over a mid-grey cover 12.2, 7.8, 5.0). */
-  background: var(--bg);
+  /* The playing cover's tint behind the backdrop (a colour scope). */
+  background: var(--tint);
   color: var(--text);
   --text-2: color-mix(in srgb, var(--text) 76%, transparent);
   --text-3: color-mix(in srgb, var(--text) 56%, transparent);
@@ -487,6 +520,18 @@
 .now-playing-controls .now-playing-play {
   width: 52px;
   height: 52px;
+}
+
+/* The playing cover's accent: the play button, the timeline. */
+.now-playing-controls .now-playing-play,
+.now-playing-controls .now-playing-play:not(:disabled):hover {
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 10px 28px -8px var(--glow);
+}
+
+.now-playing .seek-slider:not(.is-disabled) .slider-fill {
+  background: var(--accent);
 }
 
 .now-playing-nothing {

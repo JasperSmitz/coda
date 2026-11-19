@@ -1,7 +1,8 @@
 //! Coda's desktop app: the Tauri backend. One engine actor ([`engine`])
 //! owns playback and library state; commands ([`commands`]) send it
 //! intents, and it emits `snapshot`, `progress` and `visualizer` events
-//! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]).
+//! ([`dto`]). Covers are served by the `coda` URI scheme ([`cover`]),
+//! their colours by `cover_palettes` ([`cover::palettes`]).
 //! [`settings`] writes Coda's config and applies it live; [`media`] is
 //! the OS media controls; [`prefs`] the app's own preferences (the
 //! accent, applied before the window's first paint by an initialization
@@ -214,6 +215,8 @@ pub fn run() {
             // The main window is created here (not from the config) so a
             // chosen accent is set before its first paint.
             app.manage(prefs::PrefsStore::from_process());
+            // For `cover_palettes`.
+            app.manage(covers.clone());
             app.manage(frame::FramePath(paths.window.clone()));
             app.manage(frame::Tracker::default());
             let lyrics_on = app.state::<prefs::PrefsStore>().current().lyrics_index;
@@ -235,9 +238,7 @@ pub fn run() {
             let mut builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
                     .background_color(tauri::window::Color(base.r, base.g, base.b, 255));
-            if let Some(script) = accent_script {
-                builder = builder.initialization_script(script);
-            }
+            builder = builder.initialization_script(accent_script);
             #[cfg(target_os = "macos")]
             {
                 builder = titlebar::style(builder);
@@ -351,7 +352,8 @@ pub fn run() {
             mixes::mix_search_genres,
             mixes::mix_search_artists,
             mixes::mix_search_albums,
-            frame::commands::window_is_fullscreen
+            frame::commands::window_is_fullscreen,
+            cover::palettes::cover_palettes
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

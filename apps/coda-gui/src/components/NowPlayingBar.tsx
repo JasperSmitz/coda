@@ -3,7 +3,9 @@ import { intent } from "../lib/ipc";
 import { formatTime } from "../lib/format";
 import type { Progress, Repeat, Snapshot } from "../lib/types";
 import { useProgress } from "../state/store";
+import { useColourScope } from "../state/palettes";
 import { Cover } from "./Cover";
+import { CoverGlow } from "./PageGlow";
 import { ArtistAlbumLine } from "./NameLink";
 import { Slider } from "./Slider";
 import {
@@ -41,9 +43,15 @@ export function NowPlayingBar({
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
   const isPlaying = status === "playing" || status === "loading";
+  // The playing cover's colours, and the cover itself, enlarged and
+  // blurred under a wash of its tint, as the background.
+  const ref = useRef<HTMLElement>(null);
+  const coverUrl = playing?.coverUrl ?? null;
+  useColourScope(ref, coverUrl);
 
   return (
-    <footer className="bar">
+    <footer className="bar" ref={ref}>
+      <CoverGlow url={coverUrl} className="bar-backdrop" />
       <div className="bar-track">
         {playing ? (
           <>

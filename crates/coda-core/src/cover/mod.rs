@@ -22,6 +22,7 @@
 
 pub mod cache;
 pub mod local;
+pub mod palette;
 
 use std::collections::VecDeque;
 use std::fmt;

@@ -5,10 +5,48 @@
  *
  * The listener's accent (Preferences) is the one exception to "fixed":
  * the backend sets `--accent` and `--accent-text` on <html> before the
- * first paint when it is not the house accent (`prefs::init_script`),
- * and `state/accent.ts` keeps them current. Everything derived from the
+ * first paint when it is a fixed colour (`prefs::init_script`), and
+ * `state/accent.ts` keeps them current. Everything derived from the
  * accent below follows it.
+ *
+ * The music colours (N3): colour scopes (the bar, the queue panel, Now
+ * Playing, the page in `.main`) set `--tint`, and with "From the music"
+ * `--accent`, `--accent-text`, `--accent-soft`, `--selection`, `--glow`
+ * and `--viz`, inline from a cover's palette (lib/palette.ts). The
+ * colours below are registered (`@property`) so that `.colour-scope`
+ * (app.css) can transition them; where `@property` is unsupported they
+ * switch at once.
  */
+
+@property --accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #f0a83a;
+}
+
+@property --accent-soft {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+
+@property --glow {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: transparent;
+}
+
+@property --tint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #110f14;
+}
+
+@property --viz {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #f0a83a;
+}
 
 :root {
   color-scheme: dark;
@@ -38,7 +76,15 @@
      choice before the backend's answer). */
   --ink-dark: #000000;
   --ink-light: #ffffff;
+  /* A scope with a music accent sets the same mixes (lib/palette.ts:
+     16% here, 34% for `--selection`). */
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  /* A cover's tint: a deep dark of its dominant hue (core's
+     `cover::palette`), behind the bar's, Now Playing's and the page's
+     covers. Unscoped: the base. */
+  --tint: var(--bg);
+  /* The accent, translucent: soft light around accent things. */
+  --glow: color-mix(in srgb, var(--accent) 45%, transparent);
 
   --danger: #f0707a;
   --danger-text: #000000;
@@ -86,6 +132,13 @@
 
   /* The visualizer's bars. */
   --viz: var(--accent);
+
+  /* ----- music colours ----- */
+
+  /* The page's glow (components/PageGlow): fades out down the page. */
+  --page-glow-mask: linear-gradient(to bottom, #000000 0%, #000000a6 45%, transparent 100%);
+  /* "From the music" in Preferences: the curated accents in a ring. */
+  --music-swatch: conic-gradient(from 210deg, #ff7d8e, #f0a83a, #e9e3d2, #7fd8c4, #8ea9ff, #c99cff, #ff7d8e);
 
   /* Composed (no colour values). Soft, long shadows. */
   --shadow: 0 12px 32px -6px var(--shadow-color);
@@ -156,6 +209,11 @@
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --press-scale: 0.96;
+  /* Music colours blending (DESIGN.md "Colour"): accents and glows, tints,
+     and the covers' crossfade behind the page and the bar. */
+  --motion-accent: 1.6s;
+  --motion-tint: 2s;
+  --motion-glow: 1.8s;
 }
 
 /* No backdrop blur (some WebKitGTK builds): floating glass becomes
@@ -174,6 +232,9 @@
     --motion-slow: 0ms;
     --motion-slide: 0ms;
     --motion-morph: 0ms;
+    --motion-accent: 0ms;
+    --motion-tint: 0ms;
+    --motion-glow: 0ms;
     --press-scale: 1;
   }
 }

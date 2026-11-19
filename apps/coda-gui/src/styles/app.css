@@ -330,11 +330,87 @@
   background: var(--danger);
 }
 
+/* ----- music colours ----- */
+
+/* A colour scope (lib/palette.ts sets its tokens inline): the registered
+   colours blend (tokens.css `@property`; at once with reduced motion). */
+.colour-scope {
+  transition:
+    --accent var(--motion-accent) var(--ease-in-out),
+    --accent-soft var(--motion-accent) var(--ease-in-out),
+    --glow var(--motion-accent) var(--ease-in-out),
+    --viz var(--motion-accent) var(--ease-in-out),
+    --tint var(--motion-tint) var(--ease-in-out);
+}
+
+/* While the listener changes the accent (state/accent.ts), it applies at
+   once everywhere; only the tints keep blending. */
+:root[data-accent-live] .colour-scope {
+  transition: --tint var(--motion-tint) var(--ease-in-out);
+}
+
+/* Crossfading covers (components/PageGlow): each its own layer. */
+.glow-layer {
+  position: absolute;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--motion-glow) var(--ease-in-out);
+  will-change: opacity;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* The page's glow: the subject's cover, very blurred, behind the header
+   and the top of the body, under a radial darkening of the page's tint,
+   faded out by ~600px. It stays put while the body scrolls (N5 makes it
+   scroll with the page). Behind the page's content (`.main` isolates). */
+.page-glow {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 600px;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: var(--page-glow-mask);
+  mask-image: var(--page-glow-mask);
+}
+
+.page-glow .glow-layer {
+  inset: -120px -10% 0;
+  width: 120%;
+  height: calc(100% + 120px);
+  filter: blur(100px) saturate(1.4);
+}
+
+.page-glow .glow-layer.is-shown {
+  opacity: 0.45;
+}
+
+.page-glow::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  /* At least 65% tint where it is lightest. The worst case, an all-white
+     cover (the glow at 0.45 over the base, then 65% of the greyscale tint,
+     about #3a393d): text 10.5:1, text-2 5.0:1, text-3 3.2:1, the house
+     accent 5.7:1. A bright yellow cover (#ffff00, tint #171700, about
+     #3a3a04): text 10.7, text-2 5.1, text-3 3.3, house accent 5.8, its
+     own accent #d2d331 7.3. sRGB compositing, as the webview blends. */
+  background: radial-gradient(
+    120% 90% at 35% 0%,
+    color-mix(in srgb, var(--tint) 65%, transparent) 0%,
+    color-mix(in srgb, var(--tint) 80%, transparent) 60%,
+    var(--tint) 100%
+  );
+}
+
 /* ----- main ----- */
 
 .main {
   grid-area: main;
   position: relative;
+  /* Its own stacking context: the page glow sits behind the content. */
+  isolation: isolate;
   /* Clear of the top bar at scroll top. */
   padding-top: var(--topbar-h);
   display: flex;
@@ -451,7 +527,8 @@
   width: min(var(--queue-panel-width), calc(100% - 24px));
   max-height: 60%;
   border-radius: var(--radius-panel);
-  background: var(--glass);
+  /* Glass, tinted with the playing cover. */
+  background: linear-gradient(color-mix(in srgb, var(--tint) 45%, transparent), color-mix(in srgb, var(--tint) 45%, transparent)), var(--glass);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-big);
   backdrop-filter: var(--glass-blur);
@@ -633,11 +710,42 @@
   align-items: center;
   gap: 16px;
   padding: 0 16px;
-  /* A glass strip for now (N4 replaces it with the floating player). */
-  background: var(--glass);
+  /* A strip for now (N4 replaces it with the floating player): the
+     playing cover, enlarged and heavily blurred, under a wash of its tint
+     (`.bar-backdrop`). */
+  position: relative;
+  isolation: isolate;
+  background: var(--bg);
   border-top: 1px solid var(--border);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+/* The bar's background: crossfading covers (components/PageGlow) under a
+   wash of the tint, dense enough that text-2 reads at ≥4.5:1 over a
+   white cover. */
+.bar-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.bar-backdrop .glow-layer {
+  inset: -200% -10%;
+  width: 120%;
+  height: 500%;
+  filter: blur(48px) saturate(1.4);
+}
+
+.bar-backdrop .glow-layer.is-shown {
+  opacity: 1;
+}
+
+.bar-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--tint) 86%, transparent);
 }
 
 .bar-track {

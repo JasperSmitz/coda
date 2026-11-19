@@ -67,6 +67,7 @@ import {
 } from "../lib/motion";
 import { dragRegion } from "../lib/platform";
 import type { ActiveMix, QueueItem, Snapshot, Track } from "../lib/types";
+import { useColourScope } from "../state/palettes";
 
 interface Props {
   snapshot: Snapshot;
@@ -288,6 +289,9 @@ export function NowPlayingView({
   const current = shown.key === playingKey;
   const shownTrack = (current ? playing : shown.track) ?? playing;
   const shownMix = current ? snapshot.mix : shown.mix;
+  // The shown cover's colours: its tint behind the backdrop, its accent
+  // for the timeline, the play button and the visualizer.
+  useColourScope(view, shownTrack?.coverUrl ?? null);
   /** The up-next key of the last commit (before this snapshot). */
   const lastUpNext = useRef(snapshot.upNextKey);
   const latest = useRef<Shown>({ key: playingKey, track: playing, mix: snapshot.mix });
