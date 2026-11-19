@@ -1,6 +1,6 @@
 [package]
 name = "coda-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Coda: a desktop music player for local files and Navidrome"
 authors = ["Jasper Smitz"]
 edition = "2024"
