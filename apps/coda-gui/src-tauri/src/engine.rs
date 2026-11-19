@@ -532,6 +532,7 @@ impl Engine {
                                 duration: r.duration_ms.map(Duration::from_millis),
                                 cover_art,
                                 genres: r.genres,
+                                year: None,
                             },
                         );
                         track.album_id = r.album_id.filter(|id| valid_ref_id(id));

@@ -2909,6 +2909,8 @@ mod tests {
             duration: None,
             cover_art: None,
             artist_id: None,
+            play_count: None,
+            genre: None,
         }
     }
 

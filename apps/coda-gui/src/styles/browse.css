@@ -294,6 +294,34 @@
   border-color: var(--accent);
 }
 
+/* Covers / List: two icon options in a pill. */
+.view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+}
+
+.view-option {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+}
+
+.view-option:hover {
+  color: var(--text);
+}
+
+.view-option.is-active {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
 /* Below a list's tools: a quiet glass line. */
 .scan-line {
   display: flex;
@@ -541,6 +569,17 @@
   grid-template-columns: 44px minmax(0, 1fr) 64px 32px;
 }
 
+/* A note before the time (an artist's most played: "12 plays"). */
+.track-row.with-cover.with-note {
+  grid-template-columns: 44px minmax(0, 1fr) auto 64px 32px;
+}
+
+.track-note {
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .track-cover-cell {
   position: relative;
   width: 44px;
@@ -646,9 +685,51 @@
     box-shadow var(--motion);
 }
 
-.album-open:hover .album-cover {
+/* Hover (or keyboard focus) lifts the cover; it glows in the album's
+   accent (the tile's inline `--accent` once its palette is known). */
+.album-tile {
+  --tile-glow: color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.album-tile:hover .album-cover,
+.album-open:focus-visible .album-cover {
   transform: translateY(-3px);
-  box-shadow: var(--shadow-big);
+  box-shadow:
+    var(--shadow-big),
+    0 10px 36px -8px var(--tile-glow);
+}
+
+/* The round Play button on the cover, in the album's accent (an icon
+   only: `--accent-text` is black or white by contrast with the accent). */
+.album-play {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity var(--motion-fast),
+    transform var(--motion) var(--spring);
+}
+
+.album-play svg {
+  margin-left: 2px;
+}
+
+.album-tile:hover .album-play:not(:disabled),
+.album-open:focus-visible ~ .album-play:not(:disabled) {
+  opacity: 1;
+  transform: translateY(-3px);
+}
+
+.album-play:not(:disabled):hover {
+  transform: translateY(-3px) scale(1.06);
 }
 
 .album-title,
@@ -689,6 +770,188 @@
 .album-more:not(:disabled):hover {
   background: var(--on-cover-bg-hover);
   color: var(--on-cover);
+}
+
+/* ----- album list ----- */
+
+/* Library's List: 52px rows (ROW in AlbumList.tsx): cover, title,
+   artist, genre, year or plays, length, "…". */
+.album-list-head,
+.album-row {
+  display: grid;
+  grid-template-columns:
+    40px minmax(0, 3fr) minmax(0, 2fr) minmax(0, 1.4fr)
+    64px 64px 32px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px;
+}
+
+.album-list-head {
+  height: 32px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--text-small);
+}
+
+.album-list-head > :nth-child(5),
+.album-list-head > :nth-child(6) {
+  justify-self: end;
+}
+
+.album-list-sort {
+  justify-self: start;
+  padding: 2px 8px;
+  margin-left: -8px;
+  border-radius: var(--radius-pill);
+  color: var(--text-3);
+}
+
+.album-list-sort:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.album-list-sort.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.album-list {
+  position: relative;
+  margin-top: 4px;
+}
+
+.album-list:focus-visible {
+  outline-offset: 0;
+}
+
+.album-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 52px;
+  border-radius: var(--radius-small);
+}
+
+.album-row:hover {
+  background: var(--hover);
+}
+
+.album-row.is-selected {
+  background: var(--selected);
+}
+
+.album-row-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-cover-small);
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.album-row-title,
+.album-row-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-row-title {
+  font-weight: 600;
+}
+
+.album-row-text,
+.album-row-number {
+  font-size: var(--text-small);
+}
+
+.album-row-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.album-row-more {
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+}
+
+.album-row:hover .album-row-more,
+.album-row.is-selected .album-row-more {
+  opacity: 1;
+}
+
+/* Narrow windows: no genre column. */
+@media (max-width: 760px) {
+  .album-list-head,
+  .album-row {
+    grid-template-columns: 40px minmax(0, 3fr) minmax(0, 2fr) 0 56px 56px 32px;
+  }
+
+  .album-list-head > :nth-child(4),
+  .album-row > :nth-child(4) {
+    visibility: hidden;
+  }
+}
+
+/* ----- artist grid (Covers) ----- */
+
+.artist-grid {
+  position: relative;
+}
+
+.artist-tile {
+  position: absolute;
+}
+
+.artist-open {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.artist-cover {
+  width: 100%;
+  max-width: 200px;
+  aspect-ratio: 1;
+  height: auto;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  transition:
+    transform var(--motion),
+    box-shadow var(--motion);
+}
+
+.artist-open:hover .artist-cover,
+.artist-open:focus-visible .artist-cover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-big);
+}
+
+.artist-tile-name,
+.artist-tile-sub {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-tile-name {
+  font-weight: 600;
+}
+
+.artist-tile-sub {
+  font-size: var(--text-small);
+}
+
+/* An artist page's "Your most played", above the albums. */
+.artist-most-played {
+  margin-bottom: 28px;
 }
 
 /* ----- artist list ----- */

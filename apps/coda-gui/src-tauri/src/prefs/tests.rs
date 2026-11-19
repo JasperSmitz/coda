@@ -42,10 +42,12 @@ fn round_trips_through_the_file() {
         accent: accent("#c99cff"),
         source: Some(SourceKind::Local),
         lyrics_index: false,
+        library_view: LibraryView::List,
     };
     save(&path, &prefs, false).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("accent = \"#c99cff\""), "{text}");
+    assert!(text.contains("libraryView = \"list\""), "{text}");
     assert_eq!(load(Some(&path)), (prefs, false));
     // The default (from the music) and the house accent are saved by name.
     save(&path, &Prefs::default(), false).unwrap();
@@ -123,6 +125,7 @@ fn a_1x_file_with_theme_keys_keeps_the_source_and_lyrics_switch() {
             accent: Accent::Music,
             source: Some(SourceKind::Navidrome),
             lyrics_index: false,
+            library_view: LibraryView::Covers,
         }
     );
     let store = PrefsStore::new(Some(path.clone()));
@@ -142,6 +145,7 @@ fn a_1x_file_with_theme_keys_keeps_the_source_and_lyrics_switch() {
             accent: accent("#7fd8c4"),
             source: Some(SourceKind::Navidrome),
             lyrics_index: false,
+            library_view: LibraryView::Covers,
         }
     );
 }
@@ -274,6 +278,7 @@ fn the_init_script_marks_the_mode_and_sets_only_a_chosen_accent() {
         accent: accent("#ff7d8e"),
         source: Some(SourceKind::Local),
         lyrics_index: true,
+        library_view: LibraryView::List,
     });
     assert!(script.contains("\"mode\":\"custom\""), "{script}");
     assert!(script.contains("accentMode"), "{script}");
@@ -338,4 +343,50 @@ fn the_config_folder_follows_xdg_then_home() {
         path(Some(Path::new("/c"))),
         Some(PathBuf::from("/c/coda-app/settings.toml"))
     );
+}
+
+#[test]
+fn the_library_view_defaults_to_covers_and_a_bad_one_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    // An N5a file has no libraryView.
+    std::fs::write(&path, "accent = \"house\"\nlyricsIndex = false\n").unwrap();
+    let (prefs, bad) = load(Some(&path));
+    assert!(!bad);
+    assert_eq!(prefs.library_view, LibraryView::Covers);
+    for (text, view) in [
+        ("list", LibraryView::List),
+        ("covers", LibraryView::Covers),
+        ("grid", LibraryView::Covers),
+        ("List", LibraryView::Covers),
+    ] {
+        std::fs::write(
+            &path,
+            format!("libraryView = \"{text}\"\nlyricsIndex = false\n"),
+        )
+        .unwrap();
+        let (prefs, bad) = load(Some(&path));
+        assert!(!bad, "{text}");
+        assert_eq!(prefs.library_view, view, "{text}");
+        // The other settings stay.
+        assert!(!prefs.lyrics_index, "{text}");
+    }
+    assert_eq!(LibraryView::parse(" list "), Some(LibraryView::List));
+    assert_eq!(LibraryView::parse("tiles"), None);
+}
+
+#[test]
+fn the_library_view_is_saved_and_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let store = PrefsStore::new(Some(path.clone()));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(save_prefs(&store, |p| p.library_view = LibraryView::List))
+        .unwrap();
+    assert_eq!(load(Some(&path)).0.library_view, LibraryView::List);
+    let dto = serde_json::to_value(PrefsDto::new(&store.current())).unwrap();
+    assert_eq!(dto["libraryView"], "list");
 }

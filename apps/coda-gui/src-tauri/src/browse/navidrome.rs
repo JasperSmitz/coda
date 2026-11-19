@@ -57,6 +57,8 @@ fn album_dto(album: &Album, covers: &CoverService) -> AlbumDto {
         track_count: album.song_count,
         duration_ms: album.duration.map(|d| d.as_millis() as u64),
         cover_url: remote_cover(covers, album.cover_art.as_ref()),
+        genre: album.genre.clone(),
+        play_count: album.play_count.map(u64::from),
     }
 }
 
@@ -191,6 +193,8 @@ impl BrowseHandle {
             track_count: Some(u32::try_from(tracks.len()).unwrap_or(u32::MAX)),
             duration_ms: durations.filter(|_| !tracks.is_empty()),
             cover_url: remote_cover(self.covers(), first.and_then(|t| t.cover_art.as_ref())),
+            genre: first.and_then(|t| t.genres.first().cloned()),
+            play_count: None,
         };
         let album = match album {
             Some(album) => {
@@ -200,6 +204,7 @@ impl BrowseHandle {
                     track_count: from_tracks.track_count,
                     duration_ms: own.duration_ms.or(from_tracks.duration_ms),
                     cover_url: own.cover_url.or(from_tracks.cover_url),
+                    genre: own.genre.or(from_tracks.genre),
                     ..own
                 }
             }

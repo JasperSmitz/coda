@@ -3,7 +3,8 @@
 //! and folder tree (as Coda's local browser shows them).
 
 use coda_core::cover::CoverKey;
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 
 use coda_core::library::search;
 use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId, GenreId};
@@ -16,6 +17,7 @@ use super::dto::*;
 use super::{LocalView, local_id, parse_local_id, track_dto};
 use crate::cover::CoverService;
 use crate::dto::TrackDto;
+use crate::history;
 
 /// Artists and albums kept per search (tracks follow
 /// `coda_core::library::search::MAX_RESULTS`).
@@ -43,10 +45,15 @@ pub(crate) fn album_dto(view: &LocalView<'_>, id: AlbumId, covers: &CoverService
         name: album.name().to_owned(),
         artist: Some(artist.name().to_owned()),
         artist_id: Some(local_id(view.generation, artist.id().0)),
-        year: None,
+        year: album.year(),
         track_count: u32_count(album.tracks().len()),
         duration_ms: album.duration().map(|d| d.as_millis() as u64),
         cover_url: first_track_cover(view.library, album.tracks(), covers),
+        genre: album
+            .tracks()
+            .iter()
+            .find_map(|t| view.library.track(*t).genres.first().cloned()),
+        play_count: None,
     }
 }
 
@@ -151,23 +158,40 @@ pub fn artists(view: LocalView<'_>, covers: &CoverService) -> Result<Vec<ArtistD
         .collect())
 }
 
-/// Every album in `order`.
+/// Every album in `order`. `listens` (local track key → listens and
+/// last listen, [`crate::history::History::local_track_listens`]) is
+/// read for the Most played order only, which also sets each album's
+/// `play_count`.
 pub fn albums(
     view: LocalView<'_>,
     order: LocalAlbumOrder,
+    listens: &HashMap<String, (u64, u64)>,
     covers: &CoverService,
 ) -> Result<Vec<AlbumDto>, BrowseError> {
-    let order = match order {
-        LocalAlbumOrder::Name => AlbumOrder::Name,
-        LocalAlbumOrder::Artist => AlbumOrder::Artist,
+    let tags = view.library.tags();
+    let ids = match order {
+        LocalAlbumOrder::Name => tags.albums(AlbumOrder::Name).to_vec(),
+        LocalAlbumOrder::Artist => tags.albums(AlbumOrder::Artist).to_vec(),
+        LocalAlbumOrder::Year => {
+            // Stable: within a year (and undated, last) A–Z.
+            let mut ids = tags.albums(AlbumOrder::Name).to_vec();
+            ids.sort_by_key(|id| Reverse(tags.album(*id).year()));
+            ids
+        }
+        LocalAlbumOrder::MostPlayed => {
+            let sums = history::local_album_listens(view.library, listens);
+            let mut ids = tags.albums(AlbumOrder::Name).to_vec();
+            ids.sort_by_key(|id| Reverse(sums[id.0 as usize]));
+            return Ok(ids
+                .iter()
+                .map(|id| AlbumDto {
+                    play_count: Some(sums[id.0 as usize]),
+                    ..album_dto(&view, *id, covers)
+                })
+                .collect());
+        }
     };
-    Ok(view
-        .library
-        .tags()
-        .albums(order)
-        .iter()
-        .map(|id| album_dto(&view, *id, covers))
-        .collect())
+    Ok(ids.iter().map(|id| album_dto(&view, *id, covers)).collect())
 }
 
 /// An artist and their albums, A–Z.

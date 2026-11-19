@@ -188,6 +188,7 @@ fn tags_written_with_lofty_are_read_back() {
     tag.insert_text(ItemKey::AlbumArtist, "The Album Artist".into());
     tag.set_track(7);
     tag.set_disk(2);
+    tag.insert_text(ItemKey::RecordingDate, "1977-03-14".into());
     tag.save_to_path(&path, WriteOptions::default()).unwrap();
 
     let outcome = run_scan(&root);
@@ -200,6 +201,7 @@ fn tags_written_with_lofty_are_read_back() {
     assert_eq!(t.album_artist.as_deref(), Some("The Album Artist"));
     assert_eq!(t.track_no, Some(7));
     assert_eq!(t.disc_no, Some(2));
+    assert_eq!(t.year, Some(1977));
     assert_eq!(t.display_name(), "The Artist - The Title");
 }
 

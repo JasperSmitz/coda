@@ -1,12 +1,12 @@
 // Navidrome album pages with infinite scroll: the server's Albums orders
 // and a genre's albums. `usePagedAlbums` loads pages as the grid nears its
-// end (one at a time); `PagedAlbumsBody` draws the grid with its loading,
-// empty and error states.
+// end (one at a time); `PagedAlbumsBody` draws the albums (Covers or
+// List) with their loading, empty and error states.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { toBrowseError } from "../lib/browse";
-import type { Album, AlbumPage, BrowseError } from "../lib/types";
-import { AlbumGrid } from "./AlbumGrid";
+import type { Album, AlbumPage, BrowseError, LibraryView } from "../lib/types";
+import { AlbumCollection, type ListSorts } from "./AlbumCollection";
 import { Empty, ErrorState, SkeletonGrid } from "./LoadState";
 
 interface Pages {
@@ -87,35 +87,42 @@ export function usePagedAlbums(load: (offset: number) => Promise<AlbumPage>, key
   return { pages, onEnd, restart, retryMore };
 }
 
-export function PagedAlbumsBody({
+export function PagedAlbumsBody<S extends string>({
   paged,
   scroller,
   label,
   empty,
+  view = "covers",
+  list,
 }: {
   paged: PagedAlbums;
   scroller: RefObject<HTMLElement | null>;
   label: string;
   /** The empty state's text. */
   empty: ReactNode;
+  /** `null`: not known yet (the preferences are loading): the loading state. */
+  view?: LibraryView | null;
+  list?: ListSorts<S>;
 }) {
   const { pages } = paged;
   const first = pages.albums.length === 0;
   return (
     <>
-      {first && pages.loading && <SkeletonGrid />}
+      {((first && pages.loading) || (!first && view === null)) && <SkeletonGrid />}
       {first && pages.error && <ErrorState error={pages.error} onRetry={paged.restart} />}
       {first && !pages.loading && !pages.error && pages.next === null && (
         <Empty title="No albums">{empty}</Empty>
       )}
-      {!first && (
-        <AlbumGrid
+      {!first && view !== null && (
+        <AlbumCollection
+          view={view}
           albums={pages.albums}
           source="navidrome"
           scroller={scroller}
           onEnd={paged.onEnd}
           endKey={`${pages.next}:${pages.loading}`}
           label={label}
+          list={list}
         />
       )}
       {!first && pages.loading && <div className="load-more secondary">Loading more…</div>}

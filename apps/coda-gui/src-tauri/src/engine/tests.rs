@@ -1831,6 +1831,20 @@ fn a_context_play_is_recorded_and_listens_count_for_album_and_context() {
     assert_eq!(album.context.name, "Album al-1");
     assert_eq!(album.context.subtitle.as_deref(), Some("Band"));
     assert_eq!(album.context.cover_art.as_deref(), Some("al-s1"));
+    // The song itself: one listen, with what its row shows.
+    let song = engine
+        .history()
+        .track_count(&crate::history::TrackKey {
+            source: SourceKind::Navidrome,
+            server: server.clone(),
+            id: "s1".into(),
+        })
+        .unwrap();
+    assert_eq!(song.listens, 1);
+    let info = song.track.song.as_ref().unwrap();
+    assert_eq!(info.album_id.as_deref(), Some("al-1"));
+    assert_eq!(info.cover_art.as_deref(), Some("al-s1"));
+    assert_eq!(engine.history().tracks_len(), 1);
     assert_eq!(
         engine
             .history()
@@ -1973,6 +1987,16 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
     };
     // The track's album and the context are the same: one listen.
     assert_eq!(engine.history().count(&key).unwrap().listens, 1);
+    // The track by its tag key (album key, disc, number, title).
+    let listens = engine.history().local_track_listens();
+    assert_eq!(listens.len(), 1);
+    let (track_key, (n, _)) = listens.iter().next().unwrap();
+    assert!(
+        track_key.starts_with("band\u{1f}record\u{1f}"),
+        "{track_key}"
+    );
+    assert!(!track_key.contains('/'), "no path: {track_key}");
+    assert_eq!(*n, 1);
 
     // `playLocal` records its folder or artist.
     engine.handle_intent(
@@ -2099,6 +2123,7 @@ fn listens_of_entries_queued_before_a_server_change_are_not_counted_for_the_new_
     let commands = engine.handle_intent(Intent::Next, now);
     listen_half(&mut engine, loads(&commands)[0], now);
     assert_eq!(engine.history().counts_len(), 0);
+    assert_eq!(engine.history().tracks_len(), 0);
     // Queued after the change: counted.
     engine.handle_intent(
         Intent::Enqueue {
@@ -2325,4 +2350,41 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
     assert_eq!(loaded.history.daily(&date, &server_id).unwrap().len(), 12);
     let text = std::fs::read_to_string(state.path().join("history.json")).unwrap();
     assert!(!text.contains("listener") && !text.contains("127.0.0.1"));
+}
+
+#[test]
+fn a_local_track_without_an_album_tag_is_not_counted_per_track() {
+    let fixture = Fixture::new(&["loose.flac"]);
+    let now = Instant::now();
+    let mut engine = engine();
+    engine.start(
+        sources(Some(fixture.root.clone()), None),
+        None,
+        restored(vec![], None),
+        now,
+    );
+    engine.handle_scan_event(
+        ScanEvent::Batch(vec![Track::local(
+            fixture.root.join("loose.flac"),
+            TrackMetadata {
+                title: Some("Loose".into()),
+                artist: Some("Band".into()),
+                duration: Some(Duration::from_secs(120)),
+                ..Default::default()
+            },
+        )]),
+        now,
+    );
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![fixture.local_ref(&engine, "loose.flac")],
+            start: None,
+            shuffle: false,
+            context: None,
+        },
+        now,
+    );
+    listen_half(&mut engine, loads(&commands)[0], now);
+    assert_eq!(engine.history().tracks_len(), 0);
+    assert_eq!(engine.history().counts_len(), 0);
 }

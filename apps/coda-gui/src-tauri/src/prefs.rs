@@ -1,7 +1,8 @@
 //! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
 //! from Coda's shared `config.toml`: the accent colour (DESIGN.md
 //! "Preferences"; `"music"` by default, also when the key is missing),
-//! the source the app browses and the Navidrome lyrics index switch. Written atomically; an unreadable or invalid file means
+//! the source the app browses, the Navidrome lyrics index switch and
+//! Library's default view (`libraryView`: Covers or List). Written atomically; an unreadable or invalid file means
 //! the defaults (and is kept as `settings.toml.bad` when it is next
 //! replaced). Keys this version does not know, such as 1.x's theme
 //! settings (`mode`, `theme`, `lightTheme`, `darkTheme`, `accents`,
@@ -88,6 +89,47 @@ impl From<Accent> for String {
     }
 }
 
+/// How Library shows albums and artists by default (Preferences ›
+/// Library); a section the listener switched keeps its own choice (in
+/// the webview).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum LibraryView {
+    #[default]
+    Covers,
+    List,
+}
+
+impl LibraryView {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "covers" => Some(Self::Covers),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
+/// An unknown value in the file falls back to the default (Covers),
+/// keeping the file's other settings.
+impl From<String> for LibraryView {
+    fn from(text: String) -> Self {
+        Self::parse(&text).unwrap_or_else(|| {
+            tracing::info!("settings.toml: libraryView is not covers or list; using covers");
+            Self::default()
+        })
+    }
+}
+
+impl From<LibraryView> for String {
+    fn from(view: LibraryView) -> Self {
+        match view {
+            LibraryView::Covers => "covers".to_owned(),
+            LibraryView::List => "list".to_owned(),
+        }
+    }
+}
+
 /// The preferences as saved (camelCase keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -100,6 +142,8 @@ pub struct Prefs {
     /// "Index lyrics for search" (Preferences › Navidrome; see
     /// `crate::lyrics_index`). Changed only by `lyrics_index_set_enabled`.
     pub lyrics_index: bool,
+    /// Library's default view of albums and artists.
+    pub library_view: LibraryView,
 }
 
 impl Default for Prefs {
@@ -108,6 +152,7 @@ impl Default for Prefs {
             accent: Accent::Music,
             source: None,
             lyrics_index: true,
+            library_view: LibraryView::Covers,
         }
     }
 }
@@ -128,6 +173,8 @@ pub struct PrefsDto {
     pub swatches: &'static [Swatch],
     pub source: Option<SourceKind>,
     pub lyrics_index: bool,
+    /// `"covers"` or `"list"`.
+    pub library_view: LibraryView,
 }
 
 impl PrefsDto {
@@ -141,6 +188,7 @@ impl PrefsDto {
             swatches: &SWATCHES,
             source: prefs.source,
             lyrics_index: prefs.lyrics_index,
+            library_view: prefs.library_view,
         }
     }
 }

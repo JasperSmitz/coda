@@ -1030,6 +1030,8 @@ fn a_navidrome_album_without_an_artist_cannot_be_marked() {
         duration: None,
         cover_art: None,
         artist_id: None,
+        play_count: None,
+        genre: None,
     };
     answer(
         &mut app,

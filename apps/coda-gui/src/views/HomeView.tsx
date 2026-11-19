@@ -97,6 +97,8 @@ function itemAlbum(card: Card): Album {
       trackCount: null,
       durationMs: null,
       coverUrl: card.coverUrl,
+      genre: null,
+      playCount: null,
     }
   );
 }

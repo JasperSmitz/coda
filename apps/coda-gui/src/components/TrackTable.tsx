@@ -5,7 +5,8 @@
 // that track, right-click or "…" opens the track menu. With `snippets`
 // (lyrics search), each row shows its lyric line below, the match marked.
 // With `covers` (Search's Songs), each row shows its cover and the title
-// over "artist · album", without a column head.
+// over "artist · album", without a column head. With `notes`, each row
+// shows its note before the time (an artist's most played: "12 plays").
 
 import {
   memo,
@@ -89,6 +90,8 @@ interface Props {
   snippets?: SnippetPart[][];
   /** Each row with its cover and "artist · album" under the title; no column head. */
   covers?: boolean;
+  /** A short note per track, shown before its time. */
+  notes?: string[];
   label: string;
 }
 
@@ -118,6 +121,7 @@ export function TrackTable({
   context,
   snippets,
   covers = false,
+  notes,
   label,
 }: Props) {
   const rowHeight = covers ? COVER_ROW : snippets ? SNIPPET_ROW : DEFAULT_ROW;
@@ -281,6 +285,7 @@ export function TrackTable({
               showArtist={showArtist}
               covers={covers}
               snippet={snippets?.[row.index]}
+              note={notes?.[row.index]}
               playing={sameTrack(track, playing)}
               animated={animated}
               selected={selected === row.index}
@@ -320,6 +325,7 @@ interface RowProps {
   showArtist: boolean;
   covers: boolean;
   snippet?: SnippetPart[];
+  note?: string;
   playing: boolean;
   animated: boolean;
   selected: boolean;
@@ -337,6 +343,7 @@ const TrackRow = memo(function TrackRow({
   showArtist,
   covers,
   snippet,
+  note,
   playing,
   animated,
   selected,
@@ -347,6 +354,7 @@ const TrackRow = memo(function TrackRow({
   const classes = ["track-row"];
   if (showAlbum) classes.push("with-album");
   if (covers) classes.push("with-cover");
+  if (note !== undefined) classes.push("with-note");
   if (playing) classes.push("is-playing");
   if (selected) classes.push("is-selected");
   return (
@@ -418,6 +426,7 @@ const TrackRow = memo(function TrackRow({
         )}
       </span>
       {showAlbum && <TrackAlbum track={track} className="track-album secondary" />}
+      {note !== undefined && <span className="track-note secondary">{note}</span>}
       <span className="track-duration time secondary">{formatTime(track.durationMs)}</span>
       <button
         className="icon-button track-more"

@@ -8,9 +8,20 @@
 // again, while still in use, after a growing pause (`retryLater`), or the
 // next time it is used.
 //
-// `useColourScope` puts a palette's tokens on an element (lib/palette.ts).
+// `useColourScope` puts a palette's tokens on an element (lib/palette.ts);
+// `useTileAccents` gives small things that stand for one album (a grid
+// tile) their cover's accent.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type RefObject,
+} from "react";
 import { fetchPalettes, PALETTE_BATCH } from "../lib/ipc";
 import { applyScope, scopeTokens } from "../lib/palette";
 import type { Palette } from "../lib/types";
@@ -172,4 +183,42 @@ export function useColourScope(ref: RefObject<HTMLElement | null>, url: string |
     const element = ref.current;
     if (element) applyScope(element, scopeTokens(palette, music));
   });
+}
+
+/** How long the tiles in view must stay put before their palettes are asked for. */
+const TILES_SETTLE_MS = 150;
+
+/**
+ * Per-tile accents (DESIGN.md "Colour": a grid tile's Play button in its
+ * album's accent). `urls` are the covers of the tiles in view; they are
+ * asked for only once the view has settled (a fast scroll through
+ * thousands of albums asks for none of those it passed), in the store's
+ * batches. Returns each known, colourful cover's palette (the cached
+ * object, so memoized tiles keep their props), with "From the music"
+ * only, for `accentStyle`; until
+ * then (or for a greyscale cover) a tile keeps the inherited accent.
+ * Tiles are no colour scope, so the first value is set without a blend.
+ */
+export function useTileAccents(urls: (string | null)[]): (url: string | null) => Palette | null {
+  const { shown } = useAccent();
+  const music = musicAccentOn(shown);
+  // A fixed accent: no tile takes its cover's, so none is asked for.
+  const key = music ? [...new Set(urls.filter((u): u is string => u !== null))].join("\n") : "";
+  const [settled, setSettled] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(key), TILES_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [key]);
+  const palettes = usePalettes(settled ? settled.split("\n") : []);
+  return (url) => {
+    if (!music || url === null) return null;
+    const palette = palettes.get(url) ?? cache.get(url);
+    return palette?.vivid ? palette : null;
+  };
+}
+
+/** A tile's accent as inline style (none: it inherits). */
+export function accentStyle(palette: Palette | null): CSSProperties | undefined {
+  if (!palette) return undefined;
+  return { "--accent": palette.accent, "--accent-text": palette.accentText } as CSSProperties;
 }

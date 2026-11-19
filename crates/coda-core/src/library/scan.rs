@@ -505,6 +505,7 @@ pub fn read_file(path: &Path, lyrics: bool) -> (TrackMetadata, Option<Lyrics>) {
         // Every genre item: repeated Vorbis fields, an ID3 `TCON` list
         // (lofty resolves numeric genres), then split on separators.
         genres: split_genres(tag.get_strings(ItemKey::Genre)),
+        year: tag.date().map(|date| u32::from(date.year)),
     };
     (metadata, found)
 }

@@ -1,12 +1,15 @@
 //! Browse commands: async, read-only, returning DTOs or a [`BrowseError`].
 //! They never touch `Player`; playing goes through the `intent` command.
 
+use std::collections::HashMap;
+
 use tauri::State;
 
 use super::BrowseHandle;
 use super::dto::*;
 use super::local;
 use crate::dto::TrackDto;
+use crate::engine::EngineHandle;
 
 type Result<T> = std::result::Result<T, BrowseError>;
 
@@ -17,13 +20,23 @@ pub async fn local_artists(browse: State<'_, BrowseHandle>) -> Result<Vec<Artist
     browse.local(local::artists).await
 }
 
+/// Every local album in `order`; Most played reads the play history's
+/// track listens first (a copy from the engine).
 #[tauri::command]
 pub async fn local_albums(
+    engine: State<'_, EngineHandle>,
     browse: State<'_, BrowseHandle>,
     order: LocalAlbumOrder,
 ) -> Result<Vec<AlbumDto>> {
+    let listens = match order {
+        LocalAlbumOrder::MostPlayed => engine
+            .local_track_listens()
+            .await
+            .map_err(|_| BrowseError::new(BrowseErrorKind::Failed, "Coda is quitting"))?,
+        _ => HashMap::new(),
+    };
     browse
-        .local(move |view, covers| local::albums(view, order, covers))
+        .local(move |view, covers| local::albums(view, order, &listens, covers))
         .await
 }
 

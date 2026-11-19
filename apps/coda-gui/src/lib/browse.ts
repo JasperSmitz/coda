@@ -20,6 +20,7 @@ import type {
   PlaylistDetail,
   SearchResults,
   SourceKind,
+  TopTrack,
   Track,
 } from "./types";
 
@@ -95,6 +96,15 @@ export const browse = {
 
   localAlbums(order: LocalAlbumOrder): Promise<Album[]> {
     return call("local_albums", { order });
+  },
+
+  /**
+   * An artist's most played songs by this app's counts (never cached:
+   * they change as you listen). Navidrome matches the artist's id or,
+   * failing that, its `name`.
+   */
+  artistMostPlayed(source: SourceKind, id: string, name: string): Promise<TopTrack[]> {
+    return call("artist_most_played", { source, id, name });
   },
 
   navidromeAlbums(sort: AlbumSort, offset: number): Promise<AlbumPage> {

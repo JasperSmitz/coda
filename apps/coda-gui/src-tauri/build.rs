@@ -47,14 +47,17 @@ fn main() {
         "playlist_delete",
         "playlist_remove",
         "playlist_reorder",
-        // Preferences (settings.toml: the accent).
+        // Preferences (settings.toml: the accent, Library's default view).
         "prefs_get",
         "prefs_set_accent",
+        "prefs_set_library_view",
         // The browsed source (settings.toml) and the Home view.
         "ui_source_get",
         "ui_source_set",
         "home_history",
         "home_daily_picks",
+        // An artist's most played songs (the play history).
+        "artist_most_played",
         "now_playing_lyrics",
         // The Navidrome lyrics index (Settings › Navidrome).
         "lyrics_index_status",

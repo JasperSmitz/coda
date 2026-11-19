@@ -18,9 +18,10 @@ import {
 } from "react";
 import { ContextMenu, type MenuItem, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
-import { BackIcon, MoreIcon, PlayIcon, ShuffleIcon } from "../components/icons";
+import { BackIcon, GridIcon, ListIcon, MoreIcon, PlayIcon, ShuffleIcon } from "../components/icons";
 import { usePageScroller } from "../hooks/useLayout";
 import { formatTime } from "../lib/format";
+import type { LibraryView } from "../lib/types";
 import { SECTION_LABEL, sectionOf, sectionsFor, type Section } from "../lib/navModel";
 import { nav, useActiveRoot, useNav, useNavState } from "../state/nav";
 import { useAppState } from "../state/store";
@@ -377,3 +378,76 @@ export function ScanLine() {
 }
 
 export const SOURCE_LABEL = { local: "Local library", navidrome: "Navidrome" } as const;
+
+/**
+ * Covers / List (a section's tool row): an icon segmented control, a
+ * radio group (arrow keys switch; not the global seek).
+ */
+export function ViewToggle({
+  value,
+  onChange,
+}: {
+  value: LibraryView;
+  onChange: (view: LibraryView) => void;
+}) {
+  const group = useRef<HTMLDivElement>(null);
+  const option = (view: LibraryView, label: string, icon: ReactNode) => (
+    <button
+      role="radio"
+      aria-checked={value === view}
+      aria-label={label}
+      title={label}
+      tabIndex={value === view ? 0 : -1}
+      className={`view-option ${value === view ? "is-active" : ""}`}
+      onClick={() => onChange(view)}
+    >
+      {icon}
+    </button>
+  );
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onChange(value === "covers" ? "list" : "covers");
+    // The control re-renders in place: keep the focus on the chosen one.
+    requestAnimationFrame(() =>
+      group.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus(),
+    );
+  };
+  return (
+    <div
+      ref={group}
+      className="view-toggle"
+      role="radiogroup"
+      aria-label="Show as"
+      onKeyDown={onKeyDown}
+    >
+      {option("covers", "Covers", <GridIcon size={16} />)}
+      {option("list", "List", <ListIcon size={16} />)}
+    </div>
+  );
+}
+
+/** A compact sort choice (a native select) for a tool row. */
+export function SortSelect<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: [T, string][];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <label className="sort-select">
+      <span className="secondary">Sort</span>
+      <select value={value} onChange={(e) => onChange(e.target.value as T)}>
+        {options.map(([v, label]) => (
+          <option key={v} value={v}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}

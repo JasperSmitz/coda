@@ -4,7 +4,7 @@
 
 use tauri::State;
 
-use super::{Accent, Prefs, PrefsDto, PrefsStore};
+use super::{Accent, LibraryView, Prefs, PrefsDto, PrefsStore};
 use crate::history::SourceKind;
 
 type Result<T> = std::result::Result<T, String>;
@@ -22,6 +22,18 @@ pub async fn prefs_set_accent(store: State<'_, PrefsStore>, accent: String) -> R
     let accent =
         Accent::parse(&accent).ok_or_else(|| format!("“{accent}” is not a colour; use #rrggbb"))?;
     save_prefs(&store, |prefs| prefs.accent = accent).await?;
+    Ok(PrefsDto::new(&store.state.lock().await.0))
+}
+
+/// Saves Library's default view: `"covers"` or `"list"`. Answers with
+/// the new state.
+#[tauri::command]
+pub async fn prefs_set_library_view(
+    store: State<'_, PrefsStore>,
+    view: String,
+) -> Result<PrefsDto> {
+    let view = LibraryView::parse(&view).ok_or_else(|| format!("“{view}” is not a view"))?;
+    save_prefs(&store, |prefs| prefs.library_view = view).await?;
     Ok(PrefsDto::new(&store.state.lock().await.0))
 }
 

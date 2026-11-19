@@ -16,8 +16,9 @@ export type Route =
   | { kind: "home"; source: SourceKind }
   | { kind: "search"; source: SourceKind; query: string }
   | { kind: "artists"; source: SourceKind }
-  | { kind: "albums"; source: "local"; order: LocalAlbumOrder }
-  | { kind: "albums"; source: "navidrome"; sort: AlbumSort }
+  /** No `order` / `sort`: the one remembered for the source (`state/libraryView.ts`). */
+  | { kind: "albums"; source: "local"; order?: LocalAlbumOrder }
+  | { kind: "albums"; source: "navidrome"; sort?: AlbumSort }
   | { kind: "playlists"; source: SourceKind }
   | { kind: "mixes"; source: SourceKind }
   | { kind: "genres"; source: SourceKind }
@@ -98,9 +99,7 @@ export function effectiveSection(section: Section, source: SourceKind): Section 
 export function sectionRoute(section: Section, source: SourceKind): Route {
   switch (effectiveSection(section, source)) {
     case "albums":
-      return source === "local"
-        ? { kind: "albums", source, order: "name" }
-        : { kind: "albums", source, sort: "name" };
+      return { kind: "albums", source };
     case "artists":
       return { kind: "artists", source };
     case "genres":
@@ -112,6 +111,29 @@ export function sectionRoute(section: Section, source: SourceKind): Route {
     case "folders":
       return { kind: "folder", path: [] };
   }
+}
+
+const LOCAL_ORDERS: readonly LocalAlbumOrder[] = ["name", "artist", "year", "mostPlayed"];
+const SERVER_SORTS: readonly AlbumSort[] = [
+  "name",
+  "artist",
+  "newest",
+  "frequent",
+  "recent",
+  "random",
+];
+
+/**
+ * The local Albums order a route shows: its own, else the remembered one
+ * (`remembered`, as stored; anything unknown means A–Z).
+ */
+export function localOrderOf(order: LocalAlbumOrder | undefined, remembered: string | null): LocalAlbumOrder {
+  return order ?? LOCAL_ORDERS.find((o) => o === remembered) ?? "name";
+}
+
+/** The Navidrome Albums sort a route shows, like `localOrderOf`. */
+export function serverSortOf(sort: AlbumSort | undefined, remembered: string | null): AlbumSort {
+  return sort ?? SERVER_SORTS.find((s) => s === remembered) ?? "name";
 }
 
 /** The section a library root route shows (`null`: not a section's root). */

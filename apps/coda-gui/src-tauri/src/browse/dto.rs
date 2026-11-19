@@ -32,6 +32,13 @@ pub struct AlbumDto {
     pub track_count: Option<u32>,
     pub duration_ms: Option<u64>,
     pub cover_url: Option<String>,
+    /// One genre to show in a list row (local: the first track's first
+    /// genre; Navidrome: the album's), if known.
+    pub genre: Option<String>,
+    /// Listens: the server's `playCount` for a Navidrome album; for a
+    /// local album the history's listens to its tracks, set only in the
+    /// Most played order.
+    pub play_count: Option<u64>,
 }
 
 /// Navidrome's warning data for a playlist whose server count and served
@@ -211,6 +218,11 @@ pub enum LocalContextDto {
 pub enum LocalAlbumOrder {
     Name,
     Artist,
+    /// Newest first; undated albums last (then A–Z).
+    Year,
+    /// Most listened first (the history's track listens); never heard
+    /// ones last, A–Z.
+    MostPlayed,
 }
 
 /// `getAlbumList2`'s orders (`coda_core::navidrome::AlbumSort`).

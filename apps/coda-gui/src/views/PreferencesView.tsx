@@ -1,7 +1,8 @@
 // Preferences ("Make it yours"), glass cards in this order: the accent
 // (from the music, the default; curated swatches or a custom colour; the
 // GUI's own settings.toml, see state/accent), the music source (the Local | Navidrome switch,
-// Ctrl/Cmd+1/2, and its status), music folder (native picker), Navidrome
+// Ctrl/Cmd+1/2, and its status), Library (Covers or List by default,
+// settings.toml too, see state/libraryView), music folder (native picker), Navidrome
 // server (test, save, disconnect; the lyrics index's status, Rebuild and
 // switch), cover art and scrobbling. Those after the accent are saved to
 // Coda's config.toml (shared with the TUI) and the keychain by the
@@ -9,16 +10,24 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
-import { LocalIcon, ServerIcon } from "../components/icons";
+import { GridIcon, ListIcon, LocalIcon, ServerIcon } from "../components/icons";
 import { bothConfigured, switchSource, useSources } from "../state/source";
 import { accent, useAccent } from "../state/accent";
+import { chooseLibraryDefault, useLibraryDefault } from "../state/libraryView";
 import { HOUSE, MIN_ACCENT_CONTRAST, normalizeHex } from "../lib/accent";
 import { MUSIC } from "../lib/palette";
 import { isMacos } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
 import { usePageScroller, useScroll } from "../hooks/useLayout";
 import type { Entry } from "../state/nav";
-import type { LyricsIndexStatus, ServerInput, Settings, Snapshot, SourceKind } from "../lib/types";
+import type {
+  LibraryView,
+  LyricsIndexStatus,
+  ServerInput,
+  Settings,
+  Snapshot,
+  SourceKind,
+} from "../lib/types";
 
 /** A second click within this time disconnects. */
 const DISCONNECT_CONFIRM_MS = 3000;
@@ -90,6 +99,7 @@ export function PreferencesView({ entry, snapshot }: { entry: Entry; snapshot: S
             )}
             <AccentSection />
             <SourceSection snapshot={snapshot} />
+            <LibrarySection />
             <MusicSection settings={settings} snapshot={snapshot} reload={reload} />
             <ServerSection settings={settings} snapshot={snapshot} reload={reload} />
             <OptionsSection settings={settings} reload={reload} />
@@ -377,6 +387,58 @@ function SourceSection({ snapshot }: { snapshot: Snapshot }) {
           <SourceStatus source={source} snapshot={snapshot} />
         </p>
       )}
+    </section>
+  );
+}
+
+/**
+ * Library's default view: Covers or List for albums and artists (a
+ * section switched in Library keeps its own choice). Shown at once,
+ * saved to settings.toml.
+ */
+function LibrarySection() {
+  const { view, error } = useLibraryDefault();
+  const option = (kind: LibraryView, label: string, icon: ReactNode) => (
+    <button
+      role="radio"
+      aria-checked={view === kind}
+      tabIndex={view === kind ? 0 : -1}
+      className={`source-option ${view === kind ? "is-active" : ""}`}
+      onClick={() => chooseLibraryDefault(kind)}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (radioArrow(e) === 0) return;
+    // Not a seek (the global ←/→).
+    e.preventDefault();
+    e.stopPropagation();
+    chooseLibraryDefault(view === "covers" ? "list" : "covers");
+    requestAnimationFrame(() =>
+      document
+        .querySelector<HTMLElement>('.library-view-switch [aria-checked="true"]')
+        ?.focus(),
+    );
+  };
+  return (
+    <section className="settings-section" aria-labelledby="settings-library">
+      <h2 id="settings-library">Library</h2>
+      <p className="secondary">Show albums and artists as</p>
+      <div
+        className="source-switch library-view-switch"
+        role="radiogroup"
+        aria-labelledby="settings-library"
+        onKeyDown={onKeyDown}
+      >
+        {option("covers", "Covers", <GridIcon size={15} />)}
+        {option("list", "List", <ListIcon size={15} />)}
+      </div>
+      <p className="secondary">
+        A section you switch in Library keeps its own choice.
+      </p>
+      {error && <p className="settings-status settings-status-error">{error}</p>}
     </section>
   );
 }

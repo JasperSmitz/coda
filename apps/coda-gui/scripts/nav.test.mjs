@@ -11,12 +11,15 @@ import {
   effectiveSection,
   goTo,
   initialNav,
+  localOrderOf,
   openRootFor,
   push,
   replaceTop,
   resetSource,
   search,
   sectionOf,
+  sectionRoute,
+  serverSortOf,
   sectionsFor,
   selectRoot,
   setSection,
@@ -252,4 +255,23 @@ test("sourceReplaced resets that source's stacks to their roots only", () => {
     ["home", "album"],
     "the other source is untouched",
   );
+});
+
+test("a section's Albums route names no sort: the remembered one applies", () => {
+  assert.deepEqual(sectionRoute("albums", "local"), { kind: "albums", source: "local" });
+  assert.deepEqual(sectionRoute("albums", "navidrome"), { kind: "albums", source: "navidrome" });
+  assert.deepEqual(topEntry(setSection(selectRoot(start(), "library"), "albums")).route, {
+    kind: "albums",
+    source: "local",
+  });
+  // Without one in the route: the remembered sort, A–Z when none or unknown.
+  assert.equal(localOrderOf(undefined, "mostPlayed"), "mostPlayed");
+  assert.equal(localOrderOf(undefined, "year"), "year");
+  assert.equal(localOrderOf(undefined, null), "name");
+  assert.equal(localOrderOf(undefined, "frequent"), "name", "a server sort is no local order");
+  assert.equal(serverSortOf(undefined, "frequent"), "frequent");
+  assert.equal(serverSortOf(undefined, "mostPlayed"), "name");
+  // A route's own sort (a choice just made) wins.
+  assert.equal(localOrderOf("artist", "year"), "artist");
+  assert.equal(serverSortOf("random", "newest"), "random");
 });

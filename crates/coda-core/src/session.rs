@@ -375,6 +375,7 @@ impl EntryFile {
             duration: self.duration_ms.map(Duration::from_millis),
             cover_art: None,
             genres: self.genres,
+            year: None,
         };
         match self.source {
             SourceFile::Local(path) => {
@@ -585,6 +586,7 @@ mod tests {
                 duration: Some(Duration::from_millis(183_250)),
                 cover_art: None,
                 genres: vec!["Rock".into(), "Progressive Rock".into()],
+                year: None,
             },
         )
     }

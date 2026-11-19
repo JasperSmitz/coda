@@ -63,6 +63,10 @@ pub struct Album {
     pub cover_art: Option<String>,
     /// The album artist's id (`getArtist`), if the server sent one.
     pub artist_id: Option<String>,
+    /// How often the server counted it played (`playCount`), if it said.
+    pub play_count: Option<u32>,
+    /// The album's genre as the server lists it (cleaned), if any.
+    pub genre: Option<String>,
 }
 
 /// A genre as listed by `getGenres`.

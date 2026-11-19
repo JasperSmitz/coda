@@ -5208,6 +5208,8 @@ mod tests {
         Album {
             cover_art: None,
             artist_id: None,
+            play_count: None,
+            genre: None,
             id: id.into(),
             name: format!("Album {id}"),
             artist: Some("Someone".into()),

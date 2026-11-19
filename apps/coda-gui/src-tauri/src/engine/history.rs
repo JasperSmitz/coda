@@ -1,15 +1,17 @@
 //! The engine's side of the play history ([`crate::history`]): context
 //! plays recorded from the play intents, listens counted with Coda's
 //! scrobble rule (half the track or 4 minutes, [`Listen`]) for every
-//! source, debounced saves, and the Home commands' requests.
+//! source (per context and per track), debounced saves, and the Home and
+//! Library commands' requests.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::browse::dto::LocalContextDto;
 use crate::dto::{NamedContextDto, PlayContextDto};
 use crate::history::{
-    self, Context, ContextKind, DailyAlbum, History, HistoryFile, HomeRows, Scope, SourceKind,
+    self, Context, ContextKind, DailyAlbum, HeardTrack, History, HistoryFile, HomeRows, Scope,
+    SongInfo, SourceKind, TrackCount,
 };
 use coda_core::navidrome::scrobble::Listen;
 
@@ -18,6 +20,9 @@ use coda_core::navidrome::scrobble::Listen;
 pub(crate) struct Heard {
     listen: Listen,
     contexts: Vec<Context>,
+    /// The track's own count (`None`: not countable, e.g. another
+    /// server's entry).
+    track: Option<HeardTrack>,
 }
 
 /// The context the queue was last played from, and its entries.
@@ -50,6 +55,11 @@ pub enum HistoryMsg {
         Vec<DailyAlbum>,
         oneshot::Sender<Option<Vec<DailyAlbum>>>,
     ),
+    /// The local track listens (key → listens, last listen).
+    LocalTrackListens(oneshot::Sender<HashMap<String, (u64, u64)>>),
+    /// The current server's most listened songs of an artist (id, name);
+    /// `None` without a server.
+    NavidromeTopTracks(String, String, oneshot::Sender<Option<Vec<TrackCount>>>),
 }
 
 impl EngineHandle {
@@ -76,6 +86,19 @@ impl EngineHandle {
         server: String,
     ) -> Result<Option<Vec<DailyAlbum>>, EngineGone> {
         self.history_request(|tx| HistoryMsg::Daily(date, server, tx))
+            .await
+    }
+
+    pub async fn local_track_listens(&self) -> Result<HashMap<String, (u64, u64)>, EngineGone> {
+        self.history_request(HistoryMsg::LocalTrackListens).await
+    }
+
+    pub async fn navidrome_top_tracks(
+        &self,
+        artist_id: String,
+        name: String,
+    ) -> Result<Option<Vec<TrackCount>>, EngineGone> {
+        self.history_request(|tx| HistoryMsg::NavidromeTopTracks(artist_id, name, tx))
             .await
     }
 
@@ -118,6 +141,20 @@ impl Engine {
                     .then(|| self.history.set_daily(date, server, albums));
                 self.history_changed(now);
                 let _ = reply.send(picks);
+            }
+            HistoryMsg::LocalTrackListens(reply) => {
+                let _ = reply.send(self.history.local_track_listens());
+            }
+            HistoryMsg::NavidromeTopTracks(artist_id, name, reply) => {
+                let top = self.server.as_deref().map(|server| {
+                    self.history.navidrome_top_tracks(
+                        server,
+                        &artist_id,
+                        &name,
+                        history::TOP_TRACKS,
+                    )
+                });
+                let _ = reply.send(top);
             }
         }
     }
@@ -309,6 +346,44 @@ impl Engine {
         }
     }
 
+    /// A queue entry's own listen count: a local track by its tag key, a
+    /// Navidrome song by its id and the current server (none for an entry
+    /// queued before the last server change).
+    fn heard_track(&self, entry: QueueEntryId, track: &Track) -> Option<HeardTrack> {
+        match &track.source {
+            TrackSource::Navidrome { .. } if self.other_server_entries.contains(&entry) => None,
+            TrackSource::Navidrome { song_id } => HeardTrack {
+                source: SourceKind::Navidrome,
+                server: self.server.clone(),
+                id: song_id.clone(),
+                song: Some(SongInfo {
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    album: track.album.clone(),
+                    album_artist: track.album_artist.clone(),
+                    album_id: track.album_id.clone(),
+                    artist_id: track.artist_id.clone(),
+                    cover_art: track.cover_art.clone(),
+                    duration_ms: track.duration.map(|d| d.as_millis() as u64),
+                    track_no: track.track_no,
+                    disc_no: track.disc_no,
+                }),
+            }
+            .sanitized(),
+            TrackSource::Local { .. } => self.browse.read_library(|view| {
+                let tags = view?.library.tags();
+                let album = tags.album_of(track)?;
+                Some(HeardTrack {
+                    source: SourceKind::Local,
+                    server: None,
+                    // `None` without an album tag: not counted.
+                    id: history::local_track_key(&history::local_album_key(tags, album), track)?,
+                    song: None,
+                })
+            }),
+        }
+    }
+
     /// The current load started: count its listening time.
     pub(super) fn heard_started(&mut self, load: LoadId) {
         if self.player.current_load() != Some(load)
@@ -328,9 +403,11 @@ impl Engine {
         {
             contexts.push(from.context.clone());
         }
-        self.heard = (!contexts.is_empty()).then(|| Heard {
+        let track = self.heard_track(entry.id, &entry.track);
+        self.heard = (!contexts.is_empty() || track.is_some()).then(|| Heard {
             listen: Listen::new(load, String::new(), SystemTime::now()),
             contexts,
+            track,
         });
     }
 
@@ -361,7 +438,12 @@ impl Engine {
             .is_some()
         {
             let contexts = heard.contexts.clone();
-            self.history.record_listen(contexts, history::unix_now());
+            let track = heard.track.clone();
+            let at = history::unix_now();
+            self.history.record_listen(contexts, at);
+            if let Some(track) = track {
+                self.history.record_track_listen(track, at);
+            }
             self.history_changed(now);
         }
     }

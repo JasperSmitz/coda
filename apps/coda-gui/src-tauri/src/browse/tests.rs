@@ -2,6 +2,7 @@
 //! generation rule, and Navidrome queries against a local `wiremock`
 //! server (no real server is contacted).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -99,7 +100,7 @@ async fn local_artists_albums_and_tracks() {
     assert!(artists[0].id.starts_with(&format!("{generation}:")));
 
     let albums = browse
-        .local(|v, c| local::albums(v, LocalAlbumOrder::Name, c))
+        .local(|v, c| local::albums(v, LocalAlbumOrder::Name, &HashMap::new(), c))
         .await
         .unwrap();
     let names: Vec<&str> = albums.iter().map(|a| a.name.as_str()).collect();
@@ -1032,4 +1033,77 @@ async fn ids_and_queries_from_the_ui_are_bounded() {
         MAX_INPUT_CHARS
     );
     assert_eq!(cap_query("  abba "), "abba");
+}
+
+#[tokio::test]
+async fn local_albums_sort_by_year_and_by_listens() {
+    let browse = handle();
+    let dated = |rel: &str, album: &str, year: Option<u32>, genre: &str| {
+        Track::local(
+            PathBuf::from(format!("/m/{rel}")),
+            TrackMetadata {
+                title: Some(rel.into()),
+                artist: Some("Band".into()),
+                album: Some(album.into()),
+                year,
+                genres: if genre.is_empty() {
+                    vec![]
+                } else {
+                    vec![genre.into()]
+                },
+                ..TrackMetadata::default()
+            },
+        )
+    };
+    let mut library = Library::new("/m".into());
+    library.extend([
+        dated("1", "Old", Some(1971), "Rock"),
+        dated("2", "New", Some(2020), ""),
+        dated("3", "New", None, "Jazz"),
+        dated("4", "Undated", None, ""),
+        dated("5", "Also old", Some(1971), ""),
+    ]);
+    browse.replace_library(Some(library));
+    let names =
+        |albums: &[AlbumDto]| -> Vec<String> { albums.iter().map(|a| a.name.clone()).collect() };
+    let by_year = browse
+        .local(|v, c| local::albums(v, LocalAlbumOrder::Year, &HashMap::new(), c))
+        .await
+        .unwrap();
+    // Newest first; a year's albums A–Z; undated last.
+    assert_eq!(names(&by_year), ["New", "Also old", "Old", "Undated"]);
+    assert_eq!(by_year[0].year, Some(2020));
+    // The first track with a genre gives the row's genre.
+    assert_eq!(by_year[0].genre.as_deref(), Some("Jazz"));
+    assert_eq!(by_year[0].play_count, None, "only in Most played");
+
+    let listens = browse.read_library(|view| {
+        let library = view.unwrap().library;
+        let tags = library.tags();
+        let key = |rel: &str| {
+            let track = library.track(
+                library
+                    .track_id_by_path(&PathBuf::from(format!("/m/{rel}")))
+                    .unwrap(),
+            );
+            crate::history::local_track_key(
+                &crate::history::local_album_key(tags, tags.album_of(track).unwrap()),
+                track,
+            )
+            .unwrap()
+        };
+        HashMap::from([
+            (key("4"), (3u64, 1u64)),
+            (key("2"), (1, 1)),
+            (key("3"), (1, 1)),
+        ])
+    });
+    let most = browse
+        .local(move |v, c| local::albums(v, LocalAlbumOrder::MostPlayed, &listens, c))
+        .await
+        .unwrap();
+    // Most listened first, never heard last (A–Z), each with its count.
+    assert_eq!(names(&most), ["Undated", "New", "Also old", "Old"]);
+    let counts: Vec<Option<u64>> = most.iter().map(|a| a.play_count).collect();
+    assert_eq!(counts, [Some(3), Some(2), Some(0), Some(0)]);
 }

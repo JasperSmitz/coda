@@ -605,3 +605,348 @@ fn server_ids_are_stable_hashes_and_scope_the_history() {
     );
     assert_eq!(history.revision(), before);
 }
+
+// ----- per-track listens (2.0 N5b) ------------------------------------------
+
+fn heard_local(id: &str) -> HeardTrack {
+    HeardTrack {
+        source: SourceKind::Local,
+        server: None,
+        id: id.into(),
+        song: None,
+    }
+}
+
+fn heard_song(id: &str, artist_id: Option<&str>, artist: &str) -> HeardTrack {
+    HeardTrack {
+        source: SourceKind::Navidrome,
+        server: Some(server()),
+        id: id.into(),
+        song: Some(SongInfo {
+            title: format!("Song {id}"),
+            artist: Some(artist.into()),
+            album: Some("Album".into()),
+            album_id: Some("al-1".into()),
+            artist_id: artist_id.map(Into::into),
+            cover_art: Some("al-1".into()),
+            duration_ms: Some(200_000),
+            ..SongInfo::default()
+        }),
+    }
+}
+
+#[test]
+fn track_listens_count_and_drop_the_least_recently_heard_beyond_the_bound() {
+    let mut history = History::default();
+    history.record_track_listen(heard_local("k"), 5);
+    history.record_track_listen(heard_local("k"), 9);
+    history.record_track_listen(heard_song("s1", Some("ar-1"), "Band"), 7);
+    let count = history.track_count(&heard_local("k").key()).unwrap();
+    assert_eq!((count.listens, count.last), (2, 9));
+    assert_eq!(history.tracks_len(), 2);
+    // Local and Navidrome keys never mix.
+    assert_eq!(history.local_track_listens().len(), 1);
+
+    let mut history = History::default();
+    for i in 0..(MAX_TRACK_COUNTS + 3) {
+        history.record_track_listen(heard_local(&format!("t{i}")), 100 + i as u64);
+    }
+    assert_eq!(history.tracks_len(), MAX_TRACK_COUNTS);
+    for gone in ["t0", "t1", "t2"] {
+        assert!(
+            history.track_count(&heard_local(gone).key()).is_none(),
+            "{gone}"
+        );
+    }
+    assert!(history.track_count(&heard_local("t3").key()).is_some());
+    // A file over the bound is trimmed the same way when loaded.
+    let mut file = history.to_file();
+    file.tracks.push(TrackCount {
+        track: heard_local("older"),
+        listens: 50,
+        last: 1,
+    });
+    let loaded = History::from_file(file);
+    assert_eq!(loaded.tracks_len(), MAX_TRACK_COUNTS);
+    assert!(loaded.track_count(&heard_local("older").key()).is_none());
+}
+
+#[test]
+fn untrusted_track_entries_are_cleaned_or_dropped() {
+    let mut history = History::default();
+    history.record_track_listen(heard_local(""), 1);
+    history.record_track_listen(heard_local("a\0b"), 1);
+    history.record_track_listen(heard_local(&"x".repeat(MAX_ID + 1)), 1);
+    // A Navidrome song needs a known server.
+    history.record_track_listen(
+        HeardTrack {
+            server: None,
+            ..heard_song("s1", None, "Band")
+        },
+        1,
+    );
+    history.record_track_listen(
+        HeardTrack {
+            server: Some("https://music.example/".into()),
+            ..heard_song("s2", None, "Band")
+        },
+        1,
+    );
+    assert_eq!(history.tracks_len(), 0);
+    // Text is cleaned and capped, odd ids are dropped; a local entry
+    // keeps nothing but its key.
+    let mut song = heard_song("s3", Some(""), "Ba\nnd");
+    if let Some(info) = song.song.as_mut() {
+        info.title = format!("  {}", "t".repeat(MAX_TEXT + 10));
+        info.cover_art = Some("c\0".into());
+    }
+    history.record_track_listen(song.clone(), 1);
+    history.record_track_listen(
+        HeardTrack {
+            server: Some(server()),
+            song: song.song.clone(),
+            ..heard_local("local-key")
+        },
+        1,
+    );
+    let kept = history.track_count(&song.key()).unwrap();
+    let info = kept.track.song.as_ref().unwrap();
+    assert_eq!(info.title.chars().count(), MAX_TEXT);
+    assert_eq!(info.artist.as_deref(), Some("Ba nd"));
+    assert_eq!(
+        (info.artist_id.clone(), info.cover_art.clone()),
+        (None, None)
+    );
+    let local = history
+        .track_count(&heard_local("local-key").key())
+        .unwrap();
+    assert_eq!(
+        (local.track.server.clone(), local.track.song.clone()),
+        (None, None)
+    );
+}
+
+#[test]
+fn track_listens_round_trip_through_the_file_without_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.json");
+    let mut history = History::default();
+    history.record_track_listen(heard_local("band\u{1f}record\u{1f}1\u{1f}2\u{1f}song"), 3);
+    history.record_track_listen(heard_song("s1", Some("ar-1"), "Band"), 4);
+    let file = history.to_file();
+    assert_eq!(file.version, 2);
+    save(&path, &file).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("http") && !text.contains("coda://") && !text.contains("/m/"));
+    let loaded = load(Some(path));
+    assert_eq!(loaded.history.to_file(), file);
+    // Most recently heard first.
+    assert_eq!(loaded.history.to_file().tracks[0].track.id, "s1");
+}
+
+#[test]
+fn a_version_1_file_is_migrated_keeping_its_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.json");
+    let album = serde_json::to_value(remote(ContextKind::Album, "al-1")).unwrap();
+    let mut play = album.clone();
+    play["at"] = 5.into();
+    let mut count = album;
+    count["listens"] = 4.into();
+    count["last"] = 6.into();
+    let v1 = serde_json::json!({
+        "version": 1,
+        "plays": [play],
+        "counts": [count],
+        "dailies": [{ "date": "2026-11-06", "server": server(), "albums": [] }],
+    });
+    std::fs::write(&path, v1.to_string()).unwrap();
+    let loaded = load(Some(path.clone()));
+    assert_eq!(loaded.path.as_ref(), Some(&path), "saved over (migrated)");
+    let history = loaded.history;
+    assert_eq!(history.plays().count(), 1);
+    assert_eq!(history.counts_len(), 1);
+    assert_eq!(history.tracks_len(), 0);
+    assert!(history.daily("2026-11-06", &server()).is_some());
+    // Saved as version 2, the old data kept.
+    save(&path, &history.to_file()).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["counts"][0]["listens"], 4);
+    assert!(take_aside(dir.path()).is_none(), "not set aside");
+    // A version 3 file is a newer build's: kept, not saved over.
+    let newer = "{\"version\": 3, \"tracks\": []}";
+    std::fs::write(&path, newer).unwrap();
+    assert!(load(Some(path.clone())).path.is_none());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+}
+
+#[test]
+fn local_album_listens_sum_their_tracks_and_artists_get_their_top_songs() {
+    let mut library = Library::new("/m".into());
+    let song = |rel: &str, album: &str, no: u32| {
+        Track::local(
+            PathBuf::from(format!("/m/{rel}")),
+            TrackMetadata {
+                title: Some(format!("Song {rel}")),
+                artist: Some("Band".into()),
+                album: Some(album.into()),
+                track_no: Some(no),
+                ..TrackMetadata::default()
+            },
+        )
+    };
+    library.extend([
+        song("a1", "A", 1),
+        song("a2", "A", 2),
+        song("b1", "B", 1),
+        song("c1", "C", 1),
+        local_track("other.flac", "Other", "Elsewhere"),
+    ]);
+    let tags = library.tags();
+    let key_of = |rel: &str| {
+        let id = library
+            .track_id_by_path(Path::new(&format!("/m/{rel}")))
+            .unwrap();
+        let track = library.track(id);
+        let album = tags.album_of(track).unwrap();
+        local_track_key(&local_album_key(tags, album), track).unwrap()
+    };
+    assert_eq!(key_of("a2"), "band\u{1f}a\u{1f}\u{1f}2\u{1f}song a2");
+    let mut history = History::default();
+    let mut hear = |rel: &str, times: u64, at: u64| {
+        for _ in 0..times {
+            history.record_track_listen(heard_local(&key_of(rel)), at);
+        }
+    };
+    hear("a1", 2, 10);
+    hear("a2", 3, 11);
+    hear("b1", 4, 12);
+    hear("other.flac", 9, 13);
+    // Heard as often as a1, but more recently.
+    hear("c1", 2, 20);
+    let listens = history.local_track_listens();
+    let sums = local_album_listens(&library, &listens);
+    let by_name = |name: &str| {
+        tags.albums(AlbumOrder::Name)
+            .iter()
+            .find(|a| tags.album(**a).name() == name)
+            .map(|a| sums[a.0 as usize])
+            .unwrap()
+    };
+    assert_eq!((by_name("A"), by_name("B"), by_name("C")), (5, 4, 2));
+    assert_eq!(by_name("Elsewhere"), 9);
+
+    let band = tags.artist_by_name("Band").unwrap();
+    let top = local_artist_top_tracks(&library, band, &listens, TOP_TRACKS);
+    let titles: Vec<(String, u64)> = top
+        .iter()
+        .map(|(t, _, n)| (library.track(*t).title.clone(), *n))
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            ("Song b1".to_owned(), 4),
+            ("Song a2".to_owned(), 3),
+            ("Song c1".to_owned(), 2),
+            ("Song a1".to_owned(), 2),
+        ]
+    );
+    assert_eq!(
+        local_artist_top_tracks(&library, band, &listens, 1).len(),
+        1
+    );
+    // Never heard: none.
+    let other = tags.artist_by_name("Other").unwrap();
+    assert!(local_artist_top_tracks(&library, other, &HashMap::new(), TOP_TRACKS).is_empty());
+}
+
+#[test]
+fn navidrome_top_songs_are_the_servers_by_artist_id_or_name() {
+    let mut history = History::default();
+    for (id, times) in [("s1", 1), ("s2", 3), ("s3", 2)] {
+        for _ in 0..times {
+            history.record_track_listen(heard_song(id, Some("ar-1"), "Band"), 10);
+        }
+    }
+    // No artist id: matched by its album artist's name.
+    let mut feat = heard_song("s4", None, "Band feat. Guest");
+    if let Some(info) = feat.song.as_mut() {
+        info.album_artist = Some("band".into());
+    }
+    history.record_track_listen(feat, 11);
+    // Another artist of the same name (another id): not this one's.
+    history.record_track_listen(heard_song("s6", Some("ar-7"), "Band"), 11);
+    history.record_track_listen(heard_song("x", Some("ar-2"), "Others"), 12);
+    // Another server's song of the same artist.
+    history.record_track_listen(
+        HeardTrack {
+            server: Some(server_id_of("https://other.example/", "listener")),
+            ..heard_song("s5", Some("ar-1"), "Band")
+        },
+        13,
+    );
+    let ids =
+        |top: Vec<TrackCount>| -> Vec<String> { top.into_iter().map(|c| c.track.id).collect() };
+    assert_eq!(
+        ids(history.navidrome_top_tracks(&server(), "ar-1", "Band", TOP_TRACKS)),
+        ["s2", "s3", "s4", "s1"]
+    );
+    assert_eq!(
+        ids(history.navidrome_top_tracks(&server(), "ar-1", "", TOP_TRACKS)),
+        ["s2", "s3", "s1"]
+    );
+    assert!(
+        history
+            .navidrome_top_tracks(&server(), "ar-3", "Nobody", TOP_TRACKS)
+            .is_empty()
+    );
+}
+
+#[test]
+fn local_track_keys_need_an_album_and_tell_unnumbered_tracks_apart() {
+    let tagged = |rel: &str, album: Option<&str>, no: Option<u32>| {
+        Track::local(
+            PathBuf::from(format!("/m/{rel}")),
+            TrackMetadata {
+                title: Some("Intro".into()),
+                artist: Some("Band".into()),
+                album: album.map(Into::into),
+                track_no: no,
+                ..TrackMetadata::default()
+            },
+        )
+    };
+    let key = "band\u{1f}record";
+    // No album tag: not counted (all would share "Unknown album").
+    assert_eq!(
+        local_track_key(key, &tagged("a/Intro.flac", None, Some(1))),
+        None
+    );
+    assert_eq!(
+        local_track_key(key, &tagged("a/Intro.flac", Some("  "), None)),
+        None
+    );
+    // Unnumbered: the file name (not the path) keeps two "Intro"s apart.
+    let one =
+        local_track_key(key, &tagged("Band/Record/Intro.flac", Some("Record"), None)).unwrap();
+    let two = local_track_key(
+        key,
+        &tagged("Band/Record/Intro (2).flac", Some("Record"), None),
+    )
+    .unwrap();
+    assert_ne!(one, two);
+    assert!(one.ends_with("\u{1f}intro.flac"), "{one}");
+    assert!(!one.contains('/'), "no path: {one}");
+    // A moved file keeps its key.
+    assert_eq!(
+        one,
+        local_track_key(key, &tagged("Elsewhere/Intro.flac", Some("Record"), None)).unwrap()
+    );
+    // Numbered: by number and title only.
+    assert_eq!(
+        local_track_key(key, &tagged("x/1.flac", Some("Record"), Some(1))).unwrap(),
+        "band\u{1f}record\u{1f}\u{1f}1\u{1f}intro"
+    );
+}

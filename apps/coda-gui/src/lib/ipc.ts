@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Intent,
+  LibraryView,
   Lyrics,
   LyricsIndexStatus,
   Palette,
@@ -132,6 +133,8 @@ export const prefsApi = {
   get: () => invoke<Prefs>("prefs_get"),
   /** `"music"`, `"house"` or `#rrggbb`; answers with the new state. */
   setAccent: (accent: string) => invoke<Prefs>("prefs_set_accent", { accent }),
+  /** Library's default view; answers with the new state. */
+  setLibraryView: (view: LibraryView) => invoke<Prefs>("prefs_set_library_view", { view }),
 };
 
 // ----- the browsed source (`settings.toml`) -----

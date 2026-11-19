@@ -249,6 +249,20 @@ export interface Album {
   trackCount: number | null;
   durationMs: number | null;
   coverUrl: string | null;
+  /** One genre for a list row (local: the first tagged; Navidrome: the album's). */
+  genre: string | null;
+  /**
+   * Listens: Navidrome the server's `playCount` (when it sends one);
+   * local the play history's, only in the Most played order.
+   */
+  playCount: number | null;
+}
+
+/** One of an artist's most played songs (`artist_most_played`). */
+export interface TopTrack {
+  track: Track;
+  /** Listens this app counted. */
+  listens: number;
 }
 
 export interface Playlist {
@@ -357,7 +371,7 @@ export interface LyricsIndexStatus {
   withLyrics: number;
 }
 
-export type LocalAlbumOrder = "name" | "artist";
+export type LocalAlbumOrder = "name" | "artist" | "year" | "mostPlayed";
 export type AlbumSort = "name" | "artist" | "newest" | "frequent" | "recent" | "random";
 
 export interface BrowseError {
@@ -461,7 +475,12 @@ export interface Prefs {
   swatches: Swatch[];
   source: SourceKind | null;
   lyricsIndex: boolean;
+  /** Library's default view of albums and artists. */
+  libraryView: LibraryView;
 }
+
+/** How Library shows albums and artists. */
+export type LibraryView = "covers" | "list";
 
 /** A cover's colours (`cover_palettes`; backend `cover::palettes::PaletteDto`). */
 export interface Palette {

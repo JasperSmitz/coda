@@ -2900,6 +2900,8 @@ mod tests {
         let mut album = Album {
             cover_art: None,
             artist_id: None,
+            play_count: None,
+            genre: None,
             id: "k".into(),
             name: "Kind of Blue".into(),
             artist: Some("Miles Davis".into()),
@@ -3152,6 +3154,8 @@ mod tests {
             Ok(Content::Albums(vec![Album {
                 cover_art: None,
                 artist_id: None,
+                play_count: None,
+                genre: None,
                 id: "k".into(),
                 name: "Kind of Blue".into(),
                 artist: Some("Miles Davis".into()),
@@ -3259,6 +3263,8 @@ mod tests {
                 albums: vec![Album {
                     cover_art: None,
                     artist_id: None,
+                    play_count: None,
+                    genre: None,
                     id: "b".into(),
                     name: "Blue Train".into(),
                     artist: Some("John Coltrane".into()),
@@ -3316,6 +3322,8 @@ mod tests {
             Ok(Content::Albums(vec![Album {
                 cover_art: None,
                 artist_id: None,
+                play_count: None,
+                genre: None,
                 id: "x".into(),
                 name: "X".into(),
                 artist: None,
@@ -3961,6 +3969,8 @@ mod tests {
         Album {
             cover_art: None,
             artist_id: None,
+            play_count: None,
+            genre: None,
             id: id.into(),
             name: name.into(),
             artist: Some(artist.into()),

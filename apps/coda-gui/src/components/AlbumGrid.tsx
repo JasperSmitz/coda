@@ -1,7 +1,11 @@
-// A virtualized album grid (DESIGN.md: ~180px tiles, cover, title and
-// artist below). Rows render only near the view's scroll position; the
-// arrow keys move between tiles, Enter opens one, right-click or "…"
-// opens the album menu (with "Add to mix…"). `onEnd` asks for more (infinite scroll).
+// A virtualized album grid, Library's Covers (DESIGN.md "Library": tiles
+// of at least 178px, the cover with a soft shadow, the title and
+// "artist · year" below; hover lifts the cover and shows a round Play
+// button in the album's own accent). Rows render only near the page's
+// scroll position; the arrow keys move between tiles, Enter opens one,
+// Shift+Enter plays it, right-click or "…" opens the album menu. `onEnd`
+// asks for more (infinite scroll). Each tile in view takes its cover's
+// accent (`useTileAccents`).
 
 import {
   memo,
@@ -12,19 +16,19 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
-import { browse } from "../lib/browse";
-import { addToMixFlow } from "../lib/mixes";
-import { albumIngredient } from "../lib/mixRecipe";
-import { albumContext, enqueue, openRoute, playFrom, playTracks } from "../lib/play";
-import type { Album, SourceKind } from "../lib/types";
-import { nav } from "../state/nav";
+import { openRoute } from "../lib/play";
+import type { Album, Palette, SourceKind } from "../lib/types";
 import { revealRow } from "../hooks/useLayout";
-import { useAppState } from "../state/store";
-import { ContextMenu, type MenuState } from "./ContextMenu";
+import { usePendingFocus } from "../hooks/usePendingFocus";
+import { accentStyle, useTileAccents } from "../state/palettes";
+import { AlbumMenu, openAlbum, playAlbum, usePlayable, type AlbumMenuState } from "./AlbumMenu";
 import { Cover } from "./Cover";
-import { MoreIcon } from "./icons";
+import { MoreIcon, PlayIcon } from "./icons";
 import { NameLink } from "./NameLink";
 
+export { openAlbum } from "./AlbumMenu";
+
+/** The smallest tile (DESIGN.md: ≥178px); tiles grow to fill a row. */
 const TILE = 180;
 const GAP = 22;
 /** Cover plus two text lines. */
@@ -35,7 +39,7 @@ interface Props {
   albums: Album[];
   source: SourceKind;
   scroller: RefObject<HTMLElement | null>;
-  /** Hide the artist line (an artist's own page). */
+  /** Hide the artist line (an artist's own page): the year alone. */
   hideArtist?: boolean;
   /** Called when the last rows come into view. */
   onEnd?: () => void;
@@ -47,28 +51,17 @@ interface Props {
   label: string;
 }
 
-export function openAlbum(source: SourceKind, album: Album) {
-  nav.push({ kind: "album", source, id: album.id, name: album.name, hint: album });
-}
-
-export function AlbumGrid({
-  albums,
-  source,
-  scroller,
-  hideArtist = false,
-  onEnd,
-  endKey,
-  label,
-}: Props) {
-  const { snapshot } = useAppState();
-  // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
-  const locked = snapshot?.phase !== "ready";
-  const disabled = locked || snapshot.status === "unavailable";
-  const grid = useRef<HTMLDivElement>(null);
+/**
+ * A virtualized grid's geometry in the page: columns, row height and the
+ * rows near the view, following the scroller and the grid's own size.
+ */
+export function useGridGeometry(
+  scroller: RefObject<HTMLElement | null>,
+  grid: RefObject<HTMLElement | null>,
+  count: number,
+  { tile: minTile, gap, text }: { tile: number; gap: number; text: number },
+) {
   const [view, setView] = useState({ top: 0, height: 800, offset: 0, width: 800 });
-  const [menu, setMenu] = useState<(MenuState & { album: Album }) | null>(null);
-  const focusAfterRender = useRef<number | null>(null);
-
   useLayoutEffect(() => {
     const el = scroller.current;
     const own = grid.current;
@@ -89,7 +82,7 @@ export function AlbumGrid({
       el.removeEventListener("scroll", update);
       observer.disconnect();
     };
-  }, [scroller]);
+  }, [scroller, grid]);
 
   // Content above the grid may load later (another search group).
   useLayoutEffect(() => {
@@ -97,14 +90,79 @@ export function AlbumGrid({
     if (offset !== view.offset) setView((v) => ({ ...v, offset }));
   });
 
-  const columns = Math.max(1, Math.floor((view.width + GAP) / (TILE + GAP)));
-  const tile = Math.floor((view.width - GAP * (columns - 1)) / columns);
-  const rowHeight = Math.min(tile, TILE + 40) + TEXT + GAP;
-  const rowCount = Math.ceil(albums.length / columns);
-  const first = Math.max(0, Math.floor((view.top - view.offset) / rowHeight) - OVERSCAN_ROWS);
-  const last = Math.min(
+  const columns = Math.max(1, Math.floor((view.width + gap) / (minTile + gap)));
+  const tile = Math.floor((view.width - gap * (columns - 1)) / columns);
+  const cover = Math.min(tile, minTile + 40);
+  const rowHeight = cover + text + gap;
+  const rowCount = Math.ceil(count / columns);
+  const rowAt = (y: number) => Math.floor((y - view.offset) / rowHeight);
+  const first = Math.max(0, rowAt(view.top) - OVERSCAN_ROWS);
+  const last = Math.min(rowCount, rowAt(view.top + view.height) + 1 + OVERSCAN_ROWS);
+  // The rows actually on screen (no overscan): what per-tile colours ask for.
+  const seenFirst = Math.max(0, rowAt(view.top));
+  const seenLast = Math.min(rowCount, rowAt(view.top + view.height) + 1);
+  return {
+    columns,
+    tile,
+    cover,
+    rowHeight,
     rowCount,
-    Math.ceil((view.top - view.offset + view.height) / rowHeight) + OVERSCAN_ROWS,
+    first,
+    last,
+    seen: [seenFirst * columns, Math.min(count, seenLast * columns)] as const,
+    offset: view.offset,
+  };
+}
+
+/** Arrow keys, Home and End in a grid of `count` tiles: the index to go to, or `null`. */
+export function gridKeyTarget(key: string, at: number, columns: number, count: number): number | null {
+  let to: number;
+  switch (key) {
+    case "ArrowRight":
+      to = at + 1;
+      break;
+    case "ArrowLeft":
+      to = at - 1;
+      break;
+    case "ArrowDown":
+      to = at + columns;
+      break;
+    case "ArrowUp":
+      to = at - columns;
+      break;
+    case "Home":
+      to = 0;
+      break;
+    case "End":
+      to = count - 1;
+      break;
+    default:
+      return null;
+  }
+  return Math.min(count - 1, Math.max(0, to));
+}
+
+export function AlbumGrid({
+  albums,
+  source,
+  scroller,
+  hideArtist = false,
+  onEnd,
+  endKey,
+  label,
+}: Props) {
+  const { disabled } = usePlayable();
+  const grid = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<AlbumMenuState | null>(null);
+  const focusAt = usePendingFocus(grid);
+  const geometry = useGridGeometry(scroller, grid, albums.length, {
+    tile: TILE,
+    gap: GAP,
+    text: TEXT,
+  });
+  const { columns, tile, cover, rowHeight, rowCount, first, last } = geometry;
+  const accentOf = useTileAccents(
+    albums.slice(geometry.seen[0], geometry.seen[1]).map((a) => a.coverUrl),
   );
 
   // Infinite scroll: ask for more when the last rows are near.
@@ -113,68 +171,37 @@ export function AlbumGrid({
     if (nearEnd) onEnd?.();
   }, [nearEnd, onEnd, albums.length, endKey]);
 
-  useEffect(() => {
-    const index = focusAfterRender.current;
-    if (index === null) return;
-    const el = grid.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
-    if (el) {
-      el.focus({ preventScroll: true });
-      focusAfterRender.current = null;
-    }
-  });
-
   const focusTile = (index: number) => {
     const el = scroller.current;
     if (!el) return;
     const row = Math.floor(index / columns);
-    revealRow(el, view.offset + row * rowHeight, rowHeight);
-    focusAfterRender.current = index;
-    const tileEl = grid.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
-    if (tileEl) {
-      tileEl.focus({ preventScroll: true });
-      focusAfterRender.current = null;
-    }
+    revealRow(el, geometry.offset + row * rowHeight, rowHeight);
+    // The tile may only mount with the scroll's render.
+    focusAt(index);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement;
     const at = Number(target.dataset.index ?? -1);
     if (at < 0) return;
-    let to: number;
-    switch (e.key) {
-      case "ArrowRight":
-        to = at + 1;
-        break;
-      case "ArrowLeft":
-        to = at - 1;
-        break;
-      case "ArrowDown":
-        to = at + columns;
-        break;
-      case "ArrowUp":
-        to = at - columns;
-        break;
-      case "Home":
-        to = 0;
-        break;
-      case "End":
-        to = albums.length - 1;
-        break;
-      case "ContextMenu": {
-        const rect = target.getBoundingClientRect();
-        setMenu({ x: rect.left + 20, y: rect.top + 40, key: albums[at].id, album: albums[at] });
-        e.preventDefault();
-        return;
-      }
-      default:
-        return;
+    if (e.key === "Enter" && e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!disabled) playAlbum(source, albums[at]);
+      return;
     }
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      const rect = target.getBoundingClientRect();
+      setMenu({ x: rect.left + 20, y: rect.top + 40, key: albums[at].id, album: albums[at] });
+      e.preventDefault();
+      return;
+    }
+    const to = gridKeyTarget(e.key, at, columns, albums.length);
+    if (to === null) return;
     e.preventDefault();
     e.stopPropagation();
-    focusTile(Math.min(albums.length - 1, Math.max(0, to)));
+    focusTile(to);
   };
-
-  const tracksOf = (album: Album) => browse.album(source, album.id).then((d) => d.tracks);
 
   return (
     <div
@@ -197,81 +224,17 @@ export function AlbumGrid({
               left={c * (tile + GAP)}
               top={row * rowHeight}
               size={tile}
+              cover={cover}
+              accent={accentOf(album.coverUrl)}
               hideArtist={hideArtist}
               source={source}
-              onOpen={() => openAlbum(source, album)}
-              onMenu={(x, y) => setMenu({ x, y, key: album.id, album })}
+              canPlay={!disabled}
+              onMenu={setMenu}
             />
           );
         });
       })}
-      {menu && (
-        <ContextMenu
-          state={menu}
-          onClose={() => setMenu(null)}
-          items={[
-            {
-              label: "Play",
-              disabled,
-              action: () =>
-                playFrom(async () =>
-                  playTracks(
-                    await tracksOf(menu.album),
-                    undefined,
-                    false,
-                    albumContext(source, menu.album),
-                  ),
-                ),
-            },
-            {
-              label: "Shuffle",
-              disabled,
-              action: () =>
-                playFrom(async () =>
-                  playTracks(
-                    await tracksOf(menu.album),
-                    undefined,
-                    true,
-                    albumContext(source, menu.album),
-                  ),
-                ),
-            },
-            {
-              label: "Play next",
-              disabled: locked,
-              action: () => playFrom(async () => enqueue(await tracksOf(menu.album), true)),
-            },
-            {
-              label: "Add to queue",
-              disabled: locked,
-              action: () => playFrom(async () => enqueue(await tracksOf(menu.album), false)),
-            },
-            // ADD TO PLAYLIST: "Add to playlist…" goes here (later slice).
-            {
-              label: "Add to mix…",
-              // An album without an artist cannot be found again by name.
-              disabled: locked || albumIngredient(source, menu.album) === null,
-              action: () => {
-                const ingredient = albumIngredient(source, menu.album);
-                if (ingredient) void addToMixFlow(source, ingredient);
-              },
-            },
-            { label: "Open album", action: () => openAlbum(source, menu.album) },
-            {
-              label: "Go to artist",
-              disabled: menu.album.artistId === null,
-              action: () =>
-                menu.album.artistId !== null &&
-                nav.push({
-                  kind: "artist",
-                  source,
-                  id: menu.album.artistId,
-                  name: menu.album.artist ?? "Artist",
-                }),
-            },
-          ]}
-        />
-      )}
+      {menu && <AlbumMenu menu={menu} source={source} onClose={() => setMenu(null)} />}
     </div>
   );
 }
@@ -282,10 +245,13 @@ interface TileProps {
   left: number;
   top: number;
   size: number;
+  cover: number;
+  /** The album's own colours (its accent), once known. */
+  accent: Palette | null;
   hideArtist: boolean;
   source: SourceKind;
-  onOpen: () => void;
-  onMenu: (x: number, y: number) => void;
+  canPlay: boolean;
+  onMenu: (menu: AlbumMenuState) => void;
 }
 
 const AlbumTile = memo(function AlbumTile({
@@ -294,31 +260,35 @@ const AlbumTile = memo(function AlbumTile({
   left,
   top,
   size,
+  cover,
+  accent,
   hideArtist,
   source,
-  onOpen,
+  canPlay,
   onMenu,
 }: TileProps) {
-  const cover = Math.min(size, TILE + 40);
-  const sub = hideArtist
-    ? album.year
-      ? String(album.year)
-      : ""
-    : (album.artist ?? "Unknown artist");
+  const year = album.year ? String(album.year) : null;
   // A known artist is a link below the button (no button in a button).
   const artistId = hideArtist ? null : album.artistId;
-  const artist = album.artist;
+  const artist = hideArtist ? null : album.artist;
+  const menuAt = (x: number, y: number) => onMenu({ x, y, key: album.id, album });
+  const sub = [hideArtist ? null : (artist ?? "Unknown artist"), year].filter(Boolean).join(" · ");
   return (
-    <div className="album-tile" role="listitem" style={{ left, top, width: size }}>
+    <div
+      className="album-tile"
+      role="listitem"
+      style={{ left, top, width: size, ...accentStyle(accent) }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        menuAt(e.clientX, e.clientY);
+      }}
+    >
       <button
         className="album-open"
         data-index={index}
-        onClick={onOpen}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          onMenu(e.clientX, e.clientY);
-        }}
+        onClick={() => openAlbum(source, album)}
         title={album.name}
+        aria-keyshortcuts="Shift+Enter"
       >
         <Cover url={album.coverUrl} name={album.name} size="small" className="album-cover" />
         <span className="album-title" style={{ maxWidth: cover }}>
@@ -331,15 +301,7 @@ const AlbumTile = memo(function AlbumTile({
         )}
       </button>
       {artistId !== null && artist && (
-        <div
-          className="album-sub card-sub-link secondary"
-          style={{ maxWidth: cover }}
-          title={album.name}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            onMenu(e.clientX, e.clientY);
-          }}
-        >
+        <div className="album-sub card-sub-link secondary" style={{ maxWidth: cover }} title={album.name}>
           <NameLink
             inRow
             label={`Go to artist ${artist}`}
@@ -347,8 +309,20 @@ const AlbumTile = memo(function AlbumTile({
           >
             {artist}
           </NameLink>
+          {year && <span> · {year}</span>}
         </div>
       )}
+      <button
+        className="album-play"
+        tabIndex={-1}
+        aria-label={`Play ${album.name}`}
+        title="Play (Shift+Enter)"
+        disabled={!canPlay}
+        style={{ left: cover - 52, top: cover - 52 }}
+        onClick={() => playAlbum(source, album)}
+      >
+        <PlayIcon size={18} />
+      </button>
       <button
         className="icon-button album-more"
         tabIndex={-1}
@@ -356,7 +330,7 @@ const AlbumTile = memo(function AlbumTile({
         style={{ left: cover - 36 }}
         onClick={(e) => {
           const rect = e.currentTarget.getBoundingClientRect();
-          onMenu(rect.left, rect.bottom);
+          menuAt(rect.left, rect.bottom);
         }}
       >
         <MoreIcon size={16} />

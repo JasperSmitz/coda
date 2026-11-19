@@ -7,7 +7,7 @@
 // page's header offer "Add to mix…".
 
 import { useId, useRef, useState, type KeyboardEvent } from "react";
-import { AlbumGrid } from "../components/AlbumGrid";
+import { AlbumCollection } from "../components/AlbumCollection";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Empty, ErrorState, SkeletonGrid, SkeletonRows } from "../components/LoadState";
 import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
@@ -19,6 +19,7 @@ import { genreIngredient } from "../lib/mixRecipe";
 import { playFrom, playLocal, playTracks, shuffleAll, useShuffleContext } from "../lib/play";
 import type { Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useLibraryView } from "../state/libraryView";
 import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
 import { showUiNotice } from "../state/uiNotices";
@@ -30,6 +31,8 @@ import {
   PlayButtons,
   ScanLine,
   SOURCE_LABEL,
+  ToolRow,
+  ViewToggle,
   plural,
 } from "./common";
 
@@ -214,7 +217,8 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
   const load = useLoad(() => browse.localGenre(id), id, version);
   const scroller = usePageScroller();
   const albums = load.data?.albums ?? [];
-  useScroll(scroller, entry, albums.length > 0);
+  const [view, setView, known] = useLibraryView("local", "genreAlbums");
+  useScroll(scroller, entry, albums.length > 0 && known);
   const genre = load.data?.genre ?? hint;
   const title = genre?.name ?? name;
   usePageSubject(entry, albums[0]?.coverUrl ?? null);
@@ -246,13 +250,21 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
           />
         }
       />
+      <ToolRow>
+        <div className="tool-row-tools">
+          <ViewToggle value={view} onChange={setView} />
+        </div>
+      </ToolRow>
       <ScanLine />
       <div className="view-body">
-        {load.state === "loading" && <SkeletonGrid count={6} />}
+        {(load.state === "loading" || (!known && albums.length > 0)) && (
+          <SkeletonGrid count={6} />
+        )}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && albums.length === 0 && <Empty title="No albums" />}
-        {albums.length > 0 && (
-          <AlbumGrid
+        {albums.length > 0 && known && (
+          <AlbumCollection
+            view={view}
             albums={albums}
             source="local"
             scroller={scroller}
@@ -268,7 +280,8 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
   const scroller = usePageScroller();
   const paged = usePagedAlbums((offset) => browse.navidromeGenreAlbums(id, offset), id);
   const { pages } = paged;
-  useScroll(scroller, entry, pages.albums.length > 0);
+  const [view, setView, known] = useLibraryView("navidrome", "genreAlbums");
+  useScroll(scroller, entry, pages.albums.length > 0 && known);
   const title = hint?.name ?? name;
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";
@@ -311,12 +324,18 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
           />
         }
       />
+      <ToolRow>
+        <div className="tool-row-tools">
+          <ViewToggle value={view} onChange={setView} />
+        </div>
+      </ToolRow>
       <div className="view-body">
         <PagedAlbumsBody
           paged={paged}
           scroller={scroller}
           label={`${title} albums`}
           empty="The server lists no albums in this genre."
+          view={known ? view : null}
         />
       </div>
     </section>

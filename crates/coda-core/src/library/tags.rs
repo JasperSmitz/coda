@@ -113,6 +113,8 @@ pub struct Album {
     duration: Duration,
     /// Some track's duration is unknown.
     duration_unknown: bool,
+    /// The latest year any of its tracks is tagged with.
+    year: Option<u32>,
 }
 
 impl Album {
@@ -138,6 +140,12 @@ impl Album {
     /// tracks.
     pub fn duration(&self) -> Option<Duration> {
         (!self.duration_unknown && !self.tracks.is_empty()).then_some(self.duration)
+    }
+
+    /// The album's year: the latest of its tracks' (as Navidrome shows an
+    /// album's year), `None` if none is tagged.
+    pub fn year(&self) -> Option<u32> {
+        self.year
     }
 }
 
@@ -393,6 +401,7 @@ impl TagIndex {
             Some(duration) => album.duration = album.duration.saturating_add(duration),
             None => album.duration_unknown = true,
         }
+        album.year = album.year.max(track.year);
         let list = &mut album.tracks;
         let at = list.partition_point(|t| {
             compare_album_tracks(&tracks[t.index()], track) != Ordering::Greater
@@ -450,6 +459,7 @@ impl TagIndex {
                     tracks: Vec::new(),
                     duration: Duration::ZERO,
                     duration_unknown: false,
+                    year: None,
                 });
                 self.album_ids.insert(lookup, id);
                 self.place_album(id);
@@ -683,6 +693,43 @@ mod tests {
             .iter()
             .map(|t| tracks[t.index()].title.clone())
             .collect()
+    }
+
+    #[test]
+    fn an_album_year_is_the_latest_tagged_one() {
+        let dated = |path: &str, album: &'static str, year: Option<u32>| {
+            Track::local(
+                format!("/m/{path}").into(),
+                TrackMetadata {
+                    artist: Some("A".into()),
+                    album: Some(album.into()),
+                    year,
+                    ..TrackMetadata::default()
+                },
+            )
+        };
+        let tracks = [
+            dated("1.flac", "Reissue", Some(1977)),
+            dated("2.flac", "Reissue", None),
+            dated("3.flac", "Reissue", Some(2011)),
+            dated("4.flac", "Undated", None),
+            // Not a year: dropped by the constructor.
+            dated("5.flac", "Undated", Some(0)),
+            dated("6.flac", "Undated", Some(12_000)),
+        ];
+        let index = index(&tracks);
+        let year = |name: &str| {
+            index
+                .albums(AlbumOrder::Name)
+                .iter()
+                .map(|a| index.album(*a))
+                .find(|a| a.name() == name)
+                .and_then(Album::year)
+        };
+        assert_eq!(year("Reissue"), Some(2011));
+        assert_eq!(year("Undated"), None);
+        assert_eq!(tracks[0].year, Some(1977));
+        assert_eq!(tracks[4].year, None);
     }
 
     #[test]

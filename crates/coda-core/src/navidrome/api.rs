@@ -395,6 +395,10 @@ pub struct RawAlbum {
     pub cover_art: Option<String>,
     #[serde(deserialize_with = "id")]
     pub artist_id: Option<String>,
+    #[serde(deserialize_with = "saturating_count")]
+    pub play_count: Option<u32>,
+    #[serde(deserialize_with = "text")]
+    pub genre: Option<String>,
     #[serde(deserialize_with = "list")]
     pub song: Vec<RawSong>,
 }
@@ -609,6 +613,8 @@ impl RawAlbum {
             duration: self.duration,
             cover_art: valid_id(self.cover_art),
             artist_id: valid_id(self.artist_id),
+            play_count: self.play_count,
+            genre: clean_text(self.genre),
         })
     }
 
@@ -626,6 +632,8 @@ impl RawAlbum {
             duration: self.duration,
             cover_art: self.cover_art.clone(),
             artist_id: self.artist_id.clone(),
+            play_count: self.play_count,
+            genre: self.genre.clone(),
             song: Vec::new(),
         };
         (header.into_album(), self.into_tracks())
@@ -669,6 +677,7 @@ impl RawSong {
                 duration: self.duration,
                 cover_art: valid_id(self.cover_art),
                 genres,
+                year: None,
             },
         );
         track.album_id = valid_id(self.album_id);
@@ -1245,6 +1254,38 @@ mod tests {
         assert_eq!(
             tracks[3].album_artist.as_ref().unwrap().chars().count(),
             MAX_METADATA_CHARS
+        );
+    }
+
+    #[test]
+    fn an_albums_play_count_and_genre_are_read_when_valid() {
+        let r = response(json!({
+            "status": "ok",
+            "artist": { "id": "ar-1", "album": [
+                { "id": "1", "playCount": 12, "genre": "  Jazz " },
+                { "id": "2", "playCount": 1e30, "genre": "   " },
+                { "id": "3", "playCount": -3, "genre": ["Rock"] },
+                { "id": "4" },
+            ]}
+        }));
+        let albums: Vec<_> = r
+            .artist
+            .unwrap()
+            .album
+            .into_iter()
+            .filter_map(RawAlbum::into_album)
+            .collect();
+        assert_eq!(albums[0].play_count, Some(12));
+        assert_eq!(albums[0].genre.as_deref(), Some("Jazz"));
+        assert_eq!(albums[1].play_count, Some(u32::MAX));
+        assert_eq!(albums[1].genre, None);
+        assert_eq!(
+            (albums[2].play_count, albums[2].genre.clone()),
+            (None, None)
+        );
+        assert_eq!(
+            (albums[3].play_count, albums[3].genre.clone()),
+            (None, None)
         );
     }
 

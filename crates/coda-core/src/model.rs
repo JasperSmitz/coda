@@ -34,6 +34,9 @@ pub struct TrackMetadata {
     /// split), so a list that was split once (a saved queue) is kept as
     /// it is.
     pub genres: Vec<String>,
+    /// The release year (lofty's recording date, else its year item).
+    /// Read from local tags only.
+    pub year: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,14 @@ pub struct Track {
     /// no two equal ignoring case (the first spelling kept), at most
     /// [`MAX_GENRES`].
     pub genres: Vec<String>,
+    /// The release year from local tags (1–9999); always `None` for
+    /// Navidrome tracks and for tracks restored from a saved session.
+    pub year: Option<u32>,
+}
+
+/// A tagged year if it is one (1–9999).
+fn valid_year(year: Option<u32>) -> Option<u32> {
+    year.filter(|y| (1..=9999).contains(y))
 }
 
 impl Track {
@@ -81,6 +92,7 @@ impl Track {
             album_id: None,
             artist_id: None,
             genres: tidy_genres(metadata.genres),
+            year: valid_year(metadata.year),
             source: TrackSource::Local { path },
         }
     }
@@ -100,6 +112,7 @@ impl Track {
             album_id: None,
             artist_id: None,
             genres: tidy_genres(metadata.genres),
+            year: None,
             source: TrackSource::Navidrome { song_id },
         }
     }

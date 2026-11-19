@@ -17,8 +17,20 @@
 //! the Daily Picks are cached per server too. The file never holds stream
 //! URLs, credentials, server addresses or cover tokens.
 //!
+//! Listens are counted per context and per track ([`TrackCount`]: Library's
+//! local Most played order and an artist's "Your most played"). A local
+//! track is keyed by its album's stable key and its disc, number and
+//! title ([`local_track_key`]), never by its path; a Navidrome track by
+//! its song id and server, with what its row shows (title, album, ids,
+//! `coverArt` id).
+//!
 //! Bounded: the last [`MAX_PLAYS`] context plays, listen counts for at
-//! most [`MAX_COUNTS`] contexts (the least recently heard dropped first).
+//! most [`MAX_COUNTS`] contexts and [`MAX_TRACK_COUNTS`] tracks (the
+//! least recently heard dropped first).
+//!
+//! File versions: 1 (no track counts) is read and migrated as it is (its
+//! plays, counts and picks kept); 2 adds `tracks`. A newer version is
+//! left untouched and not saved over.
 
 pub mod commands;
 
@@ -27,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId, TagIndex};
+use coda_core::library::tree::TrackId;
 use coda_core::library::{Library, PlaylistId};
+use coda_core::model::Track;
 use serde::{Deserialize, Serialize};
 
 use crate::browse::dto::AlbumDto;
@@ -39,6 +53,10 @@ use crate::fsio;
 pub const MAX_PLAYS: usize = 500;
 /// Contexts with listen counts kept.
 pub const MAX_COUNTS: usize = 5_000;
+/// Tracks with listen counts kept.
+pub const MAX_TRACK_COUNTS: usize = 20_000;
+/// An artist's most played songs shown.
+pub const TOP_TRACKS: usize = 6;
 /// Distinct recently played contexts shown.
 pub const RECENT_SHOWN: usize = 20;
 /// Most played contexts shown.
@@ -46,7 +64,9 @@ pub const MOST_SHOWN: usize = 20;
 /// Albums in the Daily Picks.
 pub const DAILY_PICKS: usize = 12;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const FILE_VERSION: u32 = 1;
+const FILE_VERSION: u32 = 2;
+/// The oldest version read (and migrated on the next save).
+const OLDEST_VERSION: u32 = 1;
 /// Names and subtitles are cut to this many characters.
 const MAX_TEXT: usize = 256;
 /// Ids (a folder path can be long) are refused beyond this.
@@ -198,6 +218,113 @@ pub struct Count {
     pub last: u64,
 }
 
+/// What identifies a counted track across runs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrackKey {
+    pub source: SourceKind,
+    /// Navidrome: the [`server_id`]; local: `None`.
+    pub server: Option<String>,
+    /// Navidrome: the song id. Local: [`local_track_key`].
+    pub id: String,
+}
+
+/// What a Navidrome song's row shows (a local track's comes from the
+/// library). No stream URL, no cover URL: the `coverArt` id only.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SongInfo {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_art: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_no: Option<u32>,
+}
+
+impl SongInfo {
+    fn sanitized(mut self) -> Self {
+        let id_ok = |id: &String| valid_text_id(id);
+        let text = |t: Option<String>| t.as_deref().map(clean).filter(|t| !t.is_empty());
+        self.title = clean(&self.title);
+        self.artist = text(self.artist);
+        self.album = text(self.album);
+        self.album_artist = text(self.album_artist);
+        self.album_id = self.album_id.filter(id_ok);
+        self.artist_id = self.artist_id.filter(id_ok);
+        self.cover_art = self.cover_art.filter(id_ok);
+        self
+    }
+}
+
+/// A track that was heard: its key and, for Navidrome, its row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeardTrack {
+    pub source: SourceKind,
+    /// Navidrome: the [`server_id`] it came from (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    pub id: String,
+    /// Navidrome only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song: Option<SongInfo>,
+}
+
+impl HeardTrack {
+    pub fn key(&self) -> TrackKey {
+        TrackKey {
+            source: self.source,
+            server: self.server.clone(),
+            id: self.id.clone(),
+        }
+    }
+
+    /// Cleaned and capped like server data; `None` if the id (or a
+    /// Navidrome track's server) is unusable.
+    pub fn sanitized(mut self) -> Option<Self> {
+        if self.id.is_empty() || self.id.chars().count() > MAX_ID || self.id.contains('\0') {
+            return None;
+        }
+        match self.source {
+            SourceKind::Local => {
+                self.server = None;
+                self.song = None;
+            }
+            SourceKind::Navidrome => {
+                if !self.server.as_deref().is_some_and(valid_server) {
+                    return None;
+                }
+                self.song = self.song.map(SongInfo::sanitized);
+            }
+        }
+        Some(self)
+    }
+}
+
+/// Listens counted for a track.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackCount {
+    #[serde(flatten)]
+    pub track: HeardTrack,
+    pub listens: u64,
+    /// The last listen (unix seconds), for trimming.
+    pub last: u64,
+}
+
 /// One album of the cached Navidrome Daily Picks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,6 +363,9 @@ pub struct HistoryFile {
     /// The latest Daily Picks per server (at most [`MAX_DAILY_SERVERS`]).
     #[serde(default)]
     pub dailies: Vec<Daily>,
+    /// Listens per track (version 2; most recently heard first).
+    #[serde(default)]
+    pub tracks: Vec<TrackCount>,
 }
 
 /// The history in memory. Every change bumps [`History::revision`].
@@ -244,6 +374,7 @@ pub struct History {
     /// Oldest first.
     plays: VecDeque<Played>,
     counts: HashMap<ContextKey, Count>,
+    tracks: HashMap<TrackKey, TrackCount>,
     /// Oldest first, one per server.
     dailies: Vec<Daily>,
     revision: u64,
@@ -291,8 +422,13 @@ fn sanitize_daily(daily: Daily) -> Option<Daily> {
     })
 }
 
+/// A short id (a server id, a `coverArt` id): non-empty, capped, no NUL.
+fn valid_text_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().count() <= MAX_TEXT && !id.contains('\0')
+}
+
 fn sanitize_daily_album(mut album: DailyAlbum) -> Option<DailyAlbum> {
-    let ok = |id: &str| !id.is_empty() && id.chars().count() <= MAX_TEXT && !id.contains('\0');
+    let ok = valid_text_id;
     if !ok(&album.id) {
         return None;
     }
@@ -343,13 +479,32 @@ impl History {
         }
         let excess = dailies.len().saturating_sub(MAX_DAILY_SERVERS);
         dailies.drain(..excess);
+        let mut tracks = HashMap::new();
+        for count in file.tracks {
+            let Some(track) = count.track.sanitized() else {
+                continue;
+            };
+            if count.listens == 0 {
+                continue;
+            }
+            tracks.insert(
+                track.key(),
+                TrackCount {
+                    track,
+                    listens: count.listens,
+                    last: count.last,
+                },
+            );
+        }
         let mut history = Self {
             plays,
             counts,
+            tracks,
             dailies,
             revision: 0,
         };
         history.trim_counts();
+        history.trim_tracks();
         history
     }
 
@@ -362,11 +517,19 @@ impl History {
                 .then_with(|| b.listens.cmp(&a.listens))
                 .then_with(|| a.context.id.cmp(&b.context.id))
         });
+        let mut tracks: Vec<TrackCount> = self.tracks.values().cloned().collect();
+        tracks.sort_by(|a, b| {
+            b.last
+                .cmp(&a.last)
+                .then_with(|| b.listens.cmp(&a.listens))
+                .then_with(|| a.track.id.cmp(&b.track.id))
+        });
         HistoryFile {
             version: FILE_VERSION,
             plays: self.plays.iter().cloned().collect(),
             counts,
             dailies: self.dailies.clone(),
+            tracks,
         }
     }
 
@@ -424,6 +587,111 @@ impl History {
             self.trim_counts();
             self.revision += 1;
         }
+    }
+
+    /// A track was heard long enough: one listen.
+    pub fn record_track_listen(&mut self, track: HeardTrack, at: u64) {
+        let Some(track) = track.sanitized() else {
+            return;
+        };
+        let count = self
+            .tracks
+            .entry(track.key())
+            .or_insert_with(|| TrackCount {
+                track: track.clone(),
+                listens: 0,
+                last: at,
+            });
+        // The latest row wins (a retitled song).
+        count.track = track;
+        count.listens = count.listens.saturating_add(1);
+        count.last = count.last.max(at);
+        self.trim_tracks();
+        self.revision += 1;
+    }
+
+    pub fn track_count(&self, key: &TrackKey) -> Option<&TrackCount> {
+        self.tracks.get(key)
+    }
+
+    pub fn tracks_len(&self) -> usize {
+        self.tracks.len()
+    }
+
+    /// Least recently heard first out (ties: the fewer listens, then the
+    /// id, so the result does not depend on hash order).
+    fn trim_tracks(&mut self) {
+        let excess = self.tracks.len().saturating_sub(MAX_TRACK_COUNTS);
+        if excess == 0 {
+            return;
+        }
+        let mut order: Vec<(u64, u64, &TrackKey)> = self
+            .tracks
+            .iter()
+            .map(|(key, count)| (count.last, count.listens, key))
+            .collect();
+        let order = if excess < order.len() {
+            order.select_nth_unstable_by(excess - 1, |a, b| {
+                (a.0, a.1, &a.2.id).cmp(&(b.0, b.1, &b.2.id))
+            });
+            &order[..excess]
+        } else {
+            &order[..]
+        };
+        let gone: Vec<TrackKey> = order.iter().map(|(_, _, key)| (*key).clone()).collect();
+        for key in gone {
+            self.tracks.remove(&key);
+        }
+    }
+
+    /// Listens per local track key, with the last listen.
+    pub fn local_track_listens(&self) -> HashMap<String, (u64, u64)> {
+        self.tracks
+            .values()
+            .filter(|c| c.track.source == SourceKind::Local)
+            .map(|c| (c.track.id.clone(), (c.listens, c.last)))
+            .collect()
+    }
+
+    /// `server`'s most listened songs by the artist with `artist_id`: a
+    /// song with an artist id matches by it alone (two artists of the
+    /// same name with different ids stay apart); only a song without one
+    /// matches by `name` (its album artist or artist, ignoring case).
+    /// Most first (ties: the more recent), at most `limit`.
+    pub fn navidrome_top_tracks(
+        &self,
+        server: &str,
+        artist_id: &str,
+        name: &str,
+        limit: usize,
+    ) -> Vec<TrackCount> {
+        let name = lower(name);
+        let by = |song: &SongInfo| match song.artist_id.as_deref() {
+            Some(id) => id == artist_id,
+            None => {
+                !name.is_empty()
+                    && [&song.album_artist, &song.artist]
+                        .into_iter()
+                        .flatten()
+                        .any(|n| lower(n) == name)
+            }
+        };
+        let mut found: Vec<&TrackCount> = self
+            .tracks
+            .values()
+            .filter(|c| {
+                c.track.source == SourceKind::Navidrome
+                    && c.track.server.as_deref() == Some(server)
+                    && c.track.song.as_ref().is_some_and(by)
+            })
+            .collect();
+        found.sort_by(|a, b| {
+            b.listens
+                .cmp(&a.listens)
+                .then_with(|| b.last.cmp(&a.last))
+                .then_with(|| a.track.id.cmp(&b.track.id))
+        });
+        found.into_iter().take(limit).cloned().collect()
     }
 
     /// Least recently heard first out.
@@ -568,7 +836,9 @@ pub fn load(path: Option<PathBuf>) -> Loaded {
     }
     let parsed = text.and_then(|t| {
         let file: HistoryFile = serde_json::from_str(&t).map_err(|e| e.to_string())?;
-        if file.version != FILE_VERSION {
+        // Version 1 has no track counts (`tracks` defaults to empty): it
+        // is read as it is and saved as the current version.
+        if !(OLDEST_VERSION..=FILE_VERSION).contains(&file.version) {
             return Err(format!("unknown version {}", file.version));
         }
         Ok(file)
@@ -608,19 +878,25 @@ fn bounded_bytes(file: &HistoryFile, max: u64) -> std::io::Result<Vec<u8>> {
     }
     let mut trimmed = file.clone();
     while bytes.len() as u64 > max {
-        if trimmed.counts.is_empty() && trimmed.plays.is_empty() {
+        if trimmed.counts.is_empty() && trimmed.plays.is_empty() && trimmed.tracks.is_empty() {
             trimmed.dailies.clear();
         }
         // Counts are most recent first, plays oldest first.
         trimmed.counts.truncate(trimmed.counts.len() / 2);
+        trimmed.tracks.truncate(trimmed.tracks.len() / 2);
         trimmed.plays.drain(..trimmed.plays.len().div_ceil(2));
         bytes = serde_json::to_vec(&trimmed).map_err(std::io::Error::other)?;
-        if trimmed.counts.is_empty() && trimmed.plays.is_empty() && trimmed.dailies.is_empty() {
+        if trimmed.counts.is_empty()
+            && trimmed.plays.is_empty()
+            && trimmed.tracks.is_empty()
+            && trimmed.dailies.is_empty()
+        {
             break;
         }
     }
     tracing::warn!(
         counts = trimmed.counts.len(),
+        tracks = trimmed.tracks.len(),
         plays = trimmed.plays.len(),
         "the play history was too large to save whole; the oldest entries were left out"
     );
@@ -638,6 +914,85 @@ pub fn local_album_key(tags: &TagIndex, id: AlbumId) -> String {
     let album = tags.album(id);
     let artist = tags.artist(album.artist());
     format!("{}\u{1f}{}", lower(artist.name()), lower(album.name()))
+}
+
+/// A local track's stable key: its album's ([`local_album_key`], as
+/// passed), then its disc and track numbers and its title, as tagged;
+/// without a track number also its file name (never the path), so two
+/// unnumbered tracks of one title on one album stay apart. Survives
+/// rescans and moved files; a retagged (or, unnumbered, renamed) track
+/// starts again. `None` for a track without an album tag: like its album
+/// listens, it is not counted (all such tracks would share one album
+/// key, "Unknown album").
+pub fn local_track_key(album_key: &str, track: &Track) -> Option<String> {
+    track.album.as_deref().filter(|a| !a.trim().is_empty())?;
+    let number = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
+    let mut key = format!(
+        "{album_key}\u{1f}{}\u{1f}{}\u{1f}{}",
+        number(track.disc_no),
+        number(track.track_no),
+        lower(&track.title)
+    );
+    if track.track_no.is_none() {
+        let file = track
+            .local_path()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        key.push('\u{1f}');
+        key.push_str(&file);
+    }
+    Some(key)
+}
+
+/// Each album's listens (indexed by [`AlbumId`]): the sum of its
+/// tracks' in `listens` ([`History::local_track_listens`]).
+pub fn local_album_listens(library: &Library, listens: &HashMap<String, (u64, u64)>) -> Vec<u64> {
+    let tags = library.tags();
+    let albums = tags.albums(AlbumOrder::Name);
+    let mut sums = vec![0u64; albums.len()];
+    if listens.is_empty() {
+        return sums;
+    }
+    for id in albums {
+        let key = local_album_key(tags, *id);
+        sums[id.0 as usize] = tags
+            .album(*id)
+            .tracks()
+            .iter()
+            .filter_map(|t| listens.get(&local_track_key(&key, library.track(*t))?))
+            .fold(0u64, |sum, (n, _)| sum.saturating_add(*n));
+    }
+    sums
+}
+
+/// Up to `limit` of a local artist's tracks by their listens (most first;
+/// ties: the more recent, then album order), each with its album and
+/// listens. Tracks never heard are left out.
+pub fn local_artist_top_tracks(
+    library: &Library,
+    artist: ArtistId,
+    listens: &HashMap<String, (u64, u64)>,
+    limit: usize,
+) -> Vec<(TrackId, AlbumId, u64)> {
+    let tags = library.tags();
+    let mut found: Vec<(u64, u64, usize, TrackId, AlbumId)> = Vec::new();
+    for album in tags.artist(artist).albums() {
+        let key = local_album_key(tags, *album);
+        for track in tags.album(*album).tracks() {
+            if let Some((n, last)) =
+                local_track_key(&key, library.track(*track)).and_then(|k| listens.get(&k))
+            {
+                found.push((*n, *last, found.len(), *track, *album));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    found
+        .into_iter()
+        .take(limit)
+        .map(|(n, _, _, track, album)| (track, album, n))
+        .collect()
 }
 
 pub fn local_artist_key(tags: &TagIndex, id: ArtistId) -> String {
@@ -985,6 +1340,8 @@ pub fn daily_album_dto(album: &DailyAlbum, covers: &CoverService) -> AlbumDto {
             .cover_art
             .clone()
             .and_then(|c| covers.url_for_key(coda_core::cover::CoverKey::Navidrome(c))),
+        genre: None,
+        play_count: None,
     }
 }
 

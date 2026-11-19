@@ -240,3 +240,23 @@ export const CodaSignIcon = (p: IconProps) => (
     <path d="M12 2v20M3 12h18" />
   </Icon>
 );
+
+/** Covers (a grid of tiles). */
+export const GridIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="4" y="4" width="7" height="7" rx="1.8" />
+    <rect x="13" y="4" width="7" height="7" rx="1.8" />
+    <rect x="4" y="13" width="7" height="7" rx="1.8" />
+    <rect x="13" y="13" width="7" height="7" rx="1.8" />
+  </Icon>
+);
+
+/** List (rows). */
+export const ListIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 6h11M9 12h11M9 18h11" />
+    <circle cx="4.5" cy="6" r="1" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="18" r="1" fill="currentColor" stroke="none" />
+  </Icon>
+);

@@ -58,7 +58,7 @@ The landing page. Two things, and room around them.
 - A new listener (no history): the carousel is replaced by a short welcome line and **Shuffle your library** / **Browse albums**; Moods use the largest genres.
 
 ## Library
-*(Partly shipped, N5a: the Library header ("Library", the section control and the section's tools in a tool row that sticks under the top bar) and the page header pattern of the album, artist, genre and playlist pages (and a folder's, without a cover), "…" holding the page's menu. Still to come (N5b): Covers / List, the sorts below, the per-tile accents, Genres/Playlists tiles, Your most played.)*
+*(Partly shipped, N5a: the Library header ("Library", the section control and the section's tools in a tool row that sticks under the top bar) and the page header pattern of the album, artist, genre and playlist pages (and a folder's, without a cover), "…" holding the page's menu. N5b: Covers / List for Albums, Artists and a genre's albums (remembered per section and source, the Preferences default until then), the sorts below (local: A–Z, Artist, Year, Most played by this app's listens), the per-tile accents and the cover glow, the List's sortable columns, Your most played on artist pages. Still to come: Genres and Playlists as tiles.)*
 
 - Header: "Library" (display type), the section control, and per section its tools: a **sort** (Albums: A–Z, Most played, Recently added, Year; Navidrome offers the server's sorts) and a **Covers / List** toggle (Albums, Artists, a genre's albums), remembered per section. The Preferences default applies until a section has its own choice.
 - **Covers**: a responsive grid (tiles ≥178px), the cover with a soft shadow, title and "artist · year" below. Hover lifts the cover slightly and shows a round Play button in the album's own accent. Artists as round images.
@@ -93,7 +93,7 @@ Carried over from 1.x, which this design grew from, with three changes: it opens
 - Motion: as 1.x (Motion below).
 
 ## Preferences
-*(Partly shipped, N2: the page, its title and glass cards; Accent with the house amber, five more curated colours and a custom colour (hex field and the native picker, a contrast note under 3:1), saved in `settings.toml` and applied before the first paint; Music source; the server, folder, cover art/scrobbling and lyrics search sections restyled. N3: "From the music", first and the default. Still to come: the Library default view (N5).)*
+*(Partly shipped, N2: the page, its title and glass cards; Accent with the house amber, five more curated colours and a custom colour (hex field and the native picker, a contrast note under 3:1), saved in `settings.toml` and applied before the first paint; Music source; the server, folder, cover art/scrobbling and lyrics search sections restyled. N3: "From the music", first and the default. N5b: the Library card (Covers or List by default).)*
 
 One page of grouped glass cards, the title "Make it yours":
 - **Accent**: "From the music" (default; a page takes the colours of the album it shows, the player those of the song that plays) or one of ~6 curated colours, or a custom colour (hex + picker). A fixed colour is used everywhere.
@@ -103,11 +103,11 @@ One page of grouped glass cards, the title "Make it yours":
 - Onboarding (first run) keeps its 1.x flow, restyled to this design.
 
 ## Colour
-*(Shipped: N2 the base, the text levels, glass and the house accent, in `tokens.css`; the native window background is the base. N3 the music colours, who takes which (the player, the queue, Now Playing and pages; Home's carousel in N6 and small things in N5 still to come), blending and the page glow. "From the music" is the default accent.)*
+*(Shipped: N2 the base, the text levels, glass and the house accent, in `tokens.css`; the native window background is the base. N3 the music colours, who takes which (the player, the queue, Now Playing and pages; small things (a grid tile's Play button and glow) in N5b; Home's carousel in N6 still to come), blending and the page glow. "From the music" is the default accent.)*
 
 - **Base**: a dim, slightly violet-tinted near-black (`--base`, ~`hsl(256 14% 7%)`), never a neutral grey. Text: a warm white (`--ink`) with two quieter levels (`--ink-2` ~68%, `--ink-3` ~44%). Surfaces are **glass**: translucent white (5–11%) with a hairline border (9%) and a backdrop blur where something floats over content. There is no light or dark mode.
 - **Music colours** *(shipped, N3)*: for every cover the backend computes a small palette (`tint`: a deep dark of its dominant hue for backgrounds; `accent`: its most vivid colour, kept within a lightness and chroma band so it reads on the base and on its own tint; `accentInk` (`accentText` in the code): black or white by contrast; `glow`: the accent, translucent; a greyscale cover is not `vivid` and keeps the house accent). They are computed once per cover and cached with it (in memory, by cover).
-- **Who takes which colours** (with "From the music"; *shipped in N3* for the player, the queue, Now Playing and the album, artist, genre and playlist pages; the glow scrolling with the page in N5a; Home's focused album in N6, small things in N5b):
+- **Who takes which colours** (with "From the music"; *shipped in N3* for the player, the queue, Now Playing and the album, artist, genre and playlist pages; the glow scrolling with the page in N5a; Home's focused album in N6, small things *shipped in N5b*):
   - The **player, the queue and Now Playing**: the playing cover's.
   - A **page** (`#view`): what it shows: Home the carousel's focused album; an album, artist, genre or playlist page its (first) cover's. The page's **glow** is that cover, very blurred, behind the top of the page, fading out over ~600px so the rest of the page (Moods, track lists) rests on the base. It scrolls with the page.
   - **Small things that stand for one album** (a grid tile's Play button, a mood card) use that album's accent.
@@ -121,7 +121,7 @@ One page of grouped glass cards, the title "Make it yours":
 - Small labels (the "eyebrows" above titles: "Album · 1977", "Thursday evening") are the display face in italic at ~15px, sentence case; no tracked-out uppercase labels.
 - Tabular numerals for times, counts and track numbers. Scale: 14.5px body, 13px secondary; section headings ~30px; page titles 36–72px by width; the carousel title ~32px.
 
-## Shape and surfaces *(shipped, N2, except the accent glow on covers (N5, with the per-album accents on grid tiles) and the flourish (open))*
+## Shape and surfaces *(shipped, N2; the accent glow on grid covers N5b, on hover or focus; the flourish open)*
 - Radii: covers 14–18px (12px in the player, round for artists), cards and panels 22–30px, buttons and the navigation fully round (pills).
 - Shadows are soft and long; a focused or featured cover also casts a glow in its accent.
 - Buttons: **primary** a pill in the accent with `accentInk` text; **secondary** a glass pill; icon buttons round, glass where they float.
