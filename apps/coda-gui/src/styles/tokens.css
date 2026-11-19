@@ -9,7 +9,7 @@
  * `state/accent.ts` keeps them current. Everything derived from the
  * accent below follows it.
  *
- * The music colours (N3): colour scopes (the bar, the queue panel, Now
+ * The music colours (N3): colour scopes (the player, the queue panel, Now
  * Playing, the page in `.main`) set `--tint`, and with "From the music"
  * `--accent`, `--accent-text`, `--accent-soft`, `--selection`, `--glow`
  * and `--viz`, inline from a cover's palette (lib/palette.ts). The
@@ -80,7 +80,7 @@
      16% here, 34% for `--selection`). */
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   /* A cover's tint: a deep dark of its dominant hue (core's
-     `cover::palette`), behind the bar's, Now Playing's and the page's
+     `cover::palette`), behind the player's, Now Playing's and the page's
      covers. Unscoped: the base. */
   --tint: var(--bg);
   /* The accent, translucent: soft light around accent things. */
@@ -170,8 +170,10 @@
   /* ----- shape ----- */
 
   --radius-cover: 16px;
-  /* Small covers: the player, row thumbnails. */
+  /* Small covers: row thumbnails, the queue. */
   --radius-cover-small: 10px;
+  /* The player's cover. */
+  --radius-cover-player: 12px;
   --radius-card: 24px;
   --radius-panel: 26px;
   --radius-pill: 999px;
@@ -184,8 +186,14 @@
   /* The top bar's height (the macOS window buttons are centred in it:
      `titlebar.rs`, app.css). */
   --topbar-h: 52px;
-  --queue-panel-width: 380px;
-  --bar-height: 76px;
+  /* The floating player (app.css): its height, its distance from the
+     window's bottom edge, its width, and the room a scrolling page keeps
+     free below its last row so nothing ends under it. */
+  --player-h: 76px;
+  --player-gap: 16px;
+  --player-w: min(1000px, 100% - 32px);
+  --player-room: calc(var(--player-h) + var(--player-gap) + 16px);
+  --queue-panel-width: 400px;
   /* Room for the macOS window buttons (app.css); 0 elsewhere. */
   --titlebar-h: 0px;
   --window-buttons-w: 0px;
@@ -194,23 +202,27 @@
   /* ----- motion ----- */
 
   /* Hover and colour changes: short. Panels and the Now Playing view
-     opening: `--motion-slow`. Now Playing's layout morphs (View
-     Transitions): `--motion-morph`; a track change: `--motion-slide`.
+     opening: `--motion-slow`. Now Playing's layout morphs and the
+     player's cover morphing into it (View Transitions): `--motion-morph`;
+     a track change: `--motion-slide`. The queue panel rising out of the
+     player: `--motion-rise` (with `--spring`), going: `--motion-sink`.
      Soft curves (lib/motion.ts reads these for the Web Animations API);
      `--spring`, a slight overshoot, only for small direct responses (a
-     button press). */
+     button press, the queue rising). */
   --motion-fast: 120ms;
   --motion: 180ms;
   --motion-slow: 320ms;
   --motion-slide: 350ms;
   --motion-morph: 380ms;
+  --motion-rise: 500ms;
+  --motion-sink: 250ms;
   --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
   --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --press-scale: 0.96;
   /* Music colours blending (DESIGN.md "Colour"): accents and glows, tints,
-     and the covers' crossfade behind the page and the bar. */
+     and the covers' crossfade behind the page and the player. */
   --motion-accent: 1.6s;
   --motion-tint: 2s;
   --motion-glow: 1.8s;
@@ -232,6 +244,8 @@
     --motion-slow: 0ms;
     --motion-slide: 0ms;
     --motion-morph: 0ms;
+    --motion-rise: 0ms;
+    --motion-sink: 0ms;
     --motion-accent: 0ms;
     --motion-tint: 0ms;
     --motion-glow: 0ms;

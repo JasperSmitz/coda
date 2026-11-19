@@ -22,6 +22,7 @@ import {
   useEditsRunning,
 } from "../lib/playlists";
 import type { Hidden, PlayContext, Playlist, Track } from "../lib/types";
+import { revealRow } from "../hooks/useLayout";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -120,9 +121,7 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label, cont
     const el = scroller.current;
     const own = table.current;
     if (!el || !own) return;
-    const top = own.offsetTop + at * ROW;
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
+    revealRow(el, own.offsetTop + at * ROW, ROW);
   };
 
   const saveOrder = async (next: number[]) => {

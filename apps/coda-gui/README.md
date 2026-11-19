@@ -6,7 +6,7 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 ## Finding your way
 
-The bar at the top has **Home**, **Search** (`/` or Ctrl/Cmd+F) and **Library**, and the sliders button on the right opens **Preferences**. Each of the three keeps its own history: open an album from Library, switch to Home and back, and Library is still on that album; click the entry you are on to go back to its start. Back is `Backspace`, `Alt+←`, the mouse's back button or Esc. **Library** shows your collection in sections, chosen at the top of the page: Albums, Artists, Genres, Playlists, Mixes, and Folders for a local library; the section you chose is remembered. With both a music folder and a Navidrome server set up, you browse one at a time: choose it under **Music source** in Preferences, or press Ctrl/Cmd+1 (local) or Ctrl/Cmd+2 (Navidrome). `q` (or the queue button in the bottom bar) opens the queue in a panel above the bar; Esc, `q` or a click elsewhere closes it.
+The bar at the top has **Home**, **Search** (`/` or Ctrl/Cmd+F) and **Library**, and the sliders button on the right opens **Preferences**. Each of the three keeps its own history: open an album from Library, switch to Home and back, and Library is still on that album; click the entry you are on to go back to its start. Back is `Backspace`, `Alt+←`, the mouse's back button or Esc. **Library** shows your collection in sections, chosen at the top of the page: Albums, Artists, Genres, Playlists, Mixes, and Folders for a local library; the section you chose is remembered. With both a music folder and a Navidrome server set up, you browse one at a time: choose it under **Music source** in Preferences, or press Ctrl/Cmd+1 (local) or Ctrl/Cmd+2 (Navidrome). The player floats at the bottom of the window: the cover and the track's names on the left, the controls and the timeline in the middle, a small visualizer, the volume, the queue and full screen on the right. `q` (or the player's queue button) opens the queue in a panel that rises out of the player; Esc, `q` or a click elsewhere closes it.
 
 ## The look and the accent
 
@@ -22,7 +22,7 @@ A **mix** is a saved recipe of genres, artists and albums from one source, for e
 
 ## Now Playing and the window
 
-`f` (or the Full screen button at the right of the bottom bar) opens Now Playing in full screen; closing it leaves full screen again, unless the window was already full screen before. A click on the bar's cover opens Now Playing in a window, and the button at its top right enters or leaves full screen without closing it. Coda always starts in a window, at the size and place it last had outside full screen (maximised if it was).
+`f` (or the Full screen button at the right of the player) opens Now Playing in full screen; closing it leaves full screen again, unless the window was already full screen before. A click on the player's cover opens Now Playing in a window, the cover growing into Now Playing's, and the button at its top right enters or leaves full screen without closing it. Coda always starts in a window, at the size and place it last had outside full screen (maximised if it was).
 
 On macOS the window has no separate title bar: the close, minimise and zoom buttons sit at the left of the top bar (or over Now Playing), and you drag the window by the top bar or a page's header (double-click to zoom). Cmd+W, Cmd+M, Cmd+Q and the View and Window menus work as usual.
 

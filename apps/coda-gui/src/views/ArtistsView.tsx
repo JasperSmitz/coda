@@ -6,7 +6,7 @@ import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
-import { useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { revealRow, useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { addToMixFlow } from "../lib/mixes";
@@ -55,9 +55,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   const scrollTo = (index: number) => {
     const el = scroller.current;
     if (!el) return;
-    const top = index * ROW;
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
+    revealRow(el, index * ROW, ROW);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {

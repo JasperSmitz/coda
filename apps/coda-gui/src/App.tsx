@@ -3,7 +3,7 @@ import { Banner } from "./components/Banner";
 import { PageGlow } from "./components/PageGlow";
 import { DialogHost } from "./components/Dialog";
 import { MixDialogHost } from "./components/MixDialogs";
-import { NowPlayingBar } from "./components/NowPlayingBar";
+import { Player } from "./components/Player";
 import { QueuePanel } from "./components/QueuePanel";
 import { QueuePopover } from "./components/QueuePopover";
 import { Toasts } from "./components/Toasts";
@@ -13,7 +13,7 @@ import { useFullscreen } from "./hooks/useFullscreen";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
-import { viewTransition } from "./lib/motion";
+import { decodedWithin, viewTransition } from "./lib/motion";
 import { sourceReplaced, useNav } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
@@ -29,6 +29,8 @@ import { Onboarding } from "./views/Onboarding";
 const QUEUE_OPEN_KEY = "coda.queuePanelOpen";
 /** The Now Playing view's queue panel, remembered apart from the layout's. */
 const NP_QUEUE_OPEN_KEY = "coda.nowPlayingQueueOpen";
+/** The longest wait for the morph's end cover to decode (the screen is frozen meanwhile). */
+const MORPH_DECODE_WAIT_MS = 150;
 
 function loadFlag(key: string, fallback: boolean): boolean {
   try {
@@ -134,8 +136,6 @@ export default function App() {
     npLyricsTarget.current = target;
     viewTransition(() => setNpLyrics(target), { kind: "lyrics", dir: target ? "enter" : "leave" });
   }, []);
-  const toggleNowPlaying = useCallback(() => setNowPlaying((open) => !open), []);
-  const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
   // Any navigation (a top bar entry, Go to album from Now Playing, search)
   // shows the browse view again.
   useEffect(() => setNowPlaying(false), [top]);
@@ -156,9 +156,37 @@ export default function App() {
   const onboarding = started && snapshot.problems.some((p) => p.kind === "noConfig");
   // Leaving Now Playing (any route) leaves a full screen it entered.
   const fullscreen = useFullscreen(immersive && !onboarding);
-  const enterFullscreen = fullscreen.enter;
-  // `f` and the bar's Full screen button: Now Playing in full screen (the
-  // bar's cover opens it windowed). The one place that decides it.
+  const { enter: enterFullscreen, leavesOnClose } = fullscreen;
+  // Opening and closing Now Playing with a track playing morphs the
+  // player's cover into Now Playing's and back (a View Transition; the
+  // rest crossfades; experience.css `np-morph`). Not when the window
+  // changes size meanwhile (entering or leaving full screen), which would
+  // cut the transition short: then Now Playing fades in by itself.
+  const hasTrack = snapshot?.playing != null;
+  const morphNowPlaying = useCallback((open: boolean) => {
+    viewTransition(() => setNowPlaying(open), {
+      kind: "np-morph",
+      dir: open ? "open" : "close",
+      // The cover it grows into (or back into) drawn before the new screen is taken.
+      settle: () =>
+        decodedWithin(
+          [document.querySelector(open ? ".now-playing-content > .now-playing-cover" : ".player-cover")],
+          MORPH_DECODE_WAIT_MS,
+        ),
+    });
+  }, []);
+  // The player's cover: Now Playing windowed.
+  const openNowPlaying = useCallback(() => {
+    if (hasTrack) morphNowPlaying(true);
+    else setNowPlaying(true);
+  }, [hasTrack, morphNowPlaying]);
+  const closeNowPlaying = useCallback(() => {
+    if (hasTrack && !leavesOnClose()) morphNowPlaying(false);
+    else setNowPlaying(false);
+  }, [hasTrack, leavesOnClose, morphNowPlaying]);
+  // `f` and the player's Full screen button: Now Playing in full screen
+  // (the player's cover opens it windowed). The one place that decides
+  // it. No morph: the window resizes as it enters full screen.
   const connected = snapshot !== null;
   const openNowPlayingFullscreen = useCallback(() => {
     setNowPlaying(true);
@@ -238,7 +266,7 @@ export default function App() {
 
   const queueOpen = layoutQueueOpen;
   return (
-    <div className="app">
+    <div className={`app ${queueOpen ? "has-queue-panel" : ""}`}>
       <TopBar />
       <main className="main" ref={mainRef}>
         <PageGlow url={pageCover} />
@@ -263,11 +291,11 @@ export default function App() {
         </QueuePopover>
       )}
       {snapshot && (
-        <NowPlayingBar
+        <Player
           snapshot={snapshot}
           queueOpen={queueOpen}
           onToggleQueue={toggleLayoutQueue}
-          onToggleNowPlaying={toggleNowPlaying}
+          onOpenNowPlaying={openNowPlaying}
           onFullscreen={openNowPlayingFullscreen}
         />
       )}
@@ -280,9 +308,9 @@ export default function App() {
 
 /**
  * Closing Now Playing remounts the browse view, so the element focused
- * before it opened is gone: focus the bar's Now Playing button (or the
- * browse view's first tabbable element), unless something else (search,
- * a view) has taken the focus already.
+ * before it opened is gone: focus the player's cover (its Now Playing
+ * button; or the browse view's first tabbable element), unless something
+ * else (search, a view) has taken the focus already.
  */
 function useFocusAfterNowPlaying(immersive: boolean) {
   const was = useRef(immersive);
@@ -293,7 +321,7 @@ function useFocusAfterNowPlaying(immersive: boolean) {
     const lost = !document.activeElement || document.activeElement === document.body;
     if (!lost) return;
     const target =
-      document.querySelector<HTMLElement>(".bar-cover-button:not(:disabled)") ??
+      document.querySelector<HTMLElement>(".player-cover-button:not(:disabled)") ??
       document.querySelector<HTMLElement>('.main [tabindex="0"], .main button:not(:disabled)');
     target?.focus();
   }, [immersive]);

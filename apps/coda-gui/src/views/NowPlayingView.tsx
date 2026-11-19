@@ -1,5 +1,5 @@
 // The immersive Now Playing view (`f`): the only thing in the window
-// while open (App hides the top bar, browse area, queue panel and bar).
+// while open (App hides the top bar, browse area, queue panel and player).
 // Large cover over a blurred, darkened copy of it, title/artist/album, one
 // timeline with repeat beside it, one transport row with volume,
 // visualizer bars and an "Up next" card (faded out, slot kept, while the
@@ -8,10 +8,13 @@
 // stacks the player into a column on the left and shows the lyrics in the
 // middle (DESIGN.md). Visualizer readings are
 // asked for only while this view is shown and the window is not hidden or
-// minimised.
+// minimised (hooks/useVisualizerReadings).
 //
 // Motion (DESIGN.md, all off with reduced motion; nothing remounted):
-// the view fades and scales in when it opens; the queue panel slides in
+// the view fades and scales in when it opens, unless it opens through
+// App's cover morph (a View Transition, `data-vt="np-morph"`: the
+// player's cover grows into this one while the rest crossfades; then the
+// transition is the whole entrance); the queue panel slides in
 // and out (`usePresence`). Switching the layout (`q`, `l`) and a new track
 // are View Transitions (`lib/motion.ts` `viewTransition`; App wraps the
 // toggles, this view the track change): the browser takes the old and the
@@ -39,7 +42,7 @@ import { Cover } from "../components/Cover";
 import { LyricsPanel } from "../components/LyricsPanel";
 import { ActiveMixLine } from "../components/MixParts";
 import { ArtistAlbumLine } from "../components/NameLink";
-import { RepeatButton, SeekBar, VolumeControl } from "../components/NowPlayingBar";
+import { RepeatButton, SeekBar, VolumeControl } from "../components/Player";
 import { Visualizer } from "../components/Visualizer";
 import {
   CloseIcon,
@@ -55,7 +58,8 @@ import {
 import { useFadeOnChange } from "../hooks/useFadeOnChange";
 import { useLyrics } from "../hooks/useLyrics";
 import { usePresence } from "../hooks/usePresence";
-import { coverSrc, intent, intentInOrder, onWindowMinimized } from "../lib/ipc";
+import { useVisualizerReadings } from "../hooks/useVisualizerReadings";
+import { coverSrc, intent } from "../lib/ipc";
 import {
   type TransitionHandle,
   cssMs,
@@ -84,50 +88,6 @@ interface Props {
   /** The window is full screen; the toolbar button enters or leaves it. */
   fullscreen: boolean;
   onToggleFullscreen: () => void;
-}
-
-// Visualizer requests go out one at a time, each carrying the latest
-// wish, so a quick off/on (StrictMode, fast `f`) can never reach the
-// engine reordered.
-let visualizerChain: Promise<void> = Promise.resolve();
-let visualizerWanted = false;
-let visualizerSent: boolean | null = null;
-
-function requestVisualizer(visible: boolean) {
-  visualizerWanted = visible;
-  visualizerChain = visualizerChain.then(async () => {
-    const wanted = visualizerWanted;
-    if (wanted === visualizerSent) return;
-    visualizerSent = wanted;
-    await intentInOrder({ type: "setVisualizerVisible", visible: wanted });
-  });
-}
-
-/**
- * Asks for visualizer readings while `wanted`, the page is visible and the
- * window is not minimised.
- */
-function useVisualizerReadings(wanted: boolean) {
-  useEffect(() => {
-    if (!wanted) return;
-    let minimized = false;
-    let disposed = false;
-    const sync = () => {
-      if (!disposed) requestVisualizer(document.visibilityState === "visible" && !minimized);
-    };
-    sync();
-    document.addEventListener("visibilitychange", sync);
-    const unlisten = onWindowMinimized((m) => {
-      minimized = m;
-      sync();
-    });
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", sync);
-      unlisten.then((f) => f()).catch(() => {});
-      requestVisualizer(false);
-    };
-  }, [wanted]);
 }
 
 /** How the queue panel looks out of view. */
@@ -268,6 +228,14 @@ export function NowPlayingView({
   const heading = useRef<HTMLDivElement>(null);
   const lyricsArea = useRef<HTMLDivElement>(null);
   const lyricsShown = lyricsMode && playing != null;
+  // Opened by the cover morph: the transition crossfades the view in, so
+  // its own entrance (which would also move the cover's end place) is off.
+  // Only an opening morph: a view shown during a closing one (a quick `f`
+  // after Esc) still gets its entrance.
+  const [morphedIn] = useState(() => {
+    const { vt, vtDir } = document.documentElement.dataset;
+    return vt === "np-morph" && vtDir === "open";
+  });
   const lyrics = useLyrics(playing, lyricsMode, snapshot.browse.server);
 
   // Without View Transitions (App wraps `q` and `l` in one): a short
@@ -399,7 +367,7 @@ export function NowPlayingView({
       tabIndex={-1}
       className={`now-playing ${playing ? "" : "is-empty"} ${queueOpen ? "has-queue" : ""} ${
         lyricsShown ? "is-lyrics" : ""
-      }`}
+      } ${morphedIn ? "is-morphed-in" : ""}`}
       aria-label="Now Playing"
     >
       <Backdrop url={shownTrack?.coverUrl ?? null} />

@@ -15,22 +15,14 @@
 }
 
 .app {
-  /* The top bar and the queue panel float over the page (below). */
+  /* The top bar, the queue panel and the player float over the page
+     (below). */
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) var(--bar-height);
-  grid-template-areas:
-    "main"
-    "bar";
-  height: 100%;
-}
-
-/* Now Playing (`f`): nothing but the view. */
-.app.is-immersive {
-  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   grid-template-areas: "main";
+  height: 100%;
 }
 
 .app.is-immersive .toasts {
@@ -451,10 +443,15 @@
   font-weight: 500;
 }
 
+/* The page's scrolling body reaches the window's bottom edge, under the
+   player; its end keeps room for the player (`--player-room`), and
+   keyboard scrolling keeps rows clear of it (`scroll-padding-bottom`,
+   which `scrollIntoView` and `useLayout`'s `revealRow` honour). */
 .view-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 32px;
+  padding: 20px 32px calc(20px + var(--player-room));
+  scroll-padding-bottom: var(--player-room);
 }
 
 .placeholder {
@@ -473,8 +470,12 @@
 
 .starting {
   position: absolute;
-  inset: auto 0 24px 0;
+  inset: auto 0 calc(var(--player-room) + 8px) 0;
   text-align: center;
+}
+
+.app.is-immersive .starting {
+  bottom: 24px;
 }
 
 .banners {
@@ -515,18 +516,22 @@
 
 /* ----- queue ----- */
 
-/* The queue panel over the page: above the bar, at its right edge
-   (QueuePopover; 2.0 N1, until the floating player). */
+/* The queue panel rising out of the player (QueuePopover): right above
+   it, its right edge on the player's; it rises from the Queue button
+   (`transform-origin`: the button's centre, about 68px in from the
+   player's right edge and 48px below the panel). Tinted glass, the
+   playing colours. */
 .queue-popover {
   position: absolute;
-  right: 12px;
-  bottom: calc(var(--bar-height) + 8px);
+  right: calc((100% - var(--player-w)) / 2);
+  bottom: calc(var(--player-gap) + var(--player-h) + 10px);
   z-index: 6;
   display: flex;
   flex-direction: column;
-  width: min(var(--queue-panel-width), calc(100% - 24px));
-  max-height: 60%;
+  width: min(var(--queue-panel-width), var(--player-w));
+  max-height: min(560px, 60%);
   border-radius: var(--radius-panel);
+  transform-origin: calc(100% - 68px) calc(100% + 48px);
   /* Glass, tinted with the playing cover. */
   background: linear-gradient(color-mix(in srgb, var(--tint) 45%, transparent), color-mix(in srgb, var(--tint) 45%, transparent)), var(--glass);
   border: 1px solid var(--border);
@@ -701,28 +706,49 @@
   }
 }
 
-/* ----- now-playing bar ----- */
+/* ----- the player (components/Player; DESIGN.md "Player") -----
+   A rounded strip floating above the bottom edge, centred, over the page
+   (which scrolls under it). Its background: glass, covered by the playing
+   cover, enlarged and blurred, under a wash of its tint
+   (`.player-backdrop`). */
 
-.bar {
-  grid-area: bar;
+.player {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--player-gap);
+  z-index: 5;
+  width: var(--player-w);
+  height: var(--player-h);
+  margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(320px, 2fr) minmax(180px, 1fr);
+  /* The middle stays centred while both sides fit; the right side never
+     shrinks below its controls. */
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 420px) minmax(min-content, 1fr);
   align-items: center;
   gap: 16px;
-  padding: 0 16px;
-  /* A strip for now (N4 replaces it with the floating player): the
-     playing cover, enlarged and heavily blurred, under a wash of its tint
-     (`.bar-backdrop`). */
-  position: relative;
+  padding: 0 14px 0 11px;
   isolation: isolate;
-  background: var(--bg);
-  border-top: 1px solid var(--border);
+  overflow: hidden;
+  border-radius: var(--radius-panel);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-big);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
-/* The bar's background: crossfading covers (components/PageGlow) under a
-   wash of the tint, dense enough that text-2 reads at ≥4.5:1 over a
-   white cover. */
-.bar-backdrop {
+/* Crossfading covers (components/PageGlow) under a wash of the tint, at
+   86% (DESIGN.md "Contrast"). The worst case, an all-white cover (opaque
+   under the wash, so what is under the player does not count) with its
+   greyscale tint (OKLCH L 0.20, C 0.01: #1a1416–#14161b by its cast):
+   about #3a3537–#35373b; text ≥10.9:1, text-2 ≥5.2:1, text-3 ≥3.3:1,
+   the house accent ≥5.9:1. A bright yellow cover (#ffff00, tint
+   #181800): about #383800; text 11.0, text-2 5.3, text-3 3.4, house
+   accent 6.0, its own accent #d2d331 7.6. Nothing playing: the base's
+   wash over the glass over white, about #17151a (text-3 5.0). sRGB
+   compositing, as the webview blends. */
+.player-backdrop {
   position: absolute;
   inset: 0;
   z-index: -1;
@@ -730,25 +756,25 @@
   pointer-events: none;
 }
 
-.bar-backdrop .glow-layer {
+.player-backdrop .glow-layer {
   inset: -200% -10%;
   width: 120%;
   height: 500%;
   filter: blur(48px) saturate(1.4);
 }
 
-.bar-backdrop .glow-layer.is-shown {
+.player-backdrop .glow-layer.is-shown {
   opacity: 1;
 }
 
-.bar-backdrop::after {
+.player-backdrop::after {
   content: "";
   position: absolute;
   inset: 0;
   background: color-mix(in srgb, var(--tint) 86%, transparent);
 }
 
-.bar-track {
+.player-track {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -762,10 +788,19 @@
   flex: none;
 }
 
-.bar-cover {
-  width: 52px;
-  height: 52px;
-  border-radius: var(--radius-cover-small);
+.player-cover-button {
+  flex: none;
+  border-radius: var(--radius-cover-player);
+}
+
+.player-cover-button:hover .player-cover {
+  filter: brightness(1.1);
+}
+
+.player-cover {
+  width: 54px;
+  height: 54px;
+  border-radius: var(--radius-cover-player);
 }
 
 .cover-placeholder {
@@ -777,35 +812,99 @@
   letter-spacing: 0.02em;
 }
 
-.bar-text {
+.player-text {
   min-width: 0;
 }
 
-.bar-title {
+.player-nothing {
+  padding-left: 9px;
+}
+
+.player-title {
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.bar-artist {
+.player-artist {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.bar-center {
+.player-center {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  min-width: 0;
 }
 
-.bar-controls {
+.player-controls {
   display: flex;
   align-items: center;
   gap: 10px;
 }
+
+.player .play-button {
+  width: 34px;
+  height: 34px;
+}
+
+.player .seek .time {
+  font-size: 11.5px;
+}
+
+.player-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* The small visualizer: 5 bars in the playing accent (over the base
+   `.visualizer` rules in experience.css). */
+.player .player-visualizer {
+  flex: none;
+  width: 30px;
+  height: 22px;
+  margin: 0 4px 0 0;
+}
+
+.player .volume-slider {
+  width: 80px;
+}
+
+/* Towards the minimum window (900px) the middle gives the title room. */
+@media (max-width: 1099.98px) {
+  .player {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 320px) minmax(min-content, 1fr);
+  }
+}
+
+/* Narrow windows: no visualizer and volume (`ROOMY` in Player.tsx), then
+   (narrower than the minimum window, should one get there) no timeline
+   and previous / next. */
+@media (max-width: 859.98px) {
+  .player .player-visualizer,
+  .player .volume {
+    display: none;
+  }
+}
+
+@media (max-width: 599.98px) {
+  .player {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .player .seek,
+  .player-skip {
+    display: none;
+  }
+}
+
+/* ----- timeline and volume (the player, Now Playing) ----- */
 
 .seek {
   display: grid;
@@ -833,13 +932,6 @@
 
 .repeat-button {
   margin-left: -4px;
-}
-
-.bar-right {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
 }
 
 .volume {
@@ -908,16 +1000,28 @@
 
 /* ----- toasts and menus ----- */
 
+/* Bottom right: above the player in the main layout, at the window's
+   bottom edge without one (onboarding, Now Playing: `.is-immersive`).
+   While the queue panel is open they sit left of it, so they never cover
+   its bottom rows. */
 .toasts {
   position: fixed;
   right: 16px;
-  bottom: calc(var(--bar-height) + 12px);
+  bottom: 16px;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
   z-index: 10;
   pointer-events: none;
+}
+
+.app .toasts {
+  bottom: calc(var(--player-room) + 4px);
+}
+
+.app.has-queue-panel .toasts {
+  right: calc((100% - var(--player-w)) / 2 + min(var(--queue-panel-width), var(--player-w)) + 12px);
 }
 
 .toast {

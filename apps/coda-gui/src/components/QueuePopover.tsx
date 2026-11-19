@@ -1,22 +1,26 @@
-// The queue as a floating panel above the bar, anchored to its right edge
-// (`q` or the bar's queue button; 2.0 N1, until the floating player). It
-// rises and fades in (`usePresence`; none with reduced motion), takes the
-// focus (its list) when opened, and closes on Esc (App, through
-// `useBrowseKeys`), `q`, the button, or a pointer-down outside it, unless
-// a menu or dialog is open (one may have been opened from the queue) or a
-// drag in it is under way. Closing with the focus inside gives it to the
-// queue button. It takes the playing cover's colours (useColourScope).
+// The queue as a floating panel rising out of the player (DESIGN.md
+// "Queue"): `q` or the player's Queue button. Anchored above the player,
+// its right edge on the player's (app.css). It rises and scales in from
+// the Queue button with a spring and fades out faster (`usePresence`;
+// none with reduced motion), takes the focus (its list) when opened, and
+// closes on Esc (App, through `useBrowseKeys`), `q`, the button, or a
+// pointer-down outside it, unless a menu or dialog is open (one may have
+// been opened from the queue) or a drag in it is under way. Closing with
+// the focus inside gives it to the queue button. It takes the playing
+// cover's colours (useColourScope).
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { usePresence } from "../hooks/usePresence";
 import { useColourScope } from "../state/palettes";
 
-/** How the panel looks out of view. */
-const HIDDEN: Keyframe = { opacity: 0, transform: "translateY(12px)" };
+/** Before it rises (from the Queue button: `transform-origin`, app.css). */
+const RISING: Keyframe = { opacity: 0, transform: "translateY(24px) scale(0.9)" };
+/** It goes by fading out. */
+const GONE: Keyframe = { opacity: 0, transform: "none" };
 
-/** The bar's queue button. */
+/** The player's queue button. */
 function focusQueueButton() {
-  document.querySelector<HTMLElement>(".bar .queue-toggle")?.focus();
+  document.querySelector<HTMLElement>(".player .queue-toggle")?.focus();
 }
 
 interface Props {
@@ -31,8 +35,10 @@ export function QueuePopover({ open, onClose, coverUrl, children }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   useColourScope(ref, coverUrl);
   const shown = usePresence(open, ref, {
-    hidden: HIDDEN,
-    duration: "--motion",
+    hidden: RISING,
+    duration: "--motion-rise",
+    easing: "--spring",
+    exit: { hidden: GONE, duration: "--motion-sink" },
     onFocusLeaving: focusQueueButton,
   });
 

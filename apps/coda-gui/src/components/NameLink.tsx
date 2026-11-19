@@ -85,7 +85,7 @@ export function TrackAlbum({ track, className }: { track: Track; className: stri
 }
 
 /**
- * "Artist — Album" (the now-playing bar and view): each a link when known,
+ * "Artist — Album" (the player and Now Playing): each a link when known,
  * the separator plain text. Both are Tab stops. `onGo`: after navigating
  * (Now Playing closes, even when the page is already the top one).
  */

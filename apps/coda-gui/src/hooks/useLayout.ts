@@ -1,6 +1,7 @@
 // Layout helpers for virtualized lists: an element's size, its scroll
-// position (restored from the navigation entry on Back), and a library
-// version that changes while the scan grows the library.
+// position (restored from the navigation entry on Back), keeping a row in
+// view, and a library version that changes while the scan grows the
+// library.
 
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Entry } from "../state/nav";
@@ -21,6 +22,18 @@ export function useElementSize(ref: RefObject<HTMLElement | null>): {
     return () => observer.disconnect();
   }, [ref]);
   return size;
+}
+
+/**
+ * Scrolls `el` (a scrolling page body) just enough that the row at `top`
+ * (in its content) and `height` tall is in view, clear of what floats
+ * over its bottom edge (the player: its `scroll-padding-bottom`, app.css).
+ */
+export function revealRow(el: HTMLElement, top: number, height: number) {
+  const covered = parseFloat(getComputedStyle(el).scrollPaddingBottom) || 0;
+  const room = Math.max(height, el.clientHeight - covered);
+  if (top < el.scrollTop) el.scrollTop = top;
+  else if (top + height > el.scrollTop + room) el.scrollTop = top + height - room;
 }
 
 /**

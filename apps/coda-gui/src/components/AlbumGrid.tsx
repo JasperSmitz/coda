@@ -18,6 +18,7 @@ import { albumIngredient } from "../lib/mixRecipe";
 import { albumContext, enqueue, openRoute, playFrom, playTracks } from "../lib/play";
 import type { Album, SourceKind } from "../lib/types";
 import { nav } from "../state/nav";
+import { revealRow } from "../hooks/useLayout";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuState } from "./ContextMenu";
 import { Cover } from "./Cover";
@@ -126,10 +127,7 @@ export function AlbumGrid({
     const el = scroller.current;
     if (!el) return;
     const row = Math.floor(index / columns);
-    const top = view.offset + row * rowHeight;
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + rowHeight > el.scrollTop + el.clientHeight)
-      el.scrollTop = top + rowHeight - el.clientHeight;
+    revealRow(el, view.offset + row * rowHeight, rowHeight);
     focusAfterRender.current = index;
     const tileEl = grid.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
     if (tileEl) {

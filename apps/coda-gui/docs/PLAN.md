@@ -85,7 +85,7 @@ A design-led redesign on `main`: Home / Search / Library navigation, Home built 
 - A per-cover palette (tint, accent, accent ink, glow) with contrast limits, computed off the engine actor when a cover is loaded and cached with it (proposed: `coda_core::cover::palette`, pure and tested; the GUI exposes it per cover token). Scoped colours: player/queue/Now Playing follow the playing cover; a page follows what it shows (`#view`), with its glow; grid tiles and mood cards their album's accent; registered properties for the slow blends, with an instant fallback.
 - Acceptance: palettes are deterministic and tested (contrast on base and own tint, greyscale and near-black covers, missing covers); no colour change blocks rendering; a fixed accent overrides everywhere; reduced motion switches instantly.
 
-### N4 — Player, queue and Now Playing
+### N4 — Player, queue and Now Playing (done 2026-11-19, `docs/plans/n4-player.md`; reviewed; runtime smoke N4-1–N4-13 for the owner)
 - The floating player (cover background, the small visualizer, links, repeat, volume), the queue rising out of it (anchored to its right edge; Esc / `q` / click elsewhere closes; all 1.x queue features), the player's cover morphing into Now Playing's and back; Now Playing on the 2.0 tokens (its side-panel queue unchanged).
 - Acceptance: every 1.x player and queue behaviour (selection, drag-and-drop, header buttons, mix line) works in the new placement; the morph degrades to a crossfade without View Transitions; the 1.x Now Playing smoke checks still pass.
 

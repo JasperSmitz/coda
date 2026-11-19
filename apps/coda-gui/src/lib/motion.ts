@@ -1,27 +1,42 @@
 // Motion, from the same tokens as the CSS (`--motion*`, `--ease-*` in
 // tokens.css): Web Animations for small things, View Transitions for Now
-// Playing's layout changes and track changes. With reduced motion nothing
+// Playing's layout changes and track changes, and for the player's cover
+// morphing into Now Playing's. With reduced motion nothing
 // animates: `animate` returns null and `viewTransition` applies the
 // change at once.
 
 import { flushSync } from "react-dom";
 
+/** Looked up once; its `matches` follows the setting live. */
+let reducedMotionQuery: MediaQueryList | null | undefined;
+
 export function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  if (reducedMotionQuery === undefined) {
+    reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+  }
+  return reducedMotionQuery?.matches ?? false;
 }
 
-export type Duration = "--motion-fast" | "--motion" | "--motion-slow";
-export type Easing = "--ease-out" | "--ease-in-out";
+export type Duration =
+  | "--motion-fast"
+  | "--motion"
+  | "--motion-slow"
+  | "--motion-rise"
+  | "--motion-sink";
+export type Easing = "--ease-out" | "--ease-in-out" | "--spring";
 
 const FALLBACK_MS: Record<Duration, number> = {
   "--motion-fast": 120,
   "--motion": 180,
   "--motion-slow": 320,
+  "--motion-rise": 500,
+  "--motion-sink": 250,
 };
 
 const FALLBACK_EASING: Record<Easing, string> = {
   "--ease-out": "cubic-bezier(0.33, 1, 0.68, 1)",
   "--ease-in-out": "cubic-bezier(0.45, 0, 0.55, 1)",
+  "--spring": "cubic-bezier(0.34, 1.56, 0.64, 1)",
 };
 
 function token(name: string): string {

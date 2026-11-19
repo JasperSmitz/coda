@@ -1,4 +1,4 @@
-// Full screen for Now Playing. `enter` (from `f` or the bar's Full screen
+// Full screen for Now Playing. `enter` (from `f` or the player's Full screen
 // button, through App) takes the window full screen unless it already is;
 // `toggle` is Now Playing's own button. Leaving Now Playing leaves full
 // screen again, but only one we entered: a full screen the user chose
@@ -24,7 +24,9 @@ let requests: Promise<void> = Promise.resolve();
 export function useFullscreen(nowPlayingOpen: boolean) {
   const [fullscreen, setFullscreen] = useState(false);
   const entered = useRef<Entered>("no");
-  /** An `enter` is pending and Now Playing was not closed since. */
+  /** `enter`s asked for and not yet decided at their turn. */
+  const entering = useRef(0);
+  /** Some `enter` is undecided and Now Playing was not closed since (cleared once all are decided). */
   const wanted = useRef(false);
   /** Now Playing is shown (for requests deciding at their turn). */
   const open = useRef(nowPlayingOpen);
@@ -89,14 +91,19 @@ export function useFullscreen(nowPlayingOpen: boolean) {
 
   const enter = useCallback(() => {
     wanted.current = true;
+    entering.current += 1;
     return request(true, async () => {
-      // Closed again meanwhile, or full screen already (the user's): stay.
-      if (!wanted.current) return false;
       try {
+        // Closed again meanwhile, or full screen already (the user's): stay.
+        if (!wanted.current) return false;
         const already = await windowIsFullscreen();
         return wanted.current && !already;
       } catch {
         return false;
+      } finally {
+        // Decided: from here `entered` says whether we go full screen.
+        entering.current -= 1;
+        if (entering.current === 0) wanted.current = false;
       }
     });
   }, [request]);
@@ -107,5 +114,11 @@ export function useFullscreen(nowPlayingOpen: boolean) {
     void request(on, async () => !on || open.current);
   }, [request, fullscreen]);
 
-  return { fullscreen, enter, toggle };
+  /**
+   * Closing Now Playing now would leave full screen: we entered it (or
+   * are entering it), or an `enter` not yet decided may still do so.
+   */
+  const leavesOnClose = useCallback(() => entered.current !== "no" || wanted.current, []);
+
+  return { fullscreen, enter, toggle, leavesOnClose };
 }

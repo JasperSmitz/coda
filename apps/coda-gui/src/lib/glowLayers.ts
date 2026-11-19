@@ -1,4 +1,4 @@
-// The crossfading cover layers behind the page and the bar
+// The crossfading cover layers behind the page and the player
 // (components/PageGlow), as pure state changes (`node --test scripts/`
 // tests them in scripts/glow.test.mjs).
 //

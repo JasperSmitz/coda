@@ -22,7 +22,7 @@
 }
 
 /*
- * Keyboard focus (the bar, Now Playing): their lines clip overflow, so
+ * Keyboard focus (the player, Now Playing): their lines clip overflow, so
  * the global ring (2px outside) would be cut off. An inset ring plus the
  * accent colour stays inside the text's own box; no layout change.
  */
@@ -524,13 +524,26 @@
   font-weight: 600;
 }
 
+/* Centred in the room above the player while it fits; when it does not
+   (a short window), it starts at the top and scrolls, so A stays
+   reachable. Auto margins rather than `justify-content: center`, which
+   would push the first letters out of reach above the scroll start (and
+   `safe center` is not in every webview). */
 .letter-index {
   display: flex;
   flex-direction: column;
-  justify-content: center;
   gap: 1px;
-  padding: 8px 6px;
+  /* Clear of the player at the bottom. */
+  padding: 8px 6px var(--player-room);
   overflow-y: auto;
+}
+
+.letter-index > :first-child {
+  margin-top: auto;
+}
+
+.letter-index > :last-child {
+  margin-bottom: auto;
 }
 
 .letter-index button {

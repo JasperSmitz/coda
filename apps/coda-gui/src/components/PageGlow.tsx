@@ -1,7 +1,7 @@
 // Covers as blurred light (DESIGN.md "Colour"): `PageGlow` behind the top
 // of a page (its subject's cover, very blurred, under a radial darkening
 // of the page's tint, fading out by ~600px), and `CoverGlow`, the same
-// crossfading layers for other places (the docked bar's background).
+// crossfading layers for other places (the player's background).
 //
 // A new cover fades in over the old one once loaded (`--motion-glow`),
 // then the old one goes; no cover, or a new one that fails to load, fades

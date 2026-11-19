@@ -1,5 +1,5 @@
 // Music colours on an element (DESIGN.md "Colour"), pure helpers: which
-// tokens a colour scope (the bar, the queue panel, Now Playing, the page)
+// tokens a colour scope (the player, the queue panel, Now Playing, the page)
 // sets for a cover's palette, and writing them. The palettes come from
 // the backend (`cover_palettes`, through state/palettes.ts); the scope
 // hook is `useColourScope` there.

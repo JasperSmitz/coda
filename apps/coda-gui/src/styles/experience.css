@@ -68,7 +68,8 @@
   flex-direction: column;
   gap: 18px;
   max-width: 780px;
-  padding-bottom: 32px;
+  /* Its end clear of the player (app.css `.view-body`). */
+  padding-bottom: calc(32px + var(--player-room));
 }
 
 /* Each section a glass card. */
@@ -346,15 +347,6 @@
 }
 
 /* ----- now playing ----- */
-
-.bar-cover-button {
-  flex: none;
-  border-radius: var(--radius-cover-small);
-}
-
-.bar-cover-button:not(:disabled):hover .bar-cover {
-  filter: brightness(1.1);
-}
 
 /* Focused as a whole when it opens (a landing spot for Tab, not a control). */
 .now-playing:focus {
@@ -943,9 +935,12 @@
    `lib/motion.ts` `viewTransition` sets `data-vt` on <html> while one
    runs: "queue" for `q` (only where the content moves with the panel:
    `queueToggleMovesContent`), "lyrics" for `l` (App), "slide" for a
-   track change (NowPlayingView, with `data-vt-dir` "forward" or "back").
-   Elements are named only then and only inside Now Playing, so every name
-   is unique (the main layout names nothing). Everything unnamed (the
+   track change (NowPlayingView, with `data-vt-dir` "forward" or "back"),
+   "np-morph" for opening and closing Now Playing windowed (App, with
+   `data-vt-dir` "open" or "close"; at the end of this file). Elements
+   are named only then and, for the first three, only inside Now Playing;
+   the morph names one cover on each side (`np-morph`, used by nothing
+   else), so every name is unique. Everything unnamed (the
    backdrop, the visualizer, the queue panel) is swapped at once: the page
    itself is not crossfaded as one image. Named parts are drawn above
    everything else while they move, so nothing is named where it would be
@@ -980,11 +975,11 @@
   --np-lx-lyrics-rise: 40px;
 }
 
-:root[data-vt] .now-playing-content > .now-playing-cover {
+:root:is([data-vt="queue"], [data-vt="lyrics"], [data-vt="slide"]) .now-playing-content > .now-playing-cover {
   view-transition-name: np-cover;
 }
 
-:root[data-vt] .now-playing-heading {
+:root:is([data-vt="queue"], [data-vt="lyrics"], [data-vt="slide"]) .now-playing-heading {
   view-transition-name: np-heading;
 }
 
@@ -1018,7 +1013,8 @@
 }
 
 /* A narrow window: the queue panel lies over the content (outside lyrics
-   mode), so nothing there is drawn above it (it just changes). */
+   mode), so nothing there is drawn above it (it just changes); the
+   morph's cover neither (the player's cover then fades out where it is). */
 @media (max-width: 1179.98px) {
   :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-content > .now-playing-cover,
   :root[data-vt] .now-playing.has-queue:not(.is-lyrics) .now-playing-heading,
@@ -1205,5 +1201,45 @@
   ::view-transition-old(*),
   ::view-transition-new(*) {
     animation: none !important;
+  }
+}
+
+/* Now Playing opening and closing windowed (App, `data-vt="np-morph"`):
+   the player's cover grows into Now Playing's cover (and shrinks back
+   into the player's), while the rest crossfades: the new screen fades in
+   over the old one, which stays (no dip through the base). Opened this
+   way, Now Playing's own entrance is off (`is-morphed-in`), so the cover's
+   end place is final from the start. */
+:root[data-vt="np-morph"] .player-cover,
+:root[data-vt="np-morph"] .now-playing-content > .now-playing-cover {
+  view-transition-name: np-morph;
+}
+
+.now-playing.is-morphed-in {
+  animation: none;
+}
+
+:root[data-vt="np-morph"]::view-transition-old(root) {
+  opacity: 1;
+  animation: none;
+}
+
+:root[data-vt="np-morph"]::view-transition-new(root) {
+  animation: np-morph-in var(--motion-slow) var(--ease-out) both;
+}
+
+:root[data-vt="np-morph"]::view-transition-group(np-morph) {
+  animation-duration: var(--motion-morph);
+  animation-timing-function: var(--ease-standard);
+}
+
+:root[data-vt="np-morph"]::view-transition-old(np-morph),
+:root[data-vt="np-morph"]::view-transition-new(np-morph) {
+  animation-duration: var(--motion-morph);
+}
+
+@keyframes np-morph-in {
+  from {
+    opacity: 0;
   }
 }

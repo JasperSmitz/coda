@@ -1,13 +1,32 @@
+// The floating player (DESIGN.md "Player"): a rounded glass strip above
+// the bottom edge of the window, the page scrolling under it. Left the
+// playing cover (a click opens Now Playing windowed, App morphing this
+// cover into Now Playing's) and title / "artist · album"; in the middle
+// previous / play-pause / next over the timeline (repeat after the total
+// time); right a small visualizer, the volume, Queue and Full screen (Now
+// Playing in full screen, `f`). Its background is the playing cover,
+// enlarged and blurred under a wash of its tint (`CoverGlow`), and it
+// takes that cover's colours (a colour scope). Narrow windows drop the
+// visualizer and the volume (app.css; the visualizer is then not
+// rendered, so no readings flow for it), then the timeline and
+// previous / next. Nothing playing: "Nothing playing", the controls as
+// the snapshot allows (disabled while starting or without mpv).
+//
+// Also exports the timeline (`SeekBar`), `RepeatButton` and
+// `VolumeControl`, which Now Playing uses too.
+
 import { useRef, useState, type ReactNode } from "react";
 import { intent } from "../lib/ipc";
 import { formatTime } from "../lib/format";
 import type { Progress, Repeat, Snapshot } from "../lib/types";
+import { useMediaQuery, useVisualizerReadings } from "../hooks/useVisualizerReadings";
 import { useProgress } from "../state/store";
 import { useColourScope } from "../state/palettes";
 import { Cover } from "./Cover";
 import { CoverGlow } from "./PageGlow";
 import { ArtistAlbumLine } from "./NameLink";
 import { Slider } from "./Slider";
+import { Visualizer } from "./Visualizer";
 import {
   FullscreenIcon,
   NextIcon,
@@ -21,25 +40,20 @@ import {
   VolumeMutedIcon,
 } from "./icons";
 
+/** Where the visualizer and the volume fit (keep in step with app.css). */
+const ROOMY = "(min-width: 860px)";
+
 interface Props {
   snapshot: Snapshot;
   queueOpen: boolean;
   onToggleQueue: () => void;
-  /** Opens or closes the Now Playing view (`f`). */
-  nowPlayingOpen?: boolean;
-  onToggleNowPlaying?: () => void;
+  /** Opens Now Playing windowed (the cover). */
+  onOpenNowPlaying: () => void;
   /** Opens Now Playing in full screen (what `f` does). */
-  onFullscreen?: () => void;
+  onFullscreen: () => void;
 }
 
-export function NowPlayingBar({
-  snapshot,
-  queueOpen,
-  onToggleQueue,
-  nowPlayingOpen = false,
-  onToggleNowPlaying,
-  onFullscreen,
-}: Props) {
+export function Player({ snapshot, queueOpen, onToggleQueue, onOpenNowPlaying, onFullscreen }: Props) {
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
   const isPlaying = status === "playing" || status === "loading";
@@ -48,46 +62,49 @@ export function NowPlayingBar({
   const ref = useRef<HTMLElement>(null);
   const coverUrl = playing?.coverUrl ?? null;
   useColourScope(ref, coverUrl);
+  // The small visualizer: only in a roomy window, while the engine
+  // measures and a track is loaded; readings only while it is drawn.
+  const roomy = useMediaQuery(ROOMY);
+  const showVisualizer = roomy && snapshot.visualizerAvailable && playing != null;
+  useVisualizerReadings(showVisualizer);
 
   return (
-    <footer className="bar" ref={ref}>
-      <CoverGlow url={coverUrl} className="bar-backdrop" />
-      <div className="bar-track">
+    <footer className="player" ref={ref}>
+      <CoverGlow url={coverUrl} className="player-backdrop" />
+      <div className="player-track">
         {playing ? (
           <>
             <button
-              className={`bar-cover-button ${nowPlayingOpen ? "is-active" : ""}`}
-              onClick={onToggleNowPlaying}
-              disabled={!onToggleNowPlaying}
-              aria-label={nowPlayingOpen ? "Close Now Playing" : "Open Now Playing"}
-              aria-pressed={nowPlayingOpen}
-              title="Now Playing (f)"
+              className="player-cover-button"
+              onClick={onOpenNowPlaying}
+              aria-label="Open Now Playing"
+              title="Now Playing"
             >
               <Cover
                 url={playing.coverUrl}
                 name={playing.album ?? playing.title}
                 size="small"
-                className="bar-cover"
+                className="player-cover"
               />
             </button>
-            <div className="bar-text">
-              <div className="bar-title" title={playing.title}>
+            <div className="player-text">
+              <div className="player-title" title={playing.title}>
                 {playing.title}
               </div>
-              <div className="bar-artist secondary">
+              <div className="player-artist secondary">
                 <ArtistAlbumLine track={playing} />
               </div>
             </div>
           </>
         ) : (
-          <div className="bar-text secondary">Nothing playing</div>
+          <div className="player-text player-nothing secondary">Nothing playing</div>
         )}
       </div>
 
-      <div className="bar-center">
-        <div className="bar-controls">
+      <div className="player-center">
+        <div className="player-controls">
           <button
-            className="icon-button"
+            className="icon-button player-skip"
             onClick={() => intent({ type: "previous" })}
             disabled={unavailable}
             aria-label="Previous"
@@ -102,10 +119,10 @@ export function NowPlayingBar({
             aria-label={isPlaying ? "Pause" : "Play"}
             title={`${isPlaying ? "Pause" : "Play"} (Space)`}
           >
-            {isPlaying ? <PauseIcon size={20} /> : <PlayIcon size={20} />}
+            {isPlaying ? <PauseIcon size={18} /> : <PlayIcon size={18} />}
           </button>
           <button
-            className="icon-button"
+            className="icon-button player-skip"
             onClick={() => intent({ type: "next" })}
             disabled={unavailable}
             aria-label="Next"
@@ -120,7 +137,10 @@ export function NowPlayingBar({
         />
       </div>
 
-      <div className="bar-right">
+      <div className="player-right">
+        {showVisualizer && (
+          <Visualizer active={status === "playing"} bars={5} className="player-visualizer" />
+        )}
         <VolumeControl volume={snapshot.volume} disabled={unavailable} />
         <button
           className={`icon-button queue-toggle ${queueOpen ? "is-active" : ""}`}
@@ -131,16 +151,14 @@ export function NowPlayingBar({
         >
           <QueueIcon />
         </button>
-        {onFullscreen && (
-          <button
-            className="icon-button"
-            onClick={onFullscreen}
-            aria-label="Full screen"
-            title="Full screen (f)"
-          >
-            <FullscreenIcon />
-          </button>
-        )}
+        <button
+          className="icon-button"
+          onClick={onFullscreen}
+          aria-label="Full screen"
+          title="Full screen (f)"
+        >
+          <FullscreenIcon />
+        </button>
       </div>
     </footer>
   );

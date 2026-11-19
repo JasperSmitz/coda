@@ -56,6 +56,11 @@ export class Meter {
     return moved;
   }
 
+  /** Nothing to draw moving: no readings yet, or every bar has fallen to rest since the last one. */
+  atRest(): boolean {
+    return this.bands.every((v) => v == null || v <= 0);
+  }
+
   reset(): void {
     this.bands = BAND_HZ.map(() => null);
     this.updated = null;

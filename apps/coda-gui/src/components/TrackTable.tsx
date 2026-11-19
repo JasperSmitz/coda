@@ -18,6 +18,7 @@ import {
 import { formatTime } from "../lib/format";
 import { playTracks, sameTrack } from "../lib/play";
 import type { PlayContext, SnippetPart, Track } from "../lib/types";
+import { revealRow } from "../hooks/useLayout";
 import { useAppState } from "../state/store";
 import type { MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -174,9 +175,7 @@ export function TrackTable({
     const el = scroller.current;
     const own = table.current;
     if (!el || !own) return;
-    const top = own.offsetTop + rowOf(index) * rowHeight;
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + rowHeight > el.scrollTop + el.clientHeight) el.scrollTop = top + rowHeight - el.clientHeight;
+    revealRow(el, own.offsetTop + rowOf(index) * rowHeight, rowHeight);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {

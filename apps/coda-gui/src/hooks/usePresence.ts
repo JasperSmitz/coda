@@ -3,15 +3,23 @@
 // until its exit has run. Opening it again during the exit turns the same
 // animation around from where it is, and the panel keeps its state. Not
 // animated when it is first shown, nor with reduced motion (then it simply
-// appears and goes).
+// appears and goes). The exit may differ from the entrance (`exit`: e.g.
+// the queue panel rises with a spring and only fades out, faster).
 
 import { type RefObject, useLayoutEffect, useRef, useState } from "react";
-import { type Duration, animate } from "../lib/motion";
+import { type Duration, type Easing, animate, easing } from "../lib/motion";
 
-interface Options {
+interface Motion {
   /** How the panel looks when out of view (`opacity`/`transform` only). */
   hidden: Keyframe;
   duration: Duration;
+  /** The curve; `--ease-out` by default. */
+  easing?: Easing;
+}
+
+interface Options extends Motion {
+  /** How it leaves, if not as it came in (backwards). */
+  exit?: Motion;
   /** Where the focus goes when it is inside the panel as it starts to leave. */
   onFocusLeaving?: () => void;
 }
@@ -20,7 +28,7 @@ interface Options {
 export function usePresence(
   open: boolean,
   ref: RefObject<HTMLElement | null>,
-  { hidden, duration, onFocusLeaving }: Options,
+  options: Options,
 ): boolean {
   const [mounted, setMounted] = useState(open);
   if (open && !mounted) setMounted(true);
@@ -29,8 +37,8 @@ export function usePresence(
   // The state last applied (not a first-run flag: StrictMode runs mount
   // effects twice).
   const applied = useRef(open);
-  const options = useRef({ hidden, duration, onFocusLeaving });
-  options.current = { hidden, duration, onFocusLeaving };
+  const latest = useRef(options);
+  latest.current = options;
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -45,7 +53,7 @@ export function usePresence(
       if (!open) setMounted(false);
       return;
     }
-    if (!open && element.contains(document.activeElement)) options.current.onFocusLeaving?.();
+    if (!open && element.contains(document.activeElement)) latest.current.onFocusLeaving?.();
     element.inert = !open;
 
     const current = motion.current;
@@ -62,13 +70,14 @@ export function usePresence(
     current?.animation.cancel();
     motion.current = null;
     const shown: Keyframe = { opacity: 1, transform: "none" };
+    const motionNow: Motion = open ? latest.current : (latest.current.exit ?? latest.current);
     const animation = animate(
       element,
-      open ? [options.current.hidden, shown] : [shown, options.current.hidden],
-      options.current.duration,
+      open ? [motionNow.hidden, shown] : [shown, motionNow.hidden],
+      motionNow.duration,
       // Holds the hidden end until the panel is unmounted (either way
       // round, after a reverse).
-      { fill: "both" },
+      { fill: "both", easing: easing(motionNow.easing ?? "--ease-out") },
     );
     if (!animation) {
       if (!open) setMounted(false);
