@@ -1,0 +1,29 @@
+# ADR 0009 — GUI 2.0: freeze the classic design, a design-led redesign, and the end of themes
+
+- **Status:** Accepted (2026-11-19; the owner's direction in conversation, design in `apps/coda-gui/docs/DESIGN.md`, slices in `apps/coda-gui/docs/PLAN.md` "2.0")
+- **Context:**
+  - The GUI's Now Playing view (blurred cover backdrop, translucent queue panel, View Transitions) has become the part of the app the owner likes most. The rest (a sidebar, flat surfaces, a bar, a queue column) is functional but has a different, plainer design language.
+  - Colour themes (2026-11-06, `docs/plans/themes.md`): built-in themes, Ghostty theme files, custom themes, a per-token colour editor, contrast nudging, light and dark following the system. That made sense for a neutral, terminal-like app; it also means every design decision has to look right under any palette, which keeps the design generic.
+  - The owner wants the app to carry a clear taste ("Neo-Coda"): restructured navigation (Home, Search, Library), Home as the centrepiece, colour taken from the music, no light or dark mode. Customisation should stay, as the accent colour.
+  - Keeping the old design as an option inside the new app would mean two shells to maintain and test for every feature.
+- **Decision:**
+  - **1.0.0 is the classic design, frozen.** The GUI released as 1.0.0 (tag `coda-gui-v1.0.0`, 2026-11-19) is the "functional classic". It gets critical fixes only, on a `gui-1.x` branch created from the tag when the first fix is needed; no new features or design work. Anyone who prefers it can install 1.x.
+  - **2.0.0 is the redesign, on `main`.** One app, one design; no "classic mode" inside 2.0. `DESIGN.md` on `main` describes the 2.0 target (1.x's stays at the tag).
+  - **Themes end in 2.0.** Removed: the built-in theme list, Ghostty theme loading and the "follow Ghostty" mode, custom theme files under `~/.config/coda-app/themes/`, the colour editor, the light/dark pair following the system, and the theme parts of Settings → Appearance. What stays or replaces them:
+    - The **token layer** (CSS custom properties, the `check:colors` rule that no colour literal lives outside it), with a new, fixed token set designed for the one look.
+    - The **accent** as the personalisation: "From the music" (default) or one fixed colour (curated or custom), saved in `settings.toml`.
+    - **Colours from covers**: a small palette per cover (tint, accent, accent ink, glow), computed in the backend with contrast limits, cached with the cover. Pages take the colours of what they show, the player those of what plays (DESIGN.md "Colour").
+  - **No light or dark mode**: the base is a dim, tinted dark by design; contrast rules (≥4.5:1 text, ≥3:1 accents) are checked against it and against every computed tint.
+  - The terminal player (TUI) is not affected; it keeps its own colours and Ghostty-agnostic terminal rendering.
+- **Alternatives:**
+  - **Two shells in one app** (a "Classic / Studio" setting): every feature and fix twice, and the classic would drift anyway. The frozen 1.x release gives the same choice for free.
+  - **Keep themes and redesign on top of them**: every glow, tint and glass surface would have to work over any palette, including light ones; the redesign's colour-from-the-music idea fights a user palette. Themes could later be re-added as accent presets if wanted.
+  - **Keep a light mode**: the look rests on dark tints under blurred covers (like Now Playing, which was always dark in every theme); a light version would be a second design.
+  - **A separate app or repository for 2.0**: the engine, commands and most views carry over; a fork would split fixes.
+- **Consequences:**
+  - Users of 1.x with a Ghostty or custom theme lose it in 2.0; their theme files are left untouched on disk (2.0 neither reads nor deletes them). The 2.0 release notes say so.
+  - `settings.toml` (`theme/prefs.rs` today) also holds the chosen source and the lyrics-index switch, so it stays; it moves out of the theme module. 2.0 ignores the theme keys (`mode`, `theme`, `light_theme`, `dark_theme`, `accents`, `visualizer`) and adds `accent`. A 2.0 rewrite of the file drops the old keys, so a 1.x install on the same machine falls back to its default theme; acceptable for a frozen release, and named in the release notes.
+  - Code removed in 2.0: `src-tauri/src/theme/` except what the new token and palette code reuses (colour maths, contrast) and the prefs file, the theme commands and their capabilities, `src-tauri/themes/` and its credits, `views/settings/` (`AppearanceSection`, `ThemeList`, `ColorEditor`, `colorGroups`), `state/theme.ts`'s theme switching, and `src/styles/appearance.css`. Tests for removed behaviour go with it. The visualizer's "palette spread" colours go too (no palette); it uses the accent.
+  - `apps/coda-gui/AGENTS.md`'s "Light and dark themes from the same tokens" no longer applies (updated with this ADR).
+  - Fonts become part of the design: they are bundled (OFL) rather than the system font stack; their licences ship with the app.
+  - Runtime support to check per platform: `@property` colour transitions and `backdrop-filter` in WebKitGTK (Linux) and WKWebView (macOS). Where missing, colours switch at once and glass falls back to a more opaque surface; the design must stay legible either way.

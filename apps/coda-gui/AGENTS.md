@@ -24,7 +24,7 @@ It lives in the Coda monorepo. The root `AGENTS.md` applies (roles, workflow, th
 ## Frontend
 - React 19 + TypeScript (strict) + Vite. Plain CSS with design tokens (CSS custom properties) in `src/styles/`; no UI framework unless the owner approves one.
 - Keyboard-first like Coda: every main action has a shortcut, and focus is always visible. Mouse and drag-and-drop are first-class too.
-- Light and dark themes from the same tokens.
+- One designed look (ADR 0009, from 2.0): no light/dark themes; every colour comes from the design tokens or from the music's cover palettes. (1.x, at `coda-gui-v1.0.0`, had light and dark themes.)
 
 ## Workflow
 - Same roles as the root `AGENTS.md`: owner approves scope; the architect (main session) writes briefs, delegates to implementer/reviewer agents, resolves findings and reports.

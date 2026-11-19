@@ -1,6 +1,6 @@
 # Coda App — Plan
 
-Status: MVP built (M0–M4), awaiting the owner's first hands-on smoke test; Linux packaging/CI in review (2026-11-05).
+Status: **1.0.0 (Classic) released** (tag `coda-gui-v1.0.0`, 2026-11-19): M0–M4, lyrics, genres and mixes; frozen except critical fixes. **2.0 (Neo-Coda)** is in progress: the redesign in `DESIGN.md`, ADR 0009, slices under "2.0" below.
 
 ## Stack (decided)
 - **Tauri 2** desktop shell (system webview: WebKitGTK 4.1 on Linux, WKWebView on macOS).
@@ -63,8 +63,45 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 
 ### Mixes (2026-11-16, `docs/plans/mixes.md`, M12 slice 2)
 - Part 2a (backend, reviewed): the engine plays mixes (`playMix`, `playQuickMix`, local and Navidrome top-ups, session restore); the mixes and editor-search commands; `snapshot.mix`.
-- Part 2b (screens, implemented, awaiting review): a **Mixes** sidebar entry per source after Playlists (cards with ingredient chips, Play, Edit…/Delete… in the card menu, **New mix…**, a one-line empty state; the playing mix's card marked); the mix editor dialog (name, one search over genres, artists and albums of the source, chips, Play as a quick mix, Save, typed errors inline); **Add to mix…** in the genre and artist rows' menus, the album menu and the genre, artist and album page headers; "Mix: <name>" / "Quick mix: <name>" with a loading state in Now Playing and the queue panel. Pure helpers in `lib/mixRecipe.ts` (`scripts/mixes.test.mjs`). Runtime checks: `scripts/smoke.md` "Mixes" (M1–M14).
+- Part 2b (screens, done): a **Mixes** sidebar entry per source after Playlists (cards with ingredient chips, Play, Edit…/Delete… in the card menu, **New mix…**, a one-line empty state; the playing mix's card marked); the mix editor dialog (name, one search over genres, artists and albums of the source, chips, Play as a quick mix, Save, typed errors inline); **Add to mix…** in the genre and artist rows' menus, the album menu and the genre, artist and album page headers; "Mix: <name>" / "Quick mix: <name>" with a loading state in Now Playing and the queue panel. Pure helpers in `lib/mixRecipe.ts` (`scripts/mixes.test.mjs`). Runtime checks: `scripts/smoke.md` "Mixes" (M1–M14).
 - Not in it: mixes on Home or in the play history, multi-select to build a mix, exclusions and weights, combining sources.
+
+### 1.0.0 — Classic (released 2026-11-19)
+- The design above, frozen (ADR 0009). Critical fixes only, on a `gui-1.x` branch created from `coda-gui-v1.0.0` when the first one is needed, released as `coda-gui-v1.0.x`. 1.x's design document stays at the tag.
+
+## 2.0 — Neo-Coda (in progress; ADR 0009, `DESIGN.md`)
+
+A design-led redesign on `main`: Home / Search / Library navigation, Home built around a carousel of recent listening and daily mood mixes, a floating player with the queue rising out of it, colour taken from the music, one look with no themes. Each slice is a vertical slice that leaves the app working and releasable from `main`; each gets a brief in `docs/plans/` (`n1-shell.md`, …) before implementation, a review, and runtime checks in `scripts/smoke.md`. The engine, commands, mixes, lyrics, history and Now Playing carry over.
+
+### N1 — Shell and navigation
+- The top bar (coda sign and wordmark, the Home / Search / Library pill with its gliding indicator, Preferences) and the macOS window buttons in its row; the sidebar and the queue column go. Library as one root with sections (Albums, Artists, Genres, Playlists, Mixes, Folders for local), the section remembered; a back stack per root (and per source, as today). The source switch moves to Preferences (`Ctrl/Cmd+1`/`2` stay). The 1.x bar stays for now, docked; the queue opens as a temporary overlay until N4.
+- Acceptance: every 1.x view is reachable; Back, keyboard shortcuts and "Go to album/artist" across sources still work; focus is visible everywhere; nothing hides under the bar.
+
+### N2 — The look: tokens, type, glass; themes retired
+- The 2.0 token set (base, ink levels, glass, line, shadows, house accent; `tokens.css`, `check:colors` kept), bundled fonts (provisional pair; licences shipped), shapes and buttons per DESIGN.md, applied to every existing view. Preferences page (Accent: house colours and custom; Music source; Library default view; Lyrics search; the server and folder settings) replaces Settings. Theme removal per ADR 0009 (backend theme module except the prefs file and the colour maths, built-in themes, Ghostty loading, the editor and their commands and capabilities); `settings.toml` gains `accent`.
+- Acceptance: no theme code or command left; the prefs file keeps source and lyrics-index; the accent choice applies live and persists; contrast rules hold on base and glass; Linux (WebKitGTK) and macOS both legible with and without `backdrop-filter`.
+
+### N3 — Colours from the music
+- A per-cover palette (tint, accent, accent ink, glow) with contrast limits, computed off the engine actor when a cover is loaded and cached with it (proposed: `coda_core::cover::palette`, pure and tested; the GUI exposes it per cover token). Scoped colours: player/queue/Now Playing follow the playing cover; a page follows what it shows (`#view`), with its glow; grid tiles and mood cards their album's accent; registered properties for the slow blends, with an instant fallback.
+- Acceptance: palettes are deterministic and tested (contrast on base and own tint, greyscale and near-black covers, missing covers); no colour change blocks rendering; a fixed accent overrides everywhere; reduced motion switches instantly.
+
+### N4 — Player, queue and Now Playing
+- The floating player (cover background, the small visualizer, links, repeat, volume), the queue rising out of it (anchored to its right edge; Esc / `q` / click elsewhere closes; all 1.x queue features), the player's cover morphing into Now Playing's and back; Now Playing on the 2.0 tokens (its side-panel queue unchanged).
+- Acceptance: every 1.x player and queue behaviour (selection, drag-and-drop, header buttons, mix line) works in the new placement; the morph degrades to a crossfade without View Transitions; the 1.x Now Playing smoke checks still pass.
+
+### N5 — Library, pages and Search
+- Sections with Covers / List per section (remembered; the Preferences default), sorts (Albums: A–Z, Most played, Recently added, Year; Navidrome's server sorts); page headers for album, artist, genre, playlist and mix with their glows; the artist page's **Your most played**; Search's large field, genre chips, Top result + Songs, Albums, Artists, Lyrics (1.x rules).
+- Open for the brief: local per-song play counts (the history counts listens per context today) and how Navidrome's per-song `playCount` is gathered for an artist without fetching every album at once.
+- Acceptance: large libraries stay fast in List (virtualized); sorts match the source's counts; Search keeps the lyrics behaviour.
+
+### N6 — Home
+- **Where you left off**: the carousel from the play history (contexts with covers, newest first), the meta line, **Resume** (the history records where a context stopped: the entry and position, per context), Open, the page glow following the focus; keyboard and trackpad. **Moods for today**: three genres from the history, three albums each (not played for longest; never this week), the same all day and cached per source and day (the daily-picks cache's successor), **Other moods**, Play as a quick mix (ADR 0008). The empty state for a new listener. The 1.x Home rows (Recently added, Most played, Daily Picks) go.
+- Open for the brief: where genre-per-album comes from for the history's contexts (local tags; Navidrome album genres), and the exact pick and fallback rules (thin history, a genre with fewer than three albums).
+- Acceptance: the picks are deterministic per day and tested; Home renders before history and picks arrive (no layout jump); Resume continues the right track; nothing blocks the engine.
+
+### N7 — Motion and refinement
+- Cover morphs between pages, page crossfades, the carousel's glide, the queue's rise; reduced motion everywhere. The type exploration (a few pairings compared live, then one chosen), the flourish decision (the record, or none), the owner's nitpick round, the onboarding restyle, release notes (themes gone, ADR 0009) and **2.0.0**.
+- Acceptance: the full `scripts/smoke.md` for 2.0 passes on Linux and macOS; docs (`DESIGN.md` marked shipped, `ARCHITECTURE.md`, `README.md`) match the code.
 
 ### Later
 - Drag tracks/albums from browse views onto the queue.
