@@ -2,30 +2,28 @@
 
 /* macOS: the window has no visible title bar, so the webview reaches the
    top edge, and the native close/minimise/zoom buttons sit inset in the
-   sidebar's top row (`titlebar.rs` positions them: keep in step). The
-   page and panel headers there drag the window (`dragRegion`). In full
+   top bar's row, vertically centred on its pill (`BUTTONS` in
+   `titlebar.rs` positions them for `--topbar-h`: keep the two in step);
+   the brand starts right of them (`--window-buttons-w`). The top bar
+   drags the window (`dragRegion`). `--titlebar-h` is the band kept clear
+   for them where there is no top bar (Now Playing, onboarding): the top
+   bar's height, as the buttons are centred at its middle. In full
    screen macOS hides the buttons, so no room is kept. */
 :root.is-macos:not(.is-fullscreen) {
-  --titlebar-h: 40px;
+  --titlebar-h: var(--topbar-h);
+  --window-buttons-w: 70px;
 }
 
 .app {
-  /* The queue column slides out over the main view (below). */
+  /* The top bar and the queue panel float over the page (below). */
   position: relative;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) var(--bar-height);
   grid-template-areas:
-    "sidebar main"
-    "bar bar";
+    "main"
+    "bar";
   height: 100%;
-}
-
-.app.queue-open {
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--queue-width);
-  grid-template-areas:
-    "sidebar main queue"
-    "bar bar bar";
 }
 
 /* Now Playing (`f`): nothing but the view. */
@@ -86,83 +84,172 @@
   background: var(--hover);
 }
 
-/* ----- sidebar ----- */
+/* ----- top bar ----- */
 
-.sidebar {
-  grid-area: sidebar;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--surface-1);
-  border-right: 1px solid var(--border);
+/* Floats over the page, with no background of its own: a soft fade of
+   the base colour under it, so the page reads as passing beneath. */
+.topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: var(--topbar-h);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px 0 calc(20px + var(--window-buttons-w));
 }
 
-/* macOS: the window buttons' row (a drag region); nothing scrolls under it. */
-.sidebar-titlebar {
+.topbar::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 -16px 0;
+  z-index: -1;
+  background: linear-gradient(
+    var(--bg) 0%,
+    color-mix(in srgb, var(--bg) 85%, transparent) 60%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text);
+}
+
+.topbar-sign {
   flex: none;
-  height: var(--titlebar-h);
+  color: var(--accent);
 }
 
-.sidebar-body {
-  flex: 1;
-  min-height: 0;
+.topbar-wordmark {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.topnav-pill {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 14px 10px;
-  overflow-y: auto;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: var(--cover-shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
-.sidebar ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* The active entry's lighter pill: one element gliding between entries
+   (transform and width only; the buttons never move). */
+.topnav-mark {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  border-radius: 999px;
+  background: var(--surface-3);
+  box-shadow: var(--cover-shadow);
+  pointer-events: none;
 }
 
-.nav-heading {
-  display: flex;
+.topnav-mark.is-gliding {
+  transition:
+    transform var(--motion-slow) var(--ease-standard),
+    width var(--motion-slow) var(--ease-standard),
+    opacity var(--motion-fast);
+}
+
+.topnav-item {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 10px 4px;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.nav-status {
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
+  gap: 7px;
   height: 30px;
-  padding: 0 10px;
-  border-radius: var(--radius);
+  padding: 0 14px;
+  border-radius: 999px;
   color: var(--text-2);
-  text-align: left;
+  font-weight: 550;
+  transition: color var(--motion-fast);
 }
 
-.nav-item:hover {
+.topnav-item:hover,
+.topnav-item.is-active {
   color: var(--text);
-  background: var(--hover);
 }
 
-.nav-item.is-active {
+.topbar-end {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.topbar-prefs {
+  width: 36px;
+  height: 36px;
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.topbar-prefs.is-active,
+.topbar-prefs.is-active:not(:disabled):hover {
   color: var(--text);
-  background: var(--selected);
+  background: var(--surface-3);
 }
 
-.nav-bottom {
-  margin-top: auto !important;
+@media (max-width: 860px) {
+  .topnav-label {
+    display: none;
+  }
+
+  .topnav-item {
+    padding: 0 12px;
+  }
 }
+
+/* ----- Library's section control ----- */
+
+.section-control {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 10px 0 6px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--surface-3);
+}
+
+.section-option {
+  height: 26px;
+  padding: 0 12px;
+  border-radius: var(--radius-small);
+  color: var(--text-2);
+  font-size: var(--text-small);
+  font-weight: 550;
+  transition:
+    background var(--motion-fast),
+    color var(--motion-fast);
+}
+
+.section-option:hover {
+  color: var(--text);
+}
+
+.section-option.is-active {
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+/* ----- source status (Settings) ----- */
 
 .connection {
   width: 7px;
@@ -188,6 +275,8 @@
 .main {
   grid-area: main;
   position: relative;
+  /* Clear of the top bar at scroll top. */
+  padding-top: var(--topbar-h);
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -282,29 +371,31 @@
 
 /* ----- queue ----- */
 
-/* The column's slot in the grid; App slides it in and out (`usePresence`). */
-.queue-column {
-  grid-area: queue;
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-}
-
-.queue-column > .queue {
-  flex: 1;
-  min-width: 0;
-}
-
-/* Closing: the grid has given the room back at once (one reflow, as
-   before); the panel slides out over the main view, then unmounts. */
-.app > .queue-column.is-leaving {
-  grid-area: auto;
+/* The queue panel over the page: above the bar, at its right edge
+   (QueuePopover; 2.0 N1, until the floating player). */
+.queue-popover {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: var(--bar-height);
-  width: var(--queue-width);
-  z-index: 1;
+  right: 12px;
+  bottom: calc(var(--bar-height) + 8px);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  width: min(var(--queue-panel-width), calc(100% - 24px));
+  max-height: 60%;
+  border-radius: calc(var(--radius) * 2);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-big);
+  overflow: hidden;
+}
+
+.queue-popover > .queue {
+  flex: 0 1 auto;
+  min-height: 0;
+  border-left: none;
+}
+
+.queue-popover .queue-list {
+  flex: 0 1 auto;
 }
 
 .queue {
@@ -695,18 +786,14 @@
   outline: none;
 }
 
-/* ----- source switch (both sources configured) ----- */
-
-.source-switch-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+/* ----- source switch (Settings, both sources configured) ----- */
 
 .source-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
+  width: 280px;
+  max-width: 100%;
   padding: 2px;
   border-radius: var(--radius);
   background: var(--surface-3);
@@ -746,5 +833,14 @@
 }
 
 .source-status {
-  padding-bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
 }

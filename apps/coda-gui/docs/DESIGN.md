@@ -11,6 +11,7 @@
 - **The music is the decoration.** Covers, their colours and the visualizer carry the look; the chrome stays quiet glass.
 
 ## Layout
+*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column. Still to come: the floating player (N4; until then the 1.x bar stays docked at the bottom and `q` opens the queue as a panel above its right end), the glass and the page's glow (N2/N3), and the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar.)*
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -35,7 +36,7 @@
 - **Page**: the full window width under the bar, content ≤1240px centred, padded so nothing hides under the bar or the player at the ends of the scroll.
 - Minimum window 900×600 (unchanged). No sidebar and no queue column.
 
-## Navigation
+## Navigation *(shipped)*
 - Three roots: **Home**, **Search**, **Library**. Each keeps its own back stack (Back: `Backspace`, `Alt+←`, the mouse's back button, Esc when nothing is open, or the page's ‹ Back): Library → Artist → Album, Home → Album, …
 - **Library** holds the collection as sections in a segmented control at the top: **Albums, Artists, Genres, Playlists, Mixes**, and **Folders** for a local library. The chosen section is remembered.
 - **Preferences** (the slider icon, top right) is a page of its own, outside the three roots.

@@ -4,35 +4,28 @@ import { DialogHost } from "./components/Dialog";
 import { MixDialogHost } from "./components/MixDialogs";
 import { NowPlayingBar } from "./components/NowPlayingBar";
 import { QueuePanel } from "./components/QueuePanel";
-import { Sidebar } from "./components/Sidebar";
+import { QueuePopover } from "./components/QueuePopover";
 import { Toasts } from "./components/Toasts";
+import { TopBar } from "./components/TopBar";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
 import { useFullscreen } from "./hooks/useFullscreen";
-import { usePresence } from "./hooks/usePresence";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
 import { viewTransition } from "./lib/motion";
-import { nav, routeFor, sourceReplaced, useNav, viewFor } from "./state/nav";
+import { sourceReplaced, useNav } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
 import { startTheme } from "./state/theme";
-import type { ViewId } from "./views/viewList";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
 import { NowPlayingView, queueToggleMovesContent } from "./views/NowPlayingView";
 import { Onboarding } from "./views/Onboarding";
 
-const QUEUE_OPEN_KEY = "coda.queueOpen";
+/** The queue panel over the page, open or not (1.x's column used `coda.queueOpen`). */
+const QUEUE_OPEN_KEY = "coda.queuePanelOpen";
 /** The Now Playing view's queue panel, remembered apart from the layout's. */
 const NP_QUEUE_OPEN_KEY = "coda.nowPlayingQueueOpen";
-/** How the queue column looks out of view. */
-const QUEUE_HIDDEN: Keyframe = { opacity: 0, transform: "translateX(24px)" };
-
-/** Closing the queue column with the focus in it: the bar's queue button. */
-function focusQueueButton() {
-  document.querySelector<HTMLElement>('.bar-right [aria-label="Queue"]')?.focus();
-}
 
 function loadFlag(key: string, fallback: boolean): boolean {
   try {
@@ -43,22 +36,25 @@ function loadFlag(key: string, fallback: boolean): boolean {
   }
 }
 
-/** A remembered open/closed flag. */
-function useStoredFlag(key: string, fallback: boolean): [boolean, () => void] {
+/** A remembered open/closed flag: the flag, a toggle and a close. */
+function useStoredFlag(key: string, fallback: boolean): [boolean, () => void, () => void] {
   const [open, setOpen] = useState(() => loadFlag(key, fallback));
-  const toggle = useCallback(
-    () =>
+  const update = useCallback(
+    (next: (was: boolean) => boolean) =>
       setOpen((was) => {
+        const value = next(was);
         try {
-          localStorage.setItem(key, String(!was));
+          localStorage.setItem(key, String(value));
         } catch {
           // Not saved; harmless.
         }
-        return !was;
+        return value;
       }),
     [key],
   );
-  return [open, toggle];
+  const toggle = useCallback(() => update((was) => !was), [update]);
+  const close = useCallback(() => update(() => false), [update]);
+  return [open, toggle, close];
 }
 
 /**
@@ -108,10 +104,12 @@ export default function App() {
   const { snapshot, queue } = useAppState();
   const stack = useNav();
   const top = stack[stack.length - 1];
-  const view = viewFor(stack[0].route);
   useConfiguredSources(snapshot);
   useBrowseGenerations(snapshot);
-  const [layoutQueueOpen, toggleLayoutQueue] = useStoredFlag(QUEUE_OPEN_KEY, true);
+  const [layoutQueueOpen, toggleLayoutQueue, closeLayoutQueue] = useStoredFlag(
+    QUEUE_OPEN_KEY,
+    false,
+  );
   const [npQueueOpen, toggleNpQueueNow] = useStoredFlag(NP_QUEUE_OPEN_KEY, false);
   const [nowPlaying, setNowPlaying] = useState(false);
   // Lyrics mode in Now Playing: sticky for the session, off at launch.
@@ -135,25 +133,13 @@ export default function App() {
   }, []);
   const toggleNowPlaying = useCallback(() => setNowPlaying((open) => !open), []);
   const closeNowPlaying = useCallback(() => setNowPlaying(false), []);
-  const showView = (next: ViewId) => {
-    setNowPlaying(false);
-    nav.root(routeFor(next, sources.active));
-  };
-  // Any navigation (a sidebar entry, Go to album from Now Playing, search)
+  // Any navigation (a top bar entry, Go to album from Now Playing, search)
   // shows the browse view again.
   useEffect(() => setNowPlaying(false), [top]);
   // Now Playing hides the rest of the window; `q` toggles its own panel.
   const immersive = nowPlaying && snapshot !== null;
   const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
   useFocusAfterNowPlaying(immersive);
-  // The queue column slides in and out; while it leaves, the grid has
-  // already given its room back and it slides out over the main view.
-  const queueColumn = useRef<HTMLDivElement>(null);
-  const queueColumnShown = usePresence(layoutQueueOpen, queueColumn, {
-    hidden: QUEUE_HIDDEN,
-    duration: "--motion",
-    onFocusLeaving: focusQueueButton,
-  });
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -176,6 +162,8 @@ export default function App() {
     active: !onboarding,
     // Back closes Now Playing first; the stack stays.
     onBack: nowPlaying ? closeNowPlaying : undefined,
+    // Esc closes the queue panel first.
+    onEscape: !immersive && layoutQueueOpen ? closeLayoutQueue : undefined,
   });
   useShortcuts({
     volume: snapshot?.volume ?? 0,
@@ -199,18 +187,21 @@ export default function App() {
     );
   }
 
-  const queuePanel = snapshot && (
-    <QueuePanel
-      queue={queue}
-      currentKey={snapshot.currentKey}
-      playingKey={snapshot.playingKey}
-      status={snapshot.status}
-      disabled={!ready}
-      locked={!started}
-      serverConfigured={snapshot.navidrome.state !== "notConfigured"}
-      mix={snapshot.mix}
-    />
-  );
+  // The floating panel's header does not drag the window (Now Playing's does).
+  const queuePanel = (floating: boolean) =>
+    snapshot && (
+      <QueuePanel
+        dragHeader={!floating}
+        queue={queue}
+        currentKey={snapshot.currentKey}
+        playingKey={snapshot.playingKey}
+        status={snapshot.status}
+        disabled={!ready}
+        locked={!started}
+        serverConfigured={snapshot.navidrome.state !== "notConfigured"}
+        mix={snapshot.mix}
+      />
+    );
 
   if (immersive && snapshot) {
     return (
@@ -224,7 +215,7 @@ export default function App() {
             onToggleQueue={toggleNpQueue}
             lyricsMode={npLyrics}
             onToggleLyrics={toggleNpLyrics}
-            queuePanel={queuePanel}
+            queuePanel={queuePanel(false)}
             fullscreen={fullscreen.fullscreen}
             onToggleFullscreen={fullscreen.toggle}
           />
@@ -239,8 +230,8 @@ export default function App() {
 
   const queueOpen = layoutQueueOpen;
   return (
-    <div className={`app ${queueOpen ? "queue-open" : ""}`}>
-      <Sidebar view={view} onView={showView} snapshot={snapshot} />
+    <div className="app">
+      <TopBar />
       <main className="main">
         {snapshot ? (
           <>
@@ -253,10 +244,10 @@ export default function App() {
         ) : null}
         {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
       </main>
-      {queueColumnShown && (
-        <div ref={queueColumn} className={`queue-column ${queueOpen ? "" : "is-leaving"}`}>
-          {queuePanel}
-        </div>
+      {snapshot && (
+        <QueuePopover open={queueOpen} onClose={closeLayoutQueue}>
+          {queuePanel(true)}
+        </QueuePopover>
       )}
       {snapshot && (
         <NowPlayingBar

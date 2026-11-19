@@ -115,7 +115,7 @@ export function NowPlayingBar({
       <div className="bar-right">
         <VolumeControl volume={snapshot.volume} disabled={unavailable} />
         <button
-          className={`icon-button ${queueOpen ? "is-active" : ""}`}
+          className={`icon-button queue-toggle ${queueOpen ? "is-active" : ""}`}
           onClick={onToggleQueue}
           aria-label="Queue"
           aria-pressed={queueOpen}

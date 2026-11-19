@@ -1,113 +1,113 @@
-// Navigation: one back stack of routes per source (DESIGN.md: Home →
-// Artists → Artist → Album, or Genres → Genre → Album). The sidebar resets the active source's stack
-// to one of its roots; views push. Switching the source shows the other
-// stack where it was left. Each entry remembers its scroll position, so
-// Back returns to the same place.
+// Navigation (DESIGN.md "Navigation"): the live state of the pure model in
+// `lib/navModel.ts`. Per source, one back stack per browse root (Home,
+// Search, Library) and the active root; Preferences is shown over them,
+// for both sources. The top bar switches roots, views push, Back pops.
+// Switching the source shows the other source's stacks where they were
+// left. Library's section is remembered per source in `localStorage`.
 
 import { useSyncExternalStore } from "react";
-import type { Album, AlbumSort, Genre, LocalAlbumOrder, Playlist, SourceKind } from "../lib/types";
-import type { ViewId } from "../views/viewList";
+import * as model from "../lib/navModel";
+import type { BrowseRoot, Entry, NavState, Root, Route, Section } from "../lib/navModel";
+import type { SourceKind } from "../lib/types";
 
-export type Route =
-  | { kind: "home"; source: SourceKind }
-  | { kind: "search"; source: SourceKind; query: string }
-  | { kind: "artists"; source: SourceKind }
-  | { kind: "albums"; source: "local"; order: LocalAlbumOrder }
-  | { kind: "albums"; source: "navidrome"; sort: AlbumSort }
-  | { kind: "playlists"; source: SourceKind }
-  | { kind: "mixes"; source: SourceKind }
-  | { kind: "genres"; source: SourceKind }
-  | { kind: "folder"; path: string[] }
-  | { kind: "artist"; source: SourceKind; id: string; name: string }
-  /** `hint`: the listing's data, shown while the album loads. */
-  | { kind: "album"; source: SourceKind; id: string; name: string; hint?: Album }
-  | { kind: "playlist"; source: SourceKind; id: string; name: string; hint?: Playlist }
-  /** `hint`: the genre list's row (its counts). */
-  | { kind: "genre"; source: SourceKind; id: string; name: string; hint?: Genre }
-  | { kind: "settings" };
+export type { BrowseRoot, Entry, Root, Route, Section } from "../lib/navModel";
 
-export interface Entry {
-  /** Unique per push, a React key: the same route twice is two views. */
-  id: number;
-  route: Route;
-  scrollTop: number;
+const sectionKey = (source: SourceKind) => `coda.librarySection.${source}`;
+
+function loadSection(source: SourceKind): Section {
+  try {
+    const value = localStorage.getItem(sectionKey(source));
+    return model.isSection(value) ? model.effectiveSection(value, source) : "albums";
+  } catch {
+    return "albums";
+  }
 }
 
-let nextId = 1;
-const entry = (route: Route): Entry => ({ id: nextId++, route, scrollTop: 0 });
+function saveSection(source: SourceKind, section: Section) {
+  try {
+    localStorage.setItem(sectionKey(source), section);
+  } catch {
+    // Not saved; harmless.
+  }
+}
 
-const home = (source: SourceKind): Entry => entry({ kind: "home", source });
-
-let active: SourceKind = "local";
-const stacks: Record<SourceKind, Entry[]> = {
-  local: [home("local")],
-  navidrome: [home("navidrome")],
-};
+let state: NavState = model.initialNav({
+  local: loadSection("local"),
+  navidrome: loadSection("navidrome"),
+});
 const listeners = new Set<() => void>();
 
-function notify() {
+function set(next: NavState) {
+  if (next === state) return;
+  state = next;
   listeners.forEach((l) => l());
 }
 
-function set(next: Entry[], source: SourceKind = active) {
-  stacks[source] = next;
-  if (source === active) notify();
+/** Focuses the search field once Search is shown (it may already be). */
+function focusSearch() {
+  requestAnimationFrame(() => document.querySelector<HTMLInputElement>(".search-input")?.focus());
 }
 
-const stack = () => stacks[active];
-
 export const nav = {
+  /** Opens `route` on the active root's stack (from Preferences: Library's). */
   push(route: Route) {
-    set([...stack(), entry(route)]);
+    set(model.push(state, route));
   },
   /** Replaces the top route (e.g. a new sort), keeping the stack. */
   replace(route: Route) {
-    set([...stack().slice(0, -1), entry(route)]);
+    set(model.replaceTop(state, route));
   },
   /** Shows the top route again from scratch (reloads it). */
   reload() {
     nav.replace(nav.top().route);
   },
-  /** Back; the root stays. Returns `false` at the root. */
+  /** Back (from Preferences: its browse root); a root's root stays. Returns `false` there. */
   back(): boolean {
-    if (stack().length <= 1) return false;
-    set(stack().slice(0, -1));
+    const next = model.back(state);
+    if (!next) return false;
+    set(next);
     return true;
   },
-  /** A sidebar destination: a new stack with `route` at its root. */
-  root(route: Route) {
-    set([entry(route)]);
+  /** The shown browse stack back at its root. */
+  toRoot() {
+    const next = model.toRoot(state);
+    if (next) set(next);
   },
-  /** Opens search, or focuses it if it is already the top view. */
+  /** The browse root a push opens on (from Preferences: Library). */
+  openRoot(): BrowseRoot {
+    return model.openRootFor(state);
+  },
+  /** Go to album/artist: `route` on `root` of the (already switched) source. */
+  goTo(route: Route, root: BrowseRoot) {
+    set(model.goTo(state, root, route));
+  },
+  /** A top bar entry: that root, or the active one back to its root. */
+  selectRoot(root: Root) {
+    set(model.selectRoot(state, root));
+  },
+  /** Library's section (remembered for the source). */
+  setSection(section: Section) {
+    set(model.setSection(state, section));
+    saveSection(state.source, model.current(state).section);
+  },
+  /** Shows Search and focuses its field; `query` starts a new search. */
   search(query = "") {
-    const top = nav.top().route;
-    if (top.kind === "search" && query === "") {
-      document.querySelector<HTMLInputElement>(".search-input")?.focus();
-      return;
-    }
-    nav.push({ kind: "search", source: active, query });
+    set(model.search(state, query));
+    focusSearch();
   },
   top(): Entry {
-    const s = stack();
-    return s[s.length - 1];
+    return model.topEntry(state);
   },
-  /** The source whose stack is shown. */
+  /** The source whose stacks are shown. */
   source(): SourceKind {
-    return active;
+    return state.source;
   },
   /**
-   * Shows `source`'s stack (where it was left). Callers go through
-   * `state/source.ts`, which also saves the choice. `keepSettings`: if
-   * Settings was shown, it stays shown (a source disconnected there).
+   * Shows `source`'s stacks (where they were left). Callers go through
+   * `state/source.ts`, which also saves the choice.
    */
-  setSource(source: SourceKind, keepSettings = false) {
-    if (source === active) return;
-    const settings = nav.top().route.kind === "settings";
-    active = source;
-    if (keepSettings && settings && nav.top().route.kind !== "settings") {
-      stacks[source] = [...stacks[source], entry({ kind: "settings" })];
-    }
-    notify();
+  setSource(source: SourceKind) {
+    set(model.setSource(state, source));
   },
 };
 
@@ -118,81 +118,30 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** The active source's stack. */
+const getState = () => state;
+const getStack = () => model.currentStack(state);
+
+/** The shown stack (the active source's active root's). */
 export function useNav(): Entry[] {
-  return useSyncExternalStore(subscribe, stack);
+  return useSyncExternalStore(subscribe, getStack);
 }
 
-/** The source a route reads (`null`: none). */
-export function routeSource(route: Route): SourceKind | null {
-  switch (route.kind) {
-    case "folder":
-      return "local";
-    case "settings":
-      return null;
-    default:
-      return route.source;
-  }
+/** The whole navigation state (sections, stacks). */
+export function useNavState(): NavState {
+  return useSyncExternalStore(subscribe, getState);
+}
+
+const getRoot = () => model.activeRoot(state);
+
+/** The top bar's active entry. */
+export function useActiveRoot(): Root {
+  return useSyncExternalStore(subscribe, getRoot);
 }
 
 /**
  * The library or server was replaced (settings): every view of that
- * source holds stale ids, so its stack restarts at Home, which reloads.
+ * source holds stale ids, so its stacks restart at their roots, which reload.
  */
 export function sourceReplaced(source: SourceKind) {
-  set([home(source)], source);
-}
-
-/** The sidebar's routes, for the active source. */
-export function routeFor(view: ViewId, source: SourceKind): Route {
-  switch (view) {
-    case "home":
-      return { kind: "home", source };
-    case "search":
-      return { kind: "search", source, query: "" };
-    case "artists":
-      return { kind: "artists", source };
-    case "albums":
-      return source === "local"
-        ? { kind: "albums", source, order: "name" }
-        : { kind: "albums", source, sort: "name" };
-    case "folders":
-      return { kind: "folder", path: [] };
-    case "playlists":
-      return { kind: "playlists", source };
-    case "genres":
-      return { kind: "genres", source };
-    case "mixes":
-      return { kind: "mixes", source };
-    case "settings":
-      return { kind: "settings" };
-  }
-}
-
-/** The sidebar entry a route belongs to (the stack's root decides). */
-export function viewFor(route: Route): ViewId {
-  switch (route.kind) {
-    case "home":
-      return "home";
-    case "search":
-      return "search";
-    case "settings":
-      return "settings";
-    case "folder":
-      return "folders";
-    case "artists":
-    case "artist":
-      return "artists";
-    case "albums":
-    case "album":
-      return "albums";
-    case "playlists":
-    case "playlist":
-      return "playlists";
-    case "genres":
-    case "genre":
-      return "genres";
-    case "mixes":
-      return "mixes";
-  }
+  set(model.resetSource(state, source));
 }

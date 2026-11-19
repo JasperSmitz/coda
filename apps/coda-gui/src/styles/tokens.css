@@ -89,11 +89,14 @@
 
   --radius: 6px;
   --radius-small: 4px;
-  --sidebar-width: 220px;
-  --queue-width: 320px;
+  /* The top bar's height (the macOS window buttons are centred in it:
+     `titlebar.rs`, app.css). */
+  --topbar-h: 52px;
+  --queue-panel-width: 380px;
   --bar-height: 76px;
   /* Room for the macOS window buttons (app.css); 0 elsewhere. */
   --titlebar-h: 0px;
+  --window-buttons-w: 0px;
   --row-height: 36px;
 
   /* Hover and colour changes: short. Panels and the Now Playing view

@@ -10,7 +10,7 @@ import { useLibraryVersion, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { folderContext, playLocal, useShuffleContext } from "../lib/play";
-import { nav, type Entry } from "../state/nav";
+import { nav, useNav, type Entry } from "../state/nav";
 import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
 
 export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
@@ -25,6 +25,15 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
   const playAll = (shuffle: boolean) => playLocal({ kind: "folder", path }, shuffle);
   const hasContent = folder !== undefined && (folder.dirs.length > 0 || folder.tracks.length > 0);
   useShuffleContext(hasContent ? () => playAll(true) : null);
+
+  // "Music": back to the start of the stack if it is the folder root
+  // (Library's Folders), else a new page.
+  const stack = useNav();
+  const root = stack[0].route;
+  const openMusicRoot = () => {
+    if (root.kind === "folder" && root.path.length === 0) nav.toRoot();
+    else nav.push({ kind: "folder", path: [] });
+  };
 
   const title = path.length > 0 ? path[path.length - 1] : "Folders";
   return (
@@ -42,7 +51,7 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
       >
         {path.length > 0 && (
           <nav className="breadcrumbs" aria-label="Folder path">
-            <button className="link-button" onClick={() => nav.root({ kind: "folder", path: [] })}>
+            <button className="link-button" onClick={openMusicRoot}>
               Music
             </button>
             {path.slice(0, -1).map((name, i) => (

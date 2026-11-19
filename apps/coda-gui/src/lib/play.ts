@@ -146,23 +146,17 @@ export function canLinkArtist(track: Track): boolean {
   return !albumArtist || fold(albumArtist) === fold(track.artist);
 }
 
-/** Opens `route`, on its own source's stack (switching source first). */
+/**
+ * Opens `route` on its own source (switching source first), on the root
+ * it was asked from (from Preferences: Library). The model skips a
+ * duplicate (an album's own link inside it).
+ */
 export function openRoute(route: Route & { source: SourceKind }) {
+  const root = nav.openRoot();
   if (route.source !== nav.source()) switchSource(route.source);
   // The switch is refused for a source that is not configured.
   if (route.source !== nav.source()) return;
-  // Already shown (an album's own link inside it): no duplicate entry.
-  const top = nav.top().route;
-  if (
-    "id" in top &&
-    "id" in route &&
-    top.kind === route.kind &&
-    top.source === route.source &&
-    top.id === route.id
-  ) {
-    return;
-  }
-  nav.push(route);
+  nav.goTo(route, root);
 }
 
 export function goToAlbum(track: Track) {

@@ -1,5 +1,5 @@
 // The immersive Now Playing view (`f`): the only thing in the window
-// while open (App hides the sidebar, browse area, queue column and bar).
+// while open (App hides the top bar, browse area, queue panel and bar).
 // Large cover over a blurred, darkened copy of it, title/artist/album, one
 // timeline with repeat beside it, one transport row with volume,
 // visualizer bars and an "Up next" card (faded out, slot kept, while the

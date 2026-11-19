@@ -73,7 +73,7 @@ React UI ──invoke(intent)──▶ Tauri command ──mpsc──▶ Engine 
 
 A design-led redesign on `main`: Home / Search / Library navigation, Home built around a carousel of recent listening and daily mood mixes, a floating player with the queue rising out of it, colour taken from the music, one look with no themes. Each slice is a vertical slice that leaves the app working and releasable from `main`; each gets a brief in `docs/plans/` (`n1-shell.md`, …) before implementation, a review, and runtime checks in `scripts/smoke.md`. The engine, commands, mixes, lyrics, history and Now Playing carry over.
 
-### N1 — Shell and navigation
+### N1 — Shell and navigation (done 2026-11-19, `docs/plans/n1-shell.md`; macOS button placement awaits smoke N1-1)
 - The top bar (coda sign and wordmark, the Home / Search / Library pill with its gliding indicator, Preferences) and the macOS window buttons in its row; the sidebar and the queue column go. Library as one root with sections (Albums, Artists, Genres, Playlists, Mixes, Folders for local), the section remembered; a back stack per root (and per source, as today). The source switch moves to Preferences (`Ctrl/Cmd+1`/`2` stay). The 1.x bar stays for now, docked; the queue opens as a temporary overlay until N4.
 - Acceptance: every 1.x view is reachable; Back, keyboard shortcuts and "Go to album/artist" across sources still work; focus is visible everywhere; nothing hides under the bar.
 
@@ -90,7 +90,7 @@ A design-led redesign on `main`: Home / Search / Library navigation, Home built 
 - Acceptance: every 1.x player and queue behaviour (selection, drag-and-drop, header buttons, mix line) works in the new placement; the morph degrades to a crossfade without View Transitions; the 1.x Now Playing smoke checks still pass.
 
 ### N5 — Library, pages and Search
-- Sections with Covers / List per section (remembered; the Preferences default), sorts (Albums: A–Z, Most played, Recently added, Year; Navidrome's server sorts); page headers for album, artist, genre, playlist and mix with their glows; the artist page's **Your most played**; Search's large field, genre chips, Top result + Songs, Albums, Artists, Lyrics (1.x rules).
+- Sections with Covers / List per section (remembered; the Preferences default), sorts (Albums: A–Z, Most played, Recently added, Year; Navidrome's server sorts); page headers for album, artist, genre, playlist and mix with their glows; the artist page's **Your most played**; Search's large field, genre chips, Top result + Songs, Albums, Artists, Lyrics (1.x rules). **Pages scroll under the top bar** (from N1: views still have a fixed header with a scrolling body below the bar; the page becomes one scroll container whose header scrolls away, with the top bar floating over it).
 - Open for the brief: local per-song play counts (the history counts listens per context today) and how Navidrome's per-song `playCount` is gathered for an artist without fetching every album at once.
 - Acceptance: large libraries stay fast in List (virtualized); sorts match the source's counts; Search keeps the lyrics behaviour.
 

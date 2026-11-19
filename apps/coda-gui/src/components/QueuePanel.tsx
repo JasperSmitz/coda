@@ -37,6 +37,8 @@ interface Props {
   serverConfigured: boolean;
   /** The active mix (or the one loading), shown under the header. */
   mix: ActiveMix | null;
+  /** macOS: the header drags the window (not in the floating panel). */
+  dragHeader?: boolean;
 }
 
 const plural = (n: number, noun: string) =>
@@ -51,6 +53,7 @@ export function QueuePanel({
   locked,
   serverConfigured,
   mix,
+  dragHeader = true,
 }: Props) {
   const list = useRef<HTMLDivElement>(null);
   const rowsEl = useRef<HTMLDivElement>(null);
@@ -260,7 +263,7 @@ export function QueuePanel({
 
   return (
     <aside className="queue" aria-label="Queue">
-      <header className="panel-header" {...dragRegion}>
+      <header className="panel-header" {...(dragHeader ? dragRegion : {})}>
         <div>
           <h2>Queue</h2>
           <div className="secondary">

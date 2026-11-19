@@ -4,19 +4,23 @@ A desktop music player for your local files and a personal [Navidrome](https://w
 
 **Status:** early development, see [`docs/PLAN.md`](docs/PLAN.md).
 
+## Finding your way
+
+The bar at the top has **Home**, **Search** (`/` or Ctrl/Cmd+F) and **Library**, and the sliders button on the right opens **Settings**. Each of the three keeps its own history: open an album from Library, switch to Home and back, and Library is still on that album; click the entry you are on to go back to its start. Back is `Backspace`, `Alt+←`, the mouse's back button or Esc. **Library** shows your collection in sections, chosen at the top of the page: Albums, Artists, Genres, Playlists, Mixes, and Folders for a local library; the section you chose is remembered. With both a music folder and a Navidrome server set up, you browse one at a time: choose it under **Music source** at the top of Settings, or press Ctrl/Cmd+1 (local) or Ctrl/Cmd+2 (Navidrome). `q` (or the queue button in the bottom bar) opens the queue in a panel above the bar; Esc, `q` or a click elsewhere closes it.
+
 ## Genres
 
-**Genres** in the sidebar lists the genres of the library you browse (Local or Navidrome), A–Z with their album and track counts. Open one for its albums; **Play** or **Shuffle** (`s`) plays the whole genre (Navidrome: Shuffle plays random songs of the genre). An album's page shows its genres; click one to open it. Genres are read as tagged: a tag such as `Rock;Progressive Rock` counts as two genres (split on `;`, `/` and `,`, as Navidrome does), and Coda never changes or looks up genres.
+**Genres** in Library lists the genres of the library you browse (Local or Navidrome), A–Z with their album and track counts. Open one for its albums; **Play** or **Shuffle** (`s`) plays the whole genre (Navidrome: Shuffle plays random songs of the genre). An album's page shows its genres; click one to open it. Genres are read as tagged: a tag such as `Rock;Progressive Rock` counts as two genres (split on `;`, `/` and `,`, as Navidrome does), and Coda never changes or looks up genres.
 
 ## Mixes
 
-A **mix** is a saved recipe of genres, artists and albums from one source, for example "Prog Rock and Indie Rock" or "King Crimson, Yes and Genesis". It plays as an endless shuffle in which the genres, artists and albums take turns, and it is resolved every time it plays, so music added later joins in. **Mixes** in the sidebar lists the saved mixes of the source you browse: **Play** starts one, the card's menu (right-click or "…") edits or deletes it, and **New mix…** opens the editor, where you name the mix, search for genres, artists and albums and either **Save** it or **Play** it once without saving (a quick mix). **Add to mix…** in the menu of a genre, artist or album (and on their pages) adds it to a saved mix or starts a new one. While a mix plays, Now Playing and the queue show "Mix: <name>"; playing anything else, or clearing the queue, ends it. An edit applies the next time the mix plays. Saved mixes live in `~/.local/share/coda/mixes.json`, shared with the terminal player.
+A **mix** is a saved recipe of genres, artists and albums from one source, for example "Prog Rock and Indie Rock" or "King Crimson, Yes and Genesis". It plays as an endless shuffle in which the genres, artists and albums take turns, and it is resolved every time it plays, so music added later joins in. **Mixes** in Library lists the saved mixes of the source you browse: **Play** starts one, the card's menu (right-click or "…") edits or deletes it, and **New mix…** opens the editor, where you name the mix, search for genres, artists and albums and either **Save** it or **Play** it once without saving (a quick mix). **Add to mix…** in the menu of a genre, artist or album (and on their pages) adds it to a saved mix or starts a new one. While a mix plays, Now Playing and the queue show "Mix: <name>"; playing anything else, or clearing the queue, ends it. An edit applies the next time the mix plays. Saved mixes live in `~/.local/share/coda/mixes.json`, shared with the terminal player.
 
 ## Now Playing and the window
 
 `f` (or the Full screen button at the right of the bottom bar) opens Now Playing in full screen; closing it leaves full screen again, unless the window was already full screen before. A click on the bar's cover opens Now Playing in a window, and the button at its top right enters or leaves full screen without closing it. Coda always starts in a window, at the size and place it last had outside full screen (maximised if it was).
 
-On macOS the window has no separate title bar: the close, minimise and zoom buttons sit at the top of the sidebar (or over Now Playing), and you drag the window by a page's header, the queue's header or the top of the sidebar (double-click to zoom). Cmd+W, Cmd+M, Cmd+Q and the View and Window menus work as usual.
+On macOS the window has no separate title bar: the close, minimise and zoom buttons sit at the left of the top bar (or over Now Playing), and you drag the window by the top bar or a page's header (double-click to zoom). Cmd+W, Cmd+M, Cmd+Q and the View and Window menus work as usual.
 
 ## Lyrics
 

@@ -138,26 +138,6 @@ export const FolderIcon = (p: IconProps) => (
     <path d="M3.5 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
   </Icon>
 );
-export const PlaylistIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M4 6h11M4 11h11M4 16h6" />
-    <circle cx="17" cy="17" r="2.5" />
-    <path d="M19.5 17V8l2-1" />
-  </Icon>
-);
-export const SettingsIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <circle cx="12" cy="12" r="3" />
-    <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" />
-  </Icon>
-);
-export const NoteIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M9 18V5l11-2v13" />
-    <circle cx="6.5" cy="18" r="2.5" />
-    <circle cx="17.5" cy="16" r="2.5" />
-  </Icon>
-);
 export const AlertIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 3.5l9.5 16.5h-19z" />
@@ -235,5 +215,28 @@ export const MixIcon = (p: IconProps) => (
 export const PlusIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M12 5v14M5 12h14" />
+  </Icon>
+);
+/** Library: records on a shelf. */
+export const LibraryIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M5 4.5v15M9.5 4.5v15" />
+    <path d="M13.5 5.5l4.5-1.2 2.6 14.8-4.5 1.2z" />
+  </Icon>
+);
+/** Preferences: three sliders. */
+export const SlidersIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1" />
+    <circle cx="15" cy="7" r="2" />
+    <circle cx="9" cy="12" r="2" />
+    <circle cx="17" cy="17" r="2" />
+  </Icon>
+);
+/** The coda sign (𝄌): an upright oval crossed by a vertical and a horizontal line. */
+export const CodaSignIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <ellipse cx="12" cy="12" rx="5" ry="7" />
+    <path d="M12 2v20M3 12h18" />
   </Icon>
 );

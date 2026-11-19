@@ -1,11 +1,12 @@
 // Pieces shared by the browse views: the header, Play/Shuffle buttons,
 // the scan progress line and count formatting.
 
-import type { ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { BackIcon, PlayIcon, ShuffleIcon } from "../components/icons";
 import { formatTime } from "../lib/format";
+import { SECTION_LABEL, sectionOf, sectionsFor, type Section } from "../lib/navModel";
 import { dragRegion } from "../lib/platform";
-import { nav, useNav } from "../state/nav";
+import { nav, useActiveRoot, useNav, useNavState } from "../state/nav";
 import { useAppState } from "../state/store";
 
 export function plural(n: number, noun: string): string {
@@ -40,6 +41,14 @@ export function ViewHeader({
   cover?: ReactNode;
 }) {
   const stack = useNav();
+  const navState = useNavState();
+  const root = useActiveRoot();
+  // Library's root (a section) shows "Library" and the section control
+  // instead of the section's own title.
+  const section =
+    root === "library" && stack.length === 1
+      ? sectionOf(stack[0].route)
+      : null;
   return (
     <header className="view-header browse-header" {...dragRegion}>
       <div className="browse-header-main">
@@ -56,12 +65,70 @@ export function ViewHeader({
         {cover}
         <div className="browse-header-text">
           {eyebrow && <div className="eyebrow">{eyebrow}</div>}
-          <h1>{title}</h1>
+          <h1>{section ? "Library" : title}</h1>
+          {section && <SectionControl section={section} source={navState.source} />}
           {children}
         </div>
       </div>
       {actions && <div className="browse-header-actions">{actions}</div>}
     </header>
+  );
+}
+
+/** Set by the section control's arrow keys: focus the new section's radio once it shows. */
+let focusSectionOnMount = false;
+
+/** Library's sections as a segmented control (a radio group). */
+function SectionControl({ section, source }: { section: Section; source: "local" | "navidrome" }) {
+  const group = useRef<HTMLDivElement>(null);
+  const sections = sectionsFor(source);
+  useEffect(() => {
+    if (!focusSectionOnMount) return;
+    focusSectionOnMount = false;
+    group.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+  }, []);
+  const choose = (next: Section) => {
+    if (next === section) return;
+    // The new section's view replaces this one (and this control): its
+    // radio takes the focus.
+    focusSectionOnMount = true;
+    nav.setSection(next);
+  };
+  const onKeyDown = (e: KeyboardEvent) => {
+    const at = sections.indexOf(section);
+    let to: number;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") to = (at + 1) % sections.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp")
+      to = (at - 1 + sections.length) % sections.length;
+    else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = sections.length - 1;
+    else return;
+    // Not a seek (the global ←/→).
+    e.preventDefault();
+    e.stopPropagation();
+    choose(sections[to]);
+  };
+  return (
+    <div
+      ref={group}
+      className="section-control"
+      role="radiogroup"
+      aria-label="Library section"
+      onKeyDown={onKeyDown}
+    >
+      {sections.map((s) => (
+        <button
+          key={s}
+          role="radio"
+          aria-checked={s === section}
+          tabIndex={s === section ? 0 : -1}
+          className={`section-option ${s === section ? "is-active" : ""}`}
+          onClick={() => choose(s)}
+        >
+          {SECTION_LABEL[s]}
+        </button>
+      ))}
+    </div>
   );
 }
 

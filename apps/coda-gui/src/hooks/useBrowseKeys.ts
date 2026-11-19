@@ -1,7 +1,9 @@
 // Navigation keys (DESIGN.md): Back with Backspace, Alt+←, Escape or the
-// mouse back button; `/` or Ctrl+F search; `s` shuffles the shown
-// context; Ctrl/Cmd+1 and +2 switch to the local library and Navidrome. Ignored while typing in a text field (Escape there leaves the
-// field first).
+// mouse back button, on the active root's stack; `/` or Ctrl+F show
+// Search; `s` shuffles the shown context; Ctrl/Cmd+1 and +2 switch to the
+// local library and Navidrome. Ignored while typing in a text field
+// (Escape there leaves the field first). Escape closes an open panel (the
+// queue) before it goes Back.
 
 import { useEffect, useRef } from "react";
 import { shuffleContext } from "../lib/play";
@@ -16,11 +18,13 @@ interface Options {
   active: boolean;
   /** Back goes here instead of the stack (an overlay such as Now Playing). */
   onBack?: () => void;
+  /** Escape goes here first (an open panel such as the queue). */
+  onEscape?: () => void;
 }
 
-export function useBrowseKeys({ enabled, active, onBack }: Options) {
-  const state = useRef({ enabled, active, onBack });
-  state.current = { enabled, active, onBack };
+export function useBrowseKeys({ enabled, active, onBack, onEscape }: Options) {
+  const state = useRef({ enabled, active, onBack, onEscape });
+  state.current = { enabled, active, onBack, onEscape };
   useEffect(() => {
     const back = (): boolean => {
       const { onBack } = state.current;
@@ -59,6 +63,8 @@ export function useBrowseKeys({ enabled, active, onBack }: Options) {
         else return;
       } else if (e.ctrlKey || e.metaKey || e.altKey) {
         return;
+      } else if (e.key === "Escape" && state.current.onEscape) {
+        state.current.onEscape();
       } else if (e.key === "Backspace" || e.key === "Escape") {
         if (!back()) return;
       } else if (e.key === "/") {

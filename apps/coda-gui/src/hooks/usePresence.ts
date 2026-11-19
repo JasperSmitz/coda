@@ -94,7 +94,7 @@ export function usePresence(
   }, [open, ref]);
 
   // The element went away mid-exit (its parent unmounted it, e.g. Now
-  // Playing opened while the queue column left): the exit is over.
+  // Playing opened while the queue panel left): the exit is over.
   useLayoutEffect(() => {
     const current = motion.current;
     if (open || !current || current.element === ref.current) return;

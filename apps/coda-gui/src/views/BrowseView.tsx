@@ -78,6 +78,7 @@ export function BrowseView({ entry, snapshot }: { entry: Entry; snapshot: Snapsh
         />
       );
     case "settings":
-      return <SettingsView key={entry.id} snapshot={snapshot} />;
+      // One page for both sources: a source switch there keeps it.
+      return <SettingsView key="settings" snapshot={snapshot} />;
   }
 }

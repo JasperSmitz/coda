@@ -1,16 +1,19 @@
-// Settings: music folder (native picker), Navidrome server (test, save,
+// Settings: the music source (the Local | Navidrome switch, Ctrl/Cmd+1/2,
+// and its status), music folder (native picker), Navidrome server (test, save,
 // disconnect; the lyrics index's status, Rebuild and switch), cover art
 // and scrobbling, and Appearance (themes; the
 // GUI's own settings.toml, see views/settings/AppearanceSection). Every change is saved to Coda's
 // config.toml (shared with the TUI) and the keychain by the backend, then
 // applied live.
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
+import { LocalIcon, ServerIcon } from "../components/icons";
+import { bothConfigured, switchSource, useSources } from "../state/source";
 import { AppearanceSection } from "./settings/AppearanceSection";
-import { dragRegion } from "../lib/platform";
+import { dragRegion, isMacos } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
-import type { LyricsIndexStatus, ServerInput, Settings, Snapshot } from "../lib/types";
+import type { LyricsIndexStatus, ServerInput, Settings, Snapshot, SourceKind } from "../lib/types";
 
 /** A second click within this time disconnects. */
 const DISCONNECT_CONFIRM_MS = 3000;
@@ -77,6 +80,7 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
             {settings.problem && (
               <p className="settings-status settings-status-error">{settings.problem}</p>
             )}
+            <SourceSection snapshot={snapshot} />
             <MusicSection settings={settings} snapshot={snapshot} reload={reload} />
             <ServerSection settings={settings} snapshot={snapshot} reload={reload} />
             <OptionsSection settings={settings} reload={reload} />
@@ -97,6 +101,99 @@ export function SettingsView({ snapshot }: { snapshot: Snapshot }) {
           </>
         )}
       </div>
+    </section>
+  );
+}
+
+const SOURCE_NAME: Record<SourceKind, string> = { local: "Local", navidrome: "Navidrome" };
+/** Ctrl on Linux, Cmd on macOS (both work). */
+const MOD = isMacos ? "⌘" : "Ctrl+";
+
+/** The local scan's state in a few words (`null`: no library). */
+function scanStatus(snapshot: Snapshot): string | null {
+  const { scan } = snapshot;
+  switch (scan.state) {
+    case "noLibrary":
+      return null;
+    case "scanning":
+      return `Scanning… ${scan.tracks.toLocaleString()}`;
+    case "finished":
+      return `${scan.tracks.toLocaleString()} tracks`;
+    case "failed":
+      return "Scan failed";
+  }
+}
+
+/** A source's status: the scan line, or the connection state with its dot. */
+function SourceStatus({ source, snapshot }: { source: SourceKind; snapshot: Snapshot }) {
+  if (source === "local") return <span className="source-status-text">{scanStatus(snapshot)}</span>;
+  const state = snapshot.navidrome.state;
+  return (
+    <span className="source-status-text">
+      <span className={`connection connection-${state}`} aria-hidden="true" />
+      {CONNECTION_TEXT[state]}
+    </span>
+  );
+}
+
+/**
+ * The source browsed (one at a time): a switch when both are set up,
+ * else the one source's name. Ctrl/Cmd+1 and +2 switch from anywhere.
+ */
+function SourceSection({ snapshot }: { snapshot: Snapshot }) {
+  const sources = useSources();
+  const source = sources.active;
+  const option = (kind: SourceKind, index: number, icon: ReactNode) => (
+    <button
+      role="radio"
+      aria-checked={source === kind}
+      tabIndex={source === kind ? 0 : -1}
+      className={`source-option ${source === kind ? "is-active" : ""}`}
+      onClick={() => switchSource(kind)}
+      title={`Browse ${kind === "local" ? "the local library" : "Navidrome"} (${MOD}${index})`}
+    >
+      {icon}
+      <span>{SOURCE_NAME[kind]}</span>
+    </button>
+  );
+  const onKeyDown = (e: KeyboardEvent) => {
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+    if (!keys.includes(e.key)) return;
+    // Not a seek (the global ←/→).
+    e.preventDefault();
+    e.stopPropagation();
+    const next: SourceKind = source === "local" ? "navidrome" : "local";
+    switchSource(next);
+    // The switch re-renders in place: keep the focus on the chosen option.
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>('.source-switch [aria-checked="true"]')?.focus(),
+    );
+  };
+  return (
+    <section className="settings-section" aria-labelledby="settings-source">
+      <h2 id="settings-source">Music source</h2>
+      {bothConfigured(sources) ? (
+        <>
+          <div
+            className="source-switch"
+            role="radiogroup"
+            aria-labelledby="settings-source"
+            onKeyDown={onKeyDown}
+          >
+            {option("local", 1, <LocalIcon size={15} />)}
+            {option("navidrome", 2, <ServerIcon size={15} />)}
+          </div>
+          <p className="secondary source-status">
+            <span>{source === "local" ? "Local library" : "Navidrome server"}</span>
+            <SourceStatus source={source} snapshot={snapshot} />
+          </p>
+        </>
+      ) : (
+        <p className="secondary source-status">
+          <span>{SOURCE_NAME[source]}</span>
+          <SourceStatus source={source} snapshot={snapshot} />
+        </p>
+      )}
     </section>
   );
 }

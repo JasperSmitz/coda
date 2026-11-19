@@ -35,8 +35,7 @@ export function effectiveSource(
   return choice ?? "local";
 }
 
-/** `fallback`: the shown source went away (Settings stays open then). */
-function update(next: Partial<Sources>, fallback = false) {
+function update(next: Partial<Sources>) {
   const merged = { ...state, ...next };
   merged.active = effectiveSource(saved, merged.configured);
   const changed =
@@ -46,7 +45,7 @@ function update(next: Partial<Sources>, fallback = false) {
   // The new state first, so whatever nav's listeners render reads the
   // source that goes with the new stack.
   if (changed) state = merged;
-  nav.setSource(merged.active, fallback);
+  nav.setSource(merged.active);
   if (changed) listeners.forEach((l) => l());
 }
 
@@ -65,7 +64,7 @@ export function startSources() {
 export function setConfigured(local: boolean, navidrome: boolean) {
   const c = state.configured;
   if (c && c.local === local && c.navidrome === navidrome) return;
-  update({ configured: { local, navidrome } }, true);
+  update({ configured: { local, navidrome } });
 }
 
 /** Picking `source` would change the source shown. */
@@ -74,7 +73,7 @@ export function canSwitch(source: SourceKind): boolean {
   return state.active !== source;
 }
 
-/** The user picks a source (sidebar, Ctrl/Cmd+1/2, Go to album…). */
+/** The user picks a source (Settings, Ctrl/Cmd+1/2, Go to album…). */
 export function switchSource(source: SourceKind) {
   if (state.configured && !state.configured[source]) return;
   if (saved === source && state.active === source) return;
@@ -96,7 +95,7 @@ export function useSources(): Sources {
   return useSyncExternalStore(subscribe, () => state);
 }
 
-/** Both sources are set up (the sidebar shows the switch). */
+/** Both sources are set up (Settings shows the switch). */
 export function bothConfigured(sources: Sources): boolean {
   return !!sources.configured?.local && !!sources.configured.navidrome;
 }

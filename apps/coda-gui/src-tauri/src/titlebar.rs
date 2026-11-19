@@ -2,17 +2,22 @@
 //! (rounded corners, shadow, resizing, full screen) and its close,
 //! minimise and zoom buttons, but the title bar is an overlay with no
 //! title, so the webview fills the whole window. The buttons are inset
-//! into the sidebar's top row (`--titlebar-h` in `app.css`: keep the two
-//! in step); the page and panel headers are the drag regions. wry puts
-//! the buttons back at this inset whenever the window's content redraws
-//! (after a resize or leaving full screen).
+//! into the top bar's row, vertically centred on its pill (`--topbar-h`
+//! and `--window-buttons-w` in `tokens.css`/`app.css`: keep them in step);
+//! the top bar is the drag region. wry puts the buttons back at this inset
+//! whenever the window's content redraws (after a resize or leaving full
+//! screen).
 
 use tauri::LogicalPosition;
 
 /// The buttons' inset from the window's top-left corner, in points: `x`
-/// to the close button's left edge, `y` sizes the title bar area AppKit
-/// lays them out in (they end up vertically centred in a ~40pt row).
-const BUTTONS: LogicalPosition<f64> = LogicalPosition::new(18.0, 20.0);
+/// to the close button's left edge. `y` sets the title bar area AppKit
+/// lays them out in (tao makes it the button's height plus `y` and moves
+/// the buttons only sideways); in practice their centre ends up at about
+/// `y` from the top (1.x: y = 20 centred them in a 40pt row). 26 centres
+/// them on the 52px top bar's pill (`--topbar-h`); to be confirmed by the
+/// owner on a Mac (`scripts/smoke.md` N1-1).
+const BUTTONS: LogicalPosition<f64> = LogicalPosition::new(18.0, 26.0);
 
 /// The main window's builder, with the title bar overlaid, its title
 /// hidden and the buttons inset.
