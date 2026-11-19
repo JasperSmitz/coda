@@ -139,7 +139,9 @@
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
+  /* Clear of the page's scrollbar on the right, so its thumb can be
+     grabbed at the top (on macOS the bar would drag the window). */
+  right: var(--scrollbar-w);
   z-index: 5;
   height: var(--topbar-h);
   display: grid;
@@ -149,10 +151,12 @@
   padding: 0 16px 0 calc(20px + var(--window-buttons-w));
 }
 
+/* The fade reaches over the scrollbar's strip too (no pointer events:
+   the scrollbar under it stays usable). */
 .topbar::before {
   content: "";
   position: absolute;
-  inset: 0 0 -16px 0;
+  inset: 0 calc(-1 * var(--scrollbar-w)) -16px 0;
   z-index: -1;
   background: linear-gradient(
     var(--bg) 0%,
@@ -353,9 +357,10 @@
 }
 
 /* The page's glow: the subject's cover, very blurred, behind the header
-   and the top of the body, under a radial darkening of the page's tint,
-   faded out by ~600px. It stays put while the body scrolls (N5 makes it
-   scroll with the page). Behind the page's content (`.main` isolates). */
+   and the top of the page, under a radial darkening of the page's tint,
+   faded out by ~600px. It sits at the top of the page's scrolling content
+   (`.main.page`), so it scrolls away with the header. Behind the page's
+   content (`.main` isolates). */
 .page-glow {
   position: absolute;
   inset: 0 0 auto 0;
@@ -411,24 +416,45 @@
   overflow: hidden;
 }
 
+/* The page (DESIGN.md "Layout"): one scroll container for the window,
+   under the floating top bar and player. At scroll top its content starts
+   below the bar (`.page-content`); a view's own bottom padding keeps its
+   end above the player. Rows scrolled into view (keyboard, `useLayout`'s `revealRow`,
+   `scrollIntoView`) stay clear of the bar, of a list's sticky tool row
+   (`.has-tool-row`, set by `ToolRow`) and of the player: its
+   `scroll-padding`. The views' virtualized lists measure against it, as
+   their offset parent: nothing between it and a list is positioned. */
+.main.page {
+  display: block;
+  /* No padding of its own: a sticky child's `top` counts from the
+     scroller's padding edge, so padding here would push the tool row and
+     the letter index down by as much (docs/LESSONS.md). */
+  padding-top: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* The scrollbar's strip is always kept (the top bar stays clear of it). */
+  scrollbar-gutter: stable;
+  scroll-padding-top: var(--topbar-h);
+  scroll-padding-bottom: var(--player-room);
+}
+
+.main.page.has-tool-row {
+  scroll-padding-top: calc(var(--topbar-h) + var(--tool-row-h));
+}
+
+/* The page's content: clear of the top bar at scroll top. Not
+   positioned, so `.main.page` stays the lists' offset parent. */
+.page-content {
+  padding-top: var(--topbar-h);
+}
+
+/* A view: its header first, then its body; content at most
+   `--page-w` wide, centred. Its end clear of the player. */
 .view {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1;
-}
-
-.view-header {
-  padding: 22px 32px 14px;
-}
-
-.view-header h1 {
-  font-family: var(--font-display);
-  font-variation-settings: var(--display-axes);
-  font-size: var(--text-title);
-  font-weight: var(--display-weight);
-  letter-spacing: -0.015em;
-  line-height: 1.08;
+  max-width: calc(var(--page-w) + 2 * var(--page-pad));
+  margin: 0 auto;
+  padding: 0 var(--page-pad) calc(24px + var(--player-room));
 }
 
 /* The small label above a title ("Local · Album"): the display face in
@@ -443,15 +469,9 @@
   font-weight: 500;
 }
 
-/* The page's scrolling body reaches the window's bottom edge, under the
-   player; its end keeps room for the player (`--player-room`), and
-   keyboard scrolling keeps rows clear of it (`scroll-padding-bottom`,
-   which `scrollIntoView` and `useLayout`'s `revealRow` honour). */
+/* A view's content below its header (and tools). */
 .view-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px 32px calc(20px + var(--player-room));
-  scroll-padding-bottom: var(--player-room);
+  padding-top: 4px;
 }
 
 .placeholder {
@@ -482,7 +502,9 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 32px 0;
+  max-width: calc(var(--page-w) + 2 * var(--page-pad));
+  margin: 0 auto;
+  padding: 12px var(--page-pad) 0;
 }
 
 /* Glass, tinted with what it is about. */
@@ -1072,6 +1094,15 @@
   padding: 7px 12px;
   border-radius: var(--radius-small);
   text-align: left;
+}
+
+/* Why the item above is disabled. */
+.context-menu .menu-hint {
+  max-width: 240px;
+  padding: 0 12px 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .context-menu button:not(:disabled):hover,

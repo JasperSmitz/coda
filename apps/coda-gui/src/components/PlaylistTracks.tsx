@@ -22,7 +22,7 @@ import {
   useEditsRunning,
 } from "../lib/playlists";
 import type { Hidden, PlayContext, Playlist, Track } from "../lib/types";
-import { revealRow } from "../hooks/useLayout";
+import { clearHeight, revealRow } from "../hooks/useLayout";
 import { useAppState } from "../state/store";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { MoreIcon } from "./icons";
@@ -183,7 +183,8 @@ export function PlaylistTracks({ playlist, tracks, hidden, scroller, label, cont
   const onKeyDown = (e: KeyboardEvent) => {
     if (order.length === 0) return;
     const cursor = selection.cursor === null ? -1 : keys.indexOf(selection.cursor);
-    const page = Math.max(1, Math.floor(view.height / ROW) - 1);
+    const room = scroller.current ? clearHeight(scroller.current) : view.height;
+    const page = Math.max(1, Math.floor(room / ROW) - 1);
     const move = (to: number) => {
       const at = Math.min(order.length - 1, Math.max(0, to));
       selection.moveTo(at, e.shiftKey);

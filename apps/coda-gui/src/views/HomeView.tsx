@@ -9,7 +9,7 @@ import { Cover } from "../components/Cover";
 import { NameLink } from "../components/NameLink";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
 import { BackIcon, ForwardIcon, PlayIcon, ShuffleIcon } from "../components/icons";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import {
@@ -25,7 +25,7 @@ import {
 import type { Album, ContextKind, HomeItem, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { useAppState } from "../state/store";
-import { SOURCE_LABEL, ViewHeader, useCanPlay } from "./common";
+import { ListHeader, SOURCE_LABEL, useCanPlay } from "./common";
 
 /** Cards per server row (the first page holds more). */
 const ROW_MAX = 20;
@@ -383,7 +383,7 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
   const historyRevision = snapshot?.historyRevision ?? 0;
   const today = useToday();
   const canPlay = useCanPlay();
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   // Local rows resolve against the library (reload as it changes); both
   // sources reload when the history changes (a play from a card here).
   const history = useLoad(
@@ -446,8 +446,8 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
 
   return (
     <section className="view">
-      <ViewHeader eyebrow={SOURCE_LABEL[source]} title="Home" />
-      <div className="view-body home-body" ref={scroller}>
+      <ListHeader eyebrow={SOURCE_LABEL[source]} title="Home" />
+      <div className="view-body home-body">
         {!ready && <SkeletonGrid count={6} />}
         {history.state === "error" && <ErrorState error={history.error} onRetry={history.retry} />}
         {fresh && (

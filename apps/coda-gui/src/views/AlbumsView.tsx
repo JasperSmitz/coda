@@ -1,17 +1,16 @@
 // All albums of a source as a grid. Local: A–Z or by artist. Navidrome:
 // the six server orders, paged with infinite scroll.
 
-import { useRef } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
 import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { shuffleAll, useShuffleContext } from "../lib/play";
 import type { AlbumSort, LocalAlbumOrder } from "../lib/types";
 import { nav, type Entry, type Route } from "../state/nav";
-import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
+import { ListHeader, PlayButtons, ScanLine, SOURCE_LABEL, plural } from "./common";
 
 const SORTS: [AlbumSort, string][] = [
   ["name", "A–Z"],
@@ -40,16 +39,17 @@ export function AlbumsView({ entry, route }: { entry: Entry; route: AlbumsRoute 
 function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder }) {
   const version = useLibraryVersion();
   const load = useLoad(() => browse.localAlbums(order), order, version);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const albums = load.data ?? [];
   useScroll(scroller, entry, albums.length > 0);
   useShuffleContext(() => shuffleAll("local"));
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL.local}
         title="Albums"
-        actions={
+        meta={load.state === "ready" && plural(albums.length, "album")}
+        tools={
           <>
             <SortSelect
               value={order}
@@ -59,13 +59,9 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
             <PlayButtons onShuffle={() => shuffleAll("local")} />
           </>
         }
-      >
-        {load.state === "ready" && (
-          <div className="secondary">{plural(albums.length, "album")}</div>
-        )}
-      </ViewHeader>
+      />
       <ScanLine />
-      <div className="view-body" ref={scroller}>
+      <div className="view-body">
         {load.state === "loading" && <SkeletonGrid />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && albums.length === 0 && (
@@ -80,7 +76,7 @@ function LocalAlbums({ entry, order }: { entry: Entry; order: LocalAlbumOrder })
 }
 
 function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const paged = usePagedAlbums((offset) => browse.navidromeAlbums(sort, offset), sort);
   const { pages } = paged;
   useScroll(scroller, entry, pages.albums.length > 0);
@@ -88,10 +84,14 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
 
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL.navidrome}
         title="Albums"
-        actions={
+        meta={
+          pages.albums.length > 0 &&
+          `${plural(pages.albums.length, "album")}${pages.next !== null ? "+" : ""}`
+        }
+        tools={
           <>
             <SortSelect
               value={sort}
@@ -101,15 +101,8 @@ function NavidromeAlbums({ entry, sort }: { entry: Entry; sort: AlbumSort }) {
             <PlayButtons onShuffle={() => shuffleAll("navidrome")} />
           </>
         }
-      >
-        {pages.albums.length > 0 && (
-          <div className="secondary">
-            {plural(pages.albums.length, "album")}
-            {pages.next !== null ? "+" : ""}
-          </div>
-        )}
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+      />
+      <div className="view-body">
         <PagedAlbumsBody
           paged={paged}
           scroller={scroller}

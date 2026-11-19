@@ -1,20 +1,20 @@
 // An artist: their albums as a grid, with Play and Shuffle for all of
 // the artist's tracks (`s` shuffles them too).
 
-import { useRef } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
-import { AddToMixButton } from "../components/MixParts";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { addToMixFlow } from "../lib/mixes";
 import { artistIngredient } from "../lib/mixRecipe";
 import { artistContext, playFrom, playLocal, playTracks, useShuffleContext } from "../lib/play";
 import type { SourceKind } from "../lib/types";
 import type { Entry } from "../state/nav";
 import { usePageSubject } from "../state/pageSubject";
-import { PlayButtons, SOURCE_LABEL, ViewHeader, plural } from "./common";
+import { useAppState } from "../state/store";
+import { PageActions, PageHeader, plural } from "./common";
 
 interface Props {
   entry: Entry;
@@ -30,7 +30,9 @@ export function ArtistView({ entry, source, id, name }: Props) {
     `${source}:${id}`,
     source === "local" ? version : null,
   );
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
   const albums = load.data?.albums ?? [];
   useScroll(scroller, entry, albums.length > 0);
 
@@ -56,29 +58,34 @@ export function ArtistView({ entry, source, id, name }: Props) {
   const tracks = artist?.trackCount;
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={`${SOURCE_LABEL[source]} · Artist`}
+      <PageHeader
+        cover={<Cover url={cover} name={title} size="large" className="page-cover" />}
+        round
+        eyebrow="Artist"
         title={title}
-        cover={<Cover url={cover} name={title} size="small" className="header-cover round" />}
-        actions={
-          <>
-            <PlayButtons
-              onPlay={() => play(false)}
-              onShuffle={() => play(true)}
-              disabled={albums.length === 0}
-            />
-            <AddToMixButton source={source} ingredient={artistIngredient(source, { id, name: title })} />
-          </>
+        meta={
+          load.state === "ready" &&
+          [plural(albums.length, "album"), tracks != null ? plural(tracks, "song") : null]
+            .filter(Boolean)
+            .join(" · ")
         }
-      >
-        <div className="secondary">
-          {load.state === "ready" &&
-            [plural(albums.length, "album"), tracks != null ? plural(tracks, "track") : null]
-              .filter(Boolean)
-              .join(" · ")}
-        </div>
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+        actions={
+          <PageActions
+            onPlay={() => play(false)}
+            onShuffle={() => play(true)}
+            disabled={albums.length === 0}
+            menu={[
+              {
+                label: "Add to mix…",
+                disabled: !started,
+                action: () =>
+                  void addToMixFlow(source, artistIngredient(source, { id, name: title })),
+              },
+            ]}
+          />
+        }
+      />
+      <div className="view-body">
         {load.state === "loading" && <SkeletonGrid count={6} />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && albums.length === 0 && <Empty title="No albums" />}

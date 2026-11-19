@@ -3,10 +3,6 @@
 
 /* ----- shared ----- */
 
-.view-body {
-  position: relative; /* virtualized lists measure against it */
-}
-
 .link-button {
   color: var(--text);
   font-weight: 550;
@@ -47,64 +43,230 @@
   font-size: 11px;
 }
 
-.browse-header {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-}
+/* ----- page headers (views/common.tsx) ----- */
 
-.browse-header-main {
-  display: flex;
-  align-items: flex-end;
-  gap: 16px;
-  min-width: 0;
-}
-
-.browse-header-text {
-  min-width: 0;
-}
-
-.browse-header-text h1 {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.browse-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: none;
+/* A page about one thing: a large cover, then the eyebrow, the title,
+   the byline, the meta line and the actions. */
+.page-header {
+  padding: 28px 0 30px;
 }
 
 .back-button {
-  align-self: flex-start;
-  margin-left: -8px;
+  margin: 0 0 10px -8px;
 }
 
-.header-cover {
-  width: 96px;
-  height: 96px;
-  box-shadow: var(--shadow);
+.page-header-main {
+  display: flex;
+  align-items: flex-end;
+  gap: 32px;
 }
 
-.header-cover.round {
+.page-header-cover {
+  flex: none;
+  width: var(--page-cover);
+  height: var(--page-cover);
+}
+
+.page-cover {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-cover);
+  box-shadow: var(--shadow-big);
+  font-size: 44px;
+}
+
+.page-header-cover.round .page-cover {
   border-radius: 50%;
 }
 
-.album-header-cover {
-  width: 148px;
-  height: 148px;
-  border-radius: 18px;
+/* Four covers, 2×2, as one. */
+.cover-mosaic {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  overflow: hidden;
 }
 
-.album-meta {
+.cover-mosaic-tile {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 18px;
+}
+
+.page-header-text {
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.page-header-text .eyebrow {
+  margin: 0;
+}
+
+/* Large, balanced, at most three lines. */
+.page-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: var(--text-page-title);
+  font-weight: var(--display-weight);
+  letter-spacing: -0.02em;
+  line-height: 1.04;
+  /* Room for descenders under the clamp. */
+  padding-bottom: 0.06em;
+}
+
+.page-byline {
+  max-width: 100%;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.page-meta {
+  display: flex;
   flex-wrap: wrap;
-  gap: 4px 12px;
+  align-items: baseline;
+  gap: 2px 8px;
+  max-width: 100%;
+  font-size: var(--text-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.page-meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.page-meta-sep {
+  color: var(--text-3);
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.page-actions .play-buttons {
+  gap: 10px;
+}
+
+.page-actions .button {
+  height: 40px;
+  padding: 0 20px;
+}
+
+/* "…": round glass, the actions' height. */
+.page-more {
+  width: 40px;
+  height: 40px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.page-more:not(:disabled):hover {
+  background: var(--surface-3);
+}
+
+/* Narrow windows: the cover above the text. */
+@media (max-width: 860px) {
+  .page-header-main {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 22px;
+  }
+}
+
+/* A list (a Library section, Home, Preferences): the title in display
+   type; its tools in the tool row below. */
+.list-header {
+  padding: 28px 0 14px;
+}
+
+.list-title {
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: var(--text-title);
+  font-weight: var(--display-weight);
+  letter-spacing: -0.015em;
+  line-height: 1.08;
+}
+
+.list-header .page-meta {
   margin-top: 4px;
+  font-size: var(--text-small);
+}
+
+/* A list's tools (the section control, sorts, Shuffle, New…): they stick
+   8px under the top bar once the header has scrolled away, then as glass
+   (`--tool-row-h`, tokens.css, is the room they take there). The glass
+   fades in (opacity only). */
+.tool-row-mark {
+  height: 1px;
+  margin-bottom: -1px;
+}
+
+.tool-row {
+  position: sticky;
+  top: calc(var(--topbar-h) + 8px);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  margin: 0 -8px 18px;
+  padding: 5px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.tool-row::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  /* The stronger glass: covers pass under it. Over an all-white cover
+     (the worst case): text 12.1:1, text-2 5.8:1, text-3 3.7:1, the
+     house accent 6.5:1; an inactive section's text-2 on its control's
+     surface 4.9:1. */
+  background: var(--glass-strong);
+  border: 1px solid var(--border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transition: opacity var(--motion) var(--ease-out);
+  pointer-events: none;
+}
+
+.tool-row.is-stuck::before {
+  opacity: 1;
+}
+
+.tool-row .section-control {
+  margin: 0;
+}
+
+.tool-row-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
 }
 
 .play-buttons {
@@ -132,15 +294,18 @@
   border-color: var(--accent);
 }
 
+/* Below a list's tools: a quiet glass line. */
 .scan-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 32px;
+  margin-bottom: 14px;
+  padding: 6px 14px;
   color: var(--text-2);
   font-size: var(--text-small);
   font-variant-numeric: tabular-nums;
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   background: var(--surface-1);
 }
 
@@ -366,6 +531,60 @@
   --row-height: 58px;
 }
 
+/* Search's Songs: the cover in the first column, "artist · album" under
+   the title. The height matches COVER_ROW in TrackTable.tsx. */
+.track-rows.with-covers {
+  --row-height: 56px;
+}
+
+.track-row.with-cover {
+  grid-template-columns: 44px minmax(0, 1fr) 64px 32px;
+}
+
+.track-cover-cell {
+  position: relative;
+  width: 44px;
+  height: 44px;
+}
+
+.track-cover {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-cover-small);
+  box-shadow: none;
+  font-size: 11px;
+}
+
+/* The playing song: the equaliser over its cover. */
+.track-cover-playing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-cover-small);
+  background: var(--on-cover-bg);
+}
+
+.track-byline {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.track-byline .track-artist,
+.track-byline .track-album {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: inherit;
+}
+
+.track-byline-sep {
+  flex: none;
+  white-space: pre;
+}
+
 .track-snippet {
   overflow: hidden;
   color: var(--text-3);
@@ -474,14 +693,13 @@
 
 /* ----- artist list ----- */
 
+/* The list and its letter index; the index sticks under the tool row,
+   clear of the player, and scrolls itself in a short window. */
 .artists-layout {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-
-.artists-layout .view-body {
-  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
 }
 
 .artist-list {
@@ -524,26 +742,15 @@
   font-weight: 600;
 }
 
-/* Centred in the room above the player while it fits; when it does not
-   (a short window), it starts at the top and scrolls, so A stays
-   reachable. Auto margins rather than `justify-content: center`, which
-   would push the first letters out of reach above the scroll start (and
-   `safe center` is not in every webview). */
 .letter-index {
+  position: sticky;
+  top: calc(var(--topbar-h) + var(--tool-row-h));
   display: flex;
   flex-direction: column;
   gap: 1px;
-  /* Clear of the player at the bottom. */
-  padding: 8px 6px var(--player-room);
+  max-height: calc(100vh - var(--topbar-h) - var(--tool-row-h) - var(--player-room));
+  padding: 4px 6px;
   overflow-y: auto;
-}
-
-.letter-index > :first-child {
-  margin-top: auto;
-}
-
-.letter-index > :last-child {
-  margin-bottom: auto;
 }
 
 .letter-index button {
@@ -633,19 +840,11 @@
   font-weight: 600;
 }
 
-/* An album's genres under its title: small links to their pages. */
-.genre-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
+/* An album's genres in its meta line: links to their pages. */
 .genre-link {
   max-width: 220px;
   overflow: hidden;
+  color: var(--text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -707,17 +906,29 @@
 
 /* ----- search ----- */
 
+/* The field: large, round glass at the top of the page. */
+.search-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 28px 0 10px;
+}
+
 .search-box {
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-width: 560px;
-  height: 42px;
-  margin-top: 12px;
-  padding: 0 16px;
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  height: 56px;
+  padding: 0 22px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  background: var(--surface-2);
+  background: var(--glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow);
   color: var(--text-3);
   transition:
     border-color var(--motion-fast),
@@ -727,7 +938,9 @@
 /* The field's own focus ring (the input inside draws none). */
 .search-box:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow:
+    var(--shadow),
+    0 0 0 3px var(--accent-soft);
 }
 
 .search-input {
@@ -737,10 +950,21 @@
   background: none;
   color: var(--text);
   font: inherit;
+  font-size: 17px;
+}
+
+.search-input::placeholder {
+  color: var(--text-3);
 }
 
 .search-input:focus-visible {
   outline: none;
+}
+
+.search-other {
+  margin-left: 22px;
+  color: var(--text-2);
+  font-size: var(--text-small);
 }
 
 .search-section + .search-section {
@@ -758,11 +982,11 @@
 }
 
 .group-title {
-  margin: 22px 0 10px;
+  margin: 26px 0 12px;
   color: var(--text);
   font-family: var(--font-display);
   font-variation-settings: var(--display-axes);
-  font-size: 22px;
+  font-size: 24px;
   font-weight: var(--display-weight);
 }
 
@@ -771,41 +995,146 @@
   margin-top: 12px;
 }
 
-.chip-list {
+/* An empty search: the source's genres. */
+.genre-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.artist-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 38px;
-  padding: 0 16px 0 5px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-1);
+.genre-chip {
+  max-width: 260px;
+  height: 40px;
+  padding: 0 18px;
+  overflow: hidden;
   border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
-.artist-chip:hover {
+.genre-chip:hover {
   background: var(--surface-3);
 }
 
-.chip-cover {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  font-size: 10px;
+.genre-chip:active {
+  transform: scale(var(--press-scale));
 }
 
-/* ----- search: the other source ----- */
-
-.search-other {
-  align-self: flex-start;
-  margin-top: 8px;
+.genre-chip-all {
   color: var(--text-2);
-  font-size: var(--text-small);
+}
+
+/* The Top result beside the Songs (one column when only one of them). */
+.search-top.has-both {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(0, 3fr);
+  gap: 28px;
+}
+
+.top-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  max-width: 460px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  text-align: left;
+  transition: background var(--motion-fast);
+}
+
+.top-result:hover {
+  background: var(--surface-2);
+}
+
+.top-result-cover {
+  width: 150px;
+  height: 150px;
+  margin-bottom: 14px;
+  font-size: 30px;
+}
+
+.top-result-cover.round {
+  border-radius: 50%;
+}
+
+.top-result-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 32px;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+}
+
+.top-result-kind {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-more {
+  margin-top: 6px;
+}
+
+/* Artists as round images. */
+.artist-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.artist-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 12px 10px;
+  border-radius: var(--radius-card);
+  text-align: center;
+  transition: background var(--motion-fast);
+}
+
+.artist-tile:hover {
+  background: var(--hover);
+}
+
+.artist-tile-cover {
+  width: 100%;
+  max-width: 150px;
+  height: auto;
+  aspect-ratio: 1;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  font-size: 22px;
+}
+
+.artist-tile-name {
+  max-width: 100%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ----- Home ----- */

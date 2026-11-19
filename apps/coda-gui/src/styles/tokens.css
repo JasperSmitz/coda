@@ -166,6 +166,8 @@
   --text-eyebrow: 15px;
   --text-section: 30px;
   --text-title: clamp(36px, 4vw, 72px);
+  /* A page header's title (album, artist, genre, playlist, folder). */
+  --text-page-title: clamp(36px, 5.4vw, 72px);
 
   /* ----- shape ----- */
 
@@ -194,6 +196,17 @@
   --player-w: min(1000px, 100% - 32px);
   --player-room: calc(var(--player-h) + var(--player-gap) + 16px);
   --queue-panel-width: 400px;
+  /* The page (app.css `.main.page`): its content's width and side
+     padding; a list's sticky tool row with the space it keeps under the
+     top bar (`.tool-row`: 8px above, 46px tall, 8px below); a page
+     header's cover. */
+  --page-w: 1240px;
+  --page-pad: 32px;
+  --tool-row-h: 62px;
+  /* The scrollbars' width (base.css `::-webkit-scrollbar`, a literal there:
+     keep the two in step); the top bar keeps clear of the page's. */
+  --scrollbar-w: 10px;
+  --page-cover: clamp(220px, 25vw, 270px);
   /* Room for the macOS window buttons (app.css); 0 elsewhere. */
   --titlebar-h: 0px;
   --window-buttons-w: 0px;

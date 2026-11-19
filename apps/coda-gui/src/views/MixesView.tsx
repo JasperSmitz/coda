@@ -3,12 +3,12 @@
 // context-menu key) with Play, Edit… (F2) and Delete… (Delete). "New
 // mix…" opens the editor. The card of the mix that plays says so.
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Empty, SkeletonRows } from "../components/LoadState";
 import { IngredientChip } from "../components/MixParts";
 import { AlertIcon, MoreIcon, PlayIcon, PlusIcon } from "../components/icons";
-import { useScroll } from "../hooks/useLayout";
+import { usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { isRemoveKey } from "../lib/keys";
 import {
@@ -24,7 +24,7 @@ import { ingredientKey } from "../lib/mixRecipe";
 import type { ActiveMix, Mix, SourceKind } from "../lib/types";
 import type { Entry } from "../state/nav";
 import { useAppState } from "../state/store";
-import { SOURCE_LABEL, ViewHeader, plural, useCanPlay } from "./common";
+import { ListHeader, SOURCE_LABEL, plural, useCanPlay } from "./common";
 
 /** Chips shown on a card before "+N more". */
 const CARD_CHIPS = 8;
@@ -43,7 +43,7 @@ export function MixesView({ entry, source }: { entry: Entry; source: SourceKind 
   const version = useMixesVersion();
   const { snapshot } = useAppState();
   const load = useLoad(() => listMixes(source), source, version);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const mixes = load.data ?? [];
   useScroll(scroller, entry, mixes.length > 0);
   const [menu, setMenu] = useState<(MenuState & { mix: Mix }) | null>(null);
@@ -52,10 +52,11 @@ export function MixesView({ entry, source }: { entry: Entry; source: SourceKind 
 
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL[source]}
         title="Mixes"
-        actions={
+        meta={load.state === "ready" && plural(mixes.length, "mix", "mixes")}
+        tools={
           <button
             className="button"
             onClick={() => newMixFlow(source)}
@@ -64,10 +65,8 @@ export function MixesView({ entry, source }: { entry: Entry; source: SourceKind 
             <PlusIcon size={14} /> New mix…
           </button>
         }
-      >
-        {load.state === "ready" && <div className="secondary">{plural(mixes.length, "mix")}</div>}
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+      />
+      <div className="view-body">
         {load.state === "loading" && <SkeletonRows count={4} />}
         {load.state === "error" && (
           <div className="state-message" role="alert">

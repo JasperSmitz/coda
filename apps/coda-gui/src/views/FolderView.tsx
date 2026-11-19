@@ -2,21 +2,28 @@
 // folder's own tracks. Enter on a track plays the folder's tracks from
 // it; `s` (or Shuffle) plays everything below the folder shuffled.
 
-import { useRef } from "react";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
 import { TrackTable } from "../components/TrackTable";
 import { FolderIcon } from "../components/icons";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { folderContext, playLocal, useShuffleContext } from "../lib/play";
 import { nav, useNav, type Entry } from "../state/nav";
-import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
+import {
+  ListHeader,
+  PageActions,
+  PageHeader,
+  PlayButtons,
+  ScanLine,
+  SOURCE_LABEL,
+  plural,
+} from "./common";
 
 export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
   const version = useLibraryVersion();
   const load = useLoad(() => browse.folder(path), JSON.stringify(path), version);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const folder = load.data;
   useScroll(scroller, entry, folder !== undefined);
 
@@ -36,50 +43,63 @@ export function FolderView({ entry, path }: { entry: Entry; path: string[] }) {
   };
 
   const title = path.length > 0 ? path[path.length - 1] : "Folders";
+  const counts =
+    folder &&
+    [
+      folder.dirs.length > 0 ? plural(folder.dirs.length, "folder") : null,
+      folder.tracks.length > 0 ? plural(folder.tracks.length, "song") : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={SOURCE_LABEL.local}
-        title={title}
-        actions={
-          <PlayButtons
-            onPlay={() => playAll(false)}
-            onShuffle={() => playAll(true)}
-            disabled={!hasContent}
-          />
-        }
-      >
-        {path.length > 0 && (
-          <nav className="breadcrumbs" aria-label="Folder path">
-            <button className="link-button" onClick={openMusicRoot}>
-              Music
-            </button>
-            {path.slice(0, -1).map((name, i) => (
-              <span key={i}>
-                <span className="crumb-sep">/</span>
-                <button
-                  className="link-button"
-                  onClick={() => nav.push({ kind: "folder", path: path.slice(0, i + 1) })}
-                >
-                  {name}
-                </button>
-              </span>
-            ))}
-          </nav>
-        )}
-        {folder && (
-          <div className="secondary">
-            {[
-              folder.dirs.length > 0 ? plural(folder.dirs.length, "folder") : null,
-              folder.tracks.length > 0 ? plural(folder.tracks.length, "track") : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </div>
-        )}
-      </ViewHeader>
+      {path.length === 0 ? (
+        <ListHeader
+          eyebrow={SOURCE_LABEL.local}
+          title={title}
+          meta={counts}
+          tools={
+            <PlayButtons
+              onPlay={() => playAll(false)}
+              onShuffle={() => playAll(true)}
+              disabled={!hasContent}
+            />
+          }
+        />
+      ) : (
+        <PageHeader
+          eyebrow="Folder"
+          title={title}
+          byline={
+            <nav className="breadcrumbs" aria-label="Folder path">
+              <button className="link-button" onClick={openMusicRoot}>
+                Music
+              </button>
+              {path.slice(0, -1).map((name, i) => (
+                <span key={i}>
+                  <span className="crumb-sep">/</span>
+                  <button
+                    className="link-button"
+                    onClick={() => nav.push({ kind: "folder", path: path.slice(0, i + 1) })}
+                  >
+                    {name}
+                  </button>
+                </span>
+              ))}
+            </nav>
+          }
+          meta={counts}
+          actions={
+            <PageActions
+              onPlay={() => playAll(false)}
+              onShuffle={() => playAll(true)}
+              disabled={!hasContent}
+            />
+          }
+        />
+      )}
       <ScanLine />
-      <div className="view-body" ref={scroller}>
+      <div className="view-body">
         {load.state === "loading" && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {folder && !hasContent && (

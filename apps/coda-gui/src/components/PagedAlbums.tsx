@@ -94,7 +94,7 @@ export function PagedAlbumsBody({
   empty,
 }: {
   paged: PagedAlbums;
-  scroller: RefObject<HTMLDivElement | null>;
+  scroller: RefObject<HTMLElement | null>;
   label: string;
   /** The empty state's text. */
   empty: ReactNode;

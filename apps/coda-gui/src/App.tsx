@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
 import { PageGlow } from "./components/PageGlow";
 import { DialogHost } from "./components/Dialog";
@@ -9,6 +9,7 @@ import { QueuePopover } from "./components/QueuePopover";
 import { Toasts } from "./components/Toasts";
 import { TopBar } from "./components/TopBar";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
+import { PageScroller } from "./hooks/useLayout";
 import { useFullscreen } from "./hooks/useFullscreen";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
@@ -144,8 +145,26 @@ export default function App() {
   const toggleQueue = immersive ? toggleNpQueue : toggleLayoutQueue;
   useFocusAfterNowPlaying(immersive);
   // The page takes the colours of its subject (an album page its cover…);
-  // Now Playing takes the playing cover's itself.
-  const mainRef = useRef<HTMLElement>(null);
+  // Now Playing takes the playing cover's itself. `.main.page` is also
+  // the page's one scroll container (its glow, header and lists scroll in
+  // it, under the top bar and the player), shared with the views.
+  //
+  // The views get the page as a ref through `PageScroller`, but that ref
+  // must change when the element appears: React attaches a host's ref
+  // only after its children's layout effects have run, so when `<main>`
+  // mounts in the same commit as the view (closing Now Playing,
+  // navigating from it, finishing onboarding) every child effect would
+  // see `null` and, with unchanged deps, never run again (docs/LESSONS.md).
+  // So the element is state, set by a callback ref, and the context value
+  // is a new ref object whenever it changes: every `[scroller]` effect
+  // runs again once the page exists.
+  const mainRef = useRef<HTMLElement | null>(null);
+  const [pageEl, setPageEl] = useState<HTMLElement | null>(null);
+  const setMain = useCallback((el: HTMLElement | null) => {
+    mainRef.current = el;
+    setPageEl(el);
+  }, []);
+  const pageScroller = useMemo(() => ({ current: pageEl }), [pageEl]);
   const pageCover = usePageCover(immersive ? null : top.id);
   useColourScope(mainRef, pageCover);
 
@@ -268,19 +287,26 @@ export default function App() {
   return (
     <div className={`app ${queueOpen ? "has-queue-panel" : ""}`}>
       <TopBar />
-      <main className="main" ref={mainRef}>
-        <PageGlow url={pageCover} />
-        {snapshot ? (
-          <>
-            <Banner problems={snapshot.problems} />
-            {/* Sources are known once started (and the saved choice read). */}
-            {snapshot.phase !== "starting" && sources.loaded && sources.configured && (
-              <BrowseView entry={top} snapshot={snapshot} />
-            )}
-          </>
-        ) : null}
-        {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
+      <main className="main page" ref={setMain}>
+        <PageScroller.Provider value={pageScroller}>
+          <PageGlow url={pageCover} />
+          {/* The clearance under the top bar is on this unpositioned
+              wrapper, not on the scroller: a sticky element's offset counts
+              from the scroller's padding edge (app.css `.page-content`). */}
+          <div className="page-content">
+            {snapshot ? (
+              <>
+                <Banner problems={snapshot.problems} />
+                {/* Sources are known once started (and the saved choice read). */}
+                {snapshot.phase !== "starting" && sources.loaded && sources.configured && (
+                  <BrowseView entry={top} snapshot={snapshot} />
+                )}
+              </>
+            ) : null}
+          </div>
+        </PageScroller.Provider>
       </main>
+      {snapshot?.phase === "starting" && <div className="starting secondary">Starting…</div>}
       {snapshot && (
         <QueuePopover
           open={queueOpen}

@@ -1,22 +1,25 @@
-// An album: a header with the large cover, year, track count and length,
-// its genres (links to their pages), Play / Shuffle, and the track table
-// grouped by disc.
+// An album: a header with the large cover, "Album · year", the title, the
+// artist (a link), "N songs · length" with its genres (links to their
+// pages), Play / Shuffle and "…" (Add to playlist…, Add to mix…), then
+// the track table grouped by disc.
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
-import { AddToMixButton } from "../components/MixParts";
 import { TrackTable } from "../components/TrackTable";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { albumContext, openRoute, playTracks, useShuffleContext } from "../lib/play";
 import { resolveGenreLink } from "../lib/genres";
+import { addToMixFlow } from "../lib/mixes";
 import { albumIngredient } from "../lib/mixRecipe";
+import { addToPlaylistFlow, canAddToPlaylist } from "../lib/playlists";
 import type { Album, Genre, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { usePageSubject } from "../state/pageSubject";
-import { PlayButtons, SOURCE_LABEL, summary, ViewHeader } from "./common";
+import { useAppState } from "../state/store";
+import { PageActions, PageHeader, songsSummary } from "./common";
 
 /**
  * Opens an album's genre. On Navidrome the chip is resolved against the
@@ -55,7 +58,10 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
     `${source}:${id}`,
     source === "local" ? version : null,
   );
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
+  const server = snapshot !== null && snapshot.navidrome.state !== "notConfigured";
   const tracks = load.data?.tracks ?? [];
   useScroll(scroller, entry, tracks.length > 0);
   // The listing's data first (it knows the year), the album's own after.
@@ -86,71 +92,87 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
   usePageSubject(entry, album?.coverUrl ?? null);
 
+  // The album artist exactly as listed (Navidrome: with the album's id).
+  const ingredient = album ? albumIngredient(source, { ...album, id }) : undefined;
+  const songs = load.data ? tracks.length : (album?.trackCount ?? null);
+  const length = album?.durationMs ?? null;
+
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={`${SOURCE_LABEL[source]} · Album`}
-        title={title}
+      <PageHeader
         cover={
           <Cover
             url={album?.coverUrl ?? null}
             name={title}
             size="large"
-            className="header-cover album-header-cover"
+            className="page-cover"
           />
         }
-        actions={
-          <>
-            <PlayButtons
-              onPlay={() => playTracks(tracks, undefined, false, context)}
-              onShuffle={() => playTracks(tracks, undefined, true, context)}
-              disabled={tracks.length === 0}
-            />
-            {/* The album artist exactly as listed (Navidrome: with the album's id). */}
-            <AddToMixButton
-              source={source}
-              ingredient={album ? albumIngredient(source, { ...album, id }) : undefined}
-            />
-          </>
+        eyebrow={album?.year != null ? `Album · ${album.year}` : "Album"}
+        title={title}
+        byline={
+          artistName &&
+          (artistId ? (
+            <button
+              className="link-button"
+              onClick={() => nav.push({ kind: "artist", source, id: artistId, name: artistName })}
+            >
+              {artistName}
+            </button>
+          ) : (
+            <span>{artistName}</span>
+          ))
         }
-      >
-        <div className="album-meta">
-          {artistName &&
-            (artistId ? (
-              <button
-                className="link-button"
-                onClick={() => nav.push({ kind: "artist", source, id: artistId, name: artistName })}
-              >
-                {artistName}
-              </button>
-            ) : (
-              <span>{artistName}</span>
-            ))}
-          {album?.year != null && <span className="secondary">{album.year}</span>}
-          <span className="secondary">
-            {summary(
-              load.data ? tracks.length : (album?.trackCount ?? null),
-              album?.durationMs ?? null,
-            )}
-          </span>
-        </div>
-        {genres.length > 0 && (
-          <ul className="genre-links" aria-label="Genres">
+        meta={
+          <>
+            <span>{songsSummary(songs, length)}</span>
             {genres.map((genre) => (
-              <li key={genre.id}>
+              <span key={genre.id} className="page-meta-item">
+                <span className="page-meta-sep" aria-hidden="true">
+                  ·
+                </span>
                 <button
-                  className="tag genre-link"
+                  className="genre-link"
                   title={genre.name}
                   onClick={() => openGenreLink(source, genre, entry)}
                 >
                   {genre.name}
                 </button>
-              </li>
+              </span>
             ))}
-          </ul>
-        )}
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+          </>
+        }
+        actions={
+          <PageActions
+            onPlay={() => playTracks(tracks, undefined, false, context)}
+            onShuffle={() => playTracks(tracks, undefined, true, context)}
+            disabled={tracks.length === 0}
+            menu={[
+              ...(source === "navidrome"
+                ? [
+                    {
+                      label: "Add to playlist…",
+                      disabled: !started || !canAddToPlaylist(tracks, server),
+                      action: () => void addToPlaylistFlow(tracks),
+                    },
+                  ]
+                : []),
+              {
+                label: "Add to mix…",
+                disabled: !started || !ingredient,
+                hint:
+                  ingredient === null
+                    ? "An album without an artist cannot be in a mix"
+                    : undefined,
+                action: () => {
+                  if (ingredient) void addToMixFlow(source, ingredient);
+                },
+              },
+            ]}
+          />
+        }
+      />
+      <div className="view-body">
         {load.state === "loading" && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && tracks.length === 0 && <Empty title="No tracks" />}

@@ -11,7 +11,7 @@
 - **The music is the decoration.** Covers, their colours and the visualizer carry the look; the chrome stays quiet glass.
 
 ## Layout
-*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column; N2: the glass; N3: the page's glow; N4: the floating player, the page's body scrolling under it, the queue rising out of it. Still to come: the page scrolling under the top bar (N5): the 1.x views keep their fixed headers, so for now the page starts below the bar and its glow stays put.)*
+*(Partly shipped, N1: the top bar, its navigation and Preferences button, the macOS window buttons in its row, no sidebar and no queue column; N2: the glass; N3: the page's glow; N4: the floating player, the page's body scrolling under it, the queue rising out of it; N5a: the page scrolling under the top bar as one scroll container (its header scrolls away, a list's tools stick under the bar as glass, its glow scrolls with it), content ≤1240px centred.)*
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -58,6 +58,8 @@ The landing page. Two things, and room around them.
 - A new listener (no history): the carousel is replaced by a short welcome line and **Shuffle your library** / **Browse albums**; Moods use the largest genres.
 
 ## Library
+*(Partly shipped, N5a: the Library header ("Library", the section control and the section's tools in a tool row that sticks under the top bar) and the page header pattern of the album, artist, genre and playlist pages (and a folder's, without a cover), "…" holding the page's menu. Still to come (N5b): Covers / List, the sorts below, the per-tile accents, Genres/Playlists tiles, Your most played.)*
+
 - Header: "Library" (display type), the section control, and per section its tools: a **sort** (Albums: A–Z, Most played, Recently added, Year; Navidrome offers the server's sorts) and a **Covers / List** toggle (Albums, Artists, a genre's albums), remembered per section. The Preferences default applies until a section has its own choice.
 - **Covers**: a responsive grid (tiles ≥178px), the cover with a soft shadow, title and "artist · year" below. Hover lifts the cover slightly and shows a round Play button in the album's own accent. Artists as round images.
 - **List**: dense rows (52px: small cover, title, artist, genre, year or plays when sorted by Most played, length). For collections of thousands; virtualized as today.
@@ -66,9 +68,9 @@ The landing page. Two things, and room around them.
 - **Artist page**: round image, name, counts, Play / Shuffle; **Your most played** (up to six of the artist's songs by your play count, with the count; hidden without plays); then the albums.
 - **Genre, playlist and mix pages**: the same header pattern (the genre and playlist glow with their first cover's colours).
 
-## Search
+## Search *(shipped, N5a)*
 - One large rounded field at the top ("Artists, albums, songs or lyrics"), focused on arrival (`/` or `Ctrl+F` from anywhere). Empty: the source's genres as chips to jump to.
-- Results: **Top result** (a card) beside **Songs**, then Albums (grid) and Artists, then **Lyrics** (1.x rules, below). Searches the active source, with "Search … instead".
+- Results: **Top result** (a card: the artist or album named most like the query) beside **Songs** (the first five; "Show all" lists every match), then Albums (grid) and Artists (round images), then **Lyrics** (1.x rules, below). Searches the active source, with "Search … instead".
 - **Lyrics** (carried over from 1.x): local, and Navidrome while its lyrics index is on. Track rows with a third, dimmer line holding the lyric line or the two lines the match spans (joined by " / "), the matched phrase at weight 600 (no highlight colour). Shown once loaded (no spinner), never for queries under 3 characters, "and N more" past 50 matches. On Navidrome, while songs are left to index, a quiet note follows the results: "Lyrics are still being indexed (1,200 of 2,400 songs)"; while the index loads: "The lyrics index is still loading."
 
 ## Player *(shipped, N4)*
@@ -105,7 +107,7 @@ One page of grouped glass cards, the title "Make it yours":
 
 - **Base**: a dim, slightly violet-tinted near-black (`--base`, ~`hsl(256 14% 7%)`), never a neutral grey. Text: a warm white (`--ink`) with two quieter levels (`--ink-2` ~68%, `--ink-3` ~44%). Surfaces are **glass**: translucent white (5–11%) with a hairline border (9%) and a backdrop blur where something floats over content. There is no light or dark mode.
 - **Music colours** *(shipped, N3)*: for every cover the backend computes a small palette (`tint`: a deep dark of its dominant hue for backgrounds; `accent`: its most vivid colour, kept within a lightness and chroma band so it reads on the base and on its own tint; `accentInk` (`accentText` in the code): black or white by contrast; `glow`: the accent, translucent; a greyscale cover is not `vivid` and keeps the house accent). They are computed once per cover and cached with it (in memory, by cover).
-- **Who takes which colours** (with "From the music"; *shipped in N3* for the player, the queue, Now Playing and the album, artist, genre and playlist pages; Home's focused album in N6, small things in N5; until N5 the glow stays put under the page's fixed header instead of scrolling):
+- **Who takes which colours** (with "From the music"; *shipped in N3* for the player, the queue, Now Playing and the album, artist, genre and playlist pages; the glow scrolling with the page in N5a; Home's focused album in N6, small things in N5b):
   - The **player, the queue and Now Playing**: the playing cover's.
   - A **page** (`#view`): what it shows: Home the carousel's focused album; an album, artist, genre or playlist page its (first) cover's. The page's **glow** is that cover, very blurred, behind the top of the page, fading out over ~600px so the rest of the page (Moods, track lists) rests on the base. It scrolls with the page.
   - **Small things that stand for one album** (a grid tile's Play button, a mood card) use that album's accent.

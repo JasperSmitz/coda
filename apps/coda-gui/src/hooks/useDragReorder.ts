@@ -14,6 +14,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
+import { coveredEdges } from "./useLayout";
 
 const THRESHOLD = 4;
 /** Distance from an edge where autoscroll starts, and its top speed (px/frame). */
@@ -79,11 +80,14 @@ export function useDragReorder({ scroller, rows, rowHeight, count, onDrop, disab
     const s = state.current;
     const el = scroller.current;
     if (!s || !s.active || !el) return;
+    // The page's visible part: clear of the top bar, the sticky tools and the player.
     const rect = el.getBoundingClientRect();
+    const covered = coveredEdges(el);
+    const top = rect.top + covered.top;
+    const bottom = rect.bottom - covered.bottom;
     let speed = 0;
-    if (s.clientY < rect.top + EDGE) speed = -((rect.top + EDGE - s.clientY) / EDGE) * MAX_SPEED;
-    else if (s.clientY > rect.bottom - EDGE)
-      speed = ((s.clientY - (rect.bottom - EDGE)) / EDGE) * MAX_SPEED;
+    if (s.clientY < top + EDGE) speed = -((top + EDGE - s.clientY) / EDGE) * MAX_SPEED;
+    else if (s.clientY > bottom - EDGE) speed = ((s.clientY - (bottom - EDGE)) / EDGE) * MAX_SPEED;
     if (speed !== 0) {
       el.scrollTop += Math.max(-MAX_SPEED, Math.min(MAX_SPEED, speed));
       const gap = gapAt(s.clientY);

@@ -7,7 +7,7 @@
 // `position: fixed` menu and offset or clip it. One glass look everywhere
 // (Now Playing included), so it needs nothing from where it was opened.
 
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
 export interface MenuState {
@@ -19,6 +19,8 @@ export interface MenuState {
 export interface MenuItem {
   label: string;
   disabled?: boolean;
+  /** Why it is disabled: a quiet line under the label while it is. */
+  hint?: string;
   action: () => void;
 }
 
@@ -30,6 +32,7 @@ interface Props {
 
 export function ContextMenu({ state, items, onClose }: Props) {
   const menu = useRef<HTMLDivElement>(null);
+  const hintId = useId();
   const [pos, setPos] = useState({ left: state.x, top: state.y });
   // Keep the menu inside the window.
   useLayoutEffect(() => {
@@ -37,8 +40,8 @@ export function ContextMenu({ state, items, onClose }: Props) {
     if (!el) return;
     const { width, height } = el.getBoundingClientRect();
     setPos({
-      left: Math.min(state.x, window.innerWidth - width - 4),
-      top: Math.min(state.y, window.innerHeight - height - 4),
+      left: Math.max(4, Math.min(state.x, window.innerWidth - width - 4)),
+      top: Math.max(4, Math.min(state.y, window.innerHeight - height - 4)),
     });
     el.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   }, [state.x, state.y]);
@@ -74,17 +77,25 @@ export function ContextMenu({ state, items, onClose }: Props) {
   return createPortal(
     <div className="context-menu" ref={menu} role="menu" style={pos} onKeyDown={onKeyDown}>
       {items.map((item) => (
-        <button
-          key={item.label}
-          role="menuitem"
-          disabled={item.disabled}
-          onClick={() => {
-            onClose();
-            item.action();
-          }}
-        >
-          {item.label}
-        </button>
+        <Fragment key={item.label}>
+          <button
+            role="menuitem"
+            disabled={item.disabled}
+            aria-describedby={item.disabled && item.hint ? `${hintId}-${item.label}` : undefined}
+            onClick={() => {
+              onClose();
+              item.action();
+            }}
+          >
+            {item.label}
+          </button>
+          {/* Outside the button: a disabled button is dimmed as a whole. */}
+          {item.disabled && item.hint && (
+            <div id={`${hintId}-${item.label}`} className="menu-hint">
+              {item.hint}
+            </div>
+          )}
+        </Fragment>
       ))}
     </div>,
     document.body,

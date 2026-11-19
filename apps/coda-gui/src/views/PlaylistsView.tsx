@@ -11,7 +11,7 @@ import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
 import { PlaylistTracks } from "../components/PlaylistTracks";
 import { TrackTable } from "../components/TrackTable";
 import { AlertIcon, MoreIcon } from "../components/icons";
-import { useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { isRemoveKey } from "../lib/keys";
@@ -27,7 +27,17 @@ import type { Playlist, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
-import { PlayButtons, ScanLine, SOURCE_LABEL, summary, ViewHeader, plural } from "./common";
+import {
+  CoverMosaic,
+  ListHeader,
+  PageActions,
+  PageHeader,
+  ScanLine,
+  SOURCE_LABEL,
+  songsSummary,
+  summary,
+  plural,
+} from "./common";
 
 /** Shown instead of index-based edits when not every entry could be read (Coda's). */
 const INCOMPLETE = "This playlist has entries Coda cannot show; edit it in Navidrome";
@@ -46,7 +56,7 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
   const version = useLibraryVersion();
   const edits = usePlaylistsVersion();
   const load = useLoad(() => browse.playlists(source), source, source === "local" ? version : edits);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const list = useRef<HTMLDivElement>(null);
   const playlists = load.data ?? [];
   useScroll(scroller, entry, playlists.length > 0);
@@ -98,23 +108,20 @@ export function PlaylistsView({ entry, source }: { entry: Entry; source: SourceK
 
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL[source]}
         title="Playlists"
-        actions={
+        meta={load.state === "ready" && plural(playlists.length, "playlist")}
+        tools={
           canEdit && (
             <button className="button" onClick={() => void createPlaylistFlow()}>
               New playlist…
             </button>
           )
         }
-      >
-        {load.state === "ready" && (
-          <div className="secondary">{plural(playlists.length, "playlist")}</div>
-        )}
-      </ViewHeader>
+      />
       {source === "local" && <ScanLine />}
-      <div className="view-body" ref={scroller}>
+      <div className="view-body">
         {load.state === "loading" && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && playlists.length === 0 && (
@@ -227,12 +234,14 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const busy = useEditsRunning() > 0;
   // A rename shows at once; the listing's name is the fallback.
   const [renamed, setRenamed] = useState<string | null>(null);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const detail = load.data;
   const tracks = detail?.tracks ?? [];
   useScroll(scroller, entry, tracks.length > 0);
   const title = renamed ?? (detail?.playlist.name || hint?.name || name);
-  const cover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? tracks[0]?.coverUrl ?? null;
+  // Its own cover, else (header) a mosaic of its first covers.
+  const ownCover = hint?.coverUrl ?? detail?.playlist.coverUrl ?? null;
+  const cover = ownCover ?? tracks[0]?.coverUrl ?? null;
   const context = playlistContext(source, { id, name: title, coverUrl: cover });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
   usePageSubject(entry, cover);
@@ -276,50 +285,42 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   };
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={`${SOURCE_LABEL[source]} · Playlist`}
-        title={title}
+      <PageHeader
         cover={
-          <Cover
-            url={cover}
-            name={title}
-            size="large"
-            className="header-cover album-header-cover"
+          ownCover ? (
+            <Cover url={ownCover} name={title} size="large" className="page-cover" />
+          ) : (
+            <CoverMosaic urls={tracks.slice(0, 50).map((t) => t.coverUrl)} name={title} />
+          )
+        }
+        eyebrow="Playlist"
+        title={title}
+        byline={
+          (detail?.playlist.owner ?? hint?.owner) && (
+            <span className="secondary">by {detail?.playlist.owner ?? hint?.owner}</span>
+          )
+        }
+        meta={songsSummary(
+          detail ? tracks.length : (hint?.trackCount ?? null),
+          detail?.playlist.durationMs ?? hint?.durationMs ?? null,
+        )}
+        actions={
+          <PageActions
+            onPlay={() => playTracks(tracks, undefined, false, context)}
+            onShuffle={() => playTracks(tracks, undefined, true, context)}
+            disabled={tracks.length === 0}
+            menu={
+              editable
+                ? [
+                    { label: "Rename…", disabled: busy, action: () => void rename() },
+                    { label: "Delete…", disabled: busy, action: () => void remove() },
+                  ]
+                : undefined
+            }
           />
         }
-        actions={
-          <>
-            <PlayButtons
-              onPlay={() => playTracks(tracks, undefined, false, context)}
-              onShuffle={() => playTracks(tracks, undefined, true, context)}
-              disabled={tracks.length === 0}
-            />
-            {editable && (
-              <div className="play-buttons">
-                <button className="button" onClick={() => void rename()} disabled={busy}>
-                  Rename…
-                </button>
-                <button className="button" onClick={() => void remove()} disabled={busy}>
-                  Delete…
-                </button>
-              </div>
-            )}
-          </>
-        }
-      >
-        <div className="album-meta">
-          {(detail?.playlist.owner ?? hint?.owner) && (
-            <span className="secondary">by {detail?.playlist.owner ?? hint?.owner}</span>
-          )}
-          <span className="secondary">
-            {summary(
-              detail ? tracks.length : (hint?.trackCount ?? null),
-              detail?.playlist.durationMs ?? hint?.durationMs ?? null,
-            )}
-          </span>
-        </div>
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+      />
+      <div className="view-body">
         {detail?.warning && (
           <div className="inline-warning" role="note">
             <AlertIcon size={16} />

@@ -1,11 +1,10 @@
 // Small pieces of the mixes UI: an ingredient's kind icon, its chip
 // (removable in the editor) and the "Mix: <name>" line that Now Playing
-// and the queue show while a mix is active; "Add to mix…" for page headers.
+// and the queue show while a mix is active. (Page headers offer "Add to
+// mix…" in their "…" menu: views/common.tsx `PageActions`.)
 
-import { addToMixFlow } from "../lib/mixes";
 import { activeMixLabel, describeIngredient, ingredientDetail, ingredientLabel } from "../lib/mixRecipe";
-import type { ActiveMix, Ingredient, SourceKind } from "../lib/types";
-import { useAppState } from "../state/store";
+import type { ActiveMix, Ingredient } from "../lib/types";
 import { AlbumIcon, ArtistIcon, CloseIcon, GenreIcon, MixIcon } from "./icons";
 
 export function KindIcon({ kind, size = 13 }: { kind: Ingredient["kind"]; size?: number }) {
@@ -70,31 +69,5 @@ export function ActiveMixLine({ mix, className }: { mix: ActiveMix; className?: 
         </span>
       )}
     </div>
-  );
-}
-
-/** "Add to mix…" in a page header (genre, artist and album pages). */
-export function AddToMixButton({
-  source,
-  ingredient,
-}: {
-  source: SourceKind;
-  /**
-   * `null`: cannot be a mix ingredient (an album without an artist);
-   * `undefined`: not known yet (the page is loading), disabled quietly.
-   */
-  ingredient: Ingredient | null | undefined;
-}) {
-  const { snapshot } = useAppState();
-  const started = snapshot?.phase === "ready";
-  return (
-    <button
-      className="button"
-      onClick={() => ingredient && void addToMixFlow(source, ingredient)}
-      disabled={!started || !ingredient}
-      title={ingredient === null ? "An album without an artist cannot be in a mix" : "Add to a mix"}
-    >
-      <MixIcon size={14} /> Add to mix…
-    </button>
   );
 }

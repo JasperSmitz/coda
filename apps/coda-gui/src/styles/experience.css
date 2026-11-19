@@ -68,8 +68,8 @@
   flex-direction: column;
   gap: 18px;
   max-width: 780px;
-  /* Its end clear of the player (app.css `.view-body`). */
-  padding-bottom: calc(32px + var(--player-room));
+  /* Its end clear of the player: app.css `.view`. */
+  padding-bottom: 8px;
 }
 
 /* Each section a glass card. */

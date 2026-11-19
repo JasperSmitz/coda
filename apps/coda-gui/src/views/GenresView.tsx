@@ -9,10 +9,9 @@
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { AlbumGrid } from "../components/AlbumGrid";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
-import { AddToMixButton } from "../components/MixParts";
 import { Empty, ErrorState, SkeletonGrid, SkeletonRows } from "../components/LoadState";
 import { PagedAlbumsBody, usePagedAlbums } from "../components/PagedAlbums";
-import { useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
+import { clearHeight, useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { addToMixFlow } from "../lib/mixes";
@@ -23,10 +22,24 @@ import { nav, type Entry } from "../state/nav";
 import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
 import { showUiNotice } from "../state/uiNotices";
-import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
+import {
+  CoverMosaic,
+  ListHeader,
+  PageActions,
+  PageHeader,
+  PlayButtons,
+  ScanLine,
+  SOURCE_LABEL,
+  plural,
+} from "./common";
 
 export function openGenre(source: SourceKind, genre: Pick<Genre, "id" | "name">, hint?: Genre) {
   nav.push({ kind: "genre", source, id: genre.id, name: genre.name, hint });
+}
+
+/** A genre page's eyebrow: `Genre · 46 albums` (the count when known). */
+function genreEyebrow(genre: Genre | undefined): string {
+  return genre?.albumCount != null ? `Genre · ${plural(genre.albumCount, "album")}` : "Genre";
 }
 
 /** `3 albums · 41 tracks` from what is known. */
@@ -43,10 +56,9 @@ function counts(genre: Genre | undefined): string {
 export function GenresView({ entry, source }: { entry: Entry; source: SourceKind }) {
   const version = useLibraryVersion();
   const load = useLoad(() => browse.genres(source), source, source === "local" ? version : null);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const genres = load.data ?? [];
   useScroll(scroller, entry, genres.length > 0);
-  const { height } = useElementSize(scroller);
   const idPrefix = useId();
   // Kept by id, so a quiet refresh (the scan adding a genre above it)
   // keeps the same genre selected; cleared when it disappears.
@@ -63,7 +75,8 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
     if (genres.length === 0) return;
     const at = selected ?? -1;
     const row = document.getElementById(`${idPrefix}-0`)?.offsetHeight || 1;
-    const page = Math.max(1, Math.floor(height / row) - 1);
+    const room = scroller.current ? clearHeight(scroller.current) : 0;
+    const page = Math.max(1, Math.floor(room / row) - 1);
     let to: number | null = null;
     // Shift+F10 opens the row's menu like the context-menu key.
     const key = e.shiftKey && e.key === "F10" ? "ContextMenu" : e.key;
@@ -110,17 +123,14 @@ export function GenresView({ entry, source }: { entry: Entry; source: SourceKind
 
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL[source]}
         title="Genres"
-        actions={<PlayButtons onShuffle={() => shuffleAll(source)} />}
-      >
-        {load.state === "ready" && (
-          <div className="secondary">{plural(genres.length, "genre")}</div>
-        )}
-      </ViewHeader>
+        meta={load.state === "ready" && plural(genres.length, "genre")}
+        tools={<PlayButtons onShuffle={() => shuffleAll(source)} />}
+      />
       {source === "local" && <ScanLine />}
-      <div className="view-body" ref={scroller}>
+      <div className="view-body">
         {load.state === "loading" && <SkeletonRows />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && genres.length === 0 && (
@@ -202,35 +212,42 @@ export function GenreView(props: GenreProps) {
 function LocalGenre({ entry, id, name, hint }: GenreProps) {
   const version = useLibraryVersion();
   const load = useLoad(() => browse.localGenre(id), id, version);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const albums = load.data?.albums ?? [];
   useScroll(scroller, entry, albums.length > 0);
   const genre = load.data?.genre ?? hint;
   const title = genre?.name ?? name;
   usePageSubject(entry, albums[0]?.coverUrl ?? null);
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
   // The engine resolves the genre (no track list over IPC).
   const play = (shuffle: boolean) => playLocal({ kind: "genre", id }, shuffle);
   useShuffleContext(load.state === "ready" && albums.length > 0 ? () => play(true) : null);
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={`${SOURCE_LABEL.local} · Genre`}
+      <PageHeader
+        cover={<CoverMosaic urls={albums.slice(0, 50).map((a) => a.coverUrl)} name={title} />}
+        eyebrow={genreEyebrow(genre)}
         title={title}
+        meta={genre?.trackCount != null && plural(genre.trackCount, "song")}
         actions={
-          <>
-            <PlayButtons
-              onPlay={() => play(false)}
-              onShuffle={() => play(true)}
-              disabled={albums.length === 0}
-            />
-            <AddToMixButton source="local" ingredient={genreIngredient("local", { id, name: title })} />
-          </>
+          <PageActions
+            onPlay={() => play(false)}
+            onShuffle={() => play(true)}
+            disabled={albums.length === 0}
+            menu={[
+              {
+                label: "Add to mix…",
+                disabled: !started,
+                action: () =>
+                  void addToMixFlow("local", genreIngredient("local", { id, name: title })),
+              },
+            ]}
+          />
         }
-      >
-        <div className="secondary">{counts(genre)}</div>
-      </ViewHeader>
+      />
       <ScanLine />
-      <div className="view-body" ref={scroller}>
+      <div className="view-body">
         {load.state === "loading" && <SkeletonGrid count={6} />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && albums.length === 0 && <Empty title="No albums" />}
@@ -248,11 +265,13 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
 }
 
 function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const paged = usePagedAlbums((offset) => browse.navidromeGenreAlbums(id, offset), id);
   const { pages } = paged;
   useScroll(scroller, entry, pages.albums.length > 0);
   const title = hint?.name ?? name;
+  const { snapshot } = useAppState();
+  const started = snapshot?.phase === "ready";
   usePageSubject(entry, pages.albums[0]?.coverUrl ?? null);
   // Random songs of the genre, as served (already random).
   const shuffle = () =>
@@ -265,25 +284,34 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
   useShuffleContext(empty ? null : shuffle);
   return (
     <section className="view">
-      <ViewHeader
-        eyebrow={`${SOURCE_LABEL.navidrome} · Genre`}
-        title={title}
-        actions={
-          <>
-            <PlayButtons onShuffle={shuffle} disabled={empty} />
-            {/* The route's id is the server's exact value. */}
-            <AddToMixButton source="navidrome" ingredient={genreIngredient("navidrome", { id, name })} />
-          </>
+      <PageHeader
+        cover={<CoverMosaic urls={pages.albums.slice(0, 8).map((a) => a.coverUrl)} name={title} />}
+        eyebrow={
+          hint
+            ? genreEyebrow(hint)
+            : pages.albums.length > 0
+              ? `Genre · ${plural(pages.albums.length, "album")}${pages.next !== null ? "+" : ""}`
+              : "Genre"
         }
-      >
-        <div className="secondary">
-          {hint
-            ? counts(hint)
-            : pages.albums.length > 0 &&
-              `${plural(pages.albums.length, "album")}${pages.next !== null ? "+" : ""}`}
-        </div>
-      </ViewHeader>
-      <div className="view-body" ref={scroller}>
+        title={title}
+        meta={hint?.trackCount != null && plural(hint.trackCount, "song")}
+        actions={
+          <PageActions
+            onShuffle={shuffle}
+            disabled={empty}
+            menu={[
+              {
+                label: "Add to mix…",
+                disabled: !started,
+                // The route's id is the server's exact value.
+                action: () =>
+                  void addToMixFlow("navidrome", genreIngredient("navidrome", { id, name })),
+              },
+            ]}
+          />
+        }
+      />
+      <div className="view-body">
         <PagedAlbumsBody
           paged={paged}
           scroller={scroller}

@@ -14,8 +14,10 @@ import { bothConfigured, switchSource, useSources } from "../state/source";
 import { accent, useAccent } from "../state/accent";
 import { HOUSE, MIN_ACCENT_CONTRAST, normalizeHex } from "../lib/accent";
 import { MUSIC } from "../lib/palette";
-import { dragRegion, isMacos } from "../lib/platform";
+import { isMacos } from "../lib/platform";
 import { errorText, lyricsIndexApi, onLyricsIndex, settingsApi } from "../lib/ipc";
+import { usePageScroller, useScroll } from "../hooks/useLayout";
+import type { Entry } from "../state/nav";
 import type { LyricsIndexStatus, ServerInput, Settings, Snapshot, SourceKind } from "../lib/types";
 
 /** A second click within this time disconnects. */
@@ -57,7 +59,9 @@ const CONNECTION_TEXT = {
   failed: "Not reachable",
 } as const;
 
-export function PreferencesView({ snapshot }: { snapshot: Snapshot }) {
+export function PreferencesView({ entry, snapshot }: { entry: Entry; snapshot: Snapshot }) {
+  // The page starts at its top, and keeps its place while shown.
+  useScroll(usePageScroller(), entry, true);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const reload = useCallback(() => {
@@ -73,9 +77,9 @@ export function PreferencesView({ snapshot }: { snapshot: Snapshot }) {
 
   return (
     <section className="view settings">
-      <header className="view-header" {...dragRegion}>
+      <header className="list-header">
         <div className="eyebrow">Preferences</div>
-        <h1>Make it yours</h1>
+        <h1 className="list-title">Make it yours</h1>
       </header>
       <div className="view-body settings-body">
         {loadError && <p className="settings-status settings-status-error">{loadError}</p>}

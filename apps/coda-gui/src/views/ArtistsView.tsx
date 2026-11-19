@@ -6,7 +6,16 @@ import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ContextMenu, type MenuState } from "../components/ContextMenu";
 import { Cover } from "../components/Cover";
 import { Empty, ErrorState, SkeletonRows } from "../components/LoadState";
-import { revealRow, useElementSize, useLibraryVersion, useScroll } from "../hooks/useLayout";
+import {
+  clearHeight,
+  revealRow,
+  scrollToTop,
+  useElementSize,
+  useLibraryVersion,
+  useOffsetTop,
+  usePageScroller,
+  useScroll,
+} from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
 import { addToMixFlow } from "../lib/mixes";
@@ -15,7 +24,7 @@ import { shuffleAll, useShuffleContext } from "../lib/play";
 import type { Artist, SourceKind } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
 import { useAppState } from "../state/store";
-import { PlayButtons, ScanLine, SOURCE_LABEL, ViewHeader, plural } from "./common";
+import { ListHeader, PlayButtons, ScanLine, SOURCE_LABEL, plural } from "./common";
 
 const ROW = 48;
 const OVERSCAN = 8;
@@ -32,7 +41,7 @@ export function openArtist(source: SourceKind, artist: Artist) {
 export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKind }) {
   const version = useLibraryVersion();
   const load = useLoad(() => browse.artists(source), source, source === "local" ? version : null);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = usePageScroller();
   const artists = load.data ?? [];
   const scrollTop = useScroll(scroller, entry, artists.length > 0);
   const { height } = useElementSize(scroller);
@@ -40,6 +49,8 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   useShuffleContext(() => shuffleAll(source));
   const [menu, setMenu] = useState<(MenuState & { artist: Artist }) | null>(null);
   const list = useRef<HTMLDivElement>(null);
+  // Where the list starts in the page (below the header and the tools).
+  const offset = useOffsetTop(list);
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";
 
@@ -55,13 +66,14 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
   const scrollTo = (index: number) => {
     const el = scroller.current;
     if (!el) return;
-    revealRow(el, index * ROW, ROW);
+    revealRow(el, offset + index * ROW, ROW);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
     if (artists.length === 0) return;
     const at = selected ?? -1;
-    const page = Math.max(1, Math.floor(height / ROW) - 1);
+    const room = scroller.current ? clearHeight(scroller.current) : height;
+    const page = Math.max(1, Math.floor(room / ROW) - 1);
     let to: number | null = null;
     // Shift+F10 opens the row's menu like the context-menu key.
     const key = e.shiftKey && e.key === "F10" ? "ContextMenu" : e.key;
@@ -107,23 +119,20 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
     }
   };
 
-  const first = Math.max(0, Math.floor(scrollTop / ROW) - OVERSCAN);
-  const last = Math.min(artists.length, Math.ceil((scrollTop + height) / ROW) + OVERSCAN);
+  const first = Math.max(0, Math.floor((scrollTop - offset) / ROW) - OVERSCAN);
+  const last = Math.min(artists.length, Math.ceil((scrollTop - offset + height) / ROW) + OVERSCAN);
 
   return (
     <section className="view">
-      <ViewHeader
+      <ListHeader
         eyebrow={SOURCE_LABEL[source]}
         title="Artists"
-        actions={<PlayButtons onShuffle={() => shuffleAll(source)} />}
-      >
-        {load.state === "ready" && (
-          <div className="secondary">{plural(artists.length, "artist")}</div>
-        )}
-      </ViewHeader>
+        meta={load.state === "ready" && plural(artists.length, "artist")}
+        tools={<PlayButtons onShuffle={() => shuffleAll(source)} />}
+      />
       {source === "local" && <ScanLine />}
       <div className="artists-layout">
-        <div className="view-body list-body" ref={scroller}>
+        <div className="view-body list-body">
           {load.state === "loading" && <SkeletonRows />}
           {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
           {load.state === "ready" && artists.length === 0 && (
@@ -188,7 +197,7 @@ export function ArtistsView({ entry, source }: { entry: Entry; source: SourceKin
                 onClick={() => {
                   setSelected(index);
                   const el = scroller.current;
-                  if (el) el.scrollTop = index * ROW;
+                  if (el) scrollToTop(el, offset + index * ROW);
                 }}
               >
                 {letter}

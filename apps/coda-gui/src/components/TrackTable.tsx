@@ -4,6 +4,8 @@
 // several discs. ↑/↓ select, Enter or double-click plays the list from
 // that track, right-click or "…" opens the track menu. With `snippets`
 // (lyrics search), each row shows its lyric line below, the match marked.
+// With `covers` (Search's Songs), each row shows its cover and the title
+// over "artist · album", without a column head.
 
 import {
   memo,
@@ -18,9 +20,10 @@ import {
 import { formatTime } from "../lib/format";
 import { playTracks, sameTrack } from "../lib/play";
 import type { PlayContext, SnippetPart, Track } from "../lib/types";
-import { revealRow } from "../hooks/useLayout";
+import { clearHeight, revealRow } from "../hooks/useLayout";
 import { useAppState } from "../state/store";
 import type { MenuState } from "./ContextMenu";
+import { Cover } from "./Cover";
 import { MoreIcon } from "./icons";
 import { TrackAlbum, TrackArtist } from "./NameLink";
 import { Equalizer } from "./QueuePanel";
@@ -29,6 +32,8 @@ import { TrackMenu } from "./TrackMenu";
 const DEFAULT_ROW = 36;
 /** Rows with a lyric snippet (`--row-height` of `.track-rows.with-snippet`). */
 const SNIPPET_ROW = 58;
+/** Rows with a cover (`--row-height` of `.track-rows.with-covers`). */
+const COVER_ROW = 56;
 const OVERSCAN = 10;
 
 type Row = { kind: "disc"; disc: number } | { kind: "track"; index: number };
@@ -82,6 +87,8 @@ interface Props {
   context?: PlayContext | null;
   /** A lyric snippet per track, shown on a line of its own. */
   snippets?: SnippetPart[][];
+  /** Each row with its cover and "artist · album" under the title; no column head. */
+  covers?: boolean;
   label: string;
 }
 
@@ -110,9 +117,10 @@ export function TrackTable({
   onPlay,
   context,
   snippets,
+  covers = false,
   label,
 }: Props) {
-  const rowHeight = snippets ? SNIPPET_ROW : DEFAULT_ROW;
+  const rowHeight = covers ? COVER_ROW : snippets ? SNIPPET_ROW : DEFAULT_ROW;
   const { snapshot } = useAppState();
   // `locked`: no queue edits (starting or quitting); `disabled`: no playback either.
   const locked = snapshot?.phase !== "ready";
@@ -181,7 +189,8 @@ export function TrackTable({
   const onKeyDown = (e: KeyboardEvent) => {
     if (tracks.length === 0) return;
     const at = selected ?? -1;
-    const page = Math.max(1, Math.floor(view.height / rowHeight) - 1);
+    const room = scroller.current ? clearHeight(scroller.current) : view.height;
+    const page = Math.max(1, Math.floor(room / rowHeight) - 1);
     const move = (to: number) => {
       const index = Math.min(tracks.length - 1, Math.max(0, to));
       setSelected(index);
@@ -212,7 +221,8 @@ export function TrackTable({
       case "ContextMenu": {
         const index = Math.max(0, at);
         const rect = table.current?.getBoundingClientRect();
-        const y = (rect?.top ?? 0) + rowOf(index) * rowHeight + rowHeight - view.top + view.offset;
+        // Below the row: the rows' box is already where it is on screen.
+        const y = (rect?.top ?? 0) + (rowOf(index) + 1) * rowHeight;
         openMenu(index, (rect?.left ?? 0) + 40, y);
         break;
       }
@@ -231,16 +241,18 @@ export function TrackTable({
 
   return (
     <div className="track-table">
-      <div className={`track-head ${showAlbum ? "with-album" : ""}`} aria-hidden="true">
-        <span className="track-no">#</span>
-        <span>Title</span>
-        {showAlbum && <span>Album</span>}
-        <span className="track-duration">Time</span>
-        <span />
-      </div>
+      {!covers && (
+        <div className={`track-head ${showAlbum ? "with-album" : ""}`} aria-hidden="true">
+          <span className="track-no">#</span>
+          <span>Title</span>
+          {showAlbum && <span>Album</span>}
+          <span className="track-duration">Time</span>
+          <span />
+        </div>
+      )}
       <div
         ref={table}
-        className={snippets ? "track-rows with-snippet" : "track-rows"}
+        className={`track-rows ${covers ? "with-covers" : snippets ? "with-snippet" : ""}`}
         role="listbox"
         aria-label={label}
         tabIndex={0}
@@ -265,8 +277,9 @@ export function TrackTable({
               index={row.index}
               track={track}
               top={top}
-              showAlbum={showAlbum}
+              showAlbum={showAlbum && !covers}
               showArtist={showArtist}
+              covers={covers}
               snippet={snippets?.[row.index]}
               playing={sameTrack(track, playing)}
               animated={animated}
@@ -305,6 +318,7 @@ interface RowProps {
   top: number;
   showAlbum: boolean;
   showArtist: boolean;
+  covers: boolean;
   snippet?: SnippetPart[];
   playing: boolean;
   animated: boolean;
@@ -321,6 +335,7 @@ const TrackRow = memo(function TrackRow({
   top,
   showAlbum,
   showArtist,
+  covers,
   snippet,
   playing,
   animated,
@@ -331,6 +346,7 @@ const TrackRow = memo(function TrackRow({
 }: RowProps) {
   const classes = ["track-row"];
   if (showAlbum) classes.push("with-album");
+  if (covers) classes.push("with-cover");
   if (playing) classes.push("is-playing");
   if (selected) classes.push("is-selected");
   return (
@@ -347,18 +363,46 @@ const TrackRow = memo(function TrackRow({
         onMenu(index, e.clientX, e.clientY);
       }}
     >
-      <span className="track-no">
-        {playing ? (
-          <Equalizer animated={animated} />
-        ) : showAlbum ? (
-          index + 1
-        ) : (
-          (track.trackNo ?? index + 1)
-        )}
-      </span>
+      {covers ? (
+        <span className="track-cover-cell">
+          <Cover
+            url={track.coverUrl}
+            name={track.album ?? track.title}
+            size="small"
+            className="track-cover"
+          />
+          {playing && (
+            <span className="track-cover-playing">
+              <Equalizer animated={animated} />
+            </span>
+          )}
+        </span>
+      ) : (
+        <span className="track-no">
+          {playing ? (
+            <Equalizer animated={animated} />
+          ) : showAlbum ? (
+            index + 1
+          ) : (
+            (track.trackNo ?? index + 1)
+          )}
+        </span>
+      )}
       <span className="track-text">
         <span className="track-title">{track.title}</span>
-        {showArtist && <TrackArtist track={track} className="track-artist secondary" />}
+        {covers ? (
+          <span className="track-byline secondary">
+            <TrackArtist track={track} className="track-artist" />
+            {track.album && (
+              <>
+                <span className="track-byline-sep"> · </span>
+                <TrackAlbum track={track} className="track-album" />
+              </>
+            )}
+          </span>
+        ) : (
+          showArtist && <TrackArtist track={track} className="track-artist secondary" />
+        )}
         {snippet && (
           <span className="track-snippet">
             {snippet.map((part, i) =>
