@@ -225,9 +225,11 @@ pub struct Snapshot {
     /// Browse generations: a change means browse ids and cached answers
     /// of that source are stale (reload).
     pub browse: BrowseGenerationsDto,
-    /// The play history's revision: a change means Home's history rows
-    /// (Recently played, Most played) may have changed (reload them).
+    /// The play history's revision: a change means Home's Where you left
+    /// off (and its stops) may have changed (reload it).
     pub history_revision: u64,
+    /// The context whose queue is playing (Home's Now Playing).
+    pub playing_context: Option<PlayingContextDto>,
     /// The mix that owns the queue (or is loading its songs), if any.
     pub mix: Option<ActiveMixDto>,
 }
@@ -288,6 +290,17 @@ pub enum PlayContextDto {
     Folder {
         path: Vec<String>,
     },
+}
+
+/// A context as the UI names it: its source, kind and the id it opens
+/// by (a local id of the library generation it was played in, Navidrome's
+/// id, a folder's path joined by `/`, a mix id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayingContextDto {
+    pub source: crate::history::SourceKind,
+    pub kind: crate::history::ContextKind,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -353,6 +366,12 @@ pub enum Intent {
         /// play history (Home).
         #[serde(default)]
         context: Option<PlayContextDto>,
+        /// Resume: seek here (ms) once the start track plays, if it is
+        /// `seek_track` (the stopped track's id as a `TrackDto` names it).
+        #[serde(default)]
+        seek_ms: Option<u64>,
+        #[serde(default)]
+        seek_track: Option<String>,
     },
     /// Add `tracks` at the end, or after the current entry when `next`.
     Enqueue {
@@ -396,6 +415,11 @@ pub enum Intent {
         start: Option<usize>,
         #[serde(default)]
         shuffle: bool,
+        /// Resume: as `playTracks`'s.
+        #[serde(default)]
+        seek_ms: Option<u64>,
+        #[serde(default)]
+        seek_track: Option<String>,
     },
     /// Play the saved mix `id` (read again from the mixes file): replaces
     /// the queue and tops it up while the mix owns it.
@@ -523,6 +547,8 @@ mod tests {
                     start: None,
                     shuffle: false,
                     context: None,
+                    seek_ms: None,
+                    seek_track: None,
                 },
             ),
             (
@@ -538,6 +564,8 @@ mod tests {
                     },
                     start: None,
                     shuffle: true,
+                    seek_ms: None,
+                    seek_track: None,
                 },
             ),
         ];
@@ -590,6 +618,7 @@ mod tests {
                 server: 1,
             },
             history_revision: 3,
+            playing_context: None,
             mix: Some(ActiveMixDto {
                 name: "Prog".into(),
                 id: None,
@@ -621,7 +650,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 17, "{keys:?}");
+        assert_eq!(keys.len(), 18, "{keys:?}");
     }
 
     #[test]

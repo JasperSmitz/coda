@@ -95,7 +95,7 @@ A design-led redesign on `main`: Home / Search / Library navigation, Home built 
 - Open for the brief: local per-song play counts (the history counts listens per context today) and how Navidrome's per-song `playCount` is gathered for an artist without fetching every album at once.
 - Acceptance: large libraries stay fast in List (virtualized); sorts match the source's counts; Search keeps the lyrics behaviour.
 
-### N6 — Home
+### N6 — Home (`docs/plans/n6-home.md`; done 2026-11-19, reviewed; runtime smoke "2.0 N6" for the owner)
 - **Where you left off**: the carousel from the play history (contexts with covers, newest first), the meta line, **Resume** (the history records where a context stopped: the entry and position, per context), Open, the page glow following the focus; keyboard and trackpad. **Moods for today**: three genres from the history, three albums each (not played for longest; never this week), the same all day and cached per source and day (the daily-picks cache's successor), **Other moods**, Play as a quick mix (ADR 0008). The empty state for a new listener. The 1.x Home rows (Recently added, Most played, Daily Picks) go.
 - Open for the brief: where genre-per-album comes from for the history's contexts (local tags; Navidrome album genres), and the exact pick and fallback rules (thin history, a genre with fewer than three albums).
 - Acceptance: the picks are deterministic per day and tested; Home renders before history and picks arrive (no layout jump); Resume continues the right track; nothing blocks the engine.

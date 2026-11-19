@@ -1,6 +1,6 @@
 //! Play history for the Home view: which contexts (albums, artists,
-//! playlists, folders) were played, how often each was listened to, and
-//! the day's cached Navidrome picks.
+//! playlists, folders, saved mixes) were played, where each stopped, how
+//! often each was listened to, and the day's moods ([`moods`]).
 //!
 //! The engine owns the [`History`] (it records context plays from the play
 //! intents and listens from playback, see `engine/history.rs`) and saves
@@ -14,8 +14,15 @@
 //! they are gone. Navidrome contexts keep the server's ids and `coverArt`
 //! id, and the server they came from ([`server_id`]: a hash of the
 //! server's address and user name), so another server never shows them;
-//! the Daily Picks are cached per server too. The file never holds stream
-//! URLs, credentials, server addresses or cover tokens.
+//! the day's moods are cached per source and server too. The file never
+//! holds stream URLs, credentials, server addresses or cover tokens.
+//!
+//! **Where it stopped** ([`Stop`]): per context, the entry that played
+//! last (its track key, as for track listens, and its place in the
+//! context's tracks as played) and the position, recorded by the engine
+//! on track changes, pause, a new play and quit while that context fills
+//! the queue (`engine/history.rs`). Kept only for contexts among the
+//! plays, so it is bounded with them.
 //!
 //! Listens are counted per context and per track ([`TrackCount`]: Library's
 //! local Most played order and an artist's "Your most played"). A local
@@ -28,11 +35,14 @@
 //! most [`MAX_COUNTS`] contexts and [`MAX_TRACK_COUNTS`] tracks (the
 //! least recently heard dropped first).
 //!
-//! File versions: 1 (no track counts) is read and migrated as it is (its
-//! plays, counts and picks kept); 2 adds `tracks`. A newer version is
-//! left untouched and not saved over.
+//! File versions: 1 (no track counts) and 2 are read and migrated as they
+//! are (their plays and counts kept; their Daily Picks, which the moods
+//! replaced, dropped); 2 adds `tracks`; 3 adds `stops`, `moods`, a
+//! Navidrome album count's `genres` and the `mix` context kind. A newer
+//! version is left untouched and not saved over.
 
 pub mod commands;
+pub mod moods;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -41,10 +51,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use coda_core::library::tags::{AlbumId, AlbumOrder, ArtistId, TagIndex};
 use coda_core::library::tree::TrackId;
 use coda_core::library::{Library, PlaylistId};
+use coda_core::mix::{Ingredient, Mix};
 use coda_core::model::Track;
 use serde::{Deserialize, Serialize};
 
-use crate::browse::dto::AlbumDto;
 use crate::browse::{LocalView, local, local_id};
 use crate::cover::CoverService;
 use crate::fsio;
@@ -57,22 +67,25 @@ pub const MAX_COUNTS: usize = 5_000;
 pub const MAX_TRACK_COUNTS: usize = 20_000;
 /// An artist's most played songs shown.
 pub const TOP_TRACKS: usize = 6;
-/// Distinct recently played contexts shown.
-pub const RECENT_SHOWN: usize = 20;
-/// Most played contexts shown.
-pub const MOST_SHOWN: usize = 20;
-/// Albums in the Daily Picks.
-pub const DAILY_PICKS: usize = 12;
+/// Distinct recently played contexts shown (Where you left off).
+pub const RECENT_SHOWN: usize = 8;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-const FILE_VERSION: u32 = 2;
+const FILE_VERSION: u32 = 3;
 /// The oldest version read (and migrated on the next save).
 const OLDEST_VERSION: u32 = 1;
 /// Names and subtitles are cut to this many characters.
 const MAX_TEXT: usize = 256;
 /// Ids (a folder path can be long) are refused beyond this.
 const MAX_ID: usize = 4096;
-/// Servers whose Daily Picks are cached at once.
-const MAX_DAILY_SERVERS: usize = 4;
+/// A stop's context has at most this many tracks (a whole local folder
+/// can hold more than a queue).
+const MAX_STOP_TOTAL: usize = 1_000_000;
+/// A stop's position is at most this (a day): beyond any real track.
+const MAX_POSITION_MS: u64 = 24 * 60 * 60 * 1000;
+/// Scopes (the local library, servers) whose moods are cached at once.
+const MAX_MOOD_SCOPES: usize = 5;
+/// Genres a Navidrome album count keeps.
+const MAX_COUNT_GENRES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +101,8 @@ pub enum ContextKind {
     Artist,
     Playlist,
     Folder,
+    /// A saved mix (its id; a quick mix is no context).
+    Mix,
 }
 
 /// A Navidrome server's identity in the history (moved to core, which
@@ -216,6 +231,11 @@ pub struct Count {
     pub listens: u64,
     /// The last listen (unix seconds), for trimming.
     pub last: u64,
+    /// A Navidrome album's genres, from its songs as they were heard
+    /// (version 3; the moods rank genres by them). Local albums take
+    /// theirs from the tag index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
 }
 
 /// What identifies a counted track across runs.
@@ -325,30 +345,118 @@ pub struct TrackCount {
     pub last: u64,
 }
 
-/// One album of the cached Navidrome Daily Picks.
+/// Where a context stopped: the entry that played last in it and the
+/// position (version 3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DailyAlbum {
+pub struct Stop {
+    pub source: SourceKind,
+    /// Navidrome: the [`server_id`] (required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    pub kind: ContextKind,
+    /// The context's id ([`Context::id`]).
     pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub artist: Option<String>,
-    #[serde(default)]
-    pub artist_id: Option<String>,
-    #[serde(default)]
-    pub year: Option<u32>,
-    #[serde(default)]
-    pub cover_art: Option<String>,
+    /// The entry's track: a local [`local_track_key`], a Navidrome song id.
+    pub track: String,
+    /// Its place among the context's tracks as they were queued.
+    pub index: usize,
+    /// How many tracks the context queued.
+    pub total: usize,
+    pub position_ms: u64,
+    /// Unix seconds.
+    pub at: u64,
 }
 
+impl Stop {
+    pub fn key(&self) -> ContextKey {
+        ContextKey {
+            source: self.source,
+            server: self.server.clone(),
+            kind: self.kind,
+            id: self.id.clone(),
+        }
+    }
+
+    /// `None` if unusable (ids as for a [`Context`], the place within the
+    /// count, at most [`MAX_STOP_TOTAL`]); the position capped at
+    /// [`MAX_POSITION_MS`].
+    fn sanitized(mut self) -> Option<Self> {
+        let id_ok = |id: &str| !id.is_empty() && id.chars().count() <= MAX_ID && !id.contains('\0');
+        if !id_ok(&self.id)
+            || !id_ok(&self.track)
+            || self.kind == ContextKind::Mix
+            || self.total == 0
+            || self.total > MAX_STOP_TOTAL
+            || self.index >= self.total
+        {
+            return None;
+        }
+        self.position_ms = self.position_ms.min(MAX_POSITION_MS);
+        match self.source {
+            SourceKind::Local => self.server = None,
+            SourceKind::Navidrome => {
+                if !self.server.as_deref().is_some_and(valid_server) {
+                    return None;
+                }
+            }
+        }
+        Some(self)
+    }
+}
+
+/// One album of a cached mood. Local: `id` is the album's stable key
+/// ([`local_album_key`]) and the rest comes from the library when shown;
+/// Navidrome: the server's id and what the card shows (the `coverArt` id,
+/// never a URL).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Daily {
+pub struct MoodAlbum {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_art: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+/// One cached mood: a genre and its albums.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mood {
+    /// The genre's name as shown (the tag index's, the server's cleaned).
+    pub genre: String,
+    /// Navidrome: the genre's albums on the server (local: counted when
+    /// shown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_count: Option<u32>,
+    pub albums: Vec<MoodAlbum>,
+}
+
+/// A day's moods of one scope: today's first, then the other moods.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoodsDay {
     /// The local calendar day, `YYYY-MM-DD`.
     pub date: String,
-    /// The [`server_id`] they were drawn from.
-    pub server: String,
-    pub albums: Vec<DailyAlbum>,
+    pub source: SourceKind,
+    /// Navidrome: the [`server_id`] they were drawn from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    pub moods: Vec<Mood>,
+}
+
+impl MoodsDay {
+    fn scope(&self) -> Scope {
+        match &self.server {
+            Some(server) => Scope::Navidrome(server.clone()),
+            None => Scope::Local,
+        }
+    }
 }
 
 /// `history.json`.
@@ -360,12 +468,17 @@ pub struct HistoryFile {
     pub plays: Vec<Played>,
     #[serde(default)]
     pub counts: Vec<Count>,
-    /// The latest Daily Picks per server (at most [`MAX_DAILY_SERVERS`]).
-    #[serde(default)]
-    pub dailies: Vec<Daily>,
     /// Listens per track (version 2; most recently heard first).
     #[serde(default)]
     pub tracks: Vec<TrackCount>,
+    /// Where contexts stopped (version 3; most recent first).
+    #[serde(default)]
+    pub stops: Vec<Stop>,
+    /// The latest day's moods per scope (version 3; at most
+    /// [`MAX_MOOD_SCOPES`]). Version 1 and 2 files' `dailies` (the Daily
+    /// Picks the moods replaced) are ignored.
+    #[serde(default)]
+    pub moods: Vec<MoodsDay>,
 }
 
 /// The history in memory. Every change bumps [`History::revision`].
@@ -375,8 +488,10 @@ pub struct History {
     plays: VecDeque<Played>,
     counts: HashMap<ContextKey, Count>,
     tracks: HashMap<TrackKey, TrackCount>,
-    /// Oldest first, one per server.
-    dailies: Vec<Daily>,
+    /// Only for contexts among `plays`.
+    stops: HashMap<ContextKey, Stop>,
+    /// Oldest first, one per scope.
+    moods: Vec<MoodsDay>,
     revision: u64,
 }
 
@@ -405,38 +520,68 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn sanitize_daily(daily: Daily) -> Option<Daily> {
-    if !valid_date(&daily.date) || !valid_server(&daily.server) {
+fn sanitize_moods_day(day: MoodsDay) -> Option<MoodsDay> {
+    if !valid_date(&day.date) {
         return None;
     }
-    let albums = daily
-        .albums
+    let server = match day.source {
+        SourceKind::Local => None,
+        SourceKind::Navidrome => Some(day.server.filter(|s| valid_server(s))?),
+    };
+    let moods = day
+        .moods
         .into_iter()
-        .filter_map(sanitize_daily_album)
-        .take(DAILY_PICKS)
+        .filter_map(|mood| {
+            let genre = mood.genre;
+            if genre.trim().is_empty() || genre.chars().count() > MAX_TEXT || genre.contains('\0') {
+                return None;
+            }
+            let albums: Vec<MoodAlbum> = mood
+                .albums
+                .into_iter()
+                .filter_map(sanitize_mood_album)
+                .take(moods::MOOD_ALBUMS)
+                .collect();
+            (!albums.is_empty()).then_some(Mood {
+                genre,
+                album_count: mood.album_count,
+                albums,
+            })
+        })
+        .take(moods::MOODS_KEPT)
         .collect();
-    Some(Daily {
-        date: daily.date,
-        server: daily.server,
-        albums,
+    Some(MoodsDay {
+        date: day.date,
+        source: day.source,
+        server,
+        moods,
     })
+}
+
+fn sanitize_mood_album(mut album: MoodAlbum) -> Option<MoodAlbum> {
+    if album.id.is_empty() || album.id.chars().count() > MAX_ID || album.id.contains('\0') {
+        return None;
+    }
+    album.name = clean(&album.name);
+    album.artist = album.artist.as_deref().map(clean).filter(|a| !a.is_empty());
+    album.artist_id = album.artist_id.filter(|id| valid_text_id(id));
+    album.cover_art = album.cover_art.filter(|id| valid_text_id(id));
+    Some(album)
+}
+
+fn clean_genres(genres: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    genres
+        .iter()
+        .map(|g| clean(g))
+        .filter(|g| !g.is_empty() && seen.insert(lower(g)))
+        .take(MAX_COUNT_GENRES)
+        .collect()
 }
 
 /// A short id (a server id, a `coverArt` id): non-empty, capped, no NUL.
 fn valid_text_id(id: &str) -> bool {
     !id.is_empty() && id.chars().count() <= MAX_TEXT && !id.contains('\0')
-}
-
-fn sanitize_daily_album(mut album: DailyAlbum) -> Option<DailyAlbum> {
-    let ok = valid_text_id;
-    if !ok(&album.id) {
-        return None;
-    }
-    album.name = clean(&album.name);
-    album.artist = album.artist.as_deref().map(clean).filter(|a| !a.is_empty());
-    album.artist_id = album.artist_id.filter(|id| ok(id));
-    album.cover_art = album.cover_art.filter(|id| ok(id));
-    Some(album)
 }
 
 impl History {
@@ -463,22 +608,27 @@ impl History {
             if count.listens == 0 {
                 continue;
             }
+            let genres = match (context.source, context.kind) {
+                (SourceKind::Navidrome, ContextKind::Album) => clean_genres(count.genres),
+                _ => Vec::new(),
+            };
             counts.insert(
                 context.key(),
                 Count {
                     context,
                     listens: count.listens,
                     last: count.last,
+                    genres,
                 },
             );
         }
-        let mut dailies: Vec<Daily> = Vec::new();
-        for daily in file.dailies.into_iter().filter_map(sanitize_daily) {
-            dailies.retain(|d| d.server != daily.server);
-            dailies.push(daily);
+        let mut moods: Vec<MoodsDay> = Vec::new();
+        for day in file.moods.into_iter().filter_map(sanitize_moods_day) {
+            moods.retain(|d| d.scope() != day.scope());
+            moods.push(day);
         }
-        let excess = dailies.len().saturating_sub(MAX_DAILY_SERVERS);
-        dailies.drain(..excess);
+        let excess = moods.len().saturating_sub(MAX_MOOD_SCOPES);
+        moods.drain(..excess);
         let mut tracks = HashMap::new();
         for count in file.tracks {
             let Some(track) = count.track.sanitized() else {
@@ -496,11 +646,21 @@ impl History {
                 },
             );
         }
+        let played: HashSet<ContextKey> = plays.iter().map(|p| p.context.key()).collect();
+        let mut stops = HashMap::new();
+        for stop in file.stops.into_iter().filter_map(Stop::sanitized) {
+            let key = stop.key();
+            // The first (most recent) of a context stays.
+            if played.contains(&key) {
+                stops.entry(key).or_insert(stop);
+            }
+        }
         let mut history = Self {
             plays,
             counts,
             tracks,
-            dailies,
+            stops,
+            moods,
             revision: 0,
         };
         history.trim_counts();
@@ -524,12 +684,15 @@ impl History {
                 .then_with(|| b.listens.cmp(&a.listens))
                 .then_with(|| a.track.id.cmp(&b.track.id))
         });
+        let mut stops: Vec<Stop> = self.stops.values().cloned().collect();
+        stops.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.id.cmp(&b.id)));
         HistoryFile {
             version: FILE_VERSION,
             plays: self.plays.iter().cloned().collect(),
             counts,
-            dailies: self.dailies.clone(),
             tracks,
+            stops,
+            moods: self.moods.clone(),
         }
     }
 
@@ -555,10 +718,69 @@ impl History {
             return;
         };
         self.plays.push_back(Played { context, at });
+        let mut trimmed = false;
         while self.plays.len() > MAX_PLAYS {
             self.plays.pop_front();
+            trimmed = true;
+        }
+        if trimmed && !self.stops.is_empty() {
+            let played: HashSet<ContextKey> = self.plays.iter().map(|p| p.context.key()).collect();
+            self.stops.retain(|key, _| played.contains(key));
         }
         self.revision += 1;
+    }
+
+    /// Where a context stopped (`stop.key()` must be among the plays,
+    /// else nothing is kept). Replaces the context's earlier stop.
+    pub fn record_stop(&mut self, stop: Stop) {
+        let Some(stop) = stop.sanitized() else {
+            return;
+        };
+        let played = self.plays.iter().any(|p| {
+            let c = &p.context;
+            c.source == stop.source
+                && c.kind == stop.kind
+                && c.id == stop.id
+                && c.server == stop.server
+        });
+        if !played {
+            return;
+        }
+        let key = stop.key();
+        if self.stops.get(&key) == Some(&stop) {
+            return;
+        }
+        self.stops.insert(key, stop);
+        self.revision += 1;
+    }
+
+    /// The context played to its end: no stop to resume from.
+    pub fn clear_stop(&mut self, key: &ContextKey) {
+        if self.stops.remove(key).is_some() {
+            self.revision += 1;
+        }
+    }
+
+    pub fn stop(&self, key: &ContextKey) -> Option<&Stop> {
+        self.stops.get(key)
+    }
+
+    /// A Navidrome album's genres as its songs had them (the latest
+    /// non-empty set wins); for a counted album only.
+    pub fn set_album_genres(&mut self, key: &ContextKey, genres: Vec<String>) {
+        if key.source != SourceKind::Navidrome || key.kind != ContextKind::Album {
+            return;
+        }
+        let genres = clean_genres(genres);
+        if genres.is_empty() {
+            return;
+        }
+        if let Some(count) = self.counts.get_mut(key)
+            && count.genres != genres
+        {
+            count.genres = genres;
+            self.revision += 1;
+        }
     }
 
     /// A track was heard long enough: one listen for each context (the
@@ -577,6 +799,7 @@ impl History {
                 context: context.clone(),
                 listens: 0,
                 last: at,
+                genres: Vec::new(),
             });
             // The latest name and cover win (a renamed playlist).
             count.context = context;
@@ -725,56 +948,84 @@ impl History {
             .collect()
     }
 
-    /// The most listened contexts in `scope` among `kinds`, most first
-    /// (ties: the more recent), at most `limit`.
-    pub fn most_played(&self, scope: &Scope, kinds: &[ContextKind], limit: usize) -> Vec<Count> {
-        let mut counts: Vec<&Count> = self
+    /// The album listens in `scope`, by the album's context id: listens
+    /// and the last one (for the moods).
+    pub fn album_listens(&self, scope: &Scope) -> HashMap<String, moods::Listens> {
+        self.counts
+            .values()
+            .filter(|c| c.context.kind == ContextKind::Album && scope.holds(&c.context))
+            .map(|c| {
+                (
+                    c.context.id.clone(),
+                    moods::Listens {
+                        listens: c.listens,
+                        last: c.last,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `scope`'s Navidrome albums' genres with their listens (the moods'
+    /// ranking; local albums' genres come from the tag index).
+    pub fn heard_album_genres(&self, scope: &Scope) -> Vec<(Vec<String>, moods::Listens)> {
+        let mut heard: Vec<&Count> = self
             .counts
             .values()
-            .filter(|c| scope.holds(&c.context) && kinds.contains(&c.context.kind))
+            .filter(|c| {
+                c.context.kind == ContextKind::Album
+                    && !c.genres.is_empty()
+                    && scope.holds(&c.context)
+            })
             .collect();
-        counts.sort_by(|a, b| {
-            b.listens
-                .cmp(&a.listens)
-                .then_with(|| b.last.cmp(&a.last))
-                .then_with(|| a.context.id.cmp(&b.context.id))
-        });
-        counts.into_iter().take(limit).cloned().collect()
+        heard.sort_by(|a, b| a.context.id.cmp(&b.context.id));
+        heard
+            .into_iter()
+            .map(|c| {
+                (
+                    c.genres.clone(),
+                    moods::Listens {
+                        listens: c.listens,
+                        last: c.last,
+                    },
+                )
+            })
+            .collect()
     }
 
-    /// The cached picks of `server` for `date`.
-    pub fn daily(&self, date: &str, server: &str) -> Option<&[DailyAlbum]> {
-        self.dailies
+    /// The cached moods of `scope` for `date`.
+    pub fn moods(&self, scope: &Scope, date: &str) -> Option<&[Mood]> {
+        self.moods
             .iter()
-            .find(|d| d.date == date && d.server == server)
-            .map(|d| d.albums.as_slice())
+            .find(|d| d.date == date && d.scope() == *scope)
+            .map(|d| d.moods.as_slice())
     }
 
-    /// Caches `server`'s picks of `date`, unless that day already has some
-    /// (the first answer of the day stays). Returns the day's picks.
-    pub fn set_daily(
-        &mut self,
-        date: String,
-        server: String,
-        albums: Vec<DailyAlbum>,
-    ) -> Vec<DailyAlbum> {
-        if let Some(albums) = self.daily(&date, &server) {
-            return albums.to_vec();
+    /// Caches `scope`'s moods of `date`, unless that day already has some
+    /// (the first answer of the day stays). Returns the day's moods.
+    pub fn set_moods(&mut self, scope: &Scope, date: String, moods: Vec<Mood>) -> Vec<Mood> {
+        if let Some(moods) = self.moods(scope, &date) {
+            return moods.to_vec();
         }
-        let Some(daily) = sanitize_daily(Daily {
+        let (source, server) = match scope {
+            Scope::Local => (SourceKind::Local, None),
+            Scope::Navidrome(server) => (SourceKind::Navidrome, Some(server.clone())),
+        };
+        let Some(day) = sanitize_moods_day(MoodsDay {
             date,
+            source,
             server,
-            albums,
+            moods,
         }) else {
             return Vec::new();
         };
-        let albums = daily.albums.clone();
-        self.dailies.retain(|d| d.server != daily.server);
-        self.dailies.push(daily);
-        let excess = self.dailies.len().saturating_sub(MAX_DAILY_SERVERS);
-        self.dailies.drain(..excess);
+        let moods = day.moods.clone();
+        self.moods.retain(|d| d.scope() != *scope);
+        self.moods.push(day);
+        let excess = self.moods.len().saturating_sub(MAX_MOOD_SCOPES);
+        self.moods.drain(..excess);
         self.revision += 1;
-        albums
+        moods
     }
 }
 
@@ -836,8 +1087,8 @@ pub fn load(path: Option<PathBuf>) -> Loaded {
     }
     let parsed = text.and_then(|t| {
         let file: HistoryFile = serde_json::from_str(&t).map_err(|e| e.to_string())?;
-        // Version 1 has no track counts (`tracks` defaults to empty): it
-        // is read as it is and saved as the current version.
+        // Versions 1 and 2 lack what later versions added (it defaults to
+        // empty): read as they are and saved as the current version.
         if !(OLDEST_VERSION..=FILE_VERSION).contains(&file.version) {
             return Err(format!("unknown version {}", file.version));
         }
@@ -879,17 +1130,19 @@ fn bounded_bytes(file: &HistoryFile, max: u64) -> std::io::Result<Vec<u8>> {
     let mut trimmed = file.clone();
     while bytes.len() as u64 > max {
         if trimmed.counts.is_empty() && trimmed.plays.is_empty() && trimmed.tracks.is_empty() {
-            trimmed.dailies.clear();
+            trimmed.moods.clear();
         }
-        // Counts are most recent first, plays oldest first.
+        // Counts and stops are most recent first, plays oldest first.
         trimmed.counts.truncate(trimmed.counts.len() / 2);
         trimmed.tracks.truncate(trimmed.tracks.len() / 2);
+        trimmed.stops.truncate(trimmed.stops.len() / 2);
         trimmed.plays.drain(..trimmed.plays.len().div_ceil(2));
         bytes = serde_json::to_vec(&trimmed).map_err(std::io::Error::other)?;
         if trimmed.counts.is_empty()
             && trimmed.plays.is_empty()
             && trimmed.tracks.is_empty()
-            && trimmed.dailies.is_empty()
+            && trimmed.stops.is_empty()
+            && trimmed.moods.is_empty()
         {
             break;
         }
@@ -1063,14 +1316,31 @@ fn folder_path(id: &str) -> Vec<String> {
     }
 }
 
-/// One Home card.
+/// Where a Home item stopped, resolved for playing it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopDto {
+    /// The entry's place among the context's tracks (local: in its tracks
+    /// now; Navidrome: as they were queued).
+    pub index: usize,
+    /// The context's tracks (as above).
+    pub total: usize,
+    /// The entry's track as a `TrackDto` names it (a local id of this
+    /// library generation, a song id); `None` when it is no longer there
+    /// (then `index` is where it was).
+    pub track_id: Option<String>,
+    pub position_ms: u64,
+}
+
+/// One item of Where you left off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeItemDto {
     pub source: SourceKind,
     pub kind: ContextKind,
     /// The id to open or play it by now (a local id of this library
-    /// generation, or Navidrome's id); for a folder, its path joined.
+    /// generation, Navidrome's id, a mix id); for a folder, its path
+    /// joined.
     pub id: String,
     /// Folders only: folder names from the music root.
     pub path: Option<Vec<String>>,
@@ -1079,16 +1349,18 @@ pub struct HomeItemDto {
     /// Albums: the artist to go to, when known.
     pub artist_id: Option<String>,
     pub cover_url: Option<String>,
-    /// Most played: the listens counted.
-    pub listens: Option<u64>,
+    /// When it was last played or heard (unix seconds).
+    pub played_at: u64,
+    /// Where it stopped (none for a mix, or one played to its end).
+    pub stop: Option<StopDto>,
 }
 
-/// The history rows of the Home view.
+/// The Home view's history: Where you left off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeDto {
+    /// Newest first, at most [`RECENT_SHOWN`].
     pub recent: Vec<HomeItemDto>,
-    pub most_played: Vec<HomeItemDto>,
 }
 
 /// Looks local contexts up in the current library.
@@ -1126,8 +1398,19 @@ impl<'a> LocalIndex<'a> {
         }
     }
 
-    /// The card for `context`, if it is still in the library.
-    pub fn resolve(&self, context: &Context, covers: &CoverService) -> Option<HomeItemDto> {
+    /// The album with stable key `key`, if it is still in the library.
+    pub fn album(&self, key: &str) -> Option<AlbumId> {
+        self.albums.get(key).copied()
+    }
+
+    /// The item for `context`, if it is still in the library (a mix: in
+    /// `mixes`). `played_at` and `stop` are left empty.
+    pub fn resolve(
+        &self,
+        context: &Context,
+        mixes: &HashMap<String, Mix>,
+        covers: &CoverService,
+    ) -> Option<HomeItemDto> {
         let view = self.view;
         let library = view.library;
         let tags = library.tags();
@@ -1141,7 +1424,8 @@ impl<'a> LocalIndex<'a> {
             subtitle,
             artist_id: None,
             cover_url,
-            listens: None,
+            played_at: 0,
+            stop: None,
         };
         match context.kind {
             ContextKind::Album => {
@@ -1199,150 +1483,197 @@ impl<'a> LocalIndex<'a> {
                     )
                 })
             }
+            ContextKind::Mix => {
+                let mix = mixes.get(&context.id)?;
+                let cover = mix
+                    .ingredients
+                    .iter()
+                    .find_map(|i| self.ingredient_cover(i, covers));
+                Some(item(context.id.clone(), mix.name.clone(), None, cover))
+            }
         }
+    }
+
+    /// The cover of a local mix ingredient's first album.
+    fn ingredient_cover(&self, ingredient: &Ingredient, covers: &CoverService) -> Option<String> {
+        let library = self.view.library;
+        let tags = library.tags();
+        let album = match ingredient {
+            Ingredient::Album { artist, name, .. } => {
+                tags.album_by_name(tags.artist_by_name(artist)?, name)?
+            }
+            Ingredient::Artist { name, .. } => {
+                *tags.artist(tags.artist_by_name(name)?).albums().first()?
+            }
+            Ingredient::Genre { name } => {
+                *tags.genre(tags.genre_by_name(name)?).albums().first()?
+            }
+        };
+        local::first_track_cover(library, tags.album(album).tracks(), covers)
+    }
+
+    /// The tracks a local context holds now, in its order (as it plays).
+    fn context_tracks(&self, context: &Context) -> Option<Vec<TrackId>> {
+        let library = self.view.library;
+        let tags = library.tags();
+        Some(match context.kind {
+            ContextKind::Album => tags.album(*self.albums.get(&context.id)?).tracks().to_vec(),
+            ContextKind::Playlist => library
+                .playlist(*self.playlists.get(context.id.as_str())?)
+                .tracks
+                .clone(),
+            ContextKind::Artist => tags
+                .artist(*self.artists.get(&context.id)?)
+                .albums()
+                .iter()
+                .flat_map(|a| tags.album(*a).tracks().iter().copied())
+                .collect(),
+            ContextKind::Folder => {
+                let dir = library.tree().dir(&folder_path(&context.id))?;
+                let mut ids = Vec::new();
+                library.tree().for_each_id(dir, |id| ids.push(id));
+                ids
+            }
+            ContextKind::Mix => return None,
+        })
+    }
+
+    /// `stop` in the context's tracks now: the stopped track's place if it
+    /// is still there, else the recorded place (within the tracks there
+    /// are), without a track.
+    pub fn resolve_stop(&self, context: &Context, stop: &Stop) -> Option<StopDto> {
+        let tracks = self.context_tracks(context)?;
+        if tracks.is_empty() {
+            return None;
+        }
+        let library = self.view.library;
+        let tags = library.tags();
+        let found = tracks.iter().position(|id| {
+            let track = library.track(*id);
+            tags.album_of(track)
+                .and_then(|album| local_track_key(&local_album_key(tags, album), track))
+                .is_some_and(|key| key == stop.track)
+        });
+        Some(match found {
+            Some(index) => StopDto {
+                index,
+                total: tracks.len(),
+                track_id: Some(local_id(self.view.generation, tracks[index].0)),
+                position_ms: stop.position_ms,
+            },
+            None => StopDto {
+                index: stop.index.min(tracks.len() - 1),
+                total: tracks.len(),
+                track_id: None,
+                position_ms: 0,
+            },
+        })
     }
 }
 
-/// A Navidrome context's card (from what was stored).
-pub fn navidrome_item(context: &Context, covers: &CoverService) -> HomeItemDto {
-    HomeItemDto {
+/// A Navidrome context's item (from what was stored; a mix only while it
+/// is in `mixes`, with its current name).
+pub fn navidrome_item(
+    context: &Context,
+    mixes: &HashMap<String, Mix>,
+    covers: &CoverService,
+) -> Option<HomeItemDto> {
+    let name = match context.kind {
+        ContextKind::Mix => mixes.get(&context.id)?.name.clone(),
+        _ => context.name.clone(),
+    };
+    Some(HomeItemDto {
         source: SourceKind::Navidrome,
         kind: context.kind,
         id: context.id.clone(),
         path: None,
-        name: context.name.clone(),
+        name,
         subtitle: context.subtitle.clone(),
         artist_id: None,
         cover_url: context
             .cover_art
             .clone()
             .and_then(|c| covers.url_for_key(coda_core::cover::CoverKey::Navidrome(c))),
-        listens: None,
-    }
+        played_at: 0,
+        stop: None,
+    })
 }
 
-/// What the engine hands the Home command: the source's rows, unresolved.
+/// What the engine hands the Home command: the source's recent contexts
+/// (more than shown: some may no longer resolve), and their stops.
 #[derive(Debug, Clone, Default)]
 pub struct HomeRows {
     pub recent: Vec<Played>,
-    pub most_played: Vec<Count>,
+    pub stops: Vec<Stop>,
 }
 
 impl History {
-    /// More than shown: some local ones may no longer resolve.
     pub fn home_rows(&self, scope: &Scope) -> HomeRows {
-        let kinds: &[ContextKind] = match scope.source() {
-            // Navidrome's most played albums come from the server
-            // (`frequent`, built from scrobbles, the TUI's too).
-            SourceKind::Navidrome => &[ContextKind::Playlist],
-            SourceKind::Local => &[ContextKind::Album, ContextKind::Playlist],
-        };
-        HomeRows {
-            recent: self.recent(scope, RECENT_SHOWN * 2),
-            most_played: self.most_played(scope, kinds, MOST_SHOWN * 2),
-        }
+        let recent = self.recent(scope, RECENT_SHOWN * 4);
+        let stops = recent
+            .iter()
+            .filter_map(|p| self.stops.get(&p.context.key()).cloned())
+            .collect();
+        HomeRows { recent, stops }
     }
 }
 
-/// Resolves `rows` to cards (local ones against the library; `view` is
-/// `None` for Navidrome).
-pub fn home_dto(rows: HomeRows, view: Option<&LocalView<'_>>, covers: &CoverService) -> HomeDto {
+/// Resolves `rows` to items (local ones against the library; `view` is
+/// `None` for Navidrome; mixes against `mixes`, by id). Artists and
+/// folders without a cover are left out.
+pub fn home_dto(
+    rows: HomeRows,
+    view: Option<&LocalView<'_>>,
+    mixes: &HashMap<String, Mix>,
+    covers: &CoverService,
+) -> HomeDto {
     let index = view.map(LocalIndex::new);
-    let resolve = |context: &Context| match (&index, context.source) {
-        (Some(index), SourceKind::Local) => index.resolve(context, covers),
-        (_, SourceKind::Navidrome) => Some(navidrome_item(context, covers)),
-        (None, SourceKind::Local) => None,
-    };
+    let stops: HashMap<ContextKey, &Stop> = rows.stops.iter().map(|s| (s.key(), s)).collect();
     let recent = rows
         .recent
         .iter()
-        .filter_map(|p| resolve(&p.context))
-        .take(RECENT_SHOWN)
-        .collect();
-    let most_played = rows
-        .most_played
-        .iter()
-        .filter_map(|c| {
-            resolve(&c.context).map(|item| HomeItemDto {
-                listens: Some(c.listens),
+        .filter_map(|played| {
+            let context = &played.context;
+            let item = match (&index, context.source) {
+                (Some(index), SourceKind::Local) => index.resolve(context, mixes, covers),
+                (_, SourceKind::Navidrome) => navidrome_item(context, mixes, covers),
+                (None, SourceKind::Local) => None,
+            }?;
+            if matches!(context.kind, ContextKind::Artist | ContextKind::Folder)
+                && item.cover_url.is_none()
+            {
+                return None;
+            }
+            let stopped = stops.get(&context.key()).copied();
+            let stop = stopped.and_then(|stop| match (&index, context.source) {
+                (Some(index), SourceKind::Local) => index.resolve_stop(context, stop),
+                (_, SourceKind::Navidrome) => Some(StopDto {
+                    index: stop.index,
+                    total: stop.total,
+                    track_id: Some(stop.track.clone()),
+                    position_ms: stop.position_ms,
+                }),
+                (None, SourceKind::Local) => None,
+            });
+            Some(HomeItemDto {
+                played_at: played.at.max(stopped.map_or(0, |s| s.at)),
+                stop,
                 ..item
             })
         })
-        .take(MOST_SHOWN)
+        .take(RECENT_SHOWN)
         .collect();
-    HomeDto {
-        recent,
-        most_played,
-    }
+    HomeDto { recent }
 }
 
-// ----- Daily Picks ----------------------------------------------------------
-
-/// FNV-1a: the same seed for the same day on every run.
-fn seed(date: &str) -> u64 {
+/// FNV-1a: the same seed for the same text on every run.
+pub(crate) fn seed(text: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in date.bytes() {
+    for b in text.bytes() {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
-}
-
-/// The day's local picks: the [`DAILY_PICKS`] albums whose keys rank
-/// lowest under a hash seeded by the date. Each album's rank depends only
-/// on the date and its own key, never on scan order or on the other
-/// albums, so the picks stay the same all day and across restarts, and a
-/// library edit changes them only where an added album outranks one or a
-/// picked album goes away.
-pub fn local_daily_picks(view: &LocalView<'_>, date: &str, covers: &CoverService) -> Vec<AlbumDto> {
-    let tags = view.library.tags();
-    let mut albums: Vec<(u64, String, AlbumId)> = tags
-        .albums(AlbumOrder::Name)
-        .iter()
-        .map(|id| {
-            let key = local_album_key(tags, *id);
-            (seed(&format!("{date}\n{key}")), key, *id)
-        })
-        .collect();
-    let picks = DAILY_PICKS.min(albums.len());
-    if picks < albums.len() {
-        albums.select_nth_unstable(picks);
-        albums.truncate(picks);
-    }
-    albums.sort();
-    albums
-        .into_iter()
-        .map(|(_, _, id)| local::album_dto(view, id, covers))
-        .collect()
-}
-
-pub fn daily_album(album: coda_core::navidrome::Album) -> DailyAlbum {
-    DailyAlbum {
-        id: album.id,
-        name: album.name,
-        artist: album.artist,
-        artist_id: album.artist_id,
-        year: album.year,
-        cover_art: album.cover_art,
-    }
-}
-
-pub fn daily_album_dto(album: &DailyAlbum, covers: &CoverService) -> AlbumDto {
-    AlbumDto {
-        id: album.id.clone(),
-        name: album.name.clone(),
-        artist: album.artist.clone(),
-        artist_id: album.artist_id.clone(),
-        year: album.year,
-        track_count: None,
-        duration_ms: None,
-        cover_url: album
-            .cover_art
-            .clone()
-            .and_then(|c| covers.url_for_key(coda_core::cover::CoverKey::Navidrome(c))),
-        genre: None,
-        play_count: None,
-    }
 }
 
 #[cfg(test)]

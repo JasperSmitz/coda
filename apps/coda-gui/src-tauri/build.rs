@@ -55,7 +55,7 @@ fn main() {
         "ui_source_get",
         "ui_source_set",
         "home_history",
-        "home_daily_picks",
+        "home_moods",
         // An artist's most played songs (the play history).
         "artist_most_played",
         "now_playing_lyrics",

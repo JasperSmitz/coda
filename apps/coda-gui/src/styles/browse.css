@@ -1400,111 +1400,435 @@
   white-space: nowrap;
 }
 
-/* ----- Home ----- */
+/* ----- Home (DESIGN.md "Home", 2.0 N6) ----- */
 
-.home-body {
+/* The focused cover: ~30% of the content's width, 180–330px. */
+.home {
+  --carousel-size: clamp(
+    180px,
+    calc((min(100vw, var(--page-w) + 2 * var(--page-pad)) - 2 * var(--page-pad)) * 0.3),
+    330px
+  );
+  /* The cover's room in the track: above and below it (the scale, its glow). */
+  --carousel-pad: 24px;
+  --carousel-meta-h: 200px;
+}
+
+.home-header {
+  padding: 28px 0 4px;
+  text-align: center;
+}
+
+/* Where you left off: its room is kept while it loads. Far neighbours
+   are cut at the content's sides (they have faded out by then); its
+   glow may reach below. */
+.home-left {
+  min-height: calc(var(--carousel-size) + 2 * var(--carousel-pad) + var(--carousel-meta-h));
+  overflow-x: clip;
+}
+
+.home-quiet {
+  margin: 0;
+  padding: 12px 0;
+  text-align: center;
+}
+
+.home-welcome {
   display: flex;
   flex-direction: column;
-  gap: 22px;
-}
-
-.home-hint {
-  margin: 0;
-}
-
-.home-row-header {
-  display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 4px;
-}
-
-.home-row-header .section-title {
-  margin: 0;
-}
-
-.home-row-arrows {
-  display: flex;
-  gap: 2px;
-  margin-left: auto;
-}
-
-.home-shuffle {
-  font-size: var(--text-small);
-}
-
-.home-cards {
-  display: flex;
+  justify-content: center;
   gap: 18px;
-  margin: 0;
-  padding: 6px 2px 8px;
-  list-style: none;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
+  min-height: calc(var(--carousel-size) + 2 * var(--carousel-pad) + var(--carousel-meta-h));
+  text-align: center;
 }
 
-.home-cards::-webkit-scrollbar {
+.home-welcome-text {
+  margin: 0;
+  max-width: 34em;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 20px;
+  font-style: italic;
+}
+
+.home-welcome-actions,
+.carousel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.carousel-track {
+  position: relative;
+  height: calc(var(--carousel-size) + 2 * var(--carousel-pad));
+}
+
+/* The focused cover's glow, in the page's accent (`--glow` follows the
+   focused cover and blends: tokens.css). It stays in the centre, so it
+   never repaints while covers glide; it reaches about 40px below the
+   cover, short of the text under it. */
+.carousel-track::before {
+  content: "";
+  position: absolute;
+  top: var(--carousel-pad);
+  left: 50%;
+  width: var(--carousel-size);
+  height: var(--carousel-size);
+  border-radius: 18px;
+  transform: translateX(-50%);
+  box-shadow: 0 16px 56px -18px var(--glow);
+  pointer-events: none;
+}
+
+.carousel.is-loading .carousel-track::before {
   display: none;
 }
 
-.home-card {
-  position: relative;
-  flex: 0 0 160px;
-  width: 160px;
-}
-
-.home-card-open {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  border-radius: var(--radius);
-}
-
-.home-card-cover {
-  width: 160px;
-  height: 160px;
-  margin-bottom: 6px;
+.carousel-item {
+  position: absolute;
+  top: var(--carousel-pad);
+  left: 50%;
+  width: var(--carousel-size);
+  height: var(--carousel-size);
+  padding: 0;
+  border-radius: 18px;
+  transform-origin: center;
   transition:
-    transform var(--motion),
-    box-shadow var(--motion);
+    transform var(--motion-carousel) var(--ease),
+    opacity var(--motion-carousel) var(--ease);
+  will-change: transform, opacity;
 }
 
-.home-card-cover.round {
+.carousel-item.round,
+.carousel-item.round .carousel-cover {
   border-radius: 50%;
 }
 
-.home-card-open:hover .home-card-cover {
-  transform: translateY(-3px);
-  box-shadow: var(--shadow-big);
+.carousel-cover {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  border-radius: 18px;
+  font-size: calc(var(--carousel-size) * 0.18);
 }
 
-.home-card-play {
+.carousel-step {
   position: absolute;
-  top: 116px;
-  right: 8px;
-  width: 34px;
-  height: 34px;
+  top: calc(var(--carousel-pad) + var(--carousel-size) / 2 - 18px);
+  z-index: 20;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--glass);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+.carousel-step:disabled {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.carousel-step.prev {
+  left: 4px;
+}
+
+.carousel-step.next {
+  right: 4px;
+}
+
+.carousel-skeleton {
+  position: absolute;
+  top: var(--carousel-pad);
+  left: 50%;
+  width: var(--carousel-size);
+  height: var(--carousel-size);
+  border-radius: 18px;
+  transform: translateX(-50%);
+}
+
+/* Under the cover: title, artist, the quiet line, the dots, the actions,
+   over the page's glow (worst: an all-white cover, about #3a393d,
+   app.css `.page-glow::after`) and the end of the focused cover's glow
+   (`.carousel-track::before`: the accent at 45% under a 28px-sigma
+   blur whose edge is 2px above the cover's bottom). With a white accent,
+   sRGB compositing: at the title's top (30px below the cover, glow
+   ~6%, about #454448) text 8.8:1; at the artist line (~0.3%) text-2
+   5.0:1; at the quiet line (none) text-2 5.0:1, the dots' text-3 3.2:1.
+   A yellow cover and accent (#3a3a04 under it): text 9.1, text-2 5.1,
+   text-3 3.3. So the artist and the quiet line are text-2, never text-3. */
+.carousel-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: var(--carousel-meta-h);
+  padding-top: 6px;
+  text-align: center;
+}
+
+.carousel-title {
+  max-width: min(100%, 36em);
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 32px;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.carousel-artist {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.carousel-quiet {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.carousel-dots {
+  display: flex;
+  gap: 6px;
+  margin: 14px 0;
+}
+
+.carousel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform var(--motion) var(--ease-out);
+}
+
+.carousel-dot.is-current {
+  background: var(--text);
+  transform: scale(1.35);
+}
+
+/* Moods for today: below the page's glow (it has faded out by ~600px),
+   on the base. */
+.home-moods {
+  margin-top: 40px;
+}
+
+.home-moods-header {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.home-moods-header .section-title {
+  margin: 0;
+}
+
+.home-moods-header .button {
+  margin-left: auto;
+}
+
+.mood-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+/* A card: its albums' tints as a wash (sRGB gradient, so no point is
+   lighter than its lightest tint), a hairline; the base where a tint is
+   not known yet. Tints are OKLCH L 0.20 with chroma ≤ 0.05 (core
+   `cover::palette`); the lightest of every hue (a green at full tint
+   chroma, about #001c0b) gives text 16.3:1, text-2 7.8:1, text-3 5.0:1
+   (the base: 17.4, 8.3, 5.3). The Play button is its first album's
+   accent with its accent text (≥3:1 on its tint by construction). */
+.mood-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 380px;
+  padding: 26px 24px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.mood-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    155deg,
+    var(--mood-tint-1) 0%,
+    var(--mood-tint-2) 55%,
+    var(--mood-tint-3) 100%
+  );
+}
+
+.mood-card.skeleton-card {
+  background: var(--surface-1);
+}
+
+.mood-card.skeleton-card::before {
+  display: none;
+}
+
+.mood-fan {
+  position: relative;
+  height: 156px;
+  margin-bottom: 20px;
+}
+
+.mood-fan-cover {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 136px;
+  height: 136px;
+  padding: 0;
+  border-radius: var(--radius-cover);
+  transition: transform var(--motion-slow) var(--ease-out);
+}
+
+.mood-cover {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.mood-fan-1 {
+  z-index: 1;
+  transform: translateX(-50%) translateX(-62px) rotate(-8deg) scale(0.9);
+}
+
+.mood-fan-2 {
+  z-index: 3;
+  transform: translateX(-50%) translateY(-4px);
+}
+
+.mood-fan-3 {
+  z-index: 2;
+  transform: translateX(-50%) translateX(62px) rotate(8deg) scale(0.9);
+}
+
+.mood-card:hover .mood-fan-1,
+.mood-card:focus-within .mood-fan-1 {
+  transform: translateX(-50%) translateX(-80px) rotate(-11deg) scale(0.9);
+}
+
+.mood-card:hover .mood-fan-2,
+.mood-card:focus-within .mood-fan-2 {
+  transform: translateX(-50%) translateY(-8px);
+}
+
+.mood-card:hover .mood-fan-3,
+.mood-card:focus-within .mood-fan-3 {
+  transform: translateX(-50%) translateX(80px) rotate(11deg) scale(0.9);
+}
+
+.mood-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-self: stretch;
+  min-width: 0;
+}
+
+.mood-genre {
+  margin: 0 0 8px;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-variation-settings: var(--display-axes);
+  font-size: 34px;
+  font-weight: var(--display-weight);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mood-albums {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-small);
+}
+
+.mood-albums li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mood-album-artist {
+  color: var(--text-2);
+}
+
+.mood-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: auto;
+}
+
+.mood-facts {
+  flex: 1;
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.mood-play {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   background: var(--accent);
   color: var(--accent-text);
   box-shadow: var(--shadow);
-  opacity: 0;
-  transition:
-    opacity var(--motion-fast),
-    transform var(--motion) var(--spring);
+  transition: transform var(--motion) var(--spring);
 }
 
-.home-card:hover .home-card-play:not(:disabled),
-.home-card:focus-within .home-card-play:not(:disabled) {
-  opacity: 1;
+.mood-play:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text) 12%);
 }
 
-.home-card-play:not(:disabled):hover {
-  background: var(--accent);
-  color: var(--accent-text);
-  filter: brightness(1.08);
+.mood-play:not(:disabled):active {
+  transform: scale(var(--press-scale));
+}
+
+/* One column when narrow; each card then lies on its side. */
+@media (max-width: 1080px) {
+  .mood-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mood-card {
+    flex-direction: row;
+    align-items: center;
+    gap: 28px;
+    min-height: 220px;
+  }
+
+  .mood-fan {
+    flex: none;
+    width: 300px;
+    margin-bottom: 0;
+  }
 }

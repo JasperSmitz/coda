@@ -343,7 +343,7 @@ pub fn run() {
             prefs::commands::ui_source_get,
             prefs::commands::ui_source_set,
             history::commands::home_history,
-            history::commands::home_daily_picks,
+            history::commands::home_moods,
             history::commands::artist_most_played,
             lyrics::now_playing_lyrics,
             mixes::list_mixes,

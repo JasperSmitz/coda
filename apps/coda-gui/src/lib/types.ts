@@ -103,6 +103,8 @@ export interface Snapshot {
   browse: { library: number; server: number };
   /** The play history's revision: a change means Home's history rows may have changed. */
   historyRevision: number;
+  /** The context whose queue is playing (Home's Now Playing). */
+  playingContext: PlayingContext | null;
   /** The mix that owns the queue (or is loading its songs), if any. */
   mix: ActiveMix | null;
 }
@@ -146,6 +148,9 @@ export type Intent =
       shuffle?: boolean;
       /** The view it plays from, for the play history (Home). */
       context?: PlayContext | null;
+      /** Resume (Home): seek here, in ms, once the start track plays, if it is `seekTrack` (a track's id as `HomeStop.trackId` names it). */
+      seekMs?: number | null;
+      seekTrack?: string | null;
     }
   | { type: "enqueue"; tracks: TrackRef[]; next?: boolean }
   | { type: "dismissNotice"; id: number }
@@ -156,7 +161,15 @@ export type Intent =
   /** Moves the entries right after the current one. */
   | { type: "playNextEntries"; keys: string[] }
   | { type: "shuffleUpcoming" }
-  | { type: "playLocal"; context: LocalContext; start?: number | null; shuffle?: boolean }
+  | {
+      type: "playLocal";
+      context: LocalContext;
+      start?: number | null;
+      shuffle?: boolean;
+      /** Resume (Home): as `playTracks`'s. */
+      seekMs?: number | null;
+      seekTrack?: string | null;
+    }
   /** Plays the saved mix `id` (read again from the mixes file). */
   | { type: "playMix"; id: string }
   /** Plays a recipe without saving it (a quick mix). */
@@ -381,13 +394,31 @@ export interface BrowseError {
 
 // ----- Home (src-tauri/src/history.rs) -----
 
-export type ContextKind = "album" | "artist" | "playlist" | "folder";
+export type ContextKind = "album" | "artist" | "playlist" | "folder" | "mix";
 
-/** One Home card: a context from the play history, resolved now. */
+/** A context as the UI names it (`HomeItem`'s source, kind and id). */
+export interface PlayingContext {
+  source: SourceKind;
+  kind: ContextKind;
+  id: string;
+}
+
+/** Where a Home item stopped. */
+export interface HomeStop {
+  /** The entry's place among the context's tracks. */
+  index: number;
+  /** The context's tracks. */
+  total: number;
+  /** The entry's track as a `Track` names it (local id or song id); null: gone (then `index` is where it was). */
+  trackId: string | null;
+  positionMs: number;
+}
+
+/** One item of Where you left off: a context from the play history, resolved now. */
 export interface HomeItem {
   source: SourceKind;
   kind: ContextKind;
-  /** The id to open or play it by (a folder: its path joined by `/`). */
+  /** The id to open or play it by (a folder: its path joined by `/`; a mix: its id). */
   id: string;
   /** Folders only. */
   path: string[] | null;
@@ -396,13 +427,42 @@ export interface HomeItem {
   /** Albums: the artist, when known. */
   artistId: string | null;
   coverUrl: string | null;
-  /** Most played: listens counted. */
-  listens: number | null;
+  /** When it was last played (unix seconds). */
+  playedAt: number;
+  stop: HomeStop | null;
 }
 
 export interface HomeHistory {
+  /** Newest first, at most 8. */
   recent: HomeItem[];
-  mostPlayed: HomeItem[];
+}
+
+/** One album of a mood card. */
+export interface MoodAlbum {
+  id: string;
+  name: string;
+  artist: string | null;
+  artistId: string | null;
+  coverUrl: string | null;
+  durationMs: number | null;
+  /** The last listen counted (unix seconds); null: never. */
+  lastPlayed: number | null;
+  /** The album as a quick mix's ingredient. */
+  ingredient: Ingredient;
+}
+
+/** One mood: a genre and three of its albums. */
+export interface Mood {
+  genre: string;
+  /** The genre's albums in the library, when known. */
+  albumCount: number | null;
+  albums: MoodAlbum[];
+}
+
+/** The day's moods: today's three and the other three. */
+export interface Moods {
+  today: Mood[];
+  other: Mood[];
 }
 
 // ----- Playlist edits (src-tauri/src/playlists/dto.rs) -----

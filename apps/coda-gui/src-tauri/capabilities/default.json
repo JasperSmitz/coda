@@ -51,7 +51,7 @@
     "allow-ui-source-get",
     "allow-ui-source-set",
     "allow-home-history",
-    "allow-home-daily-picks",
+    "allow-home-moods",
     "allow-artist-most-played",
     "allow-now-playing-lyrics",
     "allow-lyrics-index-status",

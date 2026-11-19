@@ -294,6 +294,32 @@ fn a_saved_mix_is_read_again_from_the_file() {
         engine.take_final_save().unwrap().mix,
         Some(SessionMix::Saved(mix.id.clone()))
     );
+    // A saved mix is a context of the play history (Home's Where you left
+    // off), playing while it owns the queue; a quick mix is none.
+    let played = engine.history().plays().last().unwrap().context.clone();
+    assert_eq!(played.kind, crate::history::ContextKind::Mix);
+    assert_eq!(
+        (played.id.as_str(), played.name.as_str()),
+        (mix.id.as_str(), mix.name.as_str())
+    );
+    let playing = engine.full_snapshot().playing_context.unwrap();
+    assert_eq!(playing.id, mix.id.as_str());
+    let plays = engine.history().plays().count();
+    engine.handle_intent(
+        Intent::PlayQuickMix {
+            mix: MixInputDto {
+                name: "Quick".into(),
+                source: crate::history::SourceKind::Local,
+                ingredients: vec![IngredientDto::Artist {
+                    name: "Yes".into(),
+                    id: None,
+                }],
+            },
+        },
+        now,
+    );
+    assert_eq!(engine.history().plays().count(), plays);
+    assert!(engine.full_snapshot().playing_context.is_none());
 
     // A read overtaken by another play does not start.
     engine.handle_intent(
@@ -413,6 +439,36 @@ fn a_restored_mix_adopts_the_queue_and_tops_up_once_the_library_is_scanned() {
     .unwrap();
     empty.restore_mix(Some((jazz, true)), now);
     assert!(empty.full_snapshot().mix.is_none());
+}
+
+#[test]
+fn a_restored_saved_mix_is_the_queues_context_again_without_a_new_play() {
+    let (mut first, now) = local_engine(Vec::new());
+    first.handle_intent(quick("Jazz", SourceKind::Local, vec![genre("Jazz")]), now);
+    let session = first.take_final_save().unwrap();
+    let Some(SessionMix::Quick(mix)) = session.mix.clone() else {
+        panic!("{:?}", session.mix);
+    };
+    let restart = |saved: bool| {
+        let mut engine = Engine::new(Arc::new(CoverService::new(None)));
+        engine.start(
+            sources(None),
+            None,
+            restored(session.tracks.clone(), Some(0)),
+            now,
+        );
+        engine.restore_mix(Some((mix.clone(), saved)), now);
+        engine
+    };
+    // Saved: Home shows Now Playing for it after a relaunch; no play is
+    // recorded.
+    let mut engine = restart(true);
+    let playing = engine.full_snapshot().playing_context.unwrap();
+    assert_eq!(playing.kind, crate::history::ContextKind::Mix);
+    assert_eq!(playing.id, mix.id.as_str());
+    assert_eq!(engine.history().plays().count(), 0);
+    // A quick mix is no context.
+    assert!(restart(false).full_snapshot().playing_context.is_none());
 }
 
 #[test]
@@ -824,6 +880,8 @@ async fn a_play_request_that_finds_nothing_still_supersedes_a_loading_mix() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );

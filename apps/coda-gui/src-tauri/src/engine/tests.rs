@@ -269,6 +269,8 @@ fn play_tracks_resolves_local_refs_through_the_library() {
             start: Some(2),
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -304,6 +306,8 @@ fn play_tracks_shuffled_starts_with_the_chosen_track() {
             start: Some(7),
             shuffle: true,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -394,6 +398,8 @@ fn navidrome_refs_are_built_from_their_metadata_and_scrobbled() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -698,6 +704,8 @@ fn local_refs_from_an_older_library_generation_are_rejected() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -719,6 +727,8 @@ fn local_refs_from_an_older_library_generation_are_rejected() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1041,6 +1051,8 @@ fn a_new_client_replaces_the_old_without_stopping_playback() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1128,6 +1140,8 @@ fn a_new_music_folder_is_scanned_and_clears_the_no_config_problem() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1185,6 +1199,8 @@ fn scrobbling_can_be_switched_off_and_on() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1244,6 +1260,8 @@ fn settings_changes_reach_the_browse_handle_and_bump_its_generations() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1337,6 +1355,8 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             context: crate::browse::dto::LocalContextDto::Folder { path: vec![] },
             start: Some(2),
             shuffle: false,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1352,6 +1372,8 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             context: crate::browse::dto::LocalContextDto::Folder { path: vec![] },
             start: Some(4),
             shuffle: true,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1369,6 +1391,8 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             context: crate::browse::dto::LocalContextDto::Artist { id: artist.clone() },
             start: None,
             shuffle: true,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1384,6 +1408,8 @@ fn play_local_resolves_folders_and_artists_in_the_engine() {
             context: crate::browse::dto::LocalContextDto::Artist { id: artist },
             start: None,
             shuffle: false,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1438,6 +1464,8 @@ fn play_local_plays_and_shuffles_a_genre() {
             context: crate::browse::dto::LocalContextDto::Genre { id: genre.clone() },
             start: Some(1),
             shuffle: false,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1454,6 +1482,8 @@ fn play_local_plays_and_shuffles_a_genre() {
             context: crate::browse::dto::LocalContextDto::Genre { id: genre.clone() },
             start: None,
             shuffle: true,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1474,6 +1504,8 @@ fn play_local_plays_and_shuffles_a_genre() {
             },
             start: None,
             shuffle: false,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1784,6 +1816,8 @@ fn a_context_play_is_recorded_and_listens_count_for_album_and_context() {
                 subtitle: None,
                 cover_url,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1889,6 +1923,8 @@ fn a_context_play_is_recorded_and_listens_count_for_album_and_context() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -1971,6 +2007,8 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
                 subtitle: None,
                 cover_url: None,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2004,6 +2042,8 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
             context: crate::browse::dto::LocalContextDto::Folder { path: vec![] },
             start: None,
             shuffle: true,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2025,6 +2065,8 @@ fn history_counts_without_scrobbling_and_for_local_tracks() {
                 subtitle: None,
                 cover_url: None,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2052,6 +2094,8 @@ fn the_history_is_saved_after_a_debounce_and_at_exit() {
                 subtitle: None,
                 cover_url: None,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2062,6 +2106,12 @@ fn the_history_is_saved_after_a_debounce_and_at_exit() {
     engine.history_saved(None, now + SAVE_DEBOUNCE);
     assert!(engine.take_due_history(now + SAVE_DEBOUNCE).is_none());
     assert!(engine.take_due_history(now + SAVE_DEBOUNCE * 3).is_some());
+    engine.history_saved(Some(revision), now + SAVE_DEBOUNCE * 3);
+    // The exit write records where the album stopped (its first track,
+    // still loading), then nothing is left to write.
+    let (revision, file) = engine.take_final_history().unwrap();
+    assert_eq!(file.stops.len(), 1);
+    assert_eq!(file.stops[0].track, "s1");
     engine.history_saved(Some(revision), now + SAVE_DEBOUNCE * 3);
     assert!(engine.take_final_history().is_none());
     // Unsaved at exit: the final write has it.
@@ -2077,6 +2127,8 @@ fn the_history_is_saved_after_a_debounce_and_at_exit() {
                 subtitle: None,
                 cover_url: None,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2094,6 +2146,8 @@ fn listens_of_entries_queued_before_a_server_change_are_not_counted_for_the_new_
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2141,21 +2195,30 @@ fn listens_of_entries_queued_before_a_server_change_are_not_counted_for_the_new_
 }
 
 #[test]
-fn history_and_daily_picks_are_kept_per_server() {
-    use crate::history::{Scope, SourceKind};
+fn history_and_moods_are_kept_per_server() {
+    use crate::history::{Mood, MoodAlbum, Scope, SourceKind};
     let (mut engine, now) = navidrome_engine();
     let first = engine.server.clone().unwrap();
-    let album = crate::history::DailyAlbum {
-        id: "al-1".into(),
-        name: "One".into(),
-        artist: None,
-        artist_id: None,
-        year: None,
-        cover_art: None,
+    let mood = |id: &str| Mood {
+        genre: "Jazz".into(),
+        album_count: Some(4),
+        albums: vec![MoodAlbum {
+            id: id.into(),
+            name: "One".into(),
+            artist: None,
+            artist_id: None,
+            cover_art: None,
+            duration_ms: None,
+        }],
     };
     let (tx, _rx) = oneshot::channel();
     engine.handle_history_msg(
-        HistoryMsg::SetDaily("2026-11-06".into(), first.clone(), vec![album], tx),
+        HistoryMsg::SetMoods(
+            Scope::Navidrome(first.clone()),
+            "2026-11-06".into(),
+            vec![mood("al-1")],
+            tx,
+        ),
         now,
     );
     engine.handle_intent(
@@ -2170,6 +2233,8 @@ fn history_and_daily_picks_are_kept_per_server() {
                 subtitle: None,
                 cover_url: None,
             })),
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
@@ -2178,14 +2243,16 @@ fn history_and_daily_picks_are_kept_per_server() {
         engine.handle_history_msg(HistoryMsg::Home(SourceKind::Navidrome, tx), now);
         rx.try_recv().unwrap()
     };
-    let daily = |engine: &mut Engine| {
+    let moods = |engine: &mut Engine| {
         let (tx, mut rx) = oneshot::channel();
-        let server = engine.server.clone().unwrap_or_default();
-        engine.handle_history_msg(HistoryMsg::Daily("2026-11-06".into(), server, tx), now);
+        engine.handle_history_msg(
+            HistoryMsg::Moods(SourceKind::Navidrome, "2026-11-06".into(), tx),
+            now,
+        );
         rx.try_recv().unwrap()
     };
     assert_eq!(rows(&mut engine).recent.len(), 1);
-    assert!(daily(&mut engine).is_some());
+    assert!(moods(&mut engine).unwrap().cached.is_some());
 
     // Disconnected: no server, no Navidrome history.
     let change = |client| SettingsChange::Client {
@@ -2195,7 +2262,7 @@ fn history_and_daily_picks_are_kept_per_server() {
     engine.apply_settings(change(None), now).unwrap();
     assert!(engine.scope(SourceKind::Navidrome).is_none());
     assert!(rows(&mut engine).recent.is_empty());
-    assert!(daily(&mut engine).is_none());
+    assert!(moods(&mut engine).is_none());
 
     // Another server (another user here): none of the first one's.
     let other = Client::new(
@@ -2207,33 +2274,30 @@ fn history_and_daily_picks_are_kept_per_server() {
     engine.apply_settings(change(Some(other)), now).unwrap();
     assert_ne!(engine.server.as_deref(), Some(first.as_str()));
     assert!(rows(&mut engine).recent.is_empty());
-    assert!(daily(&mut engine).is_none());
-    // Picks fetched from the first server that arrive after the switch
-    // are refused, not cached under this one.
-    let late = crate::history::DailyAlbum {
-        id: "al-late".into(),
-        name: "Late".into(),
-        artist: None,
-        artist_id: None,
-        year: None,
-        cover_art: None,
-    };
+    assert!(moods(&mut engine).unwrap().cached.is_none());
+    // Moods picked from the first server that arrive after the switch
+    // are refused, not cached under it while it is not the current one.
     let (tx, mut rx) = oneshot::channel();
     engine.handle_history_msg(
-        HistoryMsg::SetDaily("2026-11-06".into(), first.clone(), vec![late], tx),
+        HistoryMsg::SetMoods(
+            Scope::Navidrome(first.clone()),
+            "2026-11-07".into(),
+            vec![mood("al-late")],
+            tx,
+        ),
         now,
     );
     assert!(rx.try_recv().unwrap().is_none());
-    assert!(daily(&mut engine).is_none());
 
-    // Back to the first: its history and today's picks again.
+    // Back to the first: its history and today's moods again.
     engine.apply_settings(change(Some(client())), now).unwrap();
     assert_eq!(
         engine.scope(SourceKind::Navidrome),
         Some(Scope::Navidrome(first))
     );
     assert_eq!(rows(&mut engine).recent[0].context.id, "al-1");
-    assert_eq!(daily(&mut engine).unwrap()[0].id, "al-1");
+    let cached = moods(&mut engine).unwrap().cached.unwrap();
+    assert_eq!(cached[0].albums[0].id, "al-1");
 }
 
 #[test]
@@ -2270,24 +2334,43 @@ fn play_contexts_deserialize_from_the_ui() {
 }
 
 #[tokio::test]
-async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
+async fn navidrome_moods_are_picked_once_a_day_and_saved_at_exit() {
     use crate::history::{self, SourceKind};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     let server = MockServer::start().await;
-    let albums: Vec<serde_json::Value> = (0..12)
-        .map(|i| serde_json::json!({"id": format!("al-{i}"), "name": format!("A{i}"), "coverArt": format!("al-{i}")}))
-        .collect();
     Mock::given(method("GET"))
-        .and(path("/rest/getAlbumList2"))
-        .and(query_param("type", "random"))
-        .and(query_param("size", "12"))
+        .and(path("/rest/getGenres"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "subsonic-response": {"status": "ok", "version": "1.16.1", "albumList2": {"album": albums}}
+            "subsonic-response": {"status": "ok", "version": "1.16.1", "genres": {"genre": [
+                {"value": "Jazz", "songCount": 40, "albumCount": 4},
+                {"value": "Rock", "songCount": 30, "albumCount": 3},
+                {"value": "Empty", "songCount": 0, "albumCount": 0}
+            ]}}
         })))
         .expect(1)
         .mount(&server)
         .await;
+    for (genre, count) in [("Jazz", 4), ("Rock", 3)] {
+        let albums: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("{genre}-{i}"), "name": format!("{genre} {i}"),
+                    "artist": "Band", "coverArt": format!("{genre}-{i}"), "duration": 600
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/rest/getAlbumList2"))
+            .and(query_param("type", "byGenre"))
+            .and(query_param("genre", genre))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "subsonic-response": {"status": "ok", "version": "1.16.1", "albumList2": {"album": albums}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
     let client = Client::new(
         coda_core::navidrome::client::parse_base_url(&server.uri()).unwrap(),
         "listener".into(),
@@ -2325,21 +2408,37 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
         tokio::time::sleep(TICK).await;
     }
     let date = "2026-11-06".to_owned();
-    let picks = |handle: EngineHandle, browse: BrowseHandle, date: String| async move {
-        history::commands::daily_picks(&handle, &browse, SourceKind::Navidrome, date)
+    let moods = |handle: EngineHandle, browse: BrowseHandle, date: String| async move {
+        history::commands::day_moods(&handle, &browse, SourceKind::Navidrome, date)
             .await
             .unwrap()
     };
-    let first = picks(handle.clone(), browse.clone(), date.clone()).await;
-    assert_eq!(first.len(), 12);
-    assert!(first[0].cover_url.is_some());
-    // The second visit of the day: from the cache (`expect(1)` above).
-    let second = picks(handle.clone(), browse.clone(), date.clone()).await;
-    assert_eq!(
-        first.iter().map(|a| &a.id).collect::<Vec<_>>(),
-        second.iter().map(|a| &a.id).collect::<Vec<_>>()
+    // Two Homes asking at once: one pick (`expect(1)` above), the same
+    // moods for both.
+    let (first, again) = tokio::join!(
+        moods(handle.clone(), browse.clone(), date.clone()),
+        moods(handle.clone(), browse.clone(), date.clone())
     );
-    let bad = history::commands::daily_picks(&handle, &browse, SourceKind::Navidrome, "x".into())
+    assert_eq!(first, again);
+    // No history: the largest genres, each with three albums.
+    let genres: Vec<&str> = first.today.iter().map(|m| m.genre.as_str()).collect();
+    assert_eq!(genres, ["Jazz", "Rock"]);
+    assert!(first.other.is_empty());
+    let jazz = &first.today[0];
+    assert_eq!(jazz.album_count, Some(4));
+    assert_eq!(jazz.albums.len(), 3);
+    assert!(jazz.albums[0].cover_url.is_some());
+    assert_eq!(jazz.albums[0].duration_ms, Some(600_000));
+    assert_eq!(jazz.albums[0].last_played, None);
+    assert!(matches!(
+        &jazz.albums[0].ingredient,
+        crate::mixes::IngredientDto::Album { id: Some(id), artist, .. }
+            if *id == jazz.albums[0].id && artist == "Band"
+    ));
+    // The second visit of the day: from the cache (`expect(1)` above).
+    let second = moods(handle.clone(), browse.clone(), date.clone()).await;
+    assert_eq!(first, second);
+    let bad = history::commands::day_moods(&handle, &browse, SourceKind::Navidrome, "x".into())
         .await
         .unwrap_err();
     assert_eq!(bad.kind, crate::browse::dto::BrowseErrorKind::NotFound);
@@ -2347,7 +2446,8 @@ async fn navidrome_daily_picks_are_fetched_once_a_day_and_saved_at_exit() {
     task.await.unwrap();
     // Saved at exit, and loaded back for the same day.
     let loaded = history::load(Some(history_path));
-    assert_eq!(loaded.history.daily(&date, &server_id).unwrap().len(), 12);
+    let scope = history::Scope::Navidrome(server_id);
+    assert_eq!(loaded.history.moods(&scope, &date).unwrap().len(), 2);
     let text = std::fs::read_to_string(state.path().join("history.json")).unwrap();
     assert!(!text.contains("listener") && !text.contains("127.0.0.1"));
 }
@@ -2381,10 +2481,310 @@ fn a_local_track_without_an_album_tag_is_not_counted_per_track() {
             start: None,
             shuffle: false,
             context: None,
+            seek_ms: None,
+            seek_track: None,
         },
         now,
     );
     listen_half(&mut engine, loads(&commands)[0], now);
     assert_eq!(engine.history().tracks_len(), 0);
     assert_eq!(engine.history().counts_len(), 0);
+}
+
+// ----- where it stopped (2.0 N6) --------------------------------------------
+
+fn album_context(id: &str) -> Option<PlayContextDto> {
+    Some(PlayContextDto::Album(NamedContextDto {
+        source: crate::history::SourceKind::Navidrome,
+        id: id.into(),
+        name: Some(format!("Album {id}")),
+        subtitle: None,
+        cover_url: None,
+    }))
+}
+
+fn stop_of(engine: &Engine, id: &str) -> Option<crate::history::Stop> {
+    use crate::history::{ContextKey, ContextKind, SourceKind};
+    engine
+        .history()
+        .stop(&ContextKey {
+            source: SourceKind::Navidrome,
+            server: engine.server.clone(),
+            kind: ContextKind::Album,
+            id: id.into(),
+        })
+        .cloned()
+}
+
+fn seeks(commands: &[PlaybackCommand]) -> Vec<f64> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            PlaybackCommand::SeekAbsolute(s) => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn where_a_context_stopped_follows_track_changes_pause_and_replacement() {
+    let (mut engine, now) = navidrome_engine();
+    let tracks = vec![
+        album_ref("s1", "al-1"),
+        album_ref("s2", "al-1"),
+        album_ref("s3", "al-1"),
+    ];
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks,
+            start: Some(1),
+            shuffle: false,
+            context: album_context("al-1"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    // The start track, once heard: track 2 of 3, at its start.
+    engine.handle_playback_event(
+        PlaybackEvent::Started {
+            load: loads(&commands)[0],
+        },
+        now,
+    );
+    let stop = stop_of(&engine, "al-1").unwrap();
+    assert_eq!((stop.track.as_str(), stop.index, stop.total), ("s2", 1, 3));
+    assert_eq!(stop.position_ms, 0);
+    // The snapshot says which context plays (Home's Now Playing).
+    let playing = engine.full_snapshot().playing_context.unwrap();
+    assert_eq!(playing.id, "al-1");
+    // Paused: the position.
+    engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(42)), now);
+    engine.handle_playback_event(PlaybackEvent::Paused(true), now);
+    assert_eq!(stop_of(&engine, "al-1").unwrap().position_ms, 42_000);
+    // Another context replaces it: where it was stays, with the position.
+    engine.handle_playback_event(PlaybackEvent::Paused(false), now);
+    engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(50)), now);
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![album_ref("t1", "al-2")],
+            start: None,
+            shuffle: false,
+            context: album_context("al-2"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    let stop = stop_of(&engine, "al-1").unwrap();
+    assert_eq!((stop.track.as_str(), stop.position_ms), ("s2", 50_000));
+    assert_eq!(engine.full_snapshot().playing_context.unwrap().id, "al-2");
+    // Played to its end: no stop (Resume starts it over).
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert!(stop_of(&engine, "al-2").is_some());
+    engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(5)), now);
+    engine.handle_playback_event(
+        PlaybackEvent::TrackEnded {
+            load,
+            reason: coda_core::playback::EndReason::Eof,
+        },
+        now,
+    );
+    assert!(stop_of(&engine, "al-2").is_none());
+    assert!(stop_of(&engine, "al-1").is_some());
+    // Nothing of the context plays any more.
+    engine.handle_intent(Intent::ClearQueue, now);
+    assert!(engine.full_snapshot().playing_context.is_none());
+}
+
+#[test]
+fn resume_continues_the_stopped_entry_at_its_position() {
+    let (mut engine, now) = navidrome_engine();
+    let tracks = || {
+        vec![
+            album_ref("s1", "al-1"),
+            album_ref("s2", "al-1"),
+            album_ref("s3", "al-1"),
+        ]
+    };
+    let resume = |engine: &mut Engine, start: usize, seek_ms: u64, track: &str| {
+        engine.handle_intent(
+            Intent::PlayTracks {
+                tracks: tracks(),
+                start: Some(start),
+                shuffle: false,
+                context: album_context("al-1"),
+                seek_ms: Some(seek_ms),
+                seek_track: Some(track.into()),
+            },
+            now,
+        )
+    };
+    // Resume: from the stopped entry, seeking once its load is heard (a
+    // seek before that would be refused by the player).
+    let commands = resume(&mut engine, 2, 75_500, "s3");
+    assert!(seeks(&commands).is_empty());
+    let load = loads(&commands)[0];
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert_eq!(seeks(&commands), [75.5]);
+    let stop = stop_of(&engine, "al-1").unwrap();
+    assert_eq!(
+        (stop.track.as_str(), stop.index, stop.position_ms),
+        ("s3", 2, 75_500)
+    );
+    // Only once.
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert!(seeks(&commands).is_empty());
+    // The started track is not the stopped one (the album changed): no
+    // seek, it starts from its beginning.
+    let commands = resume(&mut engine, 0, 30_000, "s3");
+    let load = loads(&commands)[0];
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert!(seeks(&commands).is_empty());
+    assert_eq!(stop_of(&engine, "al-1").unwrap().position_ms, 0);
+    // At (or within 5 s of) the track's end (2:00): no seek.
+    let commands = resume(&mut engine, 1, 116_000, "s2");
+    let load = loads(&commands)[0];
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert!(seeks(&commands).is_empty());
+    let commands = resume(&mut engine, 1, 114_000, "s2");
+    let load = loads(&commands)[0];
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    assert_eq!(seeks(&commands), [114.0]);
+    // A resume overtaken by another load (the user skipped before it was
+    // heard) does not seek that one.
+    let commands = resume(&mut engine, 0, 10_000, "s1");
+    let first = loads(&commands)[0];
+    let commands = engine.handle_intent(Intent::Next, now);
+    let next = loads(&commands)[0];
+    assert_ne!(first, next);
+    let commands = engine.handle_playback_event(PlaybackEvent::Started { load: next }, now);
+    assert!(seeks(&commands).is_empty());
+    // At quit, the position heard last is recorded.
+    engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(9)), now);
+    let (_, file) = engine.take_final_history().unwrap();
+    let stop = file.stops.iter().find(|s| s.id == "al-1").unwrap();
+    assert_eq!((stop.track.as_str(), stop.position_ms), ("s2", 9_000));
+}
+
+#[test]
+fn a_context_played_to_its_end_keeps_no_stop() {
+    let (mut engine, now) = navidrome_engine();
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![album_ref("s1", "al-1"), album_ref("s2", "al-1")],
+            start: Some(1),
+            shuffle: false,
+            context: album_context("al-1"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    engine.handle_playback_event(PlaybackEvent::Position(Duration::from_secs(90)), now);
+    assert!(stop_of(&engine, "al-1").is_some());
+    engine.handle_playback_event(
+        PlaybackEvent::TrackEnded {
+            load,
+            reason: coda_core::playback::EndReason::Eof,
+        },
+        now,
+    );
+    // The player keeps `current` on the last entry, with nothing loaded:
+    // nothing after this may write it back as "track 2 of 2 at 0:00".
+    assert!(stop_of(&engine, "al-1").is_none());
+    assert!(engine.full_snapshot().playing_context.is_none());
+    engine.handle_intent(Intent::ClearQueue, now);
+    assert!(stop_of(&engine, "al-1").is_none());
+    let (_, file) = engine.take_final_history().unwrap();
+    assert!(file.stops.is_empty());
+    engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![album_ref("t1", "al-2")],
+            start: None,
+            shuffle: false,
+            context: album_context("al-2"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    assert!(stop_of(&engine, "al-1").is_none());
+    assert!(engine.full_snapshot().playing_context.is_some());
+}
+
+#[test]
+fn moving_on_from_the_contexts_last_entry_to_another_clears_its_stop() {
+    let (mut engine, now) = navidrome_engine();
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks: vec![album_ref("s1", "al-1"), album_ref("s2", "al-1")],
+            start: Some(1),
+            shuffle: false,
+            context: album_context("al-1"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    engine.handle_intent(
+        Intent::Enqueue {
+            tracks: vec![album_ref("x1", "al-9")],
+            next: false,
+        },
+        now,
+    );
+    assert!(stop_of(&engine, "al-1").is_some());
+    let commands = engine.handle_playback_event(
+        PlaybackEvent::TrackEnded {
+            load,
+            reason: coda_core::playback::EndReason::Eof,
+        },
+        now,
+    );
+    let next = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load: next }, now);
+    assert!(stop_of(&engine, "al-1").is_none());
+    assert!(engine.full_snapshot().playing_context.is_none());
+}
+
+#[test]
+fn a_shuffled_context_still_records_the_albums_track_number() {
+    let (mut engine, now) = navidrome_engine();
+    let tracks: Vec<TrackRef> = (1..=8)
+        .map(|i| album_ref(&format!("s{i}"), "al-1"))
+        .collect();
+    let commands = engine.handle_intent(
+        Intent::PlayTracks {
+            tracks,
+            start: Some(4),
+            shuffle: true,
+            context: album_context("al-1"),
+            seek_ms: None,
+            seek_track: None,
+        },
+        now,
+    );
+    let check = |engine: &Engine| {
+        let stop = stop_of(engine, "al-1").unwrap();
+        let n: usize = stop.track[1..].parse().unwrap();
+        assert_eq!((stop.index, stop.total), (n - 1, 8), "{stop:?}");
+    };
+    let load = loads(&commands)[0];
+    engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+    // The chosen start first: the album's fifth track.
+    assert_eq!(stop_of(&engine, "al-1").unwrap().track, "s5");
+    check(&engine);
+    engine.handle_intent(Intent::ShuffleUpcoming, now);
+    for _ in 0..3 {
+        let commands = engine.handle_intent(Intent::Next, now);
+        let load = loads(&commands)[0];
+        engine.handle_playback_event(PlaybackEvent::Started { load }, now);
+        check(&engine);
+    }
 }

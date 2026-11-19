@@ -38,8 +38,26 @@ export function playFrom(action: () => Promise<void>) {
 }
 
 /** A local folder or artist, resolved and played by the engine. */
-export function playLocal(context: LocalContext, shuffle: boolean, start?: number) {
-  intent({ type: "playLocal", context, start: start ?? null, shuffle });
+/** Resume (Home): where to seek once the start track plays, if it is `trackId`'s. */
+export interface ResumeAt {
+  seekMs: number;
+  trackId: string;
+}
+
+export function playLocal(
+  context: LocalContext,
+  shuffle: boolean,
+  start?: number,
+  resume?: ResumeAt | null,
+) {
+  intent({
+    type: "playLocal",
+    context,
+    start: start ?? null,
+    shuffle,
+    seekMs: resume?.seekMs ?? null,
+    seekTrack: resume?.trackId ?? null,
+  });
 }
 
 export function playTracks(
@@ -47,9 +65,18 @@ export function playTracks(
   start?: number,
   shuffle = false,
   context?: PlayContext | null,
+  resume?: ResumeAt | null,
 ) {
   if (tracks.length === 0) return;
-  intent({ type: "playTracks", tracks, start: start ?? null, shuffle, context: context ?? null });
+  intent({
+    type: "playTracks",
+    tracks,
+    start: start ?? null,
+    shuffle,
+    context: context ?? null,
+    seekMs: resume?.seekMs ?? null,
+    seekTrack: resume?.trackId ?? null,
+  });
 }
 
 // ----- contexts for the play history -------------------------------------

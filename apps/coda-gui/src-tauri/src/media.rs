@@ -533,6 +533,7 @@ mod tests {
                 server: 1,
             },
             history_revision: 0,
+            playing_context: None,
             mix: None,
         }
     }

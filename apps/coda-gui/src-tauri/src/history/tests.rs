@@ -1,5 +1,6 @@
 //! Play history: recording rules, bounds, persistence (atomic, FIFO-safe,
-//! corrupt files set aside), local keys and their resolution, Daily Picks.
+//! corrupt files set aside), local keys and their resolution, stops, the
+//! moods' cache and picks.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +29,46 @@ fn remote(kind: ContextKind, id: &str) -> Context {
         name: format!("Name {id}"),
         subtitle: Some("Band".into()),
         cover_art: Some(format!("cover-{id}")),
+    }
+}
+
+fn stop(
+    kind: ContextKind,
+    id: &str,
+    track: &str,
+    index: usize,
+    total: usize,
+    position_ms: u64,
+    at: u64,
+) -> Stop {
+    Stop {
+        source: SourceKind::Navidrome,
+        server: Some(server()),
+        kind,
+        id: id.into(),
+        track: track.into(),
+        index,
+        total,
+        position_ms,
+        at,
+    }
+}
+
+fn mood(genre: &str, albums: &[&str]) -> Mood {
+    Mood {
+        genre: genre.into(),
+        album_count: None,
+        albums: albums
+            .iter()
+            .map(|id| MoodAlbum {
+                id: (*id).into(),
+                name: format!("Album {id}"),
+                artist: Some("Band".into()),
+                artist_id: None,
+                cover_art: None,
+                duration_ms: None,
+            })
+            .collect(),
     }
 }
 
@@ -109,7 +150,7 @@ fn recent_is_distinct_newest_first_and_per_source() {
 }
 
 #[test]
-fn listens_count_once_per_context_and_most_played_sorts() {
+fn listens_count_once_per_context() {
     let mut history = History::default();
     let album = remote(ContextKind::Album, "al");
     let playlist = remote(ContextKind::Playlist, "pl");
@@ -119,17 +160,10 @@ fn listens_count_once_per_context_and_most_played_sorts() {
     assert_eq!(history.count(&key).unwrap().listens, 2);
     assert_eq!(history.count(&key).unwrap().last, 20);
     assert_eq!(history.count(&playlist.key()).unwrap().listens, 1);
-    let most = history.most_played(&nd(), &[ContextKind::Album, ContextKind::Playlist], 10);
-    assert_eq!(
-        most.iter()
-            .map(|c| c.context.id.as_str())
-            .collect::<Vec<_>>(),
-        ["al", "pl"]
-    );
-    // Kinds filter: Navidrome's Home asks for playlists only.
-    let rows = history.home_rows(&nd());
-    assert_eq!(rows.most_played.len(), 1);
-    assert_eq!(rows.most_played[0].context.kind, ContextKind::Playlist);
+    // The moods' album listens: albums only, by id.
+    let albums = history.album_listens(&nd());
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums["al"].listens, 2);
     // A renamed playlist shows its latest name.
     let renamed = Context {
         name: "New name".into(),
@@ -224,18 +258,9 @@ fn the_file_round_trips_and_holds_no_urls() {
     let mut history = History::default();
     history.record_play(remote(ContextKind::Playlist, "p"), 7);
     history.record_listen(vec![remote(ContextKind::Album, "a")], 8);
-    history.set_daily(
-        "2026-11-06".into(),
-        server(),
-        vec![DailyAlbum {
-            id: "al-1".into(),
-            name: "One".into(),
-            artist: Some("Band".into()),
-            artist_id: None,
-            year: Some(1999),
-            cover_art: Some("al-1".into()),
-        }],
-    );
+    history.set_album_genres(&remote(ContextKind::Album, "a").key(), vec!["Jazz".into()]);
+    history.record_stop(stop(ContextKind::Playlist, "p", "s1", 1, 3, 42_000, 9));
+    history.set_moods(&nd(), "2026-11-06".into(), vec![mood("Jazz", &["al-1"])]);
     save(&path, &history.to_file()).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("http") && !text.contains("coda://"));
@@ -245,11 +270,14 @@ fn the_file_round_trips_and_holds_no_urls() {
     let loaded = load(Some(path.clone()));
     assert_eq!(loaded.path, Some(path));
     assert_eq!(loaded.history.to_file(), history.to_file());
+    assert_eq!(loaded.history.moods(&nd(), "2026-11-06").unwrap().len(), 1);
+    assert!(loaded.history.moods(&nd(), "2026-11-07").is_none());
+    let key = remote(ContextKind::Playlist, "p").key();
+    assert_eq!(loaded.history.stop(&key).unwrap().position_ms, 42_000);
     assert_eq!(
-        loaded.history.daily("2026-11-06", &server()).unwrap().len(),
-        1
+        loaded.history.heard_album_genres(&nd())[0].0,
+        vec!["Jazz".to_owned()]
     );
-    assert!(loaded.history.daily("2026-11-07", &server()).is_none());
 }
 
 #[test]
@@ -318,6 +346,7 @@ fn a_saved_history_never_exceeds_what_load_accepts() {
             context: remote(ContextKind::Album, &format!("c{i}")),
             listens: 1,
             last: 1000 - i,
+            genres: Vec::new(),
         });
         file.plays.push(Played {
             context: remote(ContextKind::Album, &format!("p{i}")),
@@ -373,12 +402,21 @@ fn invalid_entries_in_a_file_are_skipped_and_bounds_applied() {
         context: remote(ContextKind::Album, "zero"),
         listens: 0,
         last: 1,
+        genres: Vec::new(),
     });
-    file.dailies.push(Daily {
+    file.moods.push(MoodsDay {
         date: "yesterday".into(),
-        server: server(),
-        albums: Vec::new(),
+        source: SourceKind::Navidrome,
+        server: Some(server()),
+        moods: vec![mood("Jazz", &["a"])],
     });
+    // A stop of a context no longer among the plays, and a bad one.
+    file.stops
+        .push(stop(ContextKind::Album, "a0", "s", 0, 1, 1, 1));
+    file.stops
+        .push(stop(ContextKind::Album, "a9", "s", 5, 2, 1, 1));
+    file.stops
+        .push(stop(ContextKind::Album, "a10", "s", 1, 2, 1, 1));
     // From an older file (or no known server): dropped.
     file.plays.push(Played {
         context: Context {
@@ -390,55 +428,116 @@ fn invalid_entries_in_a_file_are_skipped_and_bounds_applied() {
     let history = History::from_file(file);
     assert_eq!(history.plays().count(), MAX_PLAYS);
     assert_eq!(history.counts_len(), 0);
-    assert!(history.to_file().dailies.is_empty());
+    assert!(history.to_file().moods.is_empty());
+    let stops = history.to_file().stops;
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0].id, "a10");
 }
 
 #[test]
-fn the_first_picks_of_a_day_stay_and_another_server_clears_them() {
-    let album = |id: &str| DailyAlbum {
-        id: id.into(),
-        name: id.into(),
-        artist: None,
-        artist_id: None,
-        year: None,
-        cover_art: None,
-    };
+fn the_first_moods_of_a_day_stay_per_scope() {
     let mut history = History::default();
-    let first = history.set_daily("2026-11-06".into(), server(), vec![album("a"), album("")]);
-    assert_eq!(first.len(), 1, "bad ids dropped");
-    let again = history.set_daily("2026-11-06".into(), server(), vec![album("b")]);
-    assert_eq!(again[0].id, "a");
-    let next_day = history.set_daily("2026-11-07".into(), server(), vec![album("c")]);
-    assert_eq!(next_day[0].id, "c");
+    let first = history.set_moods(
+        &nd(),
+        "2026-11-06".into(),
+        vec![
+            mood("Jazz", &["a", ""]),
+            mood("", &["x"]),
+            mood("Rock", &[]),
+        ],
+    );
+    assert_eq!(
+        first.len(),
+        1,
+        "bad ids, blank genres and empty moods dropped"
+    );
+    assert_eq!(first[0].albums.len(), 1);
+    let again = history.set_moods(&nd(), "2026-11-06".into(), vec![mood("Pop", &["b"])]);
+    assert_eq!(again[0].genre, "Jazz");
+    let next_day = history.set_moods(&nd(), "2026-11-07".into(), vec![mood("Pop", &["c"])]);
+    assert_eq!(next_day[0].genre, "Pop");
     assert!(
-        history
-            .set_daily("bad".into(), server(), vec![album("d")])
-            .is_empty()
+        history.moods(&nd(), "2026-11-06").is_none(),
+        "one day per scope"
     );
     assert!(
         history
-            .set_daily("2026-11-07".into(), "nothex".into(), vec![album("d")])
+            .set_moods(&nd(), "bad".into(), vec![mood("Pop", &["d"])])
             .is_empty()
     );
-    // Per server: another server's day has its own picks, and at most a
-    // few servers are kept.
-    let other = server_id_of("https://other.example/", "listener");
-    assert!(history.daily("2026-11-07", &other).is_none());
-    history.set_daily("2026-11-07".into(), other.clone(), vec![album("e")]);
-    assert_eq!(history.daily("2026-11-07", &other).unwrap()[0].id, "e");
-    assert_eq!(history.daily("2026-11-07", &server()).unwrap()[0].id, "c");
+    // Local and every server keep their own, at most a few scopes.
+    assert!(history.moods(&Scope::Local, "2026-11-07").is_none());
+    history.set_moods(
+        &Scope::Local,
+        "2026-11-07".into(),
+        vec![mood("Folk", &["e"])],
+    );
+    assert_eq!(
+        history.moods(&Scope::Local, "2026-11-07").unwrap()[0].genre,
+        "Folk"
+    );
+    assert_eq!(history.moods(&nd(), "2026-11-07").unwrap()[0].genre, "Pop");
     for i in 0..5 {
-        history.set_daily(
+        history.set_moods(
+            &Scope::Navidrome(server_id_of(&format!("https://s{i}/"), "u")),
             "2026-11-07".into(),
-            server_id_of(&format!("https://s{i}/"), "u"),
-            vec![album("f")],
+            vec![mood("Pop", &["f"])],
         );
     }
-    assert_eq!(history.to_file().dailies.len(), MAX_DAILY_SERVERS);
+    assert_eq!(history.to_file().moods.len(), MAX_MOOD_SCOPES);
     assert!(
-        history.daily("2026-11-07", &server()).is_none(),
+        history.moods(&nd(), "2026-11-07").is_none(),
         "oldest dropped"
     );
+    // Never more than today's and the other moods, three albums each.
+    let many: Vec<Mood> = (0..9)
+        .map(|i| mood(&format!("G{i}"), &["1", "2", "3", "4"]))
+        .collect();
+    let kept = history.set_moods(&Scope::Local, "2026-11-08".into(), many);
+    assert_eq!(kept.len(), moods::MOODS_KEPT);
+    assert!(kept.iter().all(|m| m.albums.len() == moods::MOOD_ALBUMS));
+}
+
+#[test]
+fn stops_are_kept_for_played_contexts_only_and_bounded_with_them() {
+    let mut history = History::default();
+    // Not played: nothing kept.
+    history.record_stop(stop(ContextKind::Album, "a", "s1", 0, 3, 5, 1));
+    assert!(
+        history
+            .stop(&remote(ContextKind::Album, "a").key())
+            .is_none()
+    );
+    history.record_play(remote(ContextKind::Album, "a"), 1);
+    history.record_stop(stop(ContextKind::Album, "a", "s2", 1, 3, 5_000, 2));
+    let key = remote(ContextKind::Album, "a").key();
+    assert_eq!(history.stop(&key).unwrap().track, "s2");
+    // The same stop again: no change.
+    let before = history.revision();
+    history.record_stop(stop(ContextKind::Album, "a", "s2", 1, 3, 5_000, 2));
+    assert_eq!(history.revision(), before);
+    // A later one replaces it.
+    history.record_stop(stop(ContextKind::Album, "a", "s3", 2, 3, 0, 3));
+    assert_eq!(history.stop(&key).unwrap().index, 2);
+    // Unusable: a place beyond the tracks, a mix, no track.
+    history.record_stop(stop(ContextKind::Album, "a", "s3", 3, 3, 0, 4));
+    history.record_stop(stop(ContextKind::Album, "a", "", 0, 3, 0, 4));
+    assert_eq!(history.stop(&key).unwrap().at, 3);
+    // An absurd position is capped at a day.
+    history.record_stop(stop(ContextKind::Album, "a", "s3", 2, 3, u64::MAX, 4));
+    assert_eq!(history.stop(&key).unwrap().position_ms, 24 * 60 * 60 * 1000);
+    history.record_play(remote(ContextKind::Mix, "m"), 4);
+    history.record_stop(stop(ContextKind::Mix, "m", "s", 0, 3, 0, 4));
+    assert!(history.stop(&remote(ContextKind::Mix, "m").key()).is_none());
+    // Played to the end: no stop.
+    history.clear_stop(&key);
+    assert!(history.stop(&key).is_none());
+    history.record_stop(stop(ContextKind::Album, "a", "s1", 0, 3, 0, 5));
+    // Gone from the plays: its stop goes too.
+    for i in 0..MAX_PLAYS {
+        history.record_play(remote(ContextKind::Album, &format!("x{i}")), 10 + i as u64);
+    }
+    assert!(history.stop(&key).is_none());
 }
 
 #[test]
@@ -478,7 +577,8 @@ fn local_contexts_resolve_by_stable_keys_across_generations() {
     // Gone from the library: skipped.
     history.record_play(local_folder_context(&["Nope".into()]), 99);
     let rows = history.home_rows(&Scope::Local);
-    let home = browse.read_library(|view| home_dto(rows, view.as_ref(), browse.covers()));
+    let home =
+        browse.read_library(|view| home_dto(rows, view.as_ref(), &HashMap::new(), browse.covers()));
     let generation = browse.library_generation();
     let shown: Vec<(ContextKind, String)> =
         home.recent.iter().map(|i| (i.kind, i.id.clone())).collect();
@@ -504,7 +604,7 @@ fn navidrome_cards_use_the_stored_names_and_cover() {
     let mut history = History::default();
     history.record_play(remote(ContextKind::Playlist, "p"), 1);
     history.record_listen(vec![remote(ContextKind::Playlist, "p")], 2);
-    let home = home_dto(history.home_rows(&nd()), None, &covers);
+    let home = home_dto(history.home_rows(&nd()), None, &HashMap::new(), &covers);
     assert_eq!(home.recent[0].name, "Name p");
     assert!(
         home.recent[0]
@@ -513,60 +613,71 @@ fn navidrome_cards_use_the_stored_names_and_cover() {
             .unwrap()
             .starts_with("coda://")
     );
-    assert_eq!(home.most_played[0].listens, Some(1));
+    assert_eq!(home.recent[0].played_at, 1);
+    assert!(home.recent[0].stop.is_none());
+    // Where it stopped: the song id and the place as queued; the latest
+    // of the play and the stop is when it was played.
+    history.record_stop(stop(ContextKind::Playlist, "p", "s2", 1, 4, 61_000, 9));
+    let home = home_dto(history.home_rows(&nd()), None, &HashMap::new(), &covers);
+    assert_eq!(home.recent[0].played_at, 9);
+    assert_eq!(
+        home.recent[0].stop,
+        Some(StopDto {
+            index: 1,
+            total: 4,
+            track_id: Some("s2".into()),
+            position_ms: 61_000,
+        })
+    );
+    // A mix only while it is saved, with its current name; artists
+    // without a cover are left out.
+    history.record_play(remote(ContextKind::Mix, "0123456789abcdef"), 10);
+    history.record_play(
+        Context {
+            cover_art: None,
+            ..remote(ContextKind::Artist, "ar")
+        },
+        11,
+    );
+    let shown = |mixes: &HashMap<String, Mix>| {
+        home_dto(history.home_rows(&nd()), None, mixes, &covers)
+            .recent
+            .iter()
+            .map(|i| (i.kind, i.name.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shown(&HashMap::new()),
+        [(ContextKind::Playlist, "Name p".into())]
+    );
+    let mix = Mix {
+        id: coda_core::mix::MixId::parse("0123456789abcdef").unwrap(),
+        name: "Evening".into(),
+        source: coda_core::mix::MixSource::Navidrome { server: server() },
+        ingredients: vec![Ingredient::Genre {
+            name: "Jazz".into(),
+        }],
+    };
+    let mixes = HashMap::from([("0123456789abcdef".to_owned(), mix)]);
+    assert_eq!(
+        shown(&mixes),
+        [
+            (ContextKind::Mix, "Evening".into()),
+            (ContextKind::Playlist, "Name p".into())
+        ]
+    );
     // Local rows without a library resolve to nothing.
     history.record_play(local_folder_context(&[]), 3);
     assert!(
-        home_dto(history.home_rows(&Scope::Local), None, &covers)
-            .recent
-            .is_empty()
-    );
-}
-
-#[test]
-fn local_daily_picks_are_stable_for_a_day_and_change_with_it() {
-    let browse = handle(library(40));
-    let picks = |date: &str| {
-        browse.read_library(|view| {
-            local_daily_picks(&view.unwrap(), date, browse.covers())
-                .into_iter()
-                .map(|a| a.name)
-                .collect::<Vec<_>>()
-        })
-    };
-    let today = picks("2026-11-06");
-    assert_eq!(today.len(), DAILY_PICKS);
-    let distinct: HashSet<_> = today.iter().collect();
-    assert_eq!(distinct.len(), DAILY_PICKS);
-    assert_eq!(picks("2026-11-06"), today);
-    assert_ne!(picks("2026-11-07"), today);
-    // The same albums in another scan order: the same picks.
-    let mut reversed = Library::new("/m".into());
-    reversed.extend((0..40).rev().map(|i| {
-        local_track(
-            &format!("Band {}/Album {i}/1.flac", i % 3),
-            &format!("Band {}", i % 3),
-            &format!("Album {i}"),
+        home_dto(
+            history.home_rows(&Scope::Local),
+            None,
+            &HashMap::new(),
+            &covers
         )
-    }));
-    browse.replace_library(Some(reversed));
-    assert_eq!(picks("2026-11-06"), today);
-    // One more album: the picks change at most where it outranks one.
-    let mut grown = library(40);
-    grown.extend([local_track("Band 9/Extra/1.flac", "Band 9", "Extra")]);
-    browse.replace_library(Some(grown));
-    let after = picks("2026-11-06");
-    assert_eq!(after.len(), DAILY_PICKS);
-    let kept = after.iter().filter(|name| today.contains(name)).count();
-    assert!(kept >= DAILY_PICKS - 1, "{today:?} -> {after:?}");
-    assert!(
-        after
-            .iter()
-            .all(|name| today.contains(name) || name == "Extra")
+        .recent
+        .is_empty()
     );
-    // Fewer albums than picks: all of them.
-    browse.replace_library(Some(library(3)));
-    assert_eq!(picks("2026-11-06").len(), 3);
 }
 
 #[test]
@@ -582,9 +693,9 @@ fn server_ids_are_stable_hashes_and_scope_the_history() {
     history.record_listen(vec![remote(ContextKind::Playlist, "p")], 2);
     let other = Scope::Navidrome(server_id_of("https://other.example/", "listener"));
     assert!(history.recent(&other, 10).is_empty());
-    assert!(history.home_rows(&other).most_played.is_empty());
+    assert!(history.home_rows(&other).recent.is_empty());
     assert_eq!(history.recent(&nd(), 10).len(), 1);
-    assert_eq!(history.home_rows(&nd()).most_played.len(), 1);
+    assert_eq!(history.home_rows(&nd()).recent.len(), 1);
     // The same album id on two servers is two contexts.
     history.record_listen(
         vec![Context {
@@ -734,7 +845,7 @@ fn track_listens_round_trip_through_the_file_without_urls() {
     history.record_track_listen(heard_local("band\u{1f}record\u{1f}1\u{1f}2\u{1f}song"), 3);
     history.record_track_listen(heard_song("s1", Some("ar-1"), "Band"), 4);
     let file = history.to_file();
-    assert_eq!(file.version, 2);
+    assert_eq!(file.version, 3);
     save(&path, &file).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("http") && !text.contains("coda://") && !text.contains("/m/"));
@@ -745,7 +856,7 @@ fn track_listens_round_trip_through_the_file_without_urls() {
 }
 
 #[test]
-fn a_version_1_file_is_migrated_keeping_its_data() {
+fn version_1_and_2_files_are_migrated_keeping_their_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.json");
     let album = serde_json::to_value(remote(ContextKind::Album, "al-1")).unwrap();
@@ -767,16 +878,26 @@ fn a_version_1_file_is_migrated_keeping_its_data() {
     assert_eq!(history.plays().count(), 1);
     assert_eq!(history.counts_len(), 1);
     assert_eq!(history.tracks_len(), 0);
-    assert!(history.daily("2026-11-06", &server()).is_some());
-    // Saved as version 2, the old data kept.
+    // Saved as version 3, the old data kept, the Daily Picks dropped.
     save(&path, &history.to_file()).unwrap();
     let saved: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 2);
+    assert_eq!(saved["version"], 3);
     assert_eq!(saved["counts"][0]["listens"], 4);
+    assert!(saved.get("dailies").is_none());
     assert!(take_aside(dir.path()).is_none(), "not set aside");
-    // A version 3 file is a newer build's: kept, not saved over.
-    let newer = "{\"version\": 3, \"tracks\": []}";
+    // Version 2: its track counts kept too.
+    let mut v2 = v1.clone();
+    v2["version"] = 2.into();
+    v2["tracks"] = serde_json::json!([{ "source": "local", "id": "k", "listens": 3, "last": 7 }]);
+    std::fs::write(&path, v2.to_string()).unwrap();
+    let loaded = load(Some(path.clone()));
+    assert_eq!(loaded.path.as_ref(), Some(&path), "saved over (migrated)");
+    assert_eq!(loaded.history.plays().count(), 1);
+    assert_eq!(loaded.history.tracks_len(), 1);
+    assert!(take_aside(dir.path()).is_none(), "not set aside");
+    // A version 4 file is a newer build's: kept, not saved over.
+    let newer = "{\"version\": 4, \"tracks\": []}";
     std::fs::write(&path, newer).unwrap();
     assert!(load(Some(path.clone())).path.is_none());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
@@ -948,5 +1069,171 @@ fn local_track_keys_need_an_album_and_tell_unnumbered_tracks_apart() {
     assert_eq!(
         local_track_key(key, &tagged("x/1.flac", Some("Record"), Some(1))).unwrap(),
         "band\u{1f}record\u{1f}\u{1f}1\u{1f}intro"
+    );
+}
+
+// ----- moods (2.0 N6) -------------------------------------------------------
+
+fn genre_library() -> Library {
+    let mut library = Library::new("/m".into());
+    let mut tracks = Vec::new();
+    for (genre, albums) in [("Jazz", 5), ("Rock", 3), ("Folk", 1)] {
+        for i in 0..albums {
+            tracks.push(Track::local(
+                PathBuf::from(format!("/m/{genre}/{i}/1.flac")),
+                TrackMetadata {
+                    title: Some("Song".into()),
+                    artist: Some(format!("{genre} Band")),
+                    album: Some(format!("{genre} {i}")),
+                    duration: Some(Duration::from_secs(600)),
+                    genres: vec![genre.into()],
+                    ..TrackMetadata::default()
+                },
+            ));
+        }
+    }
+    library.extend(tracks);
+    library
+}
+
+#[test]
+fn local_moods_follow_the_listens_and_resolve_to_cards() {
+    use super::commands::{local_mood_dtos, local_moods};
+    use super::moods::Listens;
+    let browse = handle(genre_library());
+    let now = 1_000 * 86_400;
+    let key = |genre: &str, i: usize| format!("{} band\u{1f}{} {i}", lower(genre), lower(genre));
+    // Rock was heard lately (one album this week), Jazz never.
+    let listens: HashMap<String, Listens> = HashMap::from([
+        (
+            key("Rock", 0),
+            Listens {
+                listens: 9,
+                last: now - 86_400,
+            },
+        ),
+        (
+            key("Rock", 1),
+            Listens {
+                listens: 2,
+                last: now - 30 * 86_400,
+            },
+        ),
+    ]);
+    let picks =
+        |date: &str| browse.read_library(|view| local_moods(&view.unwrap(), &listens, now, date));
+    let today = picks("2026-11-19");
+    let genres: Vec<&str> = today.iter().map(|m| m.genre.as_str()).collect();
+    // Rock ranks first, but only two of its albums may play (one was
+    // heard this week): it fills in after Jazz; Folk has one album.
+    assert_eq!(genres, ["Jazz", "Rock", "Folk"]);
+    assert_eq!(today[0].albums.len(), 3);
+    assert_eq!(today[1].albums.len(), 2);
+    assert!(!today[1].albums.iter().any(|a| a.id == key("Rock", 0)));
+    // Never heard first, then the longest unheard.
+    assert_eq!(today[1].albums[1].id, key("Rock", 1));
+    // The same day: the same picks; stored by stable keys with names.
+    assert_eq!(picks("2026-11-19"), today);
+    assert_eq!(today[0].albums[0].artist.as_deref(), Some("Jazz Band"));
+    // As cards: library ids, covers, lengths, the last listen and the
+    // quick mix ingredient; an album gone from the library is left out.
+    browse.replace_library(Some(genre_library()));
+    let cards = browse
+        .read_library(|view| local_mood_dtos(&view.unwrap(), &today, &listens, browse.covers()));
+    let generation = browse.library_generation();
+    assert_eq!(cards.len(), 3);
+    assert_eq!(cards[0].album_count, Some(5));
+    let rock = &cards[1].albums[1];
+    assert!(rock.id.starts_with(&format!("{generation}:")));
+    assert_eq!(rock.duration_ms, Some(600_000));
+    assert_eq!(rock.last_played, Some(now - 30 * 86_400));
+    assert_eq!(
+        rock.ingredient,
+        crate::mixes::IngredientDto::Album {
+            artist: "Rock Band".into(),
+            name: "Rock 1".into(),
+            id: None,
+        }
+    );
+    let mut gone = today.clone();
+    gone[2].albums[0].id = "nope".into();
+    let cards = browse
+        .read_library(|view| local_mood_dtos(&view.unwrap(), &gone, &listens, browse.covers()));
+    assert_eq!(cards.len(), 2, "a mood with no album left is left out");
+}
+
+#[test]
+fn a_local_stop_is_found_by_its_track_in_the_context_now() {
+    let album_of = |order: &[u32]| {
+        let mut library = Library::new("/m".into());
+        library.extend(order.iter().map(|n| {
+            Track::local(
+                PathBuf::from(format!("/m/Band/Record/{n}.flac")),
+                TrackMetadata {
+                    title: Some(format!("Song {n}")),
+                    artist: Some("Band".into()),
+                    album: Some("Record".into()),
+                    track_no: Some(*n),
+                    ..TrackMetadata::default()
+                },
+            )
+        }));
+        library
+    };
+    let browse = handle(album_of(&[1, 2, 3]));
+    let (context, track) = browse.read_library(|view| {
+        let view = view.unwrap();
+        let tags = view.library.tags();
+        let album = tags.albums(AlbumOrder::Name)[0];
+        let second = tags.album(album).tracks()[1];
+        (
+            local_album_context(tags, album),
+            local_track_key(&local_album_key(tags, album), view.library.track(second)).unwrap(),
+        )
+    });
+    let stop = Stop {
+        source: SourceKind::Local,
+        server: None,
+        kind: ContextKind::Album,
+        id: context.id.clone(),
+        track,
+        index: 1,
+        total: 3,
+        position_ms: 30_000,
+        at: 2,
+    };
+    let mut history = History::default();
+    history.record_play(context, 1);
+    history.record_stop(stop);
+    let resolve = |browse: &BrowseHandle| {
+        let rows = history.home_rows(&Scope::Local);
+        browse.read_library(|view| {
+            home_dto(rows, view.as_ref(), &HashMap::new(), browse.covers()).recent[0]
+                .stop
+                .clone()
+                .unwrap()
+        })
+    };
+    // A rescan that added a track before it: found by its track, with a
+    // library id of this generation.
+    browse.replace_library(Some(album_of(&[0, 1, 2, 3])));
+    let found = resolve(&browse);
+    assert_eq!(
+        (found.index, found.total, found.position_ms),
+        (2, 4, 30_000)
+    );
+    let generation = browse.library_generation();
+    assert!(
+        found
+            .track_id
+            .unwrap()
+            .starts_with(&format!("{generation}:"))
+    );
+    // Gone: the recorded place, from its start, without a track.
+    browse.replace_library(Some(album_of(&[1])));
+    let gone = resolve(&browse);
+    assert_eq!(
+        (gone.index, gone.total, gone.track_id, gone.position_ms),
+        (0, 1, None, 0)
     );
 }

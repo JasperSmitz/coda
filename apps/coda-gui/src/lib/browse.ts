@@ -14,6 +14,7 @@ import type {
   Genre,
   GenreDetail,
   HomeHistory,
+  Moods,
   LocalAlbumOrder,
   LyricsSearch,
   Playlist,
@@ -158,14 +159,14 @@ export const browse = {
     return call("navidrome_random_songs");
   },
 
-  /** Recently / most played contexts of a source (never cached). */
+  /** Where you left off: a source's recent contexts (never cached). */
   homeHistory(source: SourceKind): Promise<HomeHistory> {
     return call("home_history", { source });
   },
 
-  /** The Daily Picks of the local calendar day `date` (`YYYY-MM-DD`). */
-  dailyPicks(source: SourceKind, date: string): Promise<Album[]> {
-    return call("home_daily_picks", { source, date });
+  /** Moods for the local calendar day `date` (`YYYY-MM-DD`; picked once a day by the backend). */
+  moods(source: SourceKind, date: string): Promise<Moods> {
+    return call("home_moods", { source, date });
   },
 
   search(source: SourceKind, query: string): Promise<SearchResults> {

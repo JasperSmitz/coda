@@ -126,8 +126,7 @@
 .topnav-item:active,
 .section-option:active,
 .source-option:active,
-.accent-swatch:active,
-.home-card-play:not(:disabled):active {
+.accent-swatch:active {
   transform: scale(var(--press-scale));
 }
 

@@ -19,6 +19,7 @@ import { sourceReplaced, useNav } from "./state/nav";
 import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
 import { startAccent } from "./state/accent";
+import { NowPlayingOpener } from "./state/nowPlaying";
 import { usePageCover } from "./state/pageSubject";
 import { useColourScope } from "./state/palettes";
 import type { Snapshot } from "./lib/types";
@@ -299,7 +300,9 @@ export default function App() {
                 <Banner problems={snapshot.problems} />
                 {/* Sources are known once started (and the saved choice read). */}
                 {snapshot.phase !== "starting" && sources.loaded && sources.configured && (
-                  <BrowseView entry={top} snapshot={snapshot} />
+                  <NowPlayingOpener.Provider value={openNowPlaying}>
+                    <BrowseView entry={top} snapshot={snapshot} />
+                  </NowPlayingOpener.Provider>
                 )}
               </>
             ) : null}

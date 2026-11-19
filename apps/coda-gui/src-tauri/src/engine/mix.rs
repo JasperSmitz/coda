@@ -114,6 +114,13 @@ impl Engine {
         self.mixes_path = path;
     }
 
+    /// The saved mix that owns the queue, by id.
+    pub(super) fn playing_mix_id(&self) -> Option<String> {
+        let state = self.mix.as_ref()?;
+        (state.active.is_saved() && state.active.owns_queue(&self.player))
+            .then(|| state.active.mix().id.to_string())
+    }
+
     /// The mix loading (`loading`), else the one playing.
     pub(crate) fn mix_dto(&self) -> Option<ActiveMixDto> {
         let (state, loading) = match (&self.pending_mix, &self.mix) {
@@ -315,6 +322,8 @@ impl Engine {
     /// that played. On failure it is dropped with a notice, and the mix
     /// that played (if any) goes on.
     fn start_state(&mut self, mut state: MixState, now: Instant) -> Vec<PlaybackCommand> {
+        // Where the context that played stopped, before the mix replaces it.
+        self.note_stop(None, now);
         let result = state.active.start(&mut self.player, &mut self.rng);
         let missing = mix::no_songs_message(state.active.empty_ingredients());
         let failed: Vec<String> = state
@@ -327,6 +336,7 @@ impl Engine {
             .map(mix::Ingredient::describe)
             .collect();
         let name = state.active.mix().name.clone();
+        let saved = state.active.is_saved().then(|| state.active.mix().clone());
         self.mix_changed(now);
         match result {
             Ok(commands) => {
@@ -334,9 +344,10 @@ impl Engine {
                 if let Some(old) = self.mix.replace(state) {
                     self.forget_fetches(old.tag);
                 }
-                // Mixes are not in the play history (brief: not in this
-                // milestone); the entries no longer count for a context.
-                self.played_context(None, now);
+                // A saved mix is a context of the play history (Home's
+                // Where you left off); a quick mix is none.
+                let context = saved.map(|mix| self.mix_context(&mix));
+                self.played_context(context, now);
                 self.notify(format!("Playing mix {name}"), now);
                 if let Some(text) = missing {
                     self.notify(text, now);
@@ -658,6 +669,11 @@ impl Engine {
         // Pools are resolved when the first top-up needs them (a local
         // mix: once the library has songs; Navidrome: fetched now).
         let picker = Picker::new(mix.ingredients.len());
+        // A saved mix is the restored queue's context again (Home's Now
+        // Playing), without a new play.
+        if saved {
+            self.adopt_mix_context(&mix);
+        }
         let mut active = ActiveMix::new(mix, saved, picker, &self.player);
         active.adopt(&self.player);
         self.mix = Some(MixState {

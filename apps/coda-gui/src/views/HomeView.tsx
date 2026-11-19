@@ -1,34 +1,41 @@
-// Home (each source's landing view): rows of cards from the play history
-// (Recently played, Most played), the server's Recently added, and the
-// day's Daily Picks with "Shuffle Daily Picks". Rows scroll sideways with
-// arrow buttons; ←/→ move between a row's cards, Tab between rows, Enter
-// opens a card, Shift+Enter (or its hover button) plays it.
+// Home (DESIGN.md "Home", 2.0 N6): Where you left off, a carousel of the
+// recent listening contexts with Resume, and Moods for today, three quick
+// mixes of three albums each. The page's glow and accent follow the
+// carousel's focused cover (`usePageSubject`); the glow has faded out
+// before the moods, which rest on the base.
+//
+// The layout is drawn at once: the carousel and the cards keep their
+// room while their data loads. A listener without history gets a welcome
+// line instead of the carousel. ←/→ move the carousel only while it has
+// the focus (HomeCarousel); anywhere else on Home they seek, as on every
+// page.
 
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Cover } from "../components/Cover";
-import { NameLink } from "../components/NameLink";
-import { Empty, ErrorState, SkeletonGrid } from "../components/LoadState";
-import { BackIcon, ForwardIcon, PlayIcon, ShuffleIcon } from "../components/icons";
+import { useCallback, useEffect, useState } from "react";
+import { HomeCarousel, itemKey } from "../components/HomeCarousel";
+import { MoodCard } from "../components/MoodCard";
+import { ShuffleIcon } from "../components/icons";
 import { useLibraryVersion, usePageScroller, useScroll } from "../hooks/useLayout";
 import { useLoad } from "../hooks/useLoad";
 import { browse } from "../lib/browse";
+import { moodMixName, partOfDay, resumeStart } from "../lib/home";
+import { intent } from "../lib/ipc";
 import {
   albumContext,
   artistContext,
   openRoute,
   playFrom,
-  playlistContext,
   playLocal,
+  playlistContext,
   playTracks,
+  shuffleAll,
   useShuffleContext,
 } from "../lib/play";
-import type { Album, ContextKind, HomeItem, SourceKind } from "../lib/types";
+import type { HomeItem, Mood, MoodAlbum, SourceKind, Track } from "../lib/types";
 import { nav, type Entry } from "../state/nav";
+import { useOpenNowPlaying } from "../state/nowPlaying";
+import { usePageSubject } from "../state/pageSubject";
 import { useAppState } from "../state/store";
-import { ListHeader, SOURCE_LABEL, useCanPlay } from "./common";
-
-/** Cards per server row (the first page holds more). */
-const ROW_MAX = 20;
+import { useCanPlay } from "./common";
 
 /** The local calendar day, `YYYY-MM-DD`. */
 export function localDate(now = new Date()): string {
@@ -36,78 +43,26 @@ export function localDate(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-/** Today, changing at local midnight while shown. */
-function useToday(): string {
-  const [today, setToday] = useState(localDate);
+/** The time now, for relative times and the part of the day: once a minute. */
+function useNow(): Date {
+  const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const now = new Date();
-    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    const timer = window.setTimeout(
-      () => setToday(localDate()),
-      midnight.getTime() - now.getTime() + 1000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [today]);
-  return today;
+    const timer = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return now;
 }
 
-/** One card: a history item or an album from a list. */
-interface Card {
-  key: string;
-  source: SourceKind;
-  kind: ContextKind;
-  id: string;
-  path: string[] | null;
-  name: string;
-  subtitle: string | null;
-  /** Albums: the artist (the subtitle), when known. */
-  artistId: string | null;
-  coverUrl: string | null;
-  /** An album card's listing data (the album view's hint). */
-  album?: Album;
+/** A track's id as `HomeStop.trackId` names it. */
+function trackId(track: Track): string | null {
+  return track.source.kind === "local" ? track.source.id : track.source.songId;
 }
 
-function fromItem(item: HomeItem): Card {
-  return { ...item, key: `${item.kind}:${item.id}` };
-}
-
-function fromAlbum(source: SourceKind, album: Album): Card {
-  return {
-    key: `album:${album.id}`,
-    source,
-    kind: "album",
-    id: album.id,
-    path: null,
-    name: album.name,
-    subtitle: album.artist,
-    artistId: album.artistId,
-    coverUrl: album.coverUrl,
-    album,
-  };
-}
-
-function itemAlbum(card: Card): Album {
-  return (
-    card.album ?? {
-      id: card.id,
-      name: card.name,
-      artist: card.subtitle,
-      artistId: card.artistId,
-      year: null,
-      trackCount: null,
-      durationMs: null,
-      coverUrl: card.coverUrl,
-      genre: null,
-      playCount: null,
-    }
-  );
-}
-
-function openCard(card: Card) {
-  const { source, id, name } = card;
-  switch (card.kind) {
+function openItem(item: HomeItem) {
+  const { source, id, name } = item;
+  switch (item.kind) {
     case "album":
-      nav.push({ kind: "album", source, id, name, hint: itemAlbum(card) });
+      nav.push({ kind: "album", source, id, name });
       break;
     case "artist":
       nav.push({ kind: "artist", source, id, name });
@@ -116,383 +71,251 @@ function openCard(card: Card) {
       nav.push({ kind: "playlist", source, id, name });
       break;
     case "folder":
-      nav.push({ kind: "folder", path: card.path ?? [] });
+      nav.push({ kind: "folder", path: item.path ?? [] });
+      break;
+    case "mix":
+      nav.push({ kind: "mixes", source });
       break;
   }
 }
 
-function playCard(card: Card) {
-  const { source, id, name, coverUrl } = card;
-  switch (card.kind) {
+/** Plays `tracks` of `item` from where it stopped (Resume). */
+function resumeTracks(item: HomeItem, tracks: Track[], context: Parameters<typeof playTracks>[3]) {
+  const { start, resume } = resumeStart(item.stop, tracks.map(trackId));
+  playTracks(tracks, start, false, context, resume);
+}
+
+function resumeItem(item: HomeItem) {
+  const { source, id, name, coverUrl } = item;
+  const stop = item.stop;
+  // Local artists and folders are resolved by the engine, in the order
+  // the stop was found in (the backend's `resolve_stop`).
+  const localStart = () => ({
+    start: stop?.index ?? 0,
+    resume:
+      stop?.trackId && stop.positionMs > 0
+        ? { seekMs: stop.positionMs, trackId: stop.trackId }
+        : null,
+  });
+  switch (item.kind) {
     case "album":
       playFrom(async () =>
-        playTracks(
+        resumeTracks(
+          item,
           (await browse.album(source, id)).tracks,
-          undefined,
-          false,
-          albumContext(source, itemAlbum(card)),
+          albumContext(source, { id, name, artist: item.subtitle, coverUrl }),
         ),
       );
       break;
-    case "artist":
-      if (source === "local") playLocal({ kind: "artist", id }, false);
-      else
-        playFrom(async () =>
-          playTracks(
-            await browse.navidromeArtistTracks(id),
-            undefined,
-            false,
-            artistContext(source, { id, name, coverUrl }),
-          ),
-        );
-      break;
     case "playlist":
       playFrom(async () =>
-        playTracks(
+        resumeTracks(
+          item,
           (await browse.playlist(source, id)).tracks,
-          undefined,
-          false,
           playlistContext(source, { id, name, coverUrl }),
         ),
       );
       break;
-    case "folder":
-      // The engine records the folder itself.
-      playLocal({ kind: "folder", path: card.path ?? [] }, false);
+    case "artist":
+      if (source === "local") {
+        const { start, resume } = localStart();
+        playLocal({ kind: "artist", id }, false, start, resume);
+      } else {
+        playFrom(async () =>
+          resumeTracks(
+            item,
+            await browse.navidromeArtistTracks(id),
+            artistContext(source, { id, name, coverUrl }),
+          ),
+        );
+      }
+      break;
+    case "folder": {
+      const { start, resume } = localStart();
+      playLocal({ kind: "folder", path: item.path ?? [] }, false, start, resume);
+      break;
+    }
+    case "mix":
+      intent({ type: "playMix", id });
       break;
   }
 }
 
-/** Every pick's tracks, shuffled together (no context of its own). */
-function shufflePicks(source: SourceKind, picks: Album[]) {
-  playFrom(async () => {
-    const albums = await Promise.all(picks.map((album) => browse.album(source, album.id)));
-    playTracks(
-      albums.flatMap((a) => a.tracks),
-      undefined,
-      true,
-    );
+function playMood(source: SourceKind, mood: Mood) {
+  intent({
+    type: "playQuickMix",
+    mix: { name: moodMixName(mood), source, ingredients: mood.albums.map((a) => a.ingredient) },
   });
 }
-
-const KIND_LABEL: Record<ContextKind, string> = {
-  album: "Album",
-  artist: "Artist",
-  playlist: "Playlist",
-  folder: "Folder",
-};
-
-function CardTile({
-  card,
-  tabbable,
-  index,
-  canPlay,
-  showKind,
-}: {
-  card: Card;
-  tabbable: boolean;
-  index: number;
-  canPlay: boolean;
-  showKind: boolean;
-}) {
-  const sub = [showKind ? KIND_LABEL[card.kind] : null, card.subtitle].filter(Boolean).join(" · ");
-  // An album's known artist is a link below the button (no button in a button).
-  const artistId = card.kind === "album" ? card.artistId : null;
-  const artist = card.subtitle;
-  return (
-    <li className="home-card">
-      <button
-        className="home-card-open"
-        data-index={index}
-        tabIndex={tabbable ? 0 : -1}
-        title={card.name}
-        onClick={() => openCard(card)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && e.shiftKey) {
-            e.preventDefault();
-            if (canPlay) playCard(card);
-          }
-        }}
-      >
-        <Cover
-          url={card.coverUrl}
-          name={card.name}
-          size="small"
-          className={`home-card-cover ${card.kind === "artist" ? "round" : ""}`}
-        />
-        <span className="album-title">{card.name}</span>
-        {(artistId === null || !artist) && (
-          <span className="album-sub secondary">{sub || " "}</span>
-        )}
-      </button>
-      {artistId !== null && artist && (
-        <div className="album-sub card-sub-link secondary">
-          {showKind && `${KIND_LABEL[card.kind]} · `}
-          <NameLink
-            inRow
-            label={`Go to artist ${artist}`}
-            onGo={() =>
-              openRoute({ kind: "artist", source: card.source, id: artistId, name: artist })
-            }
-          >
-            {artist}
-          </NameLink>
-        </div>
-      )}
-      <button
-        className="icon-button home-card-play"
-        tabIndex={-1}
-        disabled={!canPlay}
-        aria-label={`Play ${card.name}`}
-        title="Play (Shift+Enter)"
-        onClick={() => playCard(card)}
-      >
-        <PlayIcon size={16} />
-      </button>
-    </li>
-  );
-}
-
-function CardRow({
-  title,
-  cards,
-  showKind = false,
-  actions,
-}: {
-  title: string;
-  cards: Card[];
-  showKind?: boolean;
-  actions?: ReactNode;
-}) {
-  const canPlay = useCanPlay();
-  const list = useRef<HTMLUListElement>(null);
-  const [focus, setFocus] = useState(0);
-  const [edges, setEdges] = useState({ start: true, end: true });
-  const at = Math.min(focus, Math.max(0, cards.length - 1));
-
-  useEffect(() => {
-    const el = list.current;
-    if (!el) return;
-    const update = () =>
-      setEdges({
-        start: el.scrollLeft <= 1,
-        end: el.scrollLeft + el.clientWidth >= el.scrollWidth - 1,
-      });
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const observer = new ResizeObserver(update);
-    observer.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      observer.disconnect();
-    };
-  }, [cards.length]);
-
-  const page = (direction: 1 | -1) => {
-    const el = list.current;
-    if (!el) return;
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    el.scrollBy({ left: direction * el.clientWidth * 0.9, behavior: reduced ? "auto" : "smooth" });
-  };
-
-  const onKeyDown = (e: KeyboardEvent) => {
-    const target = e.target as HTMLElement;
-    const index = Number(target.dataset.index ?? -1);
-    if (index < 0) return;
-    let to: number;
-    switch (e.key) {
-      case "ArrowRight":
-        to = index + 1;
-        break;
-      case "ArrowLeft":
-        to = index - 1;
-        break;
-      case "Home":
-        to = 0;
-        break;
-      case "End":
-        to = cards.length - 1;
-        break;
-      default:
-        return;
-    }
-    // Not the global seek keys.
-    e.preventDefault();
-    e.stopPropagation();
-    to = Math.min(cards.length - 1, Math.max(0, to));
-    setFocus(to);
-    const el = list.current?.querySelector<HTMLElement>(`[data-index="${to}"]`);
-    el?.focus();
-    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  };
-
-  if (cards.length === 0) return null;
-  return (
-    <section className="home-row" aria-label={title}>
-      <div className="home-row-header">
-        <h2 className="section-title">{title}</h2>
-        {actions}
-        <div className="home-row-arrows">
-          <button
-            className="icon-button"
-            tabIndex={-1}
-            aria-label={`Scroll ${title} back`}
-            disabled={edges.start}
-            onClick={() => page(-1)}
-          >
-            <BackIcon size={16} />
-          </button>
-          <button
-            className="icon-button"
-            tabIndex={-1}
-            aria-label={`Scroll ${title} on`}
-            disabled={edges.end}
-            onClick={() => page(1)}
-          >
-            <ForwardIcon size={16} />
-          </button>
-        </div>
-      </div>
-      <ul
-        ref={list}
-        className="home-cards"
-        onKeyDown={onKeyDown}
-        onFocus={(e) => {
-          const index = Number((e.target as HTMLElement).dataset.index ?? -1);
-          if (index >= 0) setFocus(index);
-        }}
-      >
-        {cards.map((card, i) => (
-          <CardTile
-            key={card.key}
-            card={card}
-            index={i}
-            tabbable={i === at}
-            canPlay={canPlay}
-            showKind={showKind}
-          />
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-const none = <T,>(): Promise<T[]> => Promise.resolve([]);
 
 export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }) {
   const version = useLibraryVersion();
   const { snapshot } = useAppState();
   const historyRevision = snapshot?.historyRevision ?? 0;
-  const today = useToday();
+  const now = useNow();
+  const today = localDate(now);
   const canPlay = useCanPlay();
   const scroller = usePageScroller();
-  // Local rows resolve against the library (reload as it changes); both
-  // sources reload when the history changes (a play from a card here).
+  const openNowPlaying = useOpenNowPlaying();
+
+  // Local items resolve against the library (reload as it changes); both
+  // sources reload when the history changes (a play, a stop).
   const history = useLoad(
     () => browse.homeHistory(source),
     `history:${source}`,
     source === "local" ? `${version}|${historyRevision}` : historyRevision,
   );
-  // Local picks wait for the scan: drawn over a growing album set they
-  // would change every refresh. They reload only once a scan has finished
-  // (new library generation, so the shown ids stay valid).
+  // Local moods wait for the scan: picked over a growing album set they
+  // would be the day's from a partial library. They reload once a scan
+  // has finished (new library generation, so the shown ids stay valid).
   const waitForScan = source === "local" && snapshot?.scan.state === "scanning";
   const settled = `${version}|${snapshot?.browse.library ?? 0}`;
-  const [picksVersion, setPicksVersion] = useState(settled);
+  const [moodsVersion, setMoodsVersion] = useState(settled);
   useEffect(() => {
-    if (!waitForScan) setPicksVersion(settled);
+    if (!waitForScan) setMoodsVersion(settled);
   }, [waitForScan, settled]);
-  const picks = useLoad(
-    () => (waitForScan ? Promise.resolve(null) : browse.dailyPicks(source, today)),
-    `picks:${source}:${today}`,
-    source === "local" ? picksVersion : null,
+  const moods = useLoad(
+    () => (waitForScan ? Promise.resolve(null) : browse.moods(source, today)),
+    `moods:${source}:${today}`,
+    source === "local" ? moodsVersion : null,
   );
-  // Navidrome only: the server's lists (built from scrobbles, the TUI's too).
-  const frequent = useLoad(
-    () =>
-      source === "navidrome"
-        ? browse.navidromeAlbums("frequent", 0).then((p) => p.albums.slice(0, ROW_MAX))
-        : none<Album>(),
-    `frequent:${source}`,
-  );
-  const newest = useLoad(
-    () =>
-      source === "navidrome"
-        ? browse.navidromeAlbums("newest", 0).then((p) => p.albums.slice(0, ROW_MAX))
-        : none<Album>(),
-    `newest:${source}`,
-  );
-  const ready = history.state !== "loading" && picks.state !== "loading";
-  useScroll(scroller, entry, ready);
+  useScroll(scroller, entry, history.state !== "loading");
+  useShuffleContext(() => shuffleAll(source));
 
-  const pickAlbums = picks.data ?? [];
-  useShuffleContext(pickAlbums.length > 0 ? () => shufflePicks(source, pickAlbums) : null);
+  const items = history.state === "ready" ? history.data.recent : [];
+  // The focused item by key, so a reload (a new play) keeps it.
+  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const found = focusKey === null ? -1 : items.findIndex((i) => itemKey(i) === focusKey);
+  const focus = found >= 0 ? found : 0;
+  const focused = items[focus] ?? null;
+  usePageSubject(entry, focused?.coverUrl ?? null);
 
-  const recent = (history.data?.recent ?? []).map(fromItem);
-  const most = [
-    ...(frequent.data ?? []).map((a) => fromAlbum(source, a)),
-    ...(history.data?.mostPlayed ?? []).map(fromItem),
-  ];
-  const added = (newest.data ?? []).map((a) => fromAlbum(source, a));
-  const daily = pickAlbums.map((a) => fromAlbum(source, a));
-  const fresh = history.state === "ready" && recent.length === 0 && most.length === 0;
-  const nothing =
-    ready &&
-    !waitForScan &&
-    frequent.state !== "loading" &&
-    newest.state !== "loading" &&
-    recent.length === 0 &&
-    most.length === 0 &&
-    added.length === 0 &&
-    daily.length === 0;
+  const moveFocus = useCallback(
+    (index: number) => {
+      const item = items[index];
+      if (item) setFocusKey(itemKey(item));
+    },
+    [items],
+  );
+
+  const pc = snapshot?.playingContext ?? null;
+  const playing = pc && pc.source === source ? `${pc.kind}:${pc.id}` : null;
+  const fresh = history.state === "ready" && items.length === 0;
+
+  const [showOther, setShowOther] = useState(false);
+  const moodList =
+    moods.state === "ready" && moods.data ? (showOther ? moods.data.other : moods.data.today) : null;
+  const hasOther = moods.state === "ready" && (moods.data?.other.length ?? 0) > 0;
+
+  const openAlbum = (album: MoodAlbum) =>
+    nav.push({ kind: "album", source, id: album.id, name: album.name });
 
   return (
-    <section className="view">
-      <ListHeader eyebrow={SOURCE_LABEL[source]} title="Home" />
-      <div className="view-body home-body">
-        {!ready && <SkeletonGrid count={6} />}
-        {history.state === "error" && <ErrorState error={history.error} onRetry={history.retry} />}
-        {fresh && (
-          <p className="secondary home-hint">
-            Albums, artists, playlists{source === "local" ? " and folders" : ""} you play show up
-            here.
-          </p>
-        )}
-        <CardRow title="Recently played" cards={recent} showKind />
-        <CardRow
-          title="Most played"
-          cards={most}
-          showKind={source === "navidrome" || most.some((c) => c.kind !== "album")}
-        />
-        <CardRow title="Recently added" cards={added} />
-        {waitForScan && daily.length === 0 && (
-          <p className="secondary home-hint">Daily Picks are drawn once the library scan is done.</p>
-        )}
-        <CardRow
-          title="Daily Picks"
-          cards={daily}
-          actions={
-            <button
-              className="button home-shuffle"
-              disabled={!canPlay || pickAlbums.length === 0}
-              onClick={() => shufflePicks(source, pickAlbums)}
-              title="Shuffle Daily Picks (s)"
-            >
-              <ShuffleIcon size={14} /> Shuffle Daily Picks
-            </button>
-          }
-        />
-        {picks.state === "error" && history.state !== "error" && (
-          <ErrorState error={picks.error} onRetry={picks.retry} />
-        )}
-        {nothing && history.state === "ready" && (
-          <Empty title="Nothing here yet">
-            {source === "local"
-              ? "The library has no albums yet."
-              : "The server has no albums yet."}
-          </Empty>
+    <section className="view home">
+      <header className="home-header">
+        <div className="eyebrow">{partOfDay(now)}</div>
+        <h1 className="list-title">Where you left off</h1>
+      </header>
+      <div className="home-left">
+        {history.state === "error" ? (
+          <p className="home-quiet secondary">Could not load your history: {history.error.message}</p>
+        ) : fresh ? (
+          <div className="home-welcome">
+            <p className="home-welcome-text">
+              Nothing played yet. What you listen to will wait for you here.
+            </p>
+            <div className="home-welcome-actions">
+              <button
+                className="button button-primary"
+                disabled={!canPlay}
+                onClick={() => shuffleAll(source)}
+              >
+                <ShuffleIcon size={14} /> Shuffle your library
+              </button>
+              <button
+                className="button"
+                onClick={() => {
+                  nav.selectRoot("library");
+                  nav.setSection("albums");
+                }}
+              >
+                Browse albums
+              </button>
+            </div>
+          </div>
+        ) : history.state === "loading" ? (
+          <div className="carousel is-loading" aria-busy="true" aria-label="Loading">
+            <div className="carousel-track">
+              <span className="skeleton carousel-skeleton" />
+            </div>
+            <div className="carousel-meta" />
+          </div>
+        ) : (
+          <HomeCarousel
+            items={items}
+            focus={focus}
+            onFocus={moveFocus}
+            playing={playing}
+            canPlay={canPlay}
+            now={now}
+            onOpen={openItem}
+            onResume={resumeItem}
+            onNowPlaying={openNowPlaying}
+            onArtist={(item) =>
+              item.artistId &&
+              item.subtitle &&
+              openRoute({ kind: "artist", source, id: item.artistId, name: item.subtitle })
+            }
+          />
         )}
       </div>
+
+      <section className="home-moods" aria-labelledby="home-moods-title">
+        <div className="home-moods-header">
+          <h2 className="section-title" id="home-moods-title">
+            {showOther ? "Other moods" : "Moods for today"}
+          </h2>
+          {hasOther && (
+            <button className="button" onClick={() => setShowOther((v) => !v)}>
+              {showOther ? "Today's moods" : "Other moods"}
+            </button>
+          )}
+        </div>
+        {moods.state === "error" ? (
+          <p className="home-quiet secondary">
+            {source === "navidrome" && moods.error.kind === "failed"
+              ? "Navidrome is unreachable; today's moods will be here when it answers."
+              : `Could not pick today's moods: ${moods.error.message}`}
+          </p>
+        ) : moodList && moodList.length === 0 ? (
+          <p className="home-quiet secondary">
+            No moods today: they come from your albums' genres.
+          </p>
+        ) : (
+          <>
+            {waitForScan && !moodList && (
+              <p className="home-quiet secondary">
+                Today's moods are picked once the library scan is done.
+              </p>
+            )}
+            <div className="mood-grid" aria-busy={moodList ? undefined : true}>
+              {moodList
+                ? moodList.map((mood) => (
+                    <MoodCard
+                      key={mood.genre}
+                      mood={mood}
+                      source={source}
+                      now={now}
+                      canPlay={canPlay}
+                      onPlay={(m) => playMood(source, m)}
+                      onOpenAlbum={openAlbum}
+                    />
+                  ))
+                : [0, 1, 2].map((i) => <div key={i} className="mood-card skeleton-card" />)}
+            </div>
+          </>
+        )}
+      </section>
     </section>
   );
 }

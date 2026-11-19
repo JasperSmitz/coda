@@ -24,9 +24,11 @@ use coda_core::model::{Track, TrackMetadata, TrackSource};
 use coda_core::navidrome::scrobble::{ScrobbleRequest, Scrobbler, Scrobbling};
 use coda_core::navidrome::{self, Client};
 use coda_core::playback::{LoadId, PlaybackCommand, PlaybackEvent, PlaybackHandle};
+use coda_core::player::context_window;
 use coda_core::player::{PlaybackStatus, Player, PlayerCommand, RepeatMode};
 use coda_core::queue::{
     MAX_QUEUE_LEN, Placement, QueueEntryId, Rng, sample, shuffle_all, shuffle_all_message,
+    shuffle_with_first,
 };
 use coda_core::resolve;
 use coda_core::session::{self, Restored, Session};
@@ -196,6 +198,11 @@ pub struct Engine {
     heard: Option<history::Heard>,
     /// The context the queue was last played from.
     played_from: Option<history::PlayedFrom>,
+    /// A resumed play's position, sent once its load starts.
+    pending_seek: Option<history::PendingSeek>,
+    /// The last play's tracks in the context's order, for
+    /// `played_context`.
+    queued_order: Option<history::QueuedOrder>,
     /// The current server's identity in the history
     /// (`history::server_id`).
     server: Option<String>,
@@ -265,6 +272,8 @@ impl Engine {
             history_save: history::HistorySave::default(),
             heard: None,
             played_from: None,
+            pending_seek: None,
+            queued_order: None,
             server: None,
             other_server_entries: HashSet::new(),
             mix: None,
@@ -402,6 +411,16 @@ impl Engine {
             // even if this request then finds nothing to play.
             self.supersede_mix_requests(now);
         }
+        if matches!(
+            intent,
+            Intent::PlayTracks { .. }
+                | Intent::PlayLocal { .. }
+                | Intent::ShuffleLibrary
+                | Intent::ClearQueue
+        ) {
+            // Where the context that played stopped, before it goes.
+            self.note_stop(None, now);
+        }
         let context = self.player.queue_context();
         let commands = match intent {
             Intent::TogglePause => self.player.toggle_pause(),
@@ -430,11 +449,14 @@ impl Engine {
                 start,
                 shuffle,
                 context,
+                seek_ms,
+                seek_track,
             } => {
                 let commands = self.play_tracks(tracks, start, shuffle, now);
                 if !commands.is_empty() {
                     let context = context.and_then(|c| self.play_context(c));
                     self.played_context(context, now);
+                    self.resume_at(seek_ms, seek_track);
                 }
                 commands
             }
@@ -457,11 +479,14 @@ impl Engine {
                 context,
                 start,
                 shuffle,
+                seek_ms,
+                seek_track,
             } => {
                 let played = self.local_context(&context);
                 let commands = self.play_local(context, start, shuffle, now);
                 if !commands.is_empty() {
                     self.played_context(played, now);
+                    self.resume_at(seek_ms, seek_track);
                 }
                 commands
             }
@@ -614,9 +639,26 @@ impl Engine {
         // A start past the end (it and every track after it missing)
         // starts at the first track.
         let start = start.filter(|&s| s < tracks.len());
+        // Shuffled here (as `Player::play_tracks` would) so that each
+        // queued track's place in the context is known (the stops).
+        let total = tracks.len();
+        let mut tracks: Vec<(usize, Track)> = tracks.into_iter().enumerate().collect();
+        let from = if shuffle {
+            shuffle_with_first(&mut tracks, start, &mut self.rng);
+            0
+        } else {
+            start.unwrap_or(0)
+        };
+        let (positions, tracks): (Vec<usize>, Vec<Track>) = tracks.into_iter().unzip();
+        let window = context_window(total, from.min(total - 1));
         let (commands, dropped) = self
             .player
-            .play_tracks(tracks, start, shuffle, &mut self.rng);
+            .play_tracks(tracks, Some(from), false, &mut self.rng);
+        // Only a play that replaced the queue (`played_context` takes it).
+        self.queued_order = (!commands.is_empty()).then(|| history::QueuedOrder {
+            positions: positions[window].to_vec(),
+            total,
+        });
         if !commands.is_empty() && dropped > 0 {
             self.notify(
                 format!(
@@ -700,7 +742,8 @@ impl Engine {
             PlaybackEvent::Position(position) => Some(position),
             _ => None,
         };
-        let commands = self.player.handle_event(event);
+        let before = self.player.status();
+        let mut commands = self.player.handle_event(event);
         if let Some(load) = started {
             self.scrobbling.started(&self.player, load);
             self.heard_started(load);
@@ -709,6 +752,7 @@ impl Engine {
             self.scrobbling.progressed(&self.player, position);
             self.heard_progressed(position, now);
         }
+        commands.extend(self.stop_after_event(started, before, now));
         let mut commands = self.dispatch(commands, now);
         commands.extend(self.check_mix(now));
         commands
@@ -721,6 +765,7 @@ impl Engine {
         // A new load, a stop or a backend exit ends the current listen.
         self.scrobbling.player_changed(&self.player);
         self.heard_ended();
+        self.drop_stale_seek();
         for message in self.player.take_messages() {
             self.notify(message, now);
         }
@@ -993,6 +1038,7 @@ impl Engine {
                 server: self.browse.client_generation(),
             },
             history_revision: self.history.revision(),
+            playing_context: self.playing_context(),
             mix: self.mix_dto(),
         }
     }
@@ -1533,7 +1579,7 @@ mod history;
 mod library;
 mod mix;
 use coda_core::mix::navidrome::Fetched;
-pub use history::HistoryMsg;
+pub use history::{HistoryMsg, MoodsRequest};
 use library::library_scan_options;
 pub(crate) use mix::{LoadedMix, ReadMix, read_saved_mix};
 
