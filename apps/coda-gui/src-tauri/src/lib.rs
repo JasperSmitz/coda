@@ -289,6 +289,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             report_minimized(window, event);
             frame::track(window, event);
+            #[cfg(target_os = "macos")]
+            frame::refocus_after_fullscreen(window, event);
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 frame::save(window);
             }

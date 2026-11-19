@@ -96,8 +96,19 @@
   --titlebar-h: 0px;
   --row-height: 36px;
 
+  /* Hover and colour changes: short. Panels and the Now Playing view
+     opening: `--motion-slow`. Now Playing's layout morphs (View
+     Transitions): `--motion-morph`; a track change: `--motion-slide`.
+     Soft curves only (lib/motion.ts reads these for the Web Animations
+     API). */
   --motion-fast: 120ms;
   --motion: 180ms;
+  --motion-slow: 320ms;
+  --motion-slide: 350ms;
+  --motion-morph: 380ms;
+  --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (prefers-color-scheme: light) {
@@ -165,5 +176,8 @@
   :root {
     --motion-fast: 0ms;
     --motion: 0ms;
+    --motion-slow: 0ms;
+    --motion-slide: 0ms;
+    --motion-morph: 0ms;
   }
 }

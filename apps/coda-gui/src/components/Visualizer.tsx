@@ -8,13 +8,10 @@
 import { useEffect, useRef } from "react";
 import { onVisualizer } from "../lib/ipc";
 import { THEME_EVENT } from "../lib/theme";
+import { prefersReducedMotion } from "../lib/motion";
 import { Meter, spreadBands } from "../lib/visualizer";
 
 const REDUCED_INTERVAL_MS = 250;
-
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-}
 
 export function Visualizer({ active }: { active: boolean }) {
   const canvas = useRef<HTMLCanvasElement>(null);

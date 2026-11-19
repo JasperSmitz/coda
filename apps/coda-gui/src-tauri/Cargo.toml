@@ -1,6 +1,6 @@
 [package]
 name = "coda-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Coda: a desktop music player for local files and Navidrome"
 authors = ["Jasper Smitz"]
 edition = "2024"
@@ -33,6 +33,11 @@ souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"
 # Reads the window's real full-screen state on Linux (`frame`).
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+# Gives the web view the keyboard back after full screen (`frame`): GCD's
+# main queue, already in the tree through tao.
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = "0.3"
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

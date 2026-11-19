@@ -214,3 +214,9 @@ Each entry should state:
 - **Root cause:** tao's Linux `Window::fullscreen()` returns a `RefCell` that only `set_fullscreen` writes (`tao 0.35.3`, `platform_impl/linux/window.rs`), so a getter call answers with what the app last asked for. tao's GTK `configure-event` does emit `Resized` when the window manager resizes the window, but that resize can arrive before GTK's window state changes, so querying any state on it can still read the old one.
 - **Rule:** for the real state read GDK's (`gtk_window().window().state()` contains `FULLSCREEN`, on the main thread) and push its changes from a `window-state-event` handler; do not trust Tauri getters for state the window manager can change, nor a resize as proof the state already changed. On macOS tao tracks it from AppKit's notifications.
 - **Where verified:** GUI full-screen Now Playing review (M1); `apps/coda-gui/src-tauri/src/frame.rs`.
+
+### Web Animations on one element and property replace each other
+- **Context / symptom:** in the GUI's Now Playing, a track-change slide (`translateX`) and a FLIP glide (`translate` + `scale`) can run on the cover at the same time; the newer animation's transform wiped out the other's, so the cover jumped.
+- **Root cause:** by default (`composite: "replace"`) the effect created last wins for a property on an element; transforms of overlapping animations do not combine. `composite: "add"` adds onto the result below, but for `opacity` it sums values, so it cannot fade from 0.
+- **Rule:** when two animations can overlap on one element, give the later-starting transform `composite: "add"` (and run its opacity as a separate, replacing animation), or animate separate elements (a wrapper); otherwise cancel one deliberately.
+- **Where verified:** GUI Now Playing motion slice review (L2), commit e426368. That code (`hooks/useFlip.ts` and the WAAPI slide) was later replaced by View Transitions; the rule still holds for Web Animations.

@@ -323,6 +323,37 @@ pub fn is_fullscreen<R: Runtime>(window: &tauri::Window<R>) -> bool {
     }
 }
 
+/// macOS: gives the web view the keyboard back after the window leaves
+/// native full screen (any route: Now Playing, its toolbar, the green
+/// button, the View menu). tao's `windowDidExitFullScreen:` restores the
+/// style mask on GCD's main queue and with it makes *its* view the first
+/// responder (`tao 0.35.3`, `util/async.rs` `set_style_mask`), but wry
+/// has replaced that view as the content view with its own parent of the
+/// `WKWebView` (`wry 0.55.1`, `wkwebview/mod.rs`), so key presses stop
+/// reaching the page until a click. Here, on the resize that follows the
+/// exit, the web view is made first responder again (`Webview::set_focus`
+/// → wry's `makeFirstResponder`), queued on the same main queue so it runs
+/// after tao's. Window events arrive on the main thread.
+#[cfg(target_os = "macos")]
+pub fn refocus_after_fullscreen<R: Runtime>(window: &tauri::Window<R>, event: &tauri::WindowEvent) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// One main window, so one flag.
+    static WAS_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+    if !matches!(event, tauri::WindowEvent::Resized(_)) {
+        return;
+    }
+    let now = is_fullscreen(window);
+    if !WAS_FULLSCREEN.swap(now, Ordering::Relaxed) || now {
+        return;
+    }
+    let webviews = window.webviews();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        for webview in webviews {
+            let _ = webview.set_focus();
+        }
+    });
+}
+
 /// Linux: emits `window-fullscreen` (the new state) when the window
 /// manager changes it. Call on the main thread, once.
 #[cfg(target_os = "linux")]
