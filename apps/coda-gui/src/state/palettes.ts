@@ -185,6 +185,61 @@ export function useColourScope(ref: RefObject<HTMLElement | null>, url: string |
   });
 }
 
+/** How long a page without a subject waits before the ground goes back to the base. */
+const GROUND_RELEASE_MS = 200;
+/** How long a page still loading its subject keeps the last ground at most. */
+const GROUND_PENDING_MS = 1500;
+
+/**
+ * Paints the page with the ground of the cover at `url` (2.0 R2,
+ * DESIGN.md "Colour": "Washed"): `--ground` and `--glass-ground` on <html>
+ * and `data-ground` (tokens.css switches the glass to it). While a new
+ * cover's palette loads, the last ground stays (no detour through the
+ * base); no cover, or one without art, goes back to the base. Elements
+ * painted with `--ground` blend by transitioning `background-color`.
+ * `glass`: the glass takes the ground's colour (off under Now Playing,
+ * which keeps its own look while the page's ground waits behind it, so
+ * closing it shows the page as it was, with no blend from the base).
+ */
+export function usePageGround(url: string | null | undefined, glass: boolean) {
+  // A new page reports its subject just after it mounts: going to none
+  // waits a moment (`GROUND_RELEASE_MS`), so a page change from one
+  // coloured page to another never dips towards the base on the way; a
+  // page still loading its subject (`undefined`) keeps the last ground up
+  // to `GROUND_PENDING_MS`.
+  const [held, setHeld] = useState<string | null>(url ?? null);
+  useEffect(() => {
+    if (url) {
+      setHeld(url);
+      return;
+    }
+    const ms = url === undefined ? GROUND_PENDING_MS : GROUND_RELEASE_MS;
+    const timer = window.setTimeout(() => setHeld(null), ms);
+    return () => window.clearTimeout(timer);
+  }, [url]);
+  const wanted = url ?? held;
+  const state = usePaletteState(wanted);
+  const last = useRef<Palette | null>(null);
+  const palette = wanted === null ? null : state === undefined ? last.current : state;
+  const ground = palette?.ground ?? null;
+  const glassColour = glass ? (palette?.glass ?? null) : null;
+  useLayoutEffect(() => {
+    last.current = palette;
+  });
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    if (ground) root.style.setProperty("--ground", ground);
+    else root.style.removeProperty("--ground");
+    if (ground && glassColour) {
+      root.style.setProperty("--glass-ground", glassColour);
+      root.dataset.ground = "";
+    } else {
+      root.style.removeProperty("--glass-ground");
+      delete root.dataset.ground;
+    }
+  }, [ground, glassColour]);
+}
+
 /** How long the tiles in view must stay put before their palettes are asked for. */
 const TILES_SETTLE_MS = 150;
 

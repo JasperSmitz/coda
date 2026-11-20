@@ -32,12 +32,22 @@
 //!   pixels' mean hue and lightness (clamped to [`SWATCH_L`]) with as much
 //!   chroma as sRGB allows (up to [`SWATCH_MAX_C`]). None for a greyscale
 //!   cover.
+//! - **Ground** (the app's "Washed" page colour, 2.0 R2): the colour a
+//!   page about this cover is painted with, top to bottom: the dominant
+//!   hue (a greyscale cover: its slight cast, or the base's violet, at a
+//!   low chroma) at a deep but clearly coloured lightness: the lightest
+//!   step from [`GROUND_L_TOP`] down at which every text level keeps its
+//!   contrast on it even under the lightest veil the app lays under text
+//!   ([`GROUND_VEIL`], a selected row). With it, the **glass** solid: the
+//!   ground darkened (mixed with black) as little as keeps the text levels
+//!   on the app's floating glass ([`GLASS_ALPHA`]) over pure white.
 //! - **Washes** ([`Surface`], [`wash_alpha`]): where the app draws the
 //!   cover blurred with text over it (the page's glow, the player), how
-//!   much of the tint it lays over the cover so that the text levels keep
-//!   their contrast over **this** cover's brightest blurred area, not over
-//!   the worst cover there is: a dark cover needs little wash and stays
-//!   colourful, a white one gets a heavy one.
+//!   much of a colour (the page's ground; the player's tint) it lays over
+//!   the cover so that the text levels keep their contrast over **this**
+//!   cover's brightest blurred area, not over the worst cover there is: a
+//!   dark cover needs little wash and stays colourful, a white one gets a
+//!   heavy one.
 
 pub mod color;
 
@@ -95,6 +105,10 @@ const SWATCH_MIN_GAP: f64 = 40.0;
 /// over any swatch at this alpha (tested). Where no text is (above a mood
 /// card's text, a genre tile's), the swatches may be stronger.
 pub const SWATCH_UNDER_TEXT: f64 = 0.24;
+/// The same on a page's ground (`--swatch-under-text-ground`): the card
+/// surface over any ground ([`Palette::ground`]), which is lighter than
+/// the base, leaves less room (tested over grounds of every hue).
+pub const SWATCH_UNDER_TEXT_ON_GROUND: f64 = 0.10;
 /// The desktop app's card surface (`--surface-1`), white at 0x0e.
 pub const CARD_SURFACE: Rgba = Rgba {
     r: 0xff,
@@ -102,6 +116,33 @@ pub const CARD_SURFACE: Rgba = Rgba {
     b: 0xff,
     a: 0x0e,
 };
+
+/// The page ground's highest OKLCH lightness: the ground is tried from
+/// here down (in steps of 0.005) until the text levels hold under the
+/// veil; in practice they settle at 0.24–0.31 (yellows and greys deepest,
+/// reds and blues lightest).
+const GROUND_L_TOP: f64 = 0.34;
+/// The ground's chroma: the dominant hue's mean chroma × 1.2, within
+/// these (then into the sRGB gamut).
+const GROUND_C: (f64, f64) = (0.06, 0.14);
+/// A greyscale cover's ground chroma: near neutral, with its cast.
+const GREY_GROUND_C: f64 = 0.025;
+/// The lightest veil the desktop app lays under text on a page (its
+/// `--selected`, white at 0x1f; a test there keeps them in step): the
+/// ground keeps the text levels under it too.
+pub const GROUND_VEIL: Rgba = Rgba {
+    r: 0xff,
+    g: 0xff,
+    b: 0xff,
+    a: 0x1f,
+};
+/// The desktop app's floating glass's alpha (`--glass`, `#242227e2` on the
+/// base): on a page with a ground its colour is the cover's `glass`.
+pub const GLASS_ALPHA: u8 = 0xe2;
+/// The stronger glass's alpha (`--glass-strong`, `#242227f0` on the base:
+/// sticky tool rows, menus); the same colour, so it reads at least as
+/// well.
+pub const GLASS_STRONG_ALPHA: u8 = 0xf0;
 
 /// The desktop app's text levels (`--text`, `--text-2`, `--text-3` in its
 /// `tokens.css`; a test there keeps them in step) and the contrast each
@@ -115,18 +156,16 @@ pub const TEXT_3: Rgba = Rgba::rgb(0x88, 0x86, 0x8c);
 const TEXT_LEVELS: [(Rgba, f64); 3] = [(TEXT, 7.0), (TEXT_2, 4.5), (TEXT_3, 3.0)];
 
 /// How a surface of the desktop app draws a cover with text over it:
-/// the cover blurred (and saturated) at some opacity over `under`, then a
-/// wash of the cover's tint at [`wash_alpha`]. The CSS draws it with the
+/// the cover blurred (and saturated) at some opacity over what is under
+/// it, then a wash of a colour at [`wash_alpha`]. The CSS draws it with the
 /// same constants (the app's `tokens.css`, `--*-glow-opacity` and
 /// `--*-glow-filter`; a test there keeps them in step).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Surface {
-    /// The cover's opacity over `under`.
+    /// The cover's opacity over what is under it.
     pub opacity: f64,
     /// The CSS `saturate()` after the blur.
     pub saturate: f64,
-    /// What shows where the cover is translucent.
-    pub under: Rgba,
     /// The least wash, so the cover never shows bare.
     pub floor: f64,
     /// The blur's standard deviation (CSS `blur(r)` is a Gaussian with
@@ -137,13 +176,13 @@ pub struct Surface {
 }
 
 /// The page's glow (app.css `.page-glow`): the cover at 0.62 under
-/// `blur(110px) saturate(1.5)`, over the base. It is drawn 120% of the
+/// `blur(110px) saturate(1.5)`, over the page's ground and washed with it.
+/// It is drawn 120% of the
 /// page's width wide (and as tall: `object-fit: cover` of a square), so
 /// at most ~1.2 × 2560px on a large screen: σ = 110 / 3072 of the cover.
 pub const PAGE_GLOW: Surface = Surface {
     opacity: 0.62,
     saturate: 1.5,
-    under: BASE,
     floor: 0.25,
     sigma: (110.0 / 3072.0, 110.0 / 3072.0),
 };
@@ -156,7 +195,6 @@ pub const PAGE_GLOW: Surface = Surface {
 pub const PLAYER: Surface = Surface {
     opacity: 1.0,
     saturate: 1.7,
-    under: BASE,
     floor: 0.35,
     sigma: (30.0 / 1060.0, 30.0 / 136.0),
 };
@@ -176,7 +214,12 @@ pub struct Palette {
     /// Up to [`MAX_SWATCHES`] vivid colours of the cover, the largest
     /// area first, for gradients over the base. Empty when greyscale.
     pub swatches: Vec<Rgba>,
-    /// The tint's alpha over the cover in the page's glow ([`PAGE_GLOW`]).
+    /// The colour of a page about this cover (see the module's "Ground").
+    pub ground: Rgba,
+    /// The floating glass's colour on that page (opaque; drawn at
+    /// [`GLASS_ALPHA`]).
+    pub glass: Rgba,
+    /// The ground's alpha over the cover in the page's glow ([`PAGE_GLOW`]).
     pub page_wash: f64,
     /// The tint's alpha over the cover in the player ([`PLAYER`]).
     pub player_wash: f64,
@@ -228,8 +271,9 @@ pub fn palette(image: &CoverImage) -> Palette {
         .collect();
 
     if populated.is_empty() {
-        let (tint, accent) = greyscale(&pixels);
-        return finish(&sample, tint, accent, false, Vec::new());
+        let (tint, accent, hue) = greyscale(&pixels);
+        let ground = ground_of(hue, GREY_GROUND_C);
+        return finish(&sample, tint, accent, false, Vec::new(), ground);
     }
 
     // The dominant hue: chroma- and lightness-weighted, smoothed.
@@ -239,12 +283,13 @@ pub fn palette(image: &CoverImage) -> Palette {
     }
     let smoothed = smooth(&weights);
     let dominant = argmax(&smoothed);
-    let tint = tint_of(&pixels, dominant);
+    let (tint, hue, mean_c) = tint_of(&pixels, dominant);
+    let ground = ground_of(hue, (mean_c * 1.2).clamp(GROUND_C.0, GROUND_C.1));
 
     let accent = vivid_accent(&pixels, &counts, &populated, total);
     let accent = lift_until_readable(accent, &[BASE, tint]);
     let swatches = swatches(&pixels, &counts, &populated);
-    finish(&sample, tint, accent, true, swatches)
+    finish(&sample, tint, accent, true, swatches, ground)
 }
 
 fn finish(
@@ -253,6 +298,7 @@ fn finish(
     accent: Rgba,
     vivid: bool,
     swatches: Vec<Rgba>,
+    ground: Rgba,
 ) -> Palette {
     Palette {
         tint,
@@ -260,25 +306,80 @@ fn finish(
         accent_text: text_on(accent),
         vivid,
         swatches,
-        page_wash: wash_alpha(sample, tint, &PAGE_GLOW),
-        player_wash: wash_alpha(sample, tint, &PLAYER),
+        ground,
+        glass: glass_of(ground),
+        page_wash: wash_alpha(sample, ground, ground, &PAGE_GLOW),
+        player_wash: wash_alpha(sample, tint, BASE, &PLAYER),
     }
 }
 
+/// Whether every text level keeps its contrast on `background`.
+fn readable(background: Rgba) -> bool {
+    TEXT_LEVELS
+        .iter()
+        .all(|&(text, min)| contrast(text, background) >= min)
+}
+
+/// `top` (its alpha) over the opaque `under`, sRGB compositing.
+fn over(top: Rgba, under: Rgba) -> Rgba {
+    let a = f64::from(top.a) / 255.0;
+    let (t, u) = (unit(top), unit(under));
+    from_unit(std::array::from_fn(|i| a * t[i] + (1.0 - a) * u[i]))
+}
+
+/// The ground at `hue` and up to `chroma`: the lightest step down from
+/// [`GROUND_L_TOP`] at which the text levels hold on it under
+/// [`GROUND_VEIL`] (the base if nothing does, which cannot happen: deep
+/// enough, every colour passes).
+fn ground_of(hue: f64, chroma: f64) -> Rgba {
+    let mut step = 0;
+    loop {
+        let l = GROUND_L_TOP - f64::from(step) * 0.005;
+        if l <= 0.0 {
+            return BASE;
+        }
+        let ground = Rgba::from_oklch_in_gamut(l, chroma, hue);
+        if readable(over(GROUND_VEIL, ground)) {
+            return ground;
+        }
+        step += 1;
+    }
+}
+
+/// The glass colour on `ground`: the ground mixed with black (in sRGB, as
+/// CSS `color-mix` does) as little as keeps the text levels on it at
+/// [`GLASS_ALPHA`] over pure white, the worst thing glass floats over.
+fn glass_of(ground: Rgba) -> Rgba {
+    let g = unit(ground);
+    for step in (0..=100).rev() {
+        let share = f64::from(step) / 100.0;
+        let glass = from_unit(g.map(|c| c * share));
+        let solid = Rgba {
+            a: GLASS_ALPHA,
+            ..glass
+        };
+        if readable(over(solid, color::WHITE)) {
+            return glass;
+        }
+    }
+    color::BLACK
+}
+
 /// The least alpha (a multiple of 0.01, at least the surface's floor) of
-/// `tint` over `sample` drawn as `surface` draws it at which every text
+/// `wash` over `sample` drawn as `surface` draws it (over `under`) at which every text
 /// level keeps its contrast ([`TEXT_LEVELS`]) over the brightest blurred
 /// area: every pixel of the sample blurred by the surface's Gaussian (on
 /// sRGB values, as the webview blurs), saturated (CSS `saturate()`), at the surface's
-/// opacity over its `under`, then the tint over that, all composited in
-/// sRGB as the webview does. A full wash (the tint alone) always passes:
-/// tints are deep (white reads at ≥ 12:1 on them).
-pub fn wash_alpha(sample: &CoverImage, tint: Rgba, surface: &Surface) -> f64 {
+/// opacity over `under`, then the wash over that, all composited in sRGB
+/// as the webview does. A full wash (the colour alone) passes for the
+/// colours used: tints are deep (white reads at ≥ 12:1 on them) and a
+/// ground is made to pass.
+pub fn wash_alpha(sample: &CoverImage, wash: Rgba, under: Rgba, surface: &Surface) -> f64 {
     let mut glows: Vec<[f64; 3]> = blurred(sample, surface.sigma)
         .into_iter()
         .map(|mean| {
             let saturated = saturate(mean, surface.saturate);
-            let under = unit(surface.under);
+            let under = unit(under);
             std::array::from_fn(|i| {
                 surface.opacity * saturated[i] + (1.0 - surface.opacity) * under[i]
             })
@@ -286,15 +387,12 @@ pub fn wash_alpha(sample: &CoverImage, tint: Rgba, surface: &Surface) -> f64 {
         .collect();
     // The brightest first: a failing alpha usually fails on one of them.
     glows.sort_by(|a, b| luma(*b).total_cmp(&luma(*a)));
-    let tint_unit = unit(tint);
+    let wash = unit(wash);
     let reads = |alpha: f64| {
         glows.iter().all(|glow| {
-            let washed = from_unit(std::array::from_fn(|i| {
-                alpha * tint_unit[i] + (1.0 - alpha) * glow[i]
-            }));
-            TEXT_LEVELS
-                .iter()
-                .all(|&(text, min)| contrast(text, washed) >= min)
+            readable(from_unit(std::array::from_fn(|i| {
+                alpha * wash[i] + (1.0 - alpha) * glow[i]
+            })))
         })
     };
     let floor = (surface.floor * 100.0).ceil() as u32;
@@ -486,8 +584,8 @@ fn argmax(values: &[f64]) -> usize {
 
 /// The tint for the dominant hue bin: the colourful pixels' mean hue there
 /// (and in its neighbours) at [`TINT_L`], with half their chroma, at most
-/// [`TINT_MAX_C`].
-fn tint_of(pixels: &[Px], dominant: usize) -> Rgba {
+/// [`TINT_MAX_C`]; with that hue and their mean chroma.
+fn tint_of(pixels: &[Px], dominant: usize) -> (Rgba, f64, f64) {
     let [left, right] = neighbours(dominant);
     let (mut a, mut b, mut c, mut n) = (0.0, 0.0, 0.0, 0.0);
     for p in pixels
@@ -502,7 +600,8 @@ fn tint_of(pixels: &[Px], dominant: usize) -> Rgba {
     }
     let mean_c = if n > 0.0 { c / n } else { TINT_MAX_C };
     let chroma = (mean_c * 0.5).clamp(0.02, TINT_MAX_C);
-    Rgba::from_oklch_in_gamut(TINT_L, chroma, b.atan2(a))
+    let hue = b.atan2(a);
+    (Rgba::from_oklch_in_gamut(TINT_L, chroma, hue), hue, mean_c)
 }
 
 /// The accent before the contrast nudge: the most vivid populated hue's
@@ -563,8 +662,8 @@ fn lift_until_readable(color: Rgba, against: &[Rgba]) -> Rgba {
 }
 
 /// A greyscale cover: a nearly neutral tint with its slight cast (the
-/// base's violet when it has none) and a soft neutral accent.
-fn greyscale(pixels: &[Px]) -> (Rgba, Rgba) {
+/// base's violet when it has none) and a soft neutral accent; and that hue.
+fn greyscale(pixels: &[Px]) -> (Rgba, Rgba, f64) {
     let n = pixels.len() as f64;
     let a = pixels.iter().map(|p| p.a).sum::<f64>() / n;
     let b = pixels.iter().map(|p| p.b).sum::<f64>() / n;
@@ -578,7 +677,7 @@ fn greyscale(pixels: &[Px]) -> (Rgba, Rgba) {
         Rgba::from_oklch_in_gamut(GREY_ACCENT_L, GREY_ACCENT_C, hue),
         &[BASE, tint],
     );
-    (tint, accent)
+    (tint, accent, hue)
 }
 
 #[cfg(test)]

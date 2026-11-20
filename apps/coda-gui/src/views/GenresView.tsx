@@ -243,7 +243,7 @@ function LocalGenre({ entry, id, name, hint }: GenreProps) {
   useScroll(scroller, entry, albums.length > 0 && known, load.state !== "loading");
   const genre = load.data?.genre ?? hint;
   const title = genre?.name ?? name;
-  usePageSubject(entry, albums[0]?.coverUrl ?? null);
+  usePageSubject(entry, albums[0]?.coverUrl ?? (load.state === "loading" ? undefined : null));
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";
   // The engine resolves the genre (no track list over IPC).
@@ -307,7 +307,10 @@ function NavidromeGenre({ entry, id, name, hint }: GenreProps) {
   const title = hint?.name ?? name;
   const { snapshot } = useAppState();
   const started = snapshot?.phase === "ready";
-  usePageSubject(entry, pages.albums[0]?.coverUrl ?? null);
+  usePageSubject(
+    entry,
+    pages.albums[0]?.coverUrl ?? (firstPageDone(pages) ? null : undefined),
+  );
   // Random songs of the genre, as served (already random).
   const shuffle = () =>
     playFrom(async () => {

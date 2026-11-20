@@ -243,14 +243,18 @@
   /* The stronger glass: covers pass under it. Over an all-white cover
      (the worst case): text 12.1:1, text-2 5.8:1, text-3 3.7:1, the
      house accent 6.5:1; an inactive section's text-2 on its control's
-     surface 4.9:1. */
+     surface 4.9:1. On a page with a ground it is the cover's glass
+     colour, tested in core for the same (text-2 ≥4.5:1 on the control
+     over white). */
   background: var(--glass-strong);
   border: 1px solid var(--border);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow);
   opacity: 0;
-  transition: opacity var(--motion) var(--ease-out);
+  transition:
+    opacity var(--motion) var(--ease-out),
+    background-color var(--motion-tint) var(--ease-in-out);
   pointer-events: none;
 }
 
@@ -955,7 +959,7 @@
 
 /* An artist page's "Your most played", above the albums. */
 .artist-most-played {
-  margin-bottom: 28px;
+  margin-bottom: 4px;
 }
 
 /* ----- artist list ----- */
@@ -1213,7 +1217,7 @@
   background: linear-gradient(
     150deg,
     var(--genre-tint) 0%,
-    color-mix(in srgb, var(--genre-tint) 45%, var(--bg)) 100%
+    color-mix(in srgb, var(--genre-tint) 45%, var(--ground)) 100%
   );
 }
 
@@ -1395,7 +1399,8 @@
   color: var(--text-3);
   transition:
     border-color var(--motion-fast),
-    box-shadow var(--motion-fast);
+    box-shadow var(--motion-fast),
+    background-color var(--motion-tint) var(--ease-in-out);
 }
 
 /* The field's own focus ring (the input inside draws none). */
@@ -1740,6 +1745,12 @@
   border: 1px solid var(--border);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
+  /* Its glass blends with the page's colour (a hover still answers at
+     once: app.css, with `.topbar-prefs`). */
+  transition:
+    color var(--motion-fast),
+    background-color var(--motion-tint) var(--ease-in-out),
+    transform var(--motion) var(--spring);
 }
 
 .carousel-step:disabled {
@@ -1757,16 +1768,17 @@
 }
 
 /* Under the cover: title, artist, the quiet line, the dots, the actions,
-   over the page's glow (worst: an all-white cover under its computed
-   wash, 0.73 at the wash's lightest, about #3d3c40, app.css `.page-glow`;
+   over the page's glow (worst: an all-white cover over and under its
+   ground #25202d, washed 0.81 at the wash's lightest, about #3f3a46,
+   app.css `.page-glow`;
    it is darker here, below the wash's middle) and the end of the focused
    cover's glow (`.carousel-track::before`: the accent at 45% under a
    28px-sigma blur whose edge is 2px above the cover's bottom). With a
    white accent, sRGB compositing: at the title's top (30px below the
-   cover, glow ~6%, about #49484b) text 8.3:1; at the artist line (~0.3%)
+   cover, glow ~6%, about #4b4651) text 8.3:1; at the artist line (~0.3%)
    text-2 4.7:1; at the quiet line (none) text-2 4.8:1, the dots' text-3
-   3.0:1. A yellow cover (wash 0.72, #3f3e02) and accent: text 8.8, text-2
-   4.8, text-3 3.1. So the artist and the quiet line are text-2, never
+   3.1:1. A yellow cover (ground #242400, wash 0.80, #3f3f00) and accent:
+   text 8.7, text-2 4.8, text-3 3.0. So the artist and the quiet line are text-2, never
    text-3. */
 .carousel-meta {
   display: flex;
@@ -1824,9 +1836,10 @@
 }
 
 /* Moods for today: below the page's glow (it has faded out by ~600px),
-   on the base. */
+   on the same ground as the carousel (2.0 R2), under a quiet hairline. */
 .home-moods {
-  margin-top: 40px;
+  margin-top: 32px;
+  padding-top: 32px;
 }
 
 .home-moods-header {
@@ -1853,19 +1866,21 @@
 /* A card, coloured by its albums' covers (as the v3 mockup): two of
    their swatches (`--mood-swatch-1`, `-2`: vivid colours, OKLCH L
    0.55–0.70, core `cover::palette`) as radial light over a glass ground
-   (`--surface-1` over the base), a hairline.
+   (`--surface-1` over the page's ground: Home's subject's, 2.0 R2), a
+   hairline.
    - The first, strong (`--swatch-strong`), from the top left, behind the
      fanned covers only: it is gone 190px down, above the text (which
      starts 202px down: the padding, the fan, its margin; in the narrow
      layout, 330px from the left, short of the text at 352px).
    - The second, under the text, from the bottom right, at most
-     `--swatch-under-text` (24%): over any swatch at that alpha text keeps
-     ≥7:1, text-2 ≥4.5:1, text-3 ≥3:1 (core's
-     `swatches_under_text_keep_the_contrast`, at the worst point: the
-     lightest swatch, every hue, sRGB compositing).
+     `--swatch-under-text-ground` (10%: grounds are lighter than the base):
+     over any swatch at that alpha, on any ground, text keeps ≥7:1, text-2
+     ≥4.5:1, text-3 ≥3:1 (core's `swatches_under_text_keep_the_contrast`,
+     at the worst point: the lightest swatch and ground, every hue, sRGB
+     compositing).
    Without swatches (greyscale covers, or not known yet): the albums'
    tints as a wash (sRGB gradient, so no point is lighter than its
-   lightest tint); the base where a tint is not known yet. Tints are
+   lightest tint); the ground where a tint is not known yet. Tints are
    OKLCH L 0.20 with chroma ≤ 0.05; the lightest of every hue (a green at
    full tint chroma, about #001c0b) gives text 16.3:1, text-2 7.8:1,
    text-3 5.0:1 (the base: 17.4, 8.3, 5.3). The Play button is its first
@@ -1880,9 +1895,10 @@
   padding: 26px 24px 22px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  background: var(--bg);
+  background-color: var(--ground);
   overflow: hidden;
   isolation: isolate;
+  transition: background-color var(--motion-tint) var(--ease-in-out);
 }
 
 .mood-card::before {
@@ -1907,7 +1923,7 @@
     ),
     radial-gradient(
       90% 80% at 100% 100%,
-      color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text), transparent),
+      color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text-ground), transparent),
       transparent 70%
     ),
     var(--surface-1);
@@ -2078,7 +2094,7 @@
       ),
       radial-gradient(
         90% 80% at 100% 100%,
-        color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text), transparent),
+        color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text-ground), transparent),
         transparent 70%
       ),
       var(--surface-1);

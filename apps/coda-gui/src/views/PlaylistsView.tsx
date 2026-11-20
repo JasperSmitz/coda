@@ -424,7 +424,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const cover = ownCover ?? tracks[0]?.coverUrl ?? null;
   const context = playlistContext(source, { id, name: title, coverUrl: cover });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
-  usePageSubject(entry, cover);
+  usePageSubject(entry, cover ?? (load.state === "loading" ? undefined : null));
 
   // The detail has no name (`getPlaylist` sends none here): use the shown one.
   const playlist: Playlist | null = detail ? { ...detail.playlist, name: title } : null;

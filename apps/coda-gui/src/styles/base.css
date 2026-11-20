@@ -15,8 +15,12 @@ body,
   overflow: hidden;
 }
 
+/* The page's colour (`--ground`: its subject's, or the base), behind
+   everything in the window; it blends as the subject changes (a standard
+   property, so in every webview; at once with reduced motion). */
 body {
-  background: var(--bg);
+  background-color: var(--ground);
+  transition: background-color var(--motion-tint) var(--ease-in-out);
   color: var(--text);
   font-family: var(--font-ui);
   font-size: var(--text-body);

@@ -189,7 +189,7 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
   const found = focusKey === null ? -1 : items.findIndex((i) => itemKey(i) === focusKey);
   const focus = found >= 0 ? found : 0;
   const focused = items[focus] ?? null;
-  usePageSubject(entry, focused?.coverUrl ?? null);
+  usePageSubject(entry, focused ? focused.coverUrl : history.state === "loading" ? undefined : null);
   // Every carousel cover's palette, ahead: the page's glow and colours
   // start blending as soon as the focus moves (a glow layer waits for its
   // palette). The focused cover's first, in a batch of its own; the
@@ -296,7 +296,7 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
         )}
       </div>
 
-      <section className="home-moods" aria-labelledby="home-moods-title">
+      <section className="home-moods section-rule" aria-labelledby="home-moods-title">
         <div className="home-moods-header">
           <h2 className="section-title" id="home-moods-title">
             {showOther ? "Other moods" : "Moods for today"}

@@ -560,7 +560,11 @@ export interface Palette {
   vivid: boolean;
   /** Up to four vivid colours of the cover, the largest first (`#rrggbb`); none when greyscale. */
   swatches: string[];
-  /** The tint's alpha over this cover in the page's glow (0–1; core `cover::palette::PAGE_GLOW`). */
+  /** The colour of a page about this cover, top to bottom (`#rrggbb`; 2.0 R2). */
+  ground: string;
+  /** The floating glass's colour on that page (`#rrggbb`, drawn at `--glass-alpha`). */
+  glass: string;
+  /** The ground's alpha over this cover in the page's glow (0–1; core `cover::palette::PAGE_GLOW`). */
   pageWash: number;
   /** The tint's alpha over this cover in the player (0–1; core `cover::palette::PLAYER`). */
   playerWash: number;

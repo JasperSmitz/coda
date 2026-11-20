@@ -80,9 +80,19 @@
      16% here, 34% for `--selection`). */
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   /* A cover's tint: a deep dark of its dominant hue (core's
-     `cover::palette`), behind the player's, Now Playing's and the page's
-     covers. Unscoped: the base. */
+     `cover::palette`), behind the player's and Now Playing's covers.
+     Unscoped: the base. */
   --tint: var(--bg);
+  /* The page's colour (2.0 R2, "Washed"): a page with a subject is
+     painted with its cover's ground (core's `Palette.ground`: the
+     dominant hue, deep, as light as keeps every text level readable even
+     under `--selected`), set on <html> by `usePageGround`
+     (state/palettes.ts) with `data-ground`; a page without one, the base.
+     Use it wherever "the page's colour" is meant; `--bg` stays the fixed
+     base (the native window, Now Playing, the contrast maths). Elements
+     painted with it transition `background-color` (`--motion-tint`): not
+     a registered property, so it blends in every webview. */
+  --ground: var(--bg);
   /* The accent, translucent: soft light around accent things. */
   --glow: color-mix(in srgb, var(--accent) 45%, transparent);
 
@@ -98,6 +108,9 @@
   --surface-2: #ffffff14;
   --surface-3: #ffffff1c;
   --border: #ffffff17;
+  /* A quiet hairline between a page's large sections (app.css
+     `.section-rule`); never between rows. */
+  --divider: #ffffff12;
   --hover: #ffffff0f;
   --selected: #ffffff1f;
   --selection: color-mix(in srgb, var(--accent) 34%, transparent);
@@ -107,9 +120,20 @@
      at ≥4.5:1 even over a white cover.
      `--glass-strong` for small things over busy content (menus, toasts,
      dialogs). */
-  --glass: #242227e2;
-  --glass-strong: #242227f0;
+  --glass-base: #242227e2;
+  --glass-strong-base: #242227f0;
+  --glass: var(--glass-base);
+  --glass-strong: var(--glass-strong-base);
   --glass-blur: blur(28px) saturate(1.5);
+  /* The base glass (`--glass-base`) is kept by what follows the playing
+     track, not the page (the player, the queue panel: app.css). The
+     glass's alphas (0xe2, 0xf0) for glass of another colour: on a
+     page with a ground (`:root[data-ground]` below) the glass is the
+     cover's `glass` (core's `Palette.glass`: the ground, darkened as
+     little as keeps text-2 ≥4.5:1 and text-3 ≥3:1 on it over pure white,
+     at `--glass-alpha`; src-tauri tests keep the alpha in step). */
+  --glass-alpha: 88.63%;
+  --glass-strong-alpha: 94.12%;
 
   /* ----- shadows and scrims ----- */
 
@@ -153,7 +177,12 @@
      `SWATCH_UNDER_TEXT`, tested: every text level keeps its contrast over
      any swatch), `--swatch-strong` where none is (above the text). */
   --swatch-under-text: 24%;
+  --swatch-under-text-ground: 10%;
   --swatch-strong: 50%;
+  /* The top bar's fade of the page's colour under it (app.css
+     `.topbar::before`: `--ground` masked by this, so the colour itself
+     can transition). */
+  --topbar-fade-mask: linear-gradient(#000000 0%, #000000d9 60%, transparent 100%);
   /* "From the music" in Preferences: the curated accents in a ring. */
   --music-swatch: conic-gradient(from 210deg, #ff7d8e, #f0a83a, #e9e3d2, #7fd8c4, #8ea9ff, #c99cff, #ff7d8e);
 
@@ -270,12 +299,23 @@
   --motion-glow: 600ms;
 }
 
+/* A page with a ground: its glass in the ground's colour (see `--glass-alpha`). */
+:root[data-ground] {
+  --glass: color-mix(in srgb, var(--glass-ground) var(--glass-alpha), transparent);
+  --glass-strong: color-mix(in srgb, var(--glass-ground) var(--glass-strong-alpha), transparent);
+}
+
 /* No backdrop blur (some WebKitGTK builds): floating glass becomes
    nearly opaque, so nothing under it shows through unblurred. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root {
-    --glass: #242227fa;
-    --glass-strong: #242227fa;
+    --glass-base: #242227fa;
+    --glass-strong-base: #242227fa;
+  }
+
+  :root[data-ground] {
+    --glass: color-mix(in srgb, var(--glass-ground) 98%, transparent);
+    --glass-strong: color-mix(in srgb, var(--glass-ground) 98%, transparent);
   }
 }
 

@@ -132,6 +132,14 @@
   transform: scale(var(--press-scale));
 }
 
+/* What follows the playing track keeps the base glass, whatever the
+   page's colour (tokens.css `--glass-base`). */
+.player,
+.queue-popover {
+  --glass: var(--glass-base);
+  --glass-strong: var(--glass-strong-base);
+}
+
 /* ----- top bar ----- */
 
 /* Floats over the page, with no background of its own: a soft fade of
@@ -158,17 +166,17 @@
 }
 
 /* The fade reaches over the scrollbar's strip too (no pointer events:
-   the scrollbar under it stays usable). */
+   the scrollbar under it stays usable). The page's colour, faded out by
+   a mask, so the colour itself blends with the page's. */
 .topbar::before {
   content: "";
   position: absolute;
   inset: 0 calc(-1 * var(--scrollbar-w)) -16px 0;
   z-index: -1;
-  background: linear-gradient(
-    var(--bg) 0%,
-    color-mix(in srgb, var(--bg) 85%, transparent) 60%,
-    transparent 100%
-  );
+  background-color: var(--ground);
+  -webkit-mask-image: var(--topbar-fade-mask);
+  mask-image: var(--topbar-fade-mask);
+  transition: background-color var(--motion-tint) var(--ease-in-out);
   pointer-events: none;
 }
 
@@ -204,6 +212,8 @@
   box-shadow: var(--shadow);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
+  /* Its glass takes the page's colour (tokens.css `:root[data-ground]`). */
+  transition: background-color var(--motion-tint) var(--ease-in-out);
 }
 
 /* The active entry's lighter pill: one element gliding between entries
@@ -254,11 +264,25 @@
 .topbar-prefs {
   width: 44px;
   height: 44px;
+  /* Its glass blends with the page's colour; a hover answers at once
+     (below). */
+  transition:
+    color var(--motion-fast),
+    background-color var(--motion-tint) var(--ease-in-out),
+    transform var(--motion) var(--spring);
   background: var(--glass);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.topbar-prefs:not(:disabled):hover,
+.carousel-step:not(:disabled):hover {
+  transition:
+    color var(--motion-fast),
+    background-color var(--motion-fast),
+    transform var(--motion) var(--spring);
 }
 
 .topbar-prefs.is-active,
@@ -380,20 +404,23 @@
 }
 
 /* The page's glow: the subject's cover, very blurred and saturated (as
-   the v3 mockup: `--page-glow-opacity`, `--page-glow-filter`), behind the
-   header and the top of the page, under a radial wash of its tint, faded
-   out by ~600px. It sits at the top of the page's scrolling content
+   the v3 mockup: `--page-glow-opacity`, `--page-glow-filter`), over the
+   page's ground and under a radial wash of that ground (each layer its
+   cover's: `--layer-ground`), behind the header and the top of the page,
+   faded out by ~600px into the ground the page is painted with (2.0 R2,
+   "Washed": never into the base). It sits at the top of the page's scrolling content
    (`.main.page`), so it scrolls away with the header. Behind the page's
    content (`.main` isolates).
 
    The wash is lightest in the middle, at the alpha the backend computed
    for this cover (`pageWash`, core `cover::palette::wash_alpha` with
-   `PAGE_GLOW`): the least at which, over the cover's brightest blurred
-   area composited in sRGB as the webview does, text keeps ≥7:1, text-2
-   ≥4.5:1 and text-3 ≥3:1 (and so the accents ≥3:1), with a floor of 0.25.
-   Dark vivid covers stay near the floor; an all-white cover gets 0.73
-   (core's tests), a bright yellow one 0.72. Towards the edges it darkens
-   (`--layer-wash-mid`, then the base at the corners), only darker. */
+   `PAGE_GLOW`, the cover over its ground and washed with it): the least
+   at which, over the cover's brightest blurred area composited in sRGB
+   as the webview does, text keeps ≥7:1, text-2 ≥4.5:1 and text-3 ≥3:1
+   (and so the accents ≥3:1), with a floor of 0.25. Dark vivid covers stay
+   near the floor; an all-white cover gets 0.81, a bright yellow one 0.80
+   (core's tests). Towards the edges more of the ground
+   (`--layer-wash-mid`, then the ground itself), which passes on its own. */
 .page-glow {
   position: absolute;
   inset: 0 0 auto 0;
@@ -407,7 +434,7 @@
 
 .page-glow .glow-layer {
   inset: -120px -10% 0;
-  background: var(--bg);
+  background: var(--layer-ground);
 }
 
 .page-glow .glow-image {
@@ -421,7 +448,7 @@
     120% 85% at 50% 35%,
     var(--layer-wash) 0%,
     var(--layer-wash-mid) 55%,
-    var(--bg) 100%
+    var(--layer-ground) 100%
   );
 }
 
@@ -496,6 +523,16 @@
 /* A view's content below its header (and tools). */
 .view-body {
   padding-top: 4px;
+}
+
+/* A quiet hairline above a large section of a page (2.0 R2: Home's
+   moods; an artist's most played and discography; an album's track
+   list), as wide as the content (the view's padding insets it). Never
+   between rows. */
+.section-rule {
+  margin-top: 20px;
+  padding-top: 24px;
+  border-top: 1px solid var(--divider);
 }
 
 .placeholder {

@@ -239,11 +239,11 @@ fn the_same_cover_gives_the_same_palette() {
 
 // ----- washes -----
 
-/// `surface` drawing a solid `color` cover, washed with `tint` at `alpha`
-/// (sRGB compositing, as the webview does).
-fn washed(color: [u8; 3], tint: Rgba, surface: &Surface, alpha: f64) -> Rgba {
+/// `surface` drawing a solid `color` cover over `under`, washed with
+/// `tint` at `alpha` (sRGB compositing, as the webview does).
+fn washed(color: [u8; 3], tint: Rgba, under: Rgba, surface: &Surface, alpha: f64) -> Rgba {
     let saturated = saturate(unit(hex(color)), surface.saturate);
-    let under = unit(surface.under);
+    let under = unit(under);
     let tint = unit(tint);
     from_unit(std::array::from_fn(|i| {
         let glow = surface.opacity * saturated[i] + (1.0 - surface.opacity) * under[i];
@@ -261,12 +261,16 @@ fn reads(background: Rgba) -> bool {
 /// least that does (or the floor).
 fn assert_wash(name: &str, color: [u8; 3]) -> (f64, f64) {
     let p = palette(&solid(color));
-    for (surface, alpha) in [(PAGE_GLOW, p.page_wash), (PLAYER, p.player_wash)] {
+    // The page's glow: over the ground, washed with it; the player: its tint.
+    for (surface, wash, under, alpha) in [
+        (PAGE_GLOW, p.ground, p.ground, p.page_wash),
+        (PLAYER, p.tint, BASE, p.player_wash),
+    ] {
         assert!(
             (surface.floor..=1.0).contains(&alpha),
             "{name}: {alpha} within the floor"
         );
-        let bg = washed(color, p.tint, &surface, alpha);
+        let bg = washed(color, wash, under, &surface, alpha);
         assert!(reads(bg), "{name}: wash {alpha} gives {bg}");
         for (text, min) in TEXT_LEVELS {
             assert!(contrast(text, bg) >= min, "{name}: {text} on {bg}");
@@ -274,7 +278,7 @@ fn assert_wash(name: &str, color: [u8; 3]) -> (f64, f64) {
         // The house accent reads too (≥ 3:1).
         assert!(contrast(Rgba::rgb(0xf0, 0xa8, 0x3a), bg) >= 3.0, "{name}");
         if alpha > surface.floor + 1e-9 {
-            let less = washed(color, p.tint, &surface, alpha - 0.01);
+            let less = washed(color, wash, under, &surface, alpha - 0.01);
             assert!(!reads(less), "{name}: {alpha} is not the least");
         }
     }
@@ -304,7 +308,8 @@ fn washes_are_what_each_cover_needs() {
         ("red", red_page, red_player),
         ("blue", blue_page, blue_player),
     ] {
-        assert!(page <= PAGE_GLOW.floor + 0.1, "{name}: page {page}");
+        // Over its (lighter) ground the page needs a little more.
+        assert!(page <= PAGE_GLOW.floor + 0.15, "{name}: page {page}");
         assert!(player <= PLAYER.floor + 0.15, "{name}: player {player}");
     }
 }
@@ -397,29 +402,123 @@ fn swatches_are_the_hues_by_area_vivid_and_distinct() {
     }
 }
 
+/// Grounds of every kind: every hue at the most and the least chroma, and
+/// greyscale ones (every cast).
+fn all_grounds() -> Vec<Rgba> {
+    let mut grounds = Vec::new();
+    for hue in (0..360).step_by(3) {
+        let h = f64::from(hue).to_radians();
+        for chroma in [GROUND_C.0, GROUND_C.1, GREY_GROUND_C] {
+            grounds.push(ground_of(h, chroma));
+        }
+    }
+    grounds
+}
+
 /// Every swatch (the lightest the band allows, every hue, as much chroma
-/// as sRGB has) at [`SWATCH_UNDER_TEXT`] over a card keeps the text levels'
-/// contrast; a little more would not.
+/// as sRGB has) at [`SWATCH_UNDER_TEXT`] over a card on the base, and at
+/// [`SWATCH_UNDER_TEXT_ON_GROUND`] over a card on any ground, keeps the
+/// text levels' contrast; a little more would not.
 #[test]
 fn swatches_under_text_keep_the_contrast() {
-    let card = unit(CARD_SURFACE);
-    let white = f64::from(CARD_SURFACE.a) / 255.0;
-    let ground: [f64; 3] = std::array::from_fn(|i| white * card[i] + (1.0 - white) * unit(BASE)[i]);
-    let over = |alpha: f64, hue: u32| {
-        let swatch = unit(Rgba::from_oklch_in_gamut(
-            SWATCH_L.1,
-            SWATCH_MAX_C,
-            f64::from(hue).to_radians(),
-        ));
-        from_unit(std::array::from_fn(|i| {
-            alpha * swatch[i] + (1.0 - alpha) * ground[i]
-        }))
+    let grounds = all_grounds();
+    let over_swatch = |alpha: f64, hue: u32, ground: Rgba| {
+        let card = over(CARD_SURFACE, ground);
+        let swatch =
+            Rgba::from_oklch_in_gamut(SWATCH_L.1, SWATCH_MAX_C, f64::from(hue).to_radians());
+        over(swatch.with_alpha(alpha), card)
     };
-    for hue in 0..360 {
-        let bg = over(SWATCH_UNDER_TEXT, hue);
-        assert!(reads(bg), "hue {hue}: {bg}");
+    let all_read = |alpha: f64, grounds: &[Rgba]| {
+        grounds.iter().all(|&g| {
+            (0..360)
+                .step_by(2)
+                .all(|hue| reads(over_swatch(alpha, hue, g)))
+        })
+    };
+    // On the base (Library's genre tiles, pages without a subject).
+    assert!(all_read(SWATCH_UNDER_TEXT, &[BASE]));
+    assert!(!all_read(SWATCH_UNDER_TEXT + 0.02, &[BASE]));
+    // On any ground (Home's mood cards).
+    assert!(all_read(SWATCH_UNDER_TEXT_ON_GROUND, &grounds));
+    assert!(!all_read(SWATCH_UNDER_TEXT_ON_GROUND + 0.02, &grounds));
+}
+
+// ----- the ground and the glass -----
+
+#[test]
+fn grounds_are_coloured_deep_and_readable() {
+    for ground in all_grounds() {
+        assert_eq!(ground.a, 255);
+        assert!(reads(ground), "{ground}");
+        assert!(reads(over(GROUND_VEIL, ground)), "{ground} under the veil");
+        let [l, _, _] = ground.oklch();
+        assert!(l <= GROUND_L_TOP + 0.005, "{ground}: L {l}");
     }
-    assert!(!(0..360).all(|hue| reads(over(SWATCH_UNDER_TEXT + 0.02, hue))));
+    // Covers of many hues, and white, black, yellow and grey ones.
+    let mut covers: Vec<(String, [u8; 3])> = (0..12)
+        .map(|i| {
+            let c = Rgba::from_oklch_in_gamut(0.6, 0.18, f64::from(i * 30).to_radians());
+            (format!("hue {}", i * 30), [c.r, c.g, c.b])
+        })
+        .collect();
+    for (name, c) in [
+        ("white", [0xff, 0xff, 0xff]),
+        ("black", [0x00, 0x00, 0x00]),
+        ("yellow", [0xff, 0xff, 0x00]),
+        ("grey", [0x80, 0x80, 0x80]),
+    ] {
+        covers.push((name.into(), c));
+    }
+    for (name, color) in covers {
+        let p = palette(&solid(color));
+        let g = p.ground;
+        let [l, c, _] = g.oklch();
+        assert!(reads(over(GROUND_VEIL, g)), "{name}: {g}");
+        // Deep but clearly coloured: about the band (yellows and greys a
+        // little under it), lighter than the tint and the base.
+        assert!(
+            (0.24..=GROUND_L_TOP + 0.005).contains(&l),
+            "{name}: {g} L {l}"
+        );
+        assert!(l > p.tint.oklch()[0] && l > BASE.oklch()[0], "{name}");
+        if p.vivid {
+            // (cyans are gamut-limited this deep: ~0.045)
+            assert!(c >= 0.04, "{name}: {g} C {c}");
+            assert!(hue_gap(g, p.tint) < 10.0, "{name}: {g} vs {}", p.tint);
+        } else {
+            // Near neutral, but not a flat grey.
+            assert!((0.01..=0.035).contains(&c), "{name}: {g} C {c}");
+        }
+        // The glass: the ground, darkened, readable over white.
+        let glass = Rgba {
+            a: GLASS_ALPHA,
+            ..p.glass
+        };
+        assert!(
+            reads(over(glass, color::WHITE)),
+            "{name}: glass {}",
+            p.glass
+        );
+        // The stronger glass (`--glass-strong`: sticky tool rows)
+        // with a control's surface on it: text-2 (an inactive section).
+        let strong = over(
+            Rgba {
+                a: GLASS_STRONG_ALPHA,
+                ..p.glass
+            },
+            color::WHITE,
+        );
+        let control = over(CARD_SURFACE, strong);
+        assert!(contrast(TEXT_2, control) >= 4.5, "{name}: {control}");
+        assert!(p.glass.oklch()[0] <= g.oklch()[0], "{name}");
+        if p.vivid {
+            assert!(
+                hue_gap(p.glass, g) < 12.0,
+                "{name}: glass {} on {g}",
+                p.glass
+            );
+        }
+    }
 }
 
 /// erf, Abramowitz and Stegun 7.1.26 (|error| < 1.5e-7).
@@ -458,8 +557,13 @@ fn a_small_white_square_keeps_the_text_readable() {
         let white = share(surface.sigma.0) * share(surface.sigma.1);
         let peak: [f64; 3] = std::array::from_fn(|i| white + (1.0 - white) * unit(hex(dark))[i]);
         let saturated = saturate(peak, surface.saturate);
-        let under = unit(surface.under);
-        let tint = unit(p.tint);
+        let (wash, under) = if name == "page" {
+            (p.ground, p.ground)
+        } else {
+            (p.tint, BASE)
+        };
+        let under = unit(under);
+        let tint = unit(wash);
         let bg = from_unit(std::array::from_fn(|i| {
             let glow = surface.opacity * saturated[i] + (1.0 - surface.opacity) * under[i];
             alpha * tint[i] + (1.0 - alpha) * glow

@@ -23,7 +23,7 @@ import { connect, useAppState } from "./state/store";
 import { startAccent } from "./state/accent";
 import { NowPlayingOpener } from "./state/nowPlaying";
 import { usePageCover } from "./state/pageSubject";
-import { useColourScope } from "./state/palettes";
+import { useColourScope, usePageGround } from "./state/palettes";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
 import { NowPlayingView, queueToggleMovesContent } from "./views/NowPlayingView";
@@ -169,8 +169,11 @@ export default function App() {
     setPageEl(el);
   }, []);
   const pageScroller = useMemo(() => ({ current: pageEl }), [pageEl]);
-  const pageCover = usePageCover(immersive ? null : top.id);
+  const pageCover = usePageCover(immersive ? null : top.id) ?? null;
   useColourScope(mainRef, pageCover);
+  // The whole page takes its subject's ground (pages without one: the
+  // base), kept behind Now Playing so closing it shows the page as it was.
+  usePageGround(usePageCover(top.id), !immersive);
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.

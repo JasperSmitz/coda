@@ -50,7 +50,12 @@ pub struct PaletteDto {
     /// Up to four vivid colours of the cover, the largest first
     /// (`#rrggbb`); none for a greyscale cover.
     pub swatches: Vec<String>,
-    /// The tint's alpha over the cover in the page's glow (0–1).
+    /// The colour of a page about this cover, top to bottom (`#rrggbb`).
+    pub ground: String,
+    /// The floating glass's colour on that page (`#rrggbb`, drawn at the
+    /// glass's alpha).
+    pub glass: String,
+    /// The ground's alpha over the cover in the page's glow (0–1).
     pub page_wash: f64,
     /// The tint's alpha over the cover in the player (0–1).
     pub player_wash: f64,
@@ -65,6 +70,8 @@ impl From<Palette> for PaletteDto {
             glow: p.accent.with_alpha(GLOW_ALPHA).to_string(),
             vivid: p.vivid,
             swatches: p.swatches.iter().map(ToString::to_string).collect(),
+            ground: p.ground.to_string(),
+            glass: p.glass.to_string(),
             page_wash: p.page_wash,
             player_wash: p.player_wash,
         }
@@ -253,6 +260,8 @@ mod tests {
             glow: "#00000073".into(),
             vivid: true,
             swatches: Vec::new(),
+            ground: "#25202d".into(),
+            glass: "#25202d".into(),
             page_wash: 0.25,
             player_wash: 0.35,
         }
@@ -291,6 +300,8 @@ mod tests {
             "glow",
             "vivid",
             "swatches",
+            "ground",
+            "glass",
             "pageWash",
             "playerWash",
         ] {

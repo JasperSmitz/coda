@@ -50,7 +50,7 @@ export function ArtistView({ entry, source, id, name }: Props) {
   const artist = load.data?.artist;
   const title = artist?.name || name;
   const cover = artist?.coverUrl ?? albums[0]?.coverUrl ?? null;
-  usePageSubject(entry, cover);
+  usePageSubject(entry, cover ?? (load.state === "loading" ? undefined : null));
 
   // Local: the engine resolves the artist (no track list over IPC) and
   // records it in the play history itself.
@@ -97,7 +97,7 @@ export function ArtistView({ entry, source, id, name }: Props) {
         }
       />
       <MostPlayed source={source} id={id} name={title} />
-      <div className="view-body">
+      <div className="view-body section-rule">
         {load.state === "loading" && <SkeletonGrid count={6} />}
         {load.state === "error" && <ErrorState error={load.error} onRetry={load.retry} />}
         {load.state === "ready" && albums.length === 0 && <Empty title="No albums" />}
@@ -149,7 +149,7 @@ function MostPlayed({ source, id, name }: { source: SourceKind; id: string; name
   const top = load.data ?? [];
   if (top.length === 0) return null;
   return (
-    <section className="artist-most-played" aria-labelledby="artist-most-played">
+    <section className="artist-most-played section-rule" aria-labelledby="artist-most-played">
       <h2 id="artist-most-played" className="section-title">
         Your most played
       </h2>

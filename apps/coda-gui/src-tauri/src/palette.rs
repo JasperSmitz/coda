@@ -97,7 +97,10 @@ mod tests {
     /// and swatches are computed for (core `cover::palette`).
     #[test]
     fn tokens_css_matches_the_contrast_inputs() {
-        use coda_core::cover::palette::{CARD_SURFACE, SWATCH_UNDER_TEXT, TEXT, TEXT_2, TEXT_3};
+        use coda_core::cover::palette::{
+            CARD_SURFACE, GLASS_ALPHA, GLASS_STRONG_ALPHA, GROUND_VEIL, SWATCH_UNDER_TEXT,
+            SWATCH_UNDER_TEXT_ON_GROUND, TEXT, TEXT_2, TEXT_3,
+        };
         let css = include_str!("../../src/styles/tokens.css");
         assert_eq!(token(css, "text"), TEXT.to_string());
         assert_eq!(token(css, "text-2"), TEXT_2.to_string());
@@ -107,6 +110,22 @@ mod tests {
             token(css, "swatch-under-text"),
             format!("{}%", (SWATCH_UNDER_TEXT * 100.0).round())
         );
+        assert_eq!(
+            token(css, "swatch-under-text-ground"),
+            format!("{}%", (SWATCH_UNDER_TEXT_ON_GROUND * 100.0).round())
+        );
+        // The ground is made readable under the lightest veil, `--selected`.
+        assert_eq!(token(css, "selected"), GROUND_VEIL.to_string());
+        // The glasses' alphas (their colour on a ground is the palette's).
+        for (name, alpha) in [("glass", GLASS_ALPHA), ("glass-strong", GLASS_STRONG_ALPHA)] {
+            let base = token(css, &format!("{name}-base"));
+            assert_eq!(&base[7..], format!("{alpha:02x}"), "{name}: {base}");
+            assert_eq!(
+                token(css, &format!("{name}-alpha")),
+                format!("{:.2}%", f64::from(alpha) / 255.0 * 100.0),
+                "{name}"
+            );
+        }
     }
 
     /// How the CSS draws the covers under the washes: the opacity and the

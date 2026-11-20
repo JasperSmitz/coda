@@ -47,9 +47,9 @@ export function MoodCard({
   const colours: Record<string, string> = swatches
     ? { "--mood-swatch-1": swatches[0], "--mood-swatch-2": swatches[1] }
     : {
-        "--mood-tint-1": tint(0) ?? "var(--bg)",
-        "--mood-tint-2": tint(1) ?? tint(0) ?? "var(--bg)",
-        "--mood-tint-3": tint(2) ?? tint(1) ?? tint(0) ?? "var(--bg)",
+        "--mood-tint-1": tint(0) ?? "var(--ground)",
+        "--mood-tint-2": tint(1) ?? tint(0) ?? "var(--ground)",
+        "--mood-tint-3": tint(2) ?? tint(1) ?? tint(0) ?? "var(--ground)",
       };
   const first = mood.albums[0]?.coverUrl;
   const firstPalette = first ? (palettes.get(first) ?? null) : null;

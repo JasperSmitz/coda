@@ -1,14 +1,15 @@
 // Covers as blurred light (DESIGN.md "Colour"): `PageGlow` behind the top
-// of a page (its subject's cover, very blurred, under a radial wash of
-// its tint, fading out by ~600px), and `CoverGlow`, the same crossfading
+// of a page (its subject's cover, very blurred, over and under a radial
+// wash of its ground, fading out by ~600px into the page's ground), and `CoverGlow`, the same crossfading
 // layers for the player's background (the whole cover stretched across
 // the strip).
 //
-// Each layer carries its own wash: its cover's tint at the alpha the
-// backend computed for that cover and that surface (`pageWash`,
+// Each layer carries its own wash: its cover's ground (the page) or tint
+// (the player) at the alpha the backend computed for that cover and that
+// surface (`pageWash`,
 // `playerWash`; core `cover::palette::wash_alpha`), so a dark cover stays
 // colourful and a white one is washed enough for the text. A layer is
-// opaque (the base or its tint under the cover), so the cover and its
+// opaque (its ground or its tint under the cover), so the cover and its
 // wash crossfade as one, and no two layers add up to something lighter
 // than either.
 //
@@ -44,28 +45,37 @@ function fadeMs(): number {
 export type GlowSurface = "page" | "player";
 
 /**
- * The wash for a cover without a palette (none for its URL): the base,
- * heavy enough for any cover (a white one needs ~0.73 on the page, ~0.84
+ * The wash for a cover without a palette (none for its URL; the page: the
+ * ground it had when the layer became ready, the player: the base),
+ * heavy enough for any cover (a white one needs ~0.81 on the page, ~0.84
  * in the player: core's tests).
  */
-const FALLBACK_WASH: Record<GlowSurface, number> = { page: 0.75, player: 0.86 };
+const FALLBACK_WASH: Record<GlowSurface, number> = { page: 0.86, player: 0.86 };
 
 /** How long a loaded image waits for its palette before the fallback wash. */
 const PALETTE_WAIT_MS = 1000;
 
-/** How far the page's radial wash darkens towards its middle stop. */
+/** How much more of the ground the page's radial wash has at its middle stop. */
 const PAGE_MID_DARKEN = 0.35;
 
-/** A layer's wash, as custom properties for its CSS (app.css `.glow-layer`). */
-function washStyle(palette: Palette | null, surface: GlowSurface): CSSProperties {
+/**
+ * A layer's wash, as custom properties for its CSS (app.css `.glow-layer`):
+ * the page's glow is washed with its cover's ground (the page's colour),
+ * the player with its tint. Without a palette: `ground` (the page's, as
+ * it was) or the base, heavily.
+ */
+function washStyle(palette: Palette | null, surface: GlowSurface, ground: string): CSSProperties {
   const alpha = palette ? (surface === "page" ? palette.pageWash : palette.playerWash) : FALLBACK_WASH[surface];
   const mid = alpha + (1 - alpha) * PAGE_MID_DARKEN;
-  const tint = (a: number) =>
-    palette ? withAlpha(palette.tint, a) : `color-mix(in srgb, var(--bg) ${Math.round(a * 100)}%, transparent)`;
+  const colour = palette ? (surface === "page" ? palette.ground : palette.tint) : null;
+  const fallback = surface === "page" ? ground : "var(--bg)";
+  const wash = (a: number) =>
+    colour ? withAlpha(colour, a) : `color-mix(in srgb, ${fallback} ${Math.round(a * 100)}%, transparent)`;
   return {
     "--layer-tint": palette ? palette.tint : "var(--bg)",
-    "--layer-wash": tint(alpha),
-    "--layer-wash-mid": tint(mid),
+    "--layer-ground": palette ? palette.ground : ground,
+    "--layer-wash": wash(alpha),
+    "--layer-wash-mid": wash(mid),
   } as CSSProperties;
 }
 
@@ -173,7 +183,16 @@ function GlowLayer({
   // The wash it became ready with stays (a palette arriving later would
   // change a shown layer at once).
   const [wash, setWash] = useState<Palette | null | undefined>(undefined);
-  if (ready && wash === undefined) setWash(palette ?? null);
+  // Without a palette, the page's ground as it was then (it stays: the
+  // layer does not follow a later page colour at once).
+  const [ground, setGround] = useState("var(--bg)");
+  if (ready && wash === undefined) {
+    setWash(palette ?? null);
+    if (!palette) {
+      const now = getComputedStyle(document.documentElement).getPropertyValue("--ground").trim();
+      if (now) setGround(now);
+    }
+  }
 
   const report = useRef(onReady);
   report.current = onReady;
@@ -202,7 +221,7 @@ function GlowLayer({
   useEffect(() => () => fade.current?.cancel(), []);
 
   return (
-    <div ref={ref} className="glow-layer" style={washStyle(wash !== undefined ? wash : (palette ?? null), surface)}>
+    <div ref={ref} className="glow-layer" style={washStyle(wash !== undefined ? wash : (palette ?? null), surface, ground)}>
       <img
         className="glow-image"
         src={coverSrc(layer.url, "small")}

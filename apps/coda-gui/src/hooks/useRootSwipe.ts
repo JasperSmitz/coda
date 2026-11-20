@@ -6,48 +6,50 @@
 // bar's entry does (the page transition, the scroll restored).
 //
 // A gesture is ignored when it starts inside a horizontally scrollable
-// element that can still scroll its way, a text field or a slider, the
-// queue panel, a dialog or a menu (or while one is open), and while a page
-// transition runs. After a switch the gesture stays locked (its momentum,
+// element that can still scroll its way, a text area, a text field whose
+// text is wider than it (Search's field otherwise lets swipes through), a
+// slider, the queue panel, a dialog or a menu (or while one is open)
+// (`blocksSwipe`); one that starts while a page transition runs waits
+// for it to end. After a switch the gesture stays locked (its momentum,
 // also when the webview delivers it after a pause while it draws the new
 // page) for at least lib/swipe.ts's cooldown and until the wheel pauses
-// outside a page change. The state is the module's, one for the app, so
+// outside a page change or a new swipe rises out of the momentum (by
+// speed, from the events' time stamps; one seen during the lock starts
+// when it ends). The state is the module's, one for the app, so
 // nothing that remounts or re-renders on navigation resets it. Not
 // listening in Now Playing or onboarding. The listener is passive: it
 // never stops the page or a list from scrolling.
 
 import { useEffect } from "react";
-import { initialSwipe, swipe, swipeTarget, type SwipeState } from "../lib/swipe";
+import {
+  blocksSwipe,
+  initialSwipe,
+  swipe,
+  swipeTarget,
+  type SwipeNode,
+  type SwipeState,
+} from "../lib/swipe";
 import { nav } from "../state/nav";
-
-/** Where a swipe never switches (and what it may be doing instead). */
-const EXCLUDED = [
-  "input",
-  "textarea",
-  "select",
-  "[contenteditable]",
-  '[role="slider"]',
-  ".queue-popover",
-  ".now-playing",
-  ".dialog-backdrop",
-  '[role="dialog"]',
-  '[role="menu"]',
-].join(", ");
 
 /** Open things that hold the swipe wherever it starts. */
 const OPEN_OVERLAYS = '.dialog-backdrop, [role="dialog"], [role="menu"]';
 
-/** Whether an element between `target` and the page can still scroll sideways `direction`. */
-function scrollsSideways(target: Element, direction: 1 | -1): boolean {
-  for (let el: Element | null = target; el && el !== document.body; el = el.parentElement) {
-    if (!(el instanceof HTMLElement) || el.scrollWidth <= el.clientWidth) continue;
-    const overflow = getComputedStyle(el).overflowX;
-    if (overflow !== "auto" && overflow !== "scroll") continue;
-    const room =
-      direction > 0 ? el.scrollWidth - el.clientWidth - el.scrollLeft : el.scrollLeft;
-    if (room > 1) return true;
-  }
-  return false;
+/** `element` and its ancestors up to the page's body, as lib/swipe.ts reads them. */
+function swipeNode(element: Element | null): SwipeNode | null {
+  if (!element || element === document.body || element === document.documentElement) return null;
+  const html = element instanceof HTMLElement ? element : null;
+  return {
+    tag: element.tagName.toLowerCase(),
+    inputType: element instanceof HTMLInputElement ? element.type.toLowerCase() : undefined,
+    role: element.getAttribute("role"),
+    editable: html?.isContentEditable ?? false,
+    classes: [...element.classList],
+    overflowX: getComputedStyle(element).overflowX,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+    scrollLeft: element.scrollLeft,
+    parent: swipeNode(element.parentElement),
+  };
 }
 
 /** A page transition is running (lib/motion.ts marks <html> while one does). */
@@ -70,11 +72,11 @@ export function useRootSwipe(enabled: boolean) {
     if (!enabled) return;
     const onWheel = (e: WheelEvent) => {
       const target = e.target instanceof Element ? e.target : null;
-      const allowed = (direction: 1 | -1) =>
-        target !== null &&
-        !target.closest(EXCLUDED) &&
-        !document.querySelector(OPEN_OVERLAYS) &&
-        !scrollsSideways(target, direction);
+      const allowed = (direction: 1 | -1) => {
+        if (!target || document.querySelector(OPEN_OVERLAYS)) return false;
+        const node = swipeNode(target);
+        return node !== null && !blocksSwipe(node, direction);
+      };
       const result = swipe(
         state,
         {
