@@ -27,20 +27,25 @@
 //!   is nearly neutral with the cover's slight cast (or the base's violet)
 //!   and the accent a soft neutral; the frontend shows its house accent.
 //! - **Swatches** (for gradients: Home's mood cards, genre tiles): up to
-//!   [`MAX_SWATCHES`] colours of the populated hues, the largest first,
+//!   [`MAX_SWATCHES`] colours of the populated hues, the heaviest first
+//!   (area × chroma², dark pixels counting less, so a large dull region
+//!   does not outvote a vivid one),
 //!   at least [`SWATCH_MIN_GAP`] degrees of hue apart, each at its
 //!   pixels' mean hue and lightness (clamped to [`SWATCH_L`]) with as much
 //!   chroma as sRGB allows (up to [`SWATCH_MAX_C`]). None for a greyscale
 //!   cover.
-//! - **Ground** (the app's "Washed" page colour, 2.0 R2): the colour a
-//!   page about this cover is painted with, top to bottom: the dominant
-//!   hue (a greyscale cover: its slight cast, or the base's violet, at a
-//!   low chroma) at a deep but clearly coloured lightness: the lightest
+//! - **Ground** (the app's "Washed" page colour, 2.0 R2; a field of up to
+//!   [`MAX_GROUNDS`] stops since R3, one per heaviest swatch): the colours
+//!   a page about this cover is painted with, top to bottom: each stop at
+//!   its swatch's hue (a greyscale cover: one stop at its slight cast, or
+//!   the base's violet, at a low chroma) at a deep but clearly coloured lightness: the lightest
 //!   step from [`GROUND_L_TOP`] down at which every text level keeps its
 //!   contrast on it even under the lightest veil the app lays under text
 //!   ([`GROUND_VEIL`], a selected row). With it, the **glass** solid: the
 //!   ground darkened (mixed with black) as little as keeps the text levels
-//!   on the app's floating glass ([`GLASS_ALPHA`]) over pure white.
+//!   on the app's floating glass ([`GLASS_ALPHA`]) over pure white. Since
+//!   R3 the ground's hue (the heaviest swatch's) can differ from the
+//!   tint's (the dominant hue's, by area-weighted chroma).
 //! - **Washes** ([`Surface`], [`wash_alpha`]): where the app draws the
 //!   cover blurred with text over it (the page's glow, the player), how
 //!   much of a colour (the page's ground; the player's tint) it lays over
@@ -122,9 +127,11 @@ pub const CARD_SURFACE: Rgba = Rgba {
 /// veil; in practice they settle at 0.24–0.31 (yellows and greys deepest,
 /// reds and blues lightest).
 const GROUND_L_TOP: f64 = 0.34;
-/// The ground's chroma: the dominant hue's mean chroma × 1.2, within
+/// A ground stop's chroma: its swatch's pixels' mean chroma × 1.2, within
 /// these (then into the sRGB gamut).
 const GROUND_C: (f64, f64) = (0.06, 0.14);
+/// The ground field's stops at most.
+pub const MAX_GROUNDS: usize = 3;
 /// A greyscale cover's ground chroma: near neutral, with its cast.
 const GREY_GROUND_C: f64 = 0.025;
 /// The lightest veil the desktop app lays under text on a page (its
@@ -136,6 +143,14 @@ pub const GROUND_VEIL: Rgba = Rgba {
     b: 0xff,
     a: 0x1f,
 };
+/// The most of a cover's bloom (the desktop app's blurred art around a
+/// cover, 2.0 R3) where text may sit: the alpha its mask has at the
+/// distance from the cover where text can start (`--bloom-edge` in its
+/// `tokens.css`; a test there keeps them in step). It is the veil's: any
+/// colour at this alpha is no lighter than white at it, and every ground
+/// keeps the text levels under white at it.
+pub const BLOOM_TEXT_ALPHA: u8 = GROUND_VEIL.a;
+
 /// The desktop app's floating glass's alpha (`--glass`, `#242227e2` on the
 /// base): on a page with a ground its colour is the cover's `glass`.
 pub const GLASS_ALPHA: u8 = 0xe2;
@@ -211,11 +226,18 @@ pub struct Palette {
     pub accent_text: Rgba,
     /// `false` for a near-greyscale cover: show the house accent instead.
     pub vivid: bool,
-    /// Up to [`MAX_SWATCHES`] vivid colours of the cover, the largest
-    /// area first, for gradients over the base. Empty when greyscale.
+    /// Up to [`MAX_SWATCHES`] vivid colours of the cover, the heaviest
+    /// first (by visual weight, see [`swatches`]), for gradients. Empty
+    /// when greyscale.
     pub swatches: Vec<Rgba>,
-    /// The colour of a page about this cover (see the module's "Ground").
+    /// The colour of a page about this cover (see the module's "Ground"):
+    /// the first of `grounds`.
     pub ground: Rgba,
+    /// The page's ground field's stops (2.0 R3): one per heaviest swatch
+    /// (at most [`MAX_GROUNDS`]), each at the ground's text-safe depth;
+    /// one neutral stop for a greyscale cover. Any sRGB mix of them is as
+    /// readable as the stops (luminance is convex in sRGB values).
+    pub grounds: Vec<Rgba>,
     /// The floating glass's colour on that page (opaque; drawn at
     /// [`GLASS_ALPHA`]).
     pub glass: Rgba,
@@ -272,8 +294,8 @@ pub fn palette(image: &CoverImage) -> Palette {
 
     if populated.is_empty() {
         let (tint, accent, hue) = greyscale(&pixels);
-        let ground = ground_of(hue, GREY_GROUND_C);
-        return finish(&sample, tint, accent, false, Vec::new(), ground);
+        let grounds = vec![ground_of(hue, GREY_GROUND_C)];
+        return finish(&sample, tint, accent, false, Vec::new(), grounds);
     }
 
     // The dominant hue: chroma- and lightness-weighted, smoothed.
@@ -284,12 +306,28 @@ pub fn palette(image: &CoverImage) -> Palette {
     let smoothed = smooth(&weights);
     let dominant = argmax(&smoothed);
     let (tint, hue, mean_c) = tint_of(&pixels, dominant);
-    let ground = ground_of(hue, (mean_c * 1.2).clamp(GROUND_C.0, GROUND_C.1));
 
     let accent = vivid_accent(&pixels, &counts, &populated, total);
     let accent = lift_until_readable(accent, &[BASE, tint]);
-    let swatches = swatches(&pixels, &counts, &populated);
-    finish(&sample, tint, accent, true, swatches, ground)
+    let swatches = swatches(&pixels, &populated);
+    // The ground stops: the heaviest swatches' hues (the dominant hue if
+    // none, which cannot happen for a vivid cover), each at the ground's
+    // text-safe depth.
+    let mut grounds: Vec<Rgba> = swatches
+        .iter()
+        .take(MAX_GROUNDS)
+        .map(|s| ground_of(s.hue, ground_chroma(s.chroma)))
+        .collect();
+    if grounds.is_empty() {
+        grounds.push(ground_of(hue, ground_chroma(mean_c)));
+    }
+    let swatches = swatches.into_iter().map(|s| s.color).collect();
+    finish(&sample, tint, accent, true, swatches, grounds)
+}
+
+/// A ground stop's chroma for a hue whose pixels have `mean_c`.
+fn ground_chroma(mean_c: f64) -> f64 {
+    (mean_c * 1.2).clamp(GROUND_C.0, GROUND_C.1)
 }
 
 fn finish(
@@ -298,8 +336,9 @@ fn finish(
     accent: Rgba,
     vivid: bool,
     swatches: Vec<Rgba>,
-    ground: Rgba,
+    grounds: Vec<Rgba>,
 ) -> Palette {
+    let ground = grounds[0];
     Palette {
         tint,
         accent,
@@ -307,6 +346,7 @@ fn finish(
         vivid,
         swatches,
         ground,
+        grounds,
         glass: glass_of(ground),
         page_wash: wash_alpha(sample, ground, ground, &PAGE_GLOW),
         player_wash: wash_alpha(sample, tint, BASE, &PLAYER),
@@ -488,13 +528,21 @@ fn from_unit(c: [f64; 3]) -> Rgba {
     Rgba::rgb(r, g, b)
 }
 
-/// Up to [`MAX_SWATCHES`] colours of the populated hues, the largest
-/// first (by their own colourful pixels), each at least
+/// Up to [`MAX_SWATCHES`] colours of the populated hues, the heaviest
+/// first (their colourful pixels' summed chroma², dark ones counting less), each at least
 /// [`SWATCH_MIN_GAP`] degrees of hue from those before it.
-fn swatches(pixels: &[Px], counts: &[f64; HUE_BINS], populated: &[usize]) -> Vec<Rgba> {
+fn swatches(pixels: &[Px], populated: &[usize]) -> Vec<Swatch> {
+    // Visual weight: each hue's colourful pixels' summed chroma squared,
+    // dark ones counting less (`presence`): a large dull, dark region (a
+    // dark orange road) does not outvote a smaller vivid one (a ring of
+    // bright hues around it).
+    let mut weights = [0.0f64; HUE_BINS];
+    for p in pixels.iter().filter(|p| p.c >= GREY_CHROMA) {
+        weights[p.bin] += p.c * p.c * presence(p.l);
+    }
     let mut bins = populated.to_vec();
-    // Largest first; equal ones by bin (stable sort).
-    bins.sort_by(|a, b| counts[*b].total_cmp(&counts[*a]));
+    // Heaviest first; equal ones by bin (stable sort).
+    bins.sort_by(|a, b| weights[*b].total_cmp(&weights[*a]));
     let mut hues: Vec<f64> = Vec::new();
     let mut out = Vec::new();
     for bin in bins {
@@ -514,6 +562,7 @@ fn swatches(pixels: &[Px], counts: &[f64; HUE_BINS], populated: &[usize]) -> Vec
             .fold((0.0, 0.0), |(a, b), p| (a + p.a * p.c, b + p.b * p.c));
         let hue = b.atan2(a);
         let l = members.iter().map(|p| p.l).sum::<f64>() / n;
+        let chroma = members.iter().map(|p| p.c).sum::<f64>() / n;
         let distinct = hues.iter().all(|&h| {
             let gap = (hue - h).to_degrees().rem_euclid(360.0);
             gap.min(360.0 - gap) >= SWATCH_MIN_GAP
@@ -522,13 +571,27 @@ fn swatches(pixels: &[Px], counts: &[f64; HUE_BINS], populated: &[usize]) -> Vec
             continue;
         }
         hues.push(hue);
-        out.push(Rgba::from_oklch_in_gamut(
-            l.clamp(SWATCH_L.0, SWATCH_L.1),
-            SWATCH_MAX_C,
+        out.push(Swatch {
+            color: Rgba::from_oklch_in_gamut(l.clamp(SWATCH_L.0, SWATCH_L.1), SWATCH_MAX_C, hue),
             hue,
-        ));
+            chroma,
+        });
     }
     out
+}
+
+/// How much a pixel of lightness `l` counts towards its hue's weight: 1
+/// from L 0.6, down to a quarter for the darkest.
+fn presence(l: f64) -> f64 {
+    ((l - 0.15) / 0.45).clamp(0.25, 1.0)
+}
+
+/// A swatch and what the ground stops are made from: its pixels' mean hue
+/// and chroma.
+struct Swatch {
+    color: Rgba,
+    hue: f64,
+    chroma: f64,
 }
 
 /// The hue bin of a hue in radians.

@@ -558,10 +558,12 @@ export interface Palette {
   glow: string;
   /** `false`: a greyscale cover (the house accent is used). */
   vivid: boolean;
-  /** Up to four vivid colours of the cover, the largest first (`#rrggbb`); none when greyscale. */
+  /** Up to four vivid colours of the cover, the heaviest first by visual weight (`#rrggbb`); none when greyscale. */
   swatches: string[];
-  /** The colour of a page about this cover, top to bottom (`#rrggbb`; 2.0 R2). */
+  /** The colour of a page about this cover, top to bottom (`#rrggbb`; 2.0 R2): the first of `grounds`. */
   ground: string;
+  /** The page's ground field's stops (`#rrggbb`, 1–3, the heaviest colours first; 2.0 R3). */
+  grounds: string[];
   /** The floating glass's colour on that page (`#rrggbb`, drawn at `--glass-alpha`). */
   glass: string;
   /** The ground's alpha over this cover in the page's glow (0–1; core `cover::palette::PAGE_GLOW`). */

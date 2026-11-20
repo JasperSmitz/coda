@@ -90,7 +90,9 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
     coverUrl: album?.coverUrl ?? null,
   });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
-  usePageSubject(entry, album ? album.coverUrl : load.state === "loading" ? undefined : null);
+  usePageSubject(entry, album ? album.coverUrl : load.state === "loading" ? undefined : null, {
+    glow: false,
+  });
 
   // The album artist exactly as listed (Navidrome: with the album's id).
   const ingredient = album ? albumIngredient(source, { ...album, id }) : undefined;
@@ -100,6 +102,7 @@ export function AlbumView({ entry, source, id, name, hint }: Props) {
   return (
     <section className="view">
       <PageHeader
+        bloom={album?.coverUrl ?? null}
         cover={
           <Cover
             url={album?.coverUrl ?? null}

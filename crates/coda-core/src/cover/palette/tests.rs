@@ -357,7 +357,7 @@ fn greyscale_covers_have_no_swatches() {
 }
 
 #[test]
-fn swatches_are_the_hues_by_area_vivid_and_distinct() {
+fn swatches_are_the_hues_by_weight_vivid_and_distinct() {
     let blue = [0x30, 0x60, 0xa0];
     let red = [0xd0, 0x30, 0x30];
     let green = [0x30, 0xa0, 0x40];
@@ -369,7 +369,16 @@ fn swatches_are_the_hues_by_area_vivid_and_distinct() {
     });
     let p = palette(&cover);
     assert_eq!(p.swatches.len(), 3, "{:?}", p.swatches);
-    for (swatch, color) in p.swatches.iter().zip([blue, red, green]) {
+    // Heaviest first: share × chroma² × presence.
+    let mut order = [(blue, 0.5), (red, 1.0 / 3.0), (green, 1.0 / 6.0)];
+    order.sort_by(|a, b| {
+        let w = |(c, share): &([u8; 3], f64)| {
+            let [l, c, _] = hex(*c).oklch();
+            share * c * c * presence(l)
+        };
+        w(b).total_cmp(&w(a))
+    });
+    for (swatch, (color, _)) in p.swatches.iter().zip(order) {
         assert!(
             hue_gap(*swatch, hex(color)) < 10.0,
             "{swatch} for {:?}",
@@ -573,5 +582,118 @@ fn a_small_white_square_keeps_the_text_readable() {
             "{name}: text-2 on {bg} at {alpha} (white {white:.2})"
         );
         assert!(reads(bg), "{name}: {bg} at {alpha}");
+    }
+}
+
+// ----- the ground field (2.0 R3) -----
+
+/// A cover like Muse's *The Resistance*: a large dull dark-orange field
+/// (60%) with a ring of four vivid hues (10% each).
+fn ring_cover() -> CoverImage {
+    let road = [0x5a, 0x34, 0x1c];
+    let ring = [
+        [0x20, 0x90, 0xe0],
+        [0xe0, 0x30, 0x90],
+        [0x30, 0xc0, 0x60],
+        [0xe0, 0xc0, 0x20],
+    ];
+    image(80, 80, |x, y| {
+        if y < 48 {
+            road
+        } else {
+            ring[(x / 20) as usize]
+        }
+    })
+}
+
+#[test]
+fn vivid_hues_outweigh_a_large_dull_region() {
+    let p = palette(&ring_cover());
+    // The ring's colours lead the swatches; the dull road comes after them.
+    let road = hex([0x5a, 0x34, 0x1c]);
+    assert!(p.swatches.len() >= 3, "{:?}", p.swatches);
+    assert!(
+        hue_gap(p.swatches[0], road) > 20.0,
+        "first {}",
+        p.swatches[0]
+    );
+    // Three ground stops, of different hues.
+    assert_eq!(p.grounds.len(), MAX_GROUNDS, "{:?}", p.grounds);
+    assert_eq!(p.ground, p.grounds[0]);
+    for (i, a) in p.grounds.iter().enumerate() {
+        for b in &p.grounds[i + 1..] {
+            assert!(hue_gap(*a, *b) >= 30.0, "{a} {b}");
+        }
+    }
+}
+
+#[test]
+fn single_colour_and_greyscale_covers_have_one_stop() {
+    for (name, color, vivid) in [
+        ("red", [0xd0, 0x30, 0x30], true),
+        ("blue", [0x20, 0x40, 0xe0], true),
+        ("white", [0xff, 0xff, 0xff], false),
+        ("grey", [0x80, 0x80, 0x80], false),
+    ] {
+        let p = palette(&solid(color));
+        assert_eq!(p.grounds.len(), 1, "{name}: {:?}", p.grounds);
+        assert_eq!(p.ground, p.grounds[0], "{name}");
+        assert_eq!(p.vivid, vivid, "{name}");
+    }
+}
+
+/// The sRGB mix of `a` and `b` at `t` (as a CSS gradient between them).
+fn mix(a: Rgba, b: Rgba, t: f64) -> Rgba {
+    let (a, b) = (unit(a), unit(b));
+    from_unit(std::array::from_fn(|i| (1.0 - t) * a[i] + t * b[i]))
+}
+
+/// Every point of the field mixes text-safe stops: checked at the stops,
+/// the pairwise mixes and the three-way middle, under the veil too.
+#[test]
+fn every_point_of_the_ground_field_is_readable() {
+    let mut covers = vec![ring_cover()];
+    for i in 0..12 {
+        let a = Rgba::from_oklch_in_gamut(0.6, 0.18, f64::from(i * 30).to_radians());
+        let b = Rgba::from_oklch_in_gamut(0.7, 0.15, f64::from(i * 30 + 120).to_radians());
+        let c = Rgba::from_oklch_in_gamut(0.5, 0.2, f64::from(i * 30 + 220).to_radians());
+        covers.push(image(60, 60, move |x, _| {
+            let p = match x {
+                0..25 => a,
+                25..45 => b,
+                _ => c,
+            };
+            [p.r, p.g, p.b]
+        }));
+    }
+    for cover in covers {
+        let g = palette(&cover).grounds;
+        let mut points = g.clone();
+        for (i, a) in g.iter().enumerate() {
+            for b in &g[i + 1..] {
+                for t in [0.25, 0.5, 0.75] {
+                    points.push(mix(*a, *b, t));
+                }
+            }
+        }
+        if g.len() == 3 {
+            points.push(mix(mix(g[0], g[1], 0.5), g[2], 1.0 / 3.0));
+        }
+        for p in points {
+            assert!(reads(p), "{p} of {g:?}");
+            assert!(reads(over(GROUND_VEIL, p)), "{p} under the veil, of {g:?}");
+            // The bloom's faded edge, of any colour, over it.
+            for c in [
+                color::WHITE,
+                Rgba::rgb(0xff, 0xff, 0x00),
+                Rgba::rgb(0x00, 0xff, 0xff),
+            ] {
+                let bloom = Rgba {
+                    a: BLOOM_TEXT_ALPHA,
+                    ..c
+                };
+                assert!(reads(over(bloom, p)), "bloom {c} on {p}");
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse and Home, Navidrome playlist edits, preferences (the accent), the browsed source, saved mixes and the mix editor's searches, the window's real full-screen state, the covers' palettes) and listening to the engine's events; of the window APIs only entering and leaving full screen (Now Playing). Nothing else (no emit, menu, tray, path or webview APIs; dragging is in macos.json). tests/acl.rs checks the exact core: set.",
+  "description": "The main window: our commands (engine intents/snapshot, settings and onboarding, read-only browse and Home, Navidrome playlist edits, preferences (the accent), the browsed source, saved mixes and the mix editor's searches, the window's real full-screen state, the covers' palettes; `debug_trace`, compiled only into development builds) and listening to the engine's events; of the window APIs only entering and leaving full screen (Now Playing). Nothing else (no emit, menu, tray, path or webview APIs; dragging is in macos.json). tests/acl.rs checks the exact core: set.",
   "windows": ["main"],
   "permissions": [
     "allow-intent",
@@ -67,6 +67,7 @@
     "allow-mix-search-albums",
     "allow-window-is-fullscreen",
     "allow-cover-palettes",
+    "allow-debug-trace",
     "core:window:allow-set-fullscreen",
     "core:event:allow-listen",
     "core:event:allow-unlisten"

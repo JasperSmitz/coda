@@ -98,8 +98,8 @@ mod tests {
     #[test]
     fn tokens_css_matches_the_contrast_inputs() {
         use coda_core::cover::palette::{
-            CARD_SURFACE, GLASS_ALPHA, GLASS_STRONG_ALPHA, GROUND_VEIL, SWATCH_UNDER_TEXT,
-            SWATCH_UNDER_TEXT_ON_GROUND, TEXT, TEXT_2, TEXT_3,
+            BLOOM_TEXT_ALPHA, CARD_SURFACE, GLASS_ALPHA, GLASS_STRONG_ALPHA, GROUND_VEIL,
+            SWATCH_UNDER_TEXT, SWATCH_UNDER_TEXT_ON_GROUND, TEXT, TEXT_2, TEXT_3,
         };
         let css = include_str!("../../src/styles/tokens.css");
         assert_eq!(token(css, "text"), TEXT.to_string());
@@ -113,6 +113,11 @@ mod tests {
         assert_eq!(
             token(css, "swatch-under-text-ground"),
             format!("{}%", (SWATCH_UNDER_TEXT_ON_GROUND * 100.0).round())
+        );
+        // The bloom's mask where text may start (black at the bloom's text alpha).
+        assert_eq!(
+            token(css, "bloom-edge"),
+            format!("#000000{BLOOM_TEXT_ALPHA:02x}")
         );
         // The ground is made readable under the lightest veil, `--selected`.
         assert_eq!(token(css, "selected"), GROUND_VEIL.to_string());

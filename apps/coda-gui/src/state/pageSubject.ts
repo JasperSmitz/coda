@@ -14,6 +14,8 @@ interface Subject {
   entryId: number;
   /** `null`: none; `undefined`: not known yet (loading). */
   url: string | null | undefined;
+  /** The page draws the full-width glow (pages with a cover bloom do not, 2.0 R3). */
+  glow: boolean;
 }
 
 let subject: Subject | null = null;
@@ -26,14 +28,30 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** A view: `entry`'s page is about the cover at `url` (`null`: none; `undefined`: still loading). */
-export function usePageSubject(entry: Entry, url: string | null | undefined) {
+/**
+ * A view: `entry`'s page is about the cover at `url` (`null`: none;
+ * `undefined`: still loading). `glow: false`: the page shows its own
+ * bloom of the cover (Home, album and playlist pages), so App draws no
+ * full-width glow behind its top.
+ */
+export function usePageSubject(
+  entry: Entry,
+  url: string | null | undefined,
+  { glow = true }: { glow?: boolean } = {},
+) {
   const id = entry.id;
   useEffect(() => {
-    if (subject?.entryId === id && subject.url === url) return;
-    subject = { entryId: id, url };
+    if (subject?.entryId === id && subject.url === url && subject.glow === glow) return;
+    subject = { entryId: id, url, glow };
     listeners.forEach((l) => l());
-  }, [id, url]);
+  }, [id, url, glow]);
+}
+
+/** Whether the page shown for entry `entryId` wants the full-width glow. */
+export function usePageGlow(entryId: number | null): boolean {
+  return useSyncExternalStore(subscribe, () =>
+    entryId !== null && subject?.entryId === entryId ? subject.glow : true,
+  );
 }
 
 /**

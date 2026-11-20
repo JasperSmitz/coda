@@ -452,6 +452,90 @@
   );
 }
 
+/* ----- the ground field and the cover blooms (2.0 R3) ----- */
+
+/* The page's ground field (components/GroundField) behind the whole
+   window: crossfading opaque layers, each its own compositing layer. */
+.ground-field {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ground-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  will-change: opacity;
+}
+
+/* A bloom of a cover's art (components/CoverBloom): a box around the
+   cover (its margins `--bloom-mx` and `--bloom-mt`/`--bloom-mb`), the
+   art stretched over
+   it, blurred, under a mask that is the product of two ramps: across,
+   fully there within the cover, down to `--bloom-edge` at `--reach-x`
+   beyond it, to nothing at the box's sides; down, the same with
+   `--reach-top` and `--reach-bottom`. So any point `reach` or more beyond
+   the cover on a side has at most `--bloom-edge` of it (× the bloom's
+   opacity): there text keeps every level's contrast over any colour
+   (core's `BLOOM_TEXT_ALPHA`, tested over every ground and their mixes).
+   Each user keeps its text at least the reach away from the cover. */
+.cover-bloom {
+  --bloom-mx: 110px;
+  --bloom-my: 110px;
+  /* The box's margins above and below the cover (default: both `--bloom-my`). */
+  --bloom-mt: var(--bloom-my);
+  --bloom-mb: var(--bloom-my);
+  --reach-x: var(--bloom-reach);
+  --reach-top: var(--bloom-reach);
+  --reach-bottom: var(--bloom-reach);
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  --bloom-mask-x: linear-gradient(
+    to right,
+    transparent 0,
+    var(--bloom-edge) calc(var(--bloom-mx) - var(--reach-x)),
+    var(--mask-solid) var(--bloom-mx),
+    var(--mask-solid) calc(100% - var(--bloom-mx)),
+    var(--bloom-edge) calc(100% - var(--bloom-mx) + var(--reach-x)),
+    transparent 100%
+  );
+  --bloom-mask-y: linear-gradient(
+    to bottom,
+    transparent 0,
+    var(--bloom-edge) calc(var(--bloom-mt) - var(--reach-top)),
+    var(--mask-solid) var(--bloom-mt),
+    var(--mask-solid) calc(100% - var(--bloom-mb)),
+    var(--bloom-edge) calc(100% - var(--bloom-mb) + var(--reach-bottom)),
+    transparent 100%
+  );
+  -webkit-mask-image: var(--bloom-mask-x), var(--bloom-mask-y);
+  -webkit-mask-composite: source-in;
+  mask-image: var(--bloom-mask-x), var(--bloom-mask-y);
+  mask-composite: intersect;
+  /* On the group, not on each layer: a layer fading in over another
+     covers it fully, so pruning the one under it changes nothing. */
+  opacity: var(--bloom-opacity);
+}
+
+.bloom-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  will-change: opacity;
+}
+
+.bloom-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  filter: var(--bloom-filter);
+  user-select: none;
+}
+
 /* ----- main ----- */
 
 .main {

@@ -191,7 +191,8 @@ const GROUND_RELEASE_MS = 200;
 const GROUND_PENDING_MS = 1500;
 
 /**
- * Paints the page with the ground of the cover at `url` (2.0 R2,
+ * Paints the page with the ground of the cover at `url` (returns its
+ * field's stops for `GroundField`, `null`: the base) (2.0 R2,
  * DESIGN.md "Colour": "Washed"): `--ground` and `--glass-ground` on <html>
  * and `data-ground` (tokens.css switches the glass to it). While a new
  * cover's palette loads, the last ground stays (no detour through the
@@ -201,7 +202,7 @@ const GROUND_PENDING_MS = 1500;
  * which keeps its own look while the page's ground waits behind it, so
  * closing it shows the page as it was, with no blend from the base).
  */
-export function usePageGround(url: string | null | undefined, glass: boolean) {
+export function usePageGround(url: string | null | undefined, glass: boolean): string[] | null {
   // A new page reports its subject just after it mounts: going to none
   // waits a moment (`GROUND_RELEASE_MS`), so a page change from one
   // coloured page to another never dips towards the base on the way; a
@@ -238,6 +239,7 @@ export function usePageGround(url: string | null | undefined, glass: boolean) {
       delete root.dataset.ground;
     }
   }, [ground, glassColour]);
+  return palette?.grounds ?? null;
 }
 
 /** How long the tiles in view must stay put before their palettes are asked for. */

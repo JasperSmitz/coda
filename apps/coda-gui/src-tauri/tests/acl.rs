@@ -16,11 +16,16 @@ fn handler_commands() -> BTreeSet<String> {
         .find("generate_handler![")
         .expect("generate_handler! in lib.rs");
     let body = &LIB[start + "generate_handler![".len()..];
-    let body = &body[..body.find(']').expect("closing ]")];
+    // Up to the macro's `])` (an item may carry an attribute, `#[cfg(…)]`).
+    let body = &body[..body.find("])").expect("closing ])")];
     body.split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(|item| item.rsplit("::").next().unwrap().trim().to_owned())
+        .map(|item| {
+            // Without its attributes.
+            let path = item.rsplit(']').next().unwrap();
+            path.rsplit("::").next().unwrap().trim().to_owned()
+        })
         .collect()
 }
 

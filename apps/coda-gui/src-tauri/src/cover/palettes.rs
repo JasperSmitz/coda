@@ -47,11 +47,14 @@ pub struct PaletteDto {
     pub glow: String,
     /// `false`: a greyscale cover; show the house accent.
     pub vivid: bool,
-    /// Up to four vivid colours of the cover, the largest first
+    /// Up to four vivid colours of the cover, the heaviest first
     /// (`#rrggbb`); none for a greyscale cover.
     pub swatches: Vec<String>,
-    /// The colour of a page about this cover, top to bottom (`#rrggbb`).
+    /// The colour of a page about this cover, top to bottom (`#rrggbb`):
+    /// the first of `grounds`.
     pub ground: String,
+    /// The page's ground field's stops (`#rrggbb`, 1–3; 2.0 R3).
+    pub grounds: Vec<String>,
     /// The floating glass's colour on that page (`#rrggbb`, drawn at the
     /// glass's alpha).
     pub glass: String,
@@ -71,6 +74,7 @@ impl From<Palette> for PaletteDto {
             vivid: p.vivid,
             swatches: p.swatches.iter().map(ToString::to_string).collect(),
             ground: p.ground.to_string(),
+            grounds: p.grounds.iter().map(ToString::to_string).collect(),
             glass: p.glass.to_string(),
             page_wash: p.page_wash,
             player_wash: p.player_wash,
@@ -158,7 +162,8 @@ impl PaletteCache {
 /// What `palette_for_url` found.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAnswer {
-    Palette(PaletteDto),
+    /// Boxed: the DTO is much larger than the other answers.
+    Palette(Box<PaletteDto>),
     /// Definitive: an unknown URL or a cover without art.
     None,
     /// The cover failed to load (a network error, a failed task): ask
@@ -176,7 +181,7 @@ impl CoverService {
         let generation = {
             let mut cache = self.palettes.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(hit) = cache.get(&key) {
-                return PaletteAnswer::Palette(hit);
+                return PaletteAnswer::Palette(Box::new(hit));
             }
             cache.generation
         };
@@ -197,7 +202,7 @@ impl CoverService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, palette.clone(), generation);
-        PaletteAnswer::Palette(palette)
+        PaletteAnswer::Palette(Box::new(palette))
     }
 
     /// The palettes of up to [`MAX_BATCH`] cover URLs (duplicates once),
@@ -223,7 +228,7 @@ impl CoverService {
         while let Some(done) = tasks.join_next().await {
             match done {
                 Ok((url, PaletteAnswer::Palette(palette))) => {
-                    answers.insert(url, Some(palette));
+                    answers.insert(url, Some(*palette));
                 }
                 Ok((url, PaletteAnswer::None)) => {
                     answers.insert(url, None);
@@ -261,6 +266,7 @@ mod tests {
             vivid: true,
             swatches: Vec::new(),
             ground: "#25202d".into(),
+            grounds: vec!["#25202d".into()],
             glass: "#25202d".into(),
             page_wash: 0.25,
             player_wash: 0.35,
@@ -301,6 +307,7 @@ mod tests {
             "vivid",
             "swatches",
             "ground",
+            "grounds",
             "glass",
             "pageWash",
             "playerWash",
@@ -340,7 +347,7 @@ mod tests {
             .palettes_for_urls(vec![url.clone()])
             .await
             .unwrap();
-        assert_eq!(answers[&url], Some(first));
+        assert_eq!(answers[&url], Some(*first));
         // A cover without art answers null.
         let bare = tempfile::tempdir().unwrap();
         let none = local_url(&service, bare.path());

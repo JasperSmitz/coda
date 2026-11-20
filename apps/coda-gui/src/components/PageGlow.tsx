@@ -28,10 +28,11 @@
 // tech, no pointer events, each layer its own compositing layer (CSS), so
 // scrolling or anything moving over it does not repaint the blur.
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { coverSrc } from "../lib/ipc";
 import { failed, initialLayers, loaded, prune, setUrl, type Layer, type Layers } from "../lib/glowLayers";
-import { cssMs, easing } from "../lib/motion";
+import { useLayerFade } from "../hooks/useLayerFade";
+import { cssMs } from "../lib/motion";
 import { withAlpha } from "../lib/palette";
 import type { Palette } from "../lib/types";
 import { usePaletteState } from "../state/palettes";
@@ -167,8 +168,6 @@ function GlowLayer({
   onFailed: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const fade = useRef<Animation | null>(null);
-  const appeared = useRef(false);
   const palette = usePaletteState(layer.url);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [gaveUp, setGaveUp] = useState(false);
@@ -200,25 +199,7 @@ function GlowLayer({
     if (ready) report.current();
   }, [ready]);
 
-  // Fades to the wanted opacity from wherever the layer is now.
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const target = visible ? 1 : 0;
-    const from = Number(getComputedStyle(element).opacity);
-    fade.current?.cancel();
-    fade.current = null;
-    element.style.opacity = String(target);
-    const first = visible && !appeared.current;
-    if (visible) appeared.current = true;
-    const ms = first && instant ? 0 : fadeMs();
-    if (ms <= 0 || from === target || typeof element.animate !== "function") return;
-    fade.current = element.animate([{ opacity: from }, { opacity: target }], {
-      duration: ms * Math.abs(target - from),
-      easing: easing("--ease-in-out"),
-    });
-  }, [visible]);
-  useEffect(() => () => fade.current?.cancel(), []);
+  useLayerFade(ref, visible, instant, fadeMs);
 
   return (
     <div ref={ref} className="glow-layer" style={washStyle(wash !== undefined ? wash : (palette ?? null), surface, ground)}>

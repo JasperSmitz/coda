@@ -424,7 +424,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   const cover = ownCover ?? tracks[0]?.coverUrl ?? null;
   const context = playlistContext(source, { id, name: title, coverUrl: cover });
   useShuffleContext(tracks.length > 0 ? () => playTracks(tracks, undefined, true, context) : null);
-  usePageSubject(entry, cover ?? (load.state === "loading" ? undefined : null));
+  usePageSubject(entry, cover ?? (load.state === "loading" ? undefined : null), { glow: false });
 
   // The detail has no name (`getPlaylist` sends none here): use the shown one.
   const playlist: Playlist | null = detail ? { ...detail.playlist, name: title } : null;
@@ -466,6 +466,7 @@ export function PlaylistView({ entry, source, id, name, hint }: PlaylistProps) {
   return (
     <section className="view">
       <PageHeader
+        bloom={cover}
         cover={
           mosaic.length >= 4 ? (
             <CoverMosaic urls={mosaic} name={title} />

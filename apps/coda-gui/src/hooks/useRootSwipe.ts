@@ -5,20 +5,21 @@
 // Preferences. It goes through `nav.selectRoot`, as a click on the top
 // bar's entry does (the page transition, the scroll restored).
 //
-// A gesture is ignored when it starts inside a horizontally scrollable
+// A stream is ignored when it starts inside a horizontally scrollable
 // element that can still scroll its way, a text area, a text field whose
-// text is wider than it (Search's field otherwise lets swipes through), a
-// slider, the queue panel, a dialog or a menu (or while one is open)
-// (`blocksSwipe`); one that starts while a page transition runs waits
-// for it to end. After a switch the gesture stays locked (its momentum,
-// also when the webview delivers it after a pause while it draws the new
-// page) for at least lib/swipe.ts's cooldown and until the wheel pauses
-// outside a page change or a new swipe rises out of the momentum (by
-// speed, from the events' time stamps; one seen during the lock starts
-// when it ends). The state is the module's, one for the app, so
-// nothing that remounts or re-renders on navigation resets it. Not
-// listening in Now Playing or onboarding. The listener is passive: it
-// never stops the page or a list from scrolling.
+// text is wider than it, a slider, the queue panel, a dialog or a menu
+// (or while one is open) (`blocksSwipe`), while a page change runs and
+// until lib/swipe.ts's settle time after it ended (watched on <html>'s
+// `data-vt`, on the same clock as the events' time stamps). One switch
+// per stream of wheel events (lib/swipe.ts). The state is the module's,
+// one for the app, so nothing that remounts or re-renders on navigation
+// resets it. Not listening in Now Playing or onboarding. The listener is
+// passive: it never stops the page or a list from scrolling.
+//
+// Development builds trace every wheel event it sees (time stamp, deltas
+// and their mode, whether a page change runs, what the rule did) into the
+// app's log (lib/devTrace.ts), to tune the rule from what the webview
+// really delivers (`scripts/smoke.md` "2.0 R3").
 
 import { useEffect } from "react";
 import {
@@ -29,6 +30,7 @@ import {
   type SwipeNode,
   type SwipeState,
 } from "../lib/swipe";
+import { devTrace } from "../lib/devTrace";
 import { nav } from "../state/nav";
 
 /** Open things that hold the swipe wherever it starts. */
@@ -64,12 +66,22 @@ function pixels(e: WheelEvent, delta: number): number {
   return delta;
 }
 
-/** The gesture so far, for the app (kept across navigation and re-renders). */
+/** The stream so far, for the app (kept across navigation and re-renders). */
 let state: SwipeState = initialSwipe;
+/** When the last page change ended (`performance.now()`, the events' clock). */
+let changeEnded = Number.NEGATIVE_INFINITY;
 
 export function useRootSwipe(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return;
+    // A page change's end: <html> loses `data-vt`.
+    let wasBusy = transitionRunning();
+    const observer = new MutationObserver(() => {
+      const busy = transitionRunning();
+      if (wasBusy && !busy) changeEnded = performance.now();
+      wasBusy = busy;
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-vt"] });
     const onWheel = (e: WheelEvent) => {
       const target = e.target instanceof Element ? e.target : null;
       const allowed = (direction: 1 | -1) => {
@@ -77,22 +89,34 @@ export function useRootSwipe(enabled: boolean) {
         const node = swipeNode(target);
         return node !== null && !blocksSwipe(node, direction);
       };
+      const busy = transitionRunning();
       const result = swipe(
         state,
         {
           dx: pixels(e, e.deltaX),
           dy: pixels(e, e.deltaY),
           t: e.timeStamp,
-          busy: transitionRunning(),
+          busy,
+          changeEnded,
         },
         allowed,
       );
       state = result.state;
+      if (import.meta.env.DEV) {
+        devTrace(
+          `swipe t=${e.timeStamp.toFixed(1)} dx=${e.deltaX.toFixed(1)} dy=${e.deltaY.toFixed(1)} ` +
+            `mode=${e.deltaMode} busy=${busy ? 1 : 0} ended=${changeEnded.toFixed(1)} ` +
+            `${result.note} phase=${state.phase} travel=${state.dx.toFixed(0)}`,
+        );
+      }
       if (result.step === 0) return;
       const root = swipeTarget(nav.activeRoot(), result.step);
       if (root) nav.selectRoot(root);
     };
     window.addEventListener("wheel", onWheel, { passive: true });
-    return () => window.removeEventListener("wheel", onWheel);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      observer.disconnect();
+    };
   }, [enabled]);
 }

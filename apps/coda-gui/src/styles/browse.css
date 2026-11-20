@@ -49,6 +49,27 @@
    the byline, the meta line and the actions. */
 .page-header {
   padding: 28px 0 30px;
+  /* Its cover's bloom sits behind its text (z-index -1, within). */
+  isolation: isolate;
+}
+
+/* The cover and its bloom (album and playlist pages, 2.0 R3): 110px of
+   art to the sides and above, 48px below. Text keeps the bloom's reach
+   away: the title block `--bloom-clearance` (32px) to the right, or below
+   when stacked in narrow windows (`.page-header-main`'s gap, both
+   layouts); the bloom ends 48px below the cover, before the hairline
+   (50px) and the track list (~74px), so no row sits on it, not even a
+   selected one; above, the Back button sits 10px over the cover, so the
+   bloom is full only 8px above it. */
+.page-header-cover-wrap {
+  position: relative;
+  flex: none;
+}
+
+.header-bloom {
+  --bloom-mb: 48px;
+  inset: -110px -110px calc(-1 * var(--bloom-mb));
+  --reach-top: 8px;
 }
 
 .back-button {
@@ -58,7 +79,8 @@
 .page-header-main {
   display: flex;
   align-items: flex-end;
-  gap: 32px;
+  /* Text this far from the cover: clear of its bloom's full strength. */
+  gap: var(--bloom-clearance);
 }
 
 .page-header-cover {
@@ -188,7 +210,6 @@
   .page-header-main {
     flex-direction: column;
     align-items: flex-start;
-    gap: 22px;
   }
 }
 
@@ -1627,7 +1648,8 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
-  padding: 28px 0 4px;
+  /* With the track's pad: `--bloom-clearance` above the focused cover. */
+  padding: 28px 0 calc(var(--bloom-clearance) - var(--carousel-pad));
 }
 
 .home-heading {
@@ -1686,6 +1708,28 @@
 .carousel-track {
   position: relative;
   height: calc(var(--carousel-size) + 2 * var(--carousel-pad));
+}
+
+/* The carousel is a stacking context: the focused cover's bloom (z-index
+   -1) sits behind the heading, the covers and the text. */
+.carousel {
+  isolation: isolate;
+}
+
+/* The focused cover's bloom (2.0 R3): 2.4× the cover wide (its colours
+   spread sideways, where only covers are), 110px above and below. Text
+   keeps `--bloom-clearance` (32px) away: the heading above the cover
+   (the track's pad and `.home-header`'s bottom padding), the title below
+   (the pad and `.carousel-meta`'s top padding). Centred and still; the
+   covers slide over it. */
+.carousel-bloom {
+  --bloom-mx: calc(var(--carousel-size) * 0.7);
+  --reach-x: calc(var(--carousel-size) * 0.5);
+  top: calc(var(--carousel-pad) - var(--bloom-my));
+  left: 50%;
+  width: calc(var(--carousel-size) * 2.4);
+  height: calc(var(--carousel-size) + 2 * var(--bloom-my));
+  transform: translateX(-50%);
 }
 
 /* The focused cover's glow, in the page's accent (`--glow` follows the
@@ -1768,24 +1812,25 @@
 }
 
 /* Under the cover: title, artist, the quiet line, the dots, the actions,
-   over the page's glow (worst: an all-white cover over and under its
-   ground #25202d, washed 0.81 at the wash's lightest, about #3f3a46,
-   app.css `.page-glow`;
-   it is darker here, below the wash's middle) and the end of the focused
-   cover's glow (`.carousel-track::before`: the accent at 45% under a
-   28px-sigma blur whose edge is 2px above the cover's bottom). With a
-   white accent, sRGB compositing: at the title's top (30px below the
-   cover, glow ~6%, about #4b4651) text 8.3:1; at the artist line (~0.3%)
-   text-2 4.7:1; at the quiet line (none) text-2 4.8:1, the dots' text-3
-   3.1:1. A yellow cover (ground #242400, wash 0.80, #3f3f00) and accent:
-   text 8.7, text-2 4.8, text-3 3.0. So the artist and the quiet line are text-2, never
-   text-3. */
+   `--bloom-clearance` below it, over the ground field (no page glow on
+   Home since 2.0 R3), the faded edge of the focused cover's bloom (at
+   most `--bloom-edge` × its opacity, 0x1f × 0.92 ≈ 11%, of any colour;
+   worst: white) and the end of the focused cover's accent glow
+   (`.carousel-track::before`: the accent at 45% under a 28px-sigma blur
+   whose edge is 2px above the cover's bottom). Worst case, sRGB
+   compositing, a white cover (ground #25202d, the lightest kind), a white
+   bloom and a white accent: at the title's top (glow ~6%, about #49454f)
+   text 8.5:1; at the artist line (~0.3%, #3e3a45) text-2 4.8:1; at the
+   quiet line (none, #3d3944) text-2 4.9:1, the dots' text-3 3.1:1. A
+   yellow cover (ground #242400): text 8.6, text-2 4.9, text-3 3.1. So the
+   artist and the quiet line are text-2, never text-3. */
 .carousel-meta {
   display: flex;
   flex-direction: column;
   align-items: center;
   min-height: var(--carousel-meta-h);
-  padding-top: 6px;
+  /* With the track's pad: `--bloom-clearance` below the cover. */
+  padding-top: calc(var(--bloom-clearance) - var(--carousel-pad));
   text-align: center;
 }
 
@@ -1895,10 +1940,10 @@
   padding: 26px 24px 22px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  background-color: var(--ground);
+  /* The page's ground field shows through (2.0 R3). */
+  background: none;
   overflow: hidden;
   isolation: isolate;
-  transition: background-color var(--motion-tint) var(--ease-in-out);
 }
 
 .mood-card::before {

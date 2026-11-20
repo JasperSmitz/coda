@@ -8,6 +8,7 @@
 // control, sorts, …) stay reachable in a tool row that sticks under the
 // top bar.
 
+import { CoverBloom } from "../components/CoverBloom";
 import {
   useEffect,
   useLayoutEffect,
@@ -84,6 +85,7 @@ function BackButton() {
 export function PageHeader({
   cover,
   round = false,
+  bloom,
   eyebrow,
   title,
   byline,
@@ -94,6 +96,8 @@ export function PageHeader({
   cover?: ReactNode;
   /** A round cover (artists). */
   round?: boolean;
+  /** A bloom of this art behind the cover (album and playlist pages; 2.0 R3). */
+  bloom?: string | null;
   eyebrow?: string;
   title: string;
   byline?: ReactNode;
@@ -106,8 +110,13 @@ export function PageHeader({
       {stack.length > 1 && <BackButton />}
       <div className={`page-header-main ${cover ? "" : "no-cover"}`}>
         {cover && (
-          <div id="page-cover" className={`page-header-cover ${round ? "round" : ""}`}>
-            {cover}
+          // The bloom is outside `#page-cover`, which a cover morph names
+          // (it would fly with the cover).
+          <div className="page-header-cover-wrap">
+            {bloom !== undefined && <CoverBloom url={bloom} className="header-bloom" />}
+            <div id="page-cover" className={`page-header-cover ${round ? "round" : ""}`}>
+              {cover}
+            </div>
           </div>
         )}
         <div className="page-header-text">

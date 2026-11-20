@@ -13,6 +13,8 @@ pub mod bootstrap;
 pub mod browse;
 pub mod commands;
 pub mod cover;
+#[cfg(debug_assertions)]
+pub mod debug_trace;
 pub mod dto;
 pub mod engine;
 pub mod frame;
@@ -355,7 +357,9 @@ pub fn run() {
             mixes::mix_search_artists,
             mixes::mix_search_albums,
             frame::commands::window_is_fullscreen,
-            cover::palettes::cover_palettes
+            cover::palettes::cover_palettes,
+            #[cfg(debug_assertions)]
+            debug_trace::debug_trace
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Coda app");

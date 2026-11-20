@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner } from "./components/Banner";
+import { GroundField } from "./components/GroundField";
 import { PageGlow } from "./components/PageGlow";
 import { DialogHost } from "./components/Dialog";
 import { forgetGenreCovers } from "./components/GenreTiles";
@@ -22,7 +23,7 @@ import { setConfigured, startSources, useSources } from "./state/source";
 import { connect, useAppState } from "./state/store";
 import { startAccent } from "./state/accent";
 import { NowPlayingOpener } from "./state/nowPlaying";
-import { usePageCover } from "./state/pageSubject";
+import { usePageCover, usePageGlow } from "./state/pageSubject";
 import { useColourScope, usePageGround } from "./state/palettes";
 import type { Snapshot } from "./lib/types";
 import { BrowseView } from "./views/BrowseView";
@@ -171,9 +172,11 @@ export default function App() {
   const pageScroller = useMemo(() => ({ current: pageEl }), [pageEl]);
   const pageCover = usePageCover(immersive ? null : top.id) ?? null;
   useColourScope(mainRef, pageCover);
-  // The whole page takes its subject's ground (pages without one: the
-  // base), kept behind Now Playing so closing it shows the page as it was.
-  usePageGround(usePageCover(top.id), !immersive);
+  // The whole page takes its subject's ground field (pages without one:
+  // the base), kept behind Now Playing so closing it shows the page as it
+  // was. Pages with a bloom of their cover draw no full-width glow.
+  const groundStops = usePageGround(usePageCover(top.id), !immersive);
+  const pageGlow = usePageGlow(top.id) ? pageCover : null;
 
   // `started`: the engine accepts intents (not starting or quitting);
   // `ready`: playback works too.
@@ -296,10 +299,11 @@ export default function App() {
   const queueOpen = layoutQueueOpen;
   return (
     <div className={`app ${queueOpen ? "has-queue-panel" : ""}`}>
+      <GroundField stops={groundStops} />
       <TopBar />
       <main className="main page" ref={setMain}>
         <PageScroller.Provider value={pageScroller}>
-          <PageGlow url={pageCover} />
+          <PageGlow url={pageGlow} />
           {/* The clearance under the top bar is on this unpositioned
               wrapper, not on the scroller: a sticky element's offset counts
               from the scroller's padding edge (app.css `.page-content`). */}

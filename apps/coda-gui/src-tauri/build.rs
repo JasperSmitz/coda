@@ -76,6 +76,9 @@ fn main() {
         "window_is_fullscreen",
         // The covers' palettes (music colours).
         "cover_palettes",
+        // Development builds only (the command is compiled only with
+        // `debug_assertions`): trace lines for the log (2.0 R3).
+        "debug_trace",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to run tauri-build");

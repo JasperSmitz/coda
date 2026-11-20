@@ -84,9 +84,10 @@
      Unscoped: the base. */
   --tint: var(--bg);
   /* The page's colour (2.0 R2, "Washed"): a page with a subject is
-     painted with its cover's ground (core's `Palette.ground`: the
-     dominant hue, deep, as light as keeps every text level readable even
-     under `--selected`), set on <html> by `usePageGround`
+     painted with its cover's ground (core's `Palette.ground`, the first
+     of its field's stops: its heaviest swatch's hue, deep, as light as
+     keeps every text level readable even under `--selected`; since R3 it
+     can differ in hue from `--tint`, the dominant hue's), set on <html> by `usePageGround`
      (state/palettes.ts) with `data-ground`; a page without one, the base.
      Use it wherever "the page's colour" is meant; `--bg` stays the fixed
      base (the native window, Now Playing, the contrast maths). Elements
@@ -176,6 +177,23 @@
      `--swatch-under-text` where text is drawn on them (core's
      `SWATCH_UNDER_TEXT`, tested: every text level keeps its contrast over
      any swatch), `--swatch-strong` where none is (above the text). */
+  /* A bloom of a cover's art around it (2.0 R3, components/CoverBloom):
+     how it is drawn, and its mask (app.css `.cover-bloom`): fully there
+     up to `--bloom-reach` beyond the cover on the sides where text sits,
+     at most `--bloom-edge` from there (black at the alpha of core's
+     `BLOOM_TEXT_ALPHA`, the ground veil's: every text level keeps its
+     contrast over any colour at it; src-tauri tests keep them in step),
+     then nothing. `--mask-solid`: a mask's fully shown. */
+  --bloom-opacity: 0.92;
+  --bloom-filter: blur(64px) saturate(1.6);
+  --bloom-edge: #0000001f;
+  --bloom-reach: 28px;
+  /* The least distance from a bloomed cover to text: beyond the reach,
+     with a margin. Layouts with a bloom space their text by it (browse.css
+     `.page-header-main`, Home's carousel), so a layout change cannot put
+     text in the bloom's full strength without changing this. */
+  --bloom-clearance: calc(var(--bloom-reach) + 4px);
+  --mask-solid: #000000;
   --swatch-under-text: 24%;
   --swatch-under-text-ground: 10%;
   --swatch-strong: 50%;

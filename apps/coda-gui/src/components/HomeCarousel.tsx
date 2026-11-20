@@ -18,6 +18,7 @@ import { quietLine, slot } from "../lib/home";
 import { morphKey } from "../lib/pageTransition";
 import type { HomeItem } from "../lib/types";
 import { Cover } from "./Cover";
+import { CoverBloom } from "./CoverBloom";
 import { BackIcon, ForwardIcon, PlayIcon } from "./icons";
 import { NameLink } from "./NameLink";
 
@@ -141,6 +142,9 @@ export function HomeCarousel({
         aria-label="Where you left off"
         onKeyDown={onKeyDown}
       >
+        {/* The focused cover's art spreading out behind it (it stays put
+            while the covers slide, crossfading to the new focus). */}
+        <CoverBloom url={item?.coverUrl ?? null} className="carousel-bloom" />
         {items.map((it, i) => {
           const s = slot(i - focus);
           const focused = i === focus;
