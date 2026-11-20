@@ -48,6 +48,7 @@
     "allow-prefs-get",
     "allow-prefs-set-accent",
     "allow-prefs-set-library-view",
+    "allow-prefs-set-start-screen",
     "allow-ui-source-get",
     "allow-ui-source-set",
     "allow-home-history",

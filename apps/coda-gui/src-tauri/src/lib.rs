@@ -342,6 +342,7 @@ pub fn run() {
             prefs::commands::prefs_get,
             prefs::commands::prefs_set_accent,
             prefs::commands::prefs_set_library_view,
+            prefs::commands::prefs_set_start_screen,
             prefs::commands::ui_source_get,
             prefs::commands::ui_source_set,
             history::commands::home_history,

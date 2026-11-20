@@ -133,11 +133,14 @@ test("nothing starts while a page change runs", () => {
 });
 
 test("the roots in order, nothing past the ends or from Preferences", () => {
-  assert.equal(swipeTarget("home", 1), "search");
-  assert.equal(swipeTarget("search", 1), "library");
+  // Search · Home · Library (2.0 R4): a left swipe (1) from Home goes to
+  // Library, a right swipe (-1) to Search; the ends are Search and Library.
+  assert.equal(swipeTarget("home", 1), "library");
+  assert.equal(swipeTarget("home", -1), "search");
+  assert.equal(swipeTarget("search", 1), "home");
+  assert.equal(swipeTarget("library", -1), "home");
   assert.equal(swipeTarget("library", 1), null);
-  assert.equal(swipeTarget("library", -1), "search");
-  assert.equal(swipeTarget("home", -1), null);
+  assert.equal(swipeTarget("search", -1), null);
   assert.equal(swipeTarget("prefs", 1), null);
 });
 

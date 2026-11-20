@@ -17,6 +17,7 @@ import type {
   SourceKind,
   TrackRef,
   VisualizerFrame,
+  StartScreen,
 } from "./types";
 
 /** Sends an intent to the engine. Failures (only while quitting) are logged. */
@@ -135,6 +136,8 @@ export const prefsApi = {
   setAccent: (accent: string) => invoke<Prefs>("prefs_set_accent", { accent }),
   /** Library's default view; answers with the new state. */
   setLibraryView: (view: LibraryView) => invoke<Prefs>("prefs_set_library_view", { view }),
+  /** The screen the app starts on; answers with the new state. */
+  setStartScreen: (screen: StartScreen) => invoke<Prefs>("prefs_set_start_screen", { screen }),
 };
 
 // ----- the browsed source (`settings.toml`) -----

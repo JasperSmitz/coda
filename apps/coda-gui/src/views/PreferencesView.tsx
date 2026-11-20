@@ -1,8 +1,9 @@
 // Preferences ("Make it yours"), glass cards in this order: the accent
 // (from the music, the default; curated swatches or a custom colour; the
 // GUI's own settings.toml, see state/accent), the music source (the Local | Navidrome switch,
-// Ctrl/Cmd+1/2, and its status), Library (Covers or List by default,
-// settings.toml too, see state/libraryView), music folder (native picker), Navidrome
+// Ctrl/Cmd+1/2, and its status), Library (Covers or List by default and
+// the screen to start on, settings.toml too, see state/libraryView and
+// state/startScreen), music folder (native picker), Navidrome
 // server (test, save, disconnect; the lyrics index's status, Rebuild and
 // switch), cover art and scrobbling. Those after the accent are saved to
 // Coda's config.toml (shared with the TUI) and the keychain by the
@@ -10,10 +11,19 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ServerFields, serverComplete } from "../components/ServerFields";
-import { GridIcon, ListIcon, LocalIcon, ServerIcon } from "../components/icons";
+import {
+  GridIcon,
+  HomeIcon,
+  LibraryIcon,
+  ListIcon,
+  LocalIcon,
+  SearchIcon,
+  ServerIcon,
+} from "../components/icons";
 import { bothConfigured, switchSource, useSources } from "../state/source";
 import { accent, useAccent } from "../state/accent";
 import { chooseLibraryDefault, useLibraryDefault } from "../state/libraryView";
+import { chooseStartScreen, useStartScreen } from "../state/startScreen";
 import { HOUSE, MIN_ACCENT_CONTRAST, normalizeHex } from "../lib/accent";
 import { MUSIC } from "../lib/palette";
 import { isMacos } from "../lib/platform";
@@ -27,6 +37,7 @@ import type {
   Settings,
   Snapshot,
   SourceKind,
+  StartScreen,
 } from "../lib/types";
 
 /** A second click within this time disconnects. */
@@ -439,7 +450,65 @@ function LibrarySection() {
         A section you switch in Library keeps its own choice.
       </p>
       {error && <p className="settings-status settings-status-error">{error}</p>}
+      <StartScreenChoice />
     </section>
+  );
+}
+
+/** The screens to start on, in the top bar's order. */
+const START_SCREENS: { screen: StartScreen; label: string; icon: ReactNode }[] = [
+  { screen: "search", label: "Search", icon: <SearchIcon size={15} /> },
+  { screen: "home", label: "Home", icon: <HomeIcon size={15} /> },
+  { screen: "library", label: "Library", icon: <LibraryIcon size={15} /> },
+];
+
+/**
+ * Start on: Search, Home (the default) or Library (2.0 R4), in the
+ * Library card. Saved at once, applied at the next launch.
+ */
+function StartScreenChoice() {
+  const { screen, error } = useStartScreen();
+  const onKeyDown = (e: KeyboardEvent) => {
+    const step = radioArrow(e);
+    if (step === 0) return;
+    // Not a seek (the global ←/→).
+    e.preventDefault();
+    e.stopPropagation();
+    const at = START_SCREENS.findIndex((s) => s.screen === screen);
+    const next = START_SCREENS[(at + step + START_SCREENS.length) % START_SCREENS.length].screen;
+    chooseStartScreen(next);
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>('.start-screen-switch [aria-checked="true"]')?.focus(),
+    );
+  };
+  return (
+    <>
+      <p className="secondary" id="settings-start-on">
+        Start on
+      </p>
+      <div
+        className="source-switch start-screen-switch"
+        role="radiogroup"
+        aria-labelledby="settings-start-on"
+        onKeyDown={onKeyDown}
+      >
+        {START_SCREENS.map(({ screen: kind, label, icon }) => (
+          <button
+            key={kind}
+            role="radio"
+            aria-checked={screen === kind}
+            tabIndex={screen === kind ? 0 : -1}
+            className={`source-option ${screen === kind ? "is-active" : ""}`}
+            onClick={() => chooseStartScreen(kind)}
+          >
+            {icon}
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="secondary">Used the next time Coda starts.</p>
+      {error && <p className="settings-status settings-status-error">{error}</p>}
+    </>
   );
 }
 

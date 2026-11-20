@@ -4,7 +4,7 @@
 
 use tauri::State;
 
-use super::{Accent, LibraryView, Prefs, PrefsDto, PrefsStore};
+use super::{Accent, LibraryView, Prefs, PrefsDto, PrefsStore, StartScreen};
 use crate::history::SourceKind;
 
 type Result<T> = std::result::Result<T, String>;
@@ -34,6 +34,19 @@ pub async fn prefs_set_library_view(
 ) -> Result<PrefsDto> {
     let view = LibraryView::parse(&view).ok_or_else(|| format!("“{view}” is not a view"))?;
     save_prefs(&store, |prefs| prefs.library_view = view).await?;
+    Ok(PrefsDto::new(&store.state.lock().await.0))
+}
+
+/// Saves the screen the app starts on: `"home"`, `"search"` or
+/// `"library"`. Answers with the new state.
+#[tauri::command]
+pub async fn prefs_set_start_screen(
+    store: State<'_, PrefsStore>,
+    screen: String,
+) -> Result<PrefsDto> {
+    let screen =
+        StartScreen::parse(&screen).ok_or_else(|| format!("“{screen}” is not a screen"))?;
+    save_prefs(&store, |prefs| prefs.start_screen = screen).await?;
     Ok(PrefsDto::new(&store.state.lock().await.0))
 }
 

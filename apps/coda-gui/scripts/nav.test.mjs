@@ -6,6 +6,9 @@ import { test } from "node:test";
 import {
   activeRoot,
   back,
+  BROWSE_ROOTS,
+  isBrowseRoot,
+  rootBeside,
   current,
   currentStack,
   effectiveSection,
@@ -294,4 +297,32 @@ test("a page change is a push, Back, or else (for the page transition's morph)",
   assert.equal(pageChange(s1, push(s1, album("a"))), "other");
   // Replacing the top (a new sort) is no push.
   assert.equal(pageChange(s1, replaceTop(s1, album("c"))), "other");
+});
+
+test("the roots in the top bar's order, Home in the middle", () => {
+  assert.deepEqual([...BROWSE_ROOTS], ["search", "home", "library"]);
+  assert.equal(rootBeside("home", -1), "search");
+  assert.equal(rootBeside("home", 1), "library");
+  assert.equal(rootBeside("search", 1), "home");
+  assert.equal(rootBeside("library", -1), "home");
+  assert.equal(rootBeside("search", -1), null);
+  assert.equal(rootBeside("library", 1), null);
+  assert.equal(rootBeside("prefs", 1), null);
+});
+
+test("the start screen is the root shown at first, on both sources", () => {
+  for (const root of ["home", "search", "library"]) {
+    let s = initialNav({ local: "artists", navidrome: "albums" }, "local", root);
+    assert.equal(activeRoot(s), root);
+    // Library opens at its remembered section; Search with an empty query.
+    if (root === "library") assert.equal(topEntry(s).route.kind, "artists");
+    if (root === "search") assert.equal(topEntry(s).route.query, "");
+    s = setSource(s, "navidrome");
+    assert.equal(activeRoot(s), root, "the other source starts there too");
+  }
+  // Home by default.
+  assert.equal(activeRoot(initialNav({ local: "albums", navidrome: "albums" })), "home");
+  assert.equal(isBrowseRoot("library"), true);
+  assert.equal(isBrowseRoot("prefs"), false);
+  assert.equal(isBrowseRoot(undefined), false);
 });

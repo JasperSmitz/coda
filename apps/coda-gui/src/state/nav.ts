@@ -44,11 +44,27 @@ function saveSection(source: SourceKind, section: Section) {
  * (one transition, not a queue of them).
  */
 const listeners = new Set<() => void>();
+/**
+ * The screen to start on (Preferences › Start on, 2.0 R4): the backend's
+ * initialization script marks it on <html> (`data-start-screen`) before
+ * this module loads, so the first paint is already that screen. Anything
+ * else: Home. Search focuses its field as it mounts; Library opens at its
+ * remembered section.
+ */
+function startScreen(): BrowseRoot {
+  const value = typeof document === "undefined" ? null : document.documentElement.dataset.startScreen;
+  return model.isBrowseRoot(value) ? value : "home";
+}
+
 const staged = createStaged<NavState>(
-  model.initialNav({
-    local: loadSection("local"),
-    navidrome: loadSection("navidrome"),
-  }),
+  model.initialNav(
+    {
+      local: loadSection("local"),
+      navidrome: loadSection("navidrome"),
+    },
+    "local",
+    startScreen(),
+  ),
   {
     transitions: (from, to) => model.topEntry(from) !== model.topEntry(to) && viewTransitionsOn(),
     start: (from, to, publish) =>

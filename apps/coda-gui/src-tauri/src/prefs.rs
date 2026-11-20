@@ -1,8 +1,9 @@
 //! The GUI's own preferences (`~/.config/coda-app/settings.toml`), apart
 //! from Coda's shared `config.toml`: the accent colour (DESIGN.md
 //! "Preferences"; `"music"` by default, also when the key is missing),
-//! the source the app browses, the Navidrome lyrics index switch and
-//! Library's default view (`libraryView`: Covers or List). Written atomically; an unreadable or invalid file means
+//! the source the app browses, the Navidrome lyrics index switch,
+//! Library's default view (`libraryView`: Covers or List) and the screen
+//! the app starts on (`startScreen`: Home, Search or Library; 2.0 R4). Written atomically; an unreadable or invalid file means
 //! the defaults (and is kept as `settings.toml.bad` when it is next
 //! replaced). Keys this version does not know, such as 1.x's theme
 //! settings (`mode`, `theme`, `lightTheme`, `darkTheme`, `accents`,
@@ -130,6 +131,52 @@ impl From<LibraryView> for String {
     }
 }
 
+/// The screen the app starts on (Preferences › Start on; 2.0 R4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum StartScreen {
+    #[default]
+    Home,
+    Search,
+    Library,
+}
+
+impl StartScreen {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "home" => Some(Self::Home),
+            "search" => Some(Self::Search),
+            "library" => Some(Self::Library),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Search => "search",
+            Self::Library => "library",
+        }
+    }
+}
+
+/// An unknown value in the file reads as Home, keeping the file's other
+/// settings.
+impl From<String> for StartScreen {
+    fn from(text: String) -> Self {
+        Self::parse(&text).unwrap_or_else(|| {
+            tracing::info!("settings.toml: startScreen is not home, search or library; using home");
+            Self::default()
+        })
+    }
+}
+
+impl From<StartScreen> for String {
+    fn from(screen: StartScreen) -> Self {
+        screen.as_str().to_owned()
+    }
+}
+
 /// The preferences as saved (camelCase keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -144,6 +191,8 @@ pub struct Prefs {
     pub lyrics_index: bool,
     /// Library's default view of albums and artists.
     pub library_view: LibraryView,
+    /// The screen the app starts on.
+    pub start_screen: StartScreen,
 }
 
 impl Default for Prefs {
@@ -153,6 +202,7 @@ impl Default for Prefs {
             source: None,
             lyrics_index: true,
             library_view: LibraryView::Covers,
+            start_screen: StartScreen::Home,
         }
     }
 }
@@ -175,6 +225,8 @@ pub struct PrefsDto {
     pub lyrics_index: bool,
     /// `"covers"` or `"list"`.
     pub library_view: LibraryView,
+    /// `"home"`, `"search"` or `"library"`.
+    pub start_screen: StartScreen,
 }
 
 impl PrefsDto {
@@ -189,6 +241,7 @@ impl PrefsDto {
             source: prefs.source,
             lyrics_index: prefs.lyrics_index,
             library_view: prefs.library_view,
+            start_screen: prefs.start_screen,
         }
     }
 }
@@ -238,10 +291,13 @@ impl PrefsStore {
 /// scopes read it until the preferences have loaded, so a "From the
 /// music" start never blends from amber) and sets a chosen accent
 /// (`--accent`, `--accent-text`; `--accent-soft` and the visualizer's
-/// `--viz` follow in `tokens.css`). Only the mode and two hex values go
-/// in, as JSON.
+/// `--viz` follow in `tokens.css`). It also marks the screen to start on
+/// (`data-start-screen`: `home`, `search` or `library`), which the
+/// navigation reads when it is created, so the first paint is already
+/// that screen. Only the mode, the screen and two hex values go in, as
+/// JSON.
 pub fn init_script(prefs: &Prefs) -> String {
-    let payload = match prefs.accent {
+    let mut payload = match prefs.accent {
         Accent::Color(color) => serde_json::json!({
             "mode": "custom",
             "accent": color.to_string(),
@@ -250,6 +306,7 @@ pub fn init_script(prefs: &Prefs) -> String {
         Accent::Music => serde_json::json!({ "mode": "music" }),
         Accent::House => serde_json::json!({ "mode": "house" }),
     };
+    payload["start"] = serde_json::Value::from(prefs.start_screen.as_str());
     format!(
         r#"(function () {{
   var a = {payload};
@@ -257,6 +314,7 @@ pub fn init_script(prefs: &Prefs) -> String {
     var root = document.documentElement;
     if (!root) return false;
     root.dataset.accentMode = a.mode;
+    root.dataset.startScreen = a.start;
     if (a.accent) {{
       root.style.setProperty("--accent", a.accent);
       root.style.setProperty("--accent-text", a.accentText);

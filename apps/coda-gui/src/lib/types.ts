@@ -541,7 +541,12 @@ export interface Prefs {
   lyricsIndex: boolean;
   /** Library's default view of albums and artists. */
   libraryView: LibraryView;
+  /** The screen the app starts on (2.0 R4). */
+  startScreen: StartScreen;
 }
+
+/** The screen the app starts on: Home, Search or Library. */
+export type StartScreen = "home" | "search" | "library";
 
 /** How Library shows albums and artists. */
 export type LibraryView = "covers" | "list";

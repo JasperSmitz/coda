@@ -1,5 +1,5 @@
 // The top bar (DESIGN.md "Layout"): the coda sign and wordmark, the main
-// navigation (Home, Search, Library) in a pill whose active entry is
+// navigation (Search, Home, Library: Home in the middle, 2.0 R4) in a pill whose active entry is
 // marked by one indicator that glides between entries, and Preferences.
 // It floats over the page. On macOS it is the window's drag region and the
 // native window buttons sit in its row, centred on the pill
@@ -10,9 +10,10 @@ import { dragRegion } from "../lib/platform";
 import { nav, useActiveRoot, type Root } from "../state/nav";
 import { CodaSignIcon, HomeIcon, LibraryIcon, SearchIcon, SlidersIcon } from "./icons";
 
+/** In the navigation's order (lib/navModel.ts `BROWSE_ROOTS`): Search · Home · Library. */
 const ENTRIES: { root: Root; label: string; icon: ReactNode; shortcut?: string }[] = [
-  { root: "home", label: "Home", icon: <HomeIcon size={18} /> },
   { root: "search", label: "Search", icon: <SearchIcon size={18} />, shortcut: "/" },
+  { root: "home", label: "Home", icon: <HomeIcon size={18} /> },
   { root: "library", label: "Library", icon: <LibraryIcon size={18} /> },
 ];
 

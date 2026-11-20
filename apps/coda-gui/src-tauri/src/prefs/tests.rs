@@ -43,6 +43,7 @@ fn round_trips_through_the_file() {
         source: Some(SourceKind::Local),
         lyrics_index: false,
         library_view: LibraryView::List,
+        start_screen: StartScreen::Search,
     };
     save(&path, &prefs, false).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
@@ -86,13 +87,19 @@ fn the_music_is_the_default_and_an_n2_house_stays() {
     assert_eq!(dto.accent, "music");
     assert_eq!(dto.accent_color, HOUSE_ACCENT.to_string());
     let music = init_script(&Prefs::default());
-    assert!(music.contains(r#"{"mode":"music"}"#), "{music}");
+    assert!(
+        music.contains(r#"{"mode":"music","start":"home"}"#),
+        "{music}"
+    );
     let house = Prefs {
         accent: Accent::House,
         ..Prefs::default()
     };
     let house = init_script(&house);
-    assert!(house.contains(r#"{"mode":"house"}"#), "{house}");
+    assert!(
+        house.contains(r#"{"mode":"house","start":"home"}"#),
+        "{house}"
+    );
     assert!(!house.contains('#'), "no colour: {house}");
 }
 
@@ -126,6 +133,7 @@ fn a_1x_file_with_theme_keys_keeps_the_source_and_lyrics_switch() {
             source: Some(SourceKind::Navidrome),
             lyrics_index: false,
             library_view: LibraryView::Covers,
+            start_screen: StartScreen::Home,
         }
     );
     let store = PrefsStore::new(Some(path.clone()));
@@ -146,6 +154,7 @@ fn a_1x_file_with_theme_keys_keeps_the_source_and_lyrics_switch() {
             source: Some(SourceKind::Navidrome),
             lyrics_index: false,
             library_view: LibraryView::Covers,
+            start_screen: StartScreen::Home,
         }
     );
 }
@@ -279,6 +288,7 @@ fn the_init_script_marks_the_mode_and_sets_only_a_chosen_accent() {
         source: Some(SourceKind::Local),
         lyrics_index: true,
         library_view: LibraryView::List,
+        start_screen: StartScreen::Library,
     });
     assert!(script.contains("\"mode\":\"custom\""), "{script}");
     assert!(script.contains("accentMode"), "{script}");
@@ -299,7 +309,7 @@ fn the_store_loads_at_startup() {
     assert!(
         PrefsStore::new(None)
             .init_script()
-            .contains(r#"{"mode":"music"}"#)
+            .contains(r#"{"mode":"music","start":"home"}"#)
     );
 }
 
@@ -389,4 +399,61 @@ fn the_library_view_is_saved_and_sent() {
     assert_eq!(load(Some(&path)).0.library_view, LibraryView::List);
     let dto = serde_json::to_value(PrefsDto::new(&store.current())).unwrap();
     assert_eq!(dto["libraryView"], "list");
+}
+
+#[test]
+fn the_start_screen_defaults_to_home_and_a_bad_one_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    // An R3 file has no startScreen.
+    std::fs::write(&path, "accent = \"house\"\nlibraryView = \"list\"\n").unwrap();
+    let (prefs, bad) = load(Some(&path));
+    assert!(!bad);
+    assert_eq!(prefs.start_screen, StartScreen::Home);
+    for (text, screen) in [
+        ("home", StartScreen::Home),
+        ("search", StartScreen::Search),
+        ("library", StartScreen::Library),
+        ("prefs", StartScreen::Home),
+        ("Library", StartScreen::Home),
+        ("", StartScreen::Home),
+    ] {
+        std::fs::write(
+            &path,
+            format!("startScreen = \"{text}\"\nlibraryView = \"list\"\n"),
+        )
+        .unwrap();
+        let (prefs, bad) = load(Some(&path));
+        assert!(!bad, "{text}");
+        assert_eq!(prefs.start_screen, screen, "{text}");
+        // The other settings stay.
+        assert_eq!(prefs.library_view, LibraryView::List, "{text}");
+    }
+    assert_eq!(StartScreen::parse(" search "), Some(StartScreen::Search));
+    assert_eq!(StartScreen::parse("settings"), None);
+}
+
+#[test]
+fn the_start_screen_is_saved_sent_and_marked_before_the_first_paint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let store = PrefsStore::new(Some(path.clone()));
+    assert!(store.init_script().contains(r#""start":"home""#));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(save_prefs(&store, |p| p.start_screen = StartScreen::Search))
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("startScreen = \"search\""), "{text}");
+    assert_eq!(load(Some(&path)).0.start_screen, StartScreen::Search);
+    let dto = serde_json::to_value(PrefsDto::new(&store.current())).unwrap();
+    assert_eq!(dto["startScreen"], "search");
+    let script = store.init_script();
+    assert!(script.contains(r#""start":"search""#), "{script}");
+    assert!(
+        script.contains("root.dataset.startScreen = a.start"),
+        "{script}"
+    );
 }

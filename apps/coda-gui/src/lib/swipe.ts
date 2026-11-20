@@ -23,7 +23,8 @@
 // `blocksSwipe` decides where a stream may not start (pure, over a small
 // view of the element and its ancestors: `SwipeNode`).
 
-import type { BrowseRoot, Root } from "./navModel";
+// With its extension: Node runs this module directly in the tests.
+import { BROWSE_ROOTS, rootBeside, type BrowseRoot, type Root } from "./navModel.ts";
 
 /** Sideways travel that makes a swipe, in pixels. */
 export const SWIPE_PX = 120;
@@ -113,14 +114,15 @@ export function swipe(
   return { state: { ...next, phase: "done", switchedAt: input.t }, step: next.direction, note: "switch" };
 }
 
-/** The roots a swipe moves between, in the top bar's order. */
-export const SWIPE_ROOTS: BrowseRoot[] = ["home", "search", "library"];
+/** The roots a swipe moves between: the top bar's order (Search · Home · Library, navModel). */
+export const SWIPE_ROOTS = BROWSE_ROOTS;
 
-/** The root one `step` from `active` (`null`: past an end, or from Preferences). */
+/**
+ * The root one `step` from `active` (1: a swipe to the left, the next on
+ * the right; `null`: past an end, or from Preferences).
+ */
 export function swipeTarget(active: Root, step: -1 | 1): BrowseRoot | null {
-  const at = SWIPE_ROOTS.indexOf(active as BrowseRoot);
-  if (at < 0) return null;
-  return SWIPE_ROOTS[at + step] ?? null;
+  return rootBeside(active, step);
 }
 
 // ----- where a swipe may not start -----

@@ -51,6 +51,7 @@ fn main() {
         "prefs_get",
         "prefs_set_accent",
         "prefs_set_library_view",
+        "prefs_set_start_screen",
         // The browsed source (settings.toml) and the Home view.
         "ui_source_get",
         "ui_source_set",

@@ -164,7 +164,27 @@ export function rootRoute(root: BrowseRoot, source: SourceKind, section: Section
   }
 }
 
-const BROWSE_ROOTS: BrowseRoot[] = ["home", "search", "library"];
+/**
+ * The browse roots in the top bar's order (2.0 R4): Home in the middle,
+ * so every root is one step or one swipe from it. Fixed: the start screen
+ * does not reorder it.
+ */
+export const BROWSE_ROOTS: readonly BrowseRoot[] = ["search", "home", "library"];
+
+/** Whether `value` names a browse root (a saved start screen, for one). */
+export function isBrowseRoot(value: unknown): value is BrowseRoot {
+  return BROWSE_ROOTS.includes(value as BrowseRoot);
+}
+
+/**
+ * The browse root `step` places from `root` in the top bar's order
+ * (`null`: past an end, or from Preferences).
+ */
+export function rootBeside(root: Root, step: -1 | 1): BrowseRoot | null {
+  const at = BROWSE_ROOTS.indexOf(root as BrowseRoot);
+  if (at < 0) return null;
+  return BROWSE_ROOTS[at + step] ?? null;
+}
 
 function freshStacks(source: SourceKind, section: Section): Record<BrowseRoot, Entry[]> {
   const stacks = {} as Record<BrowseRoot, Entry[]>;
@@ -172,22 +192,23 @@ function freshStacks(source: SourceKind, section: Section): Record<BrowseRoot, E
   return stacks;
 }
 
-function freshSource(source: SourceKind, section: Section): SourceNav {
-  return { root: "home", section, stacks: freshStacks(source, section) };
+function freshSource(source: SourceKind, section: Section, start: BrowseRoot): SourceNav {
+  return { root: start, section, stacks: freshStacks(source, section) };
 }
 
-/** Every stack at its root, Home shown, on `source`. */
+/** Every stack at its root, `start` (the start screen; Home by default) shown, on `source`. */
 export function initialNav(
   sections: Record<SourceKind, Section>,
   source: SourceKind = "local",
+  start: BrowseRoot = "home",
 ): NavState {
   return {
     source,
     prefs: false,
     prefsStack: [entry({ kind: "settings" })],
     sources: {
-      local: freshSource("local", sections.local),
-      navidrome: freshSource("navidrome", sections.navidrome),
+      local: freshSource("local", sections.local, start),
+      navidrome: freshSource("navidrome", sections.navidrome, start),
     },
   };
 }
