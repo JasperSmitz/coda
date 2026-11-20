@@ -1,6 +1,6 @@
 # Coda App — Plan
 
-Status: **1.0.0 (Classic) released** (tag `coda-gui-v1.0.0`, 2026-11-19): M0–M4, lyrics, genres and mixes; frozen except critical fixes. **2.0 (Neo-Coda)** is in progress: the redesign in `DESIGN.md`, ADR 0009, slices under "2.0" below.
+Status: **2.0.0 (Neo-Coda) released** (tag `coda-gui-v2.0.0`, 2026-11-20): the redesign in `DESIGN.md` (ADR 0009), slices N1–N7 and refinement passes R1–R4 below; release notes in `../CHANGELOG.md`. **1.0.0 (Classic)** (tag `coda-gui-v1.0.0`, 2026-11-19) is frozen except critical fixes.
 
 ## Stack (decided)
 - **Tauri 2** desktop shell (system webview: WebKitGTK 4.1 on Linux, WKWebView on macOS).

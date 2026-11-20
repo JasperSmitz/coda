@@ -15,7 +15,7 @@
 # not included.
 
 pkgname=coda-app
-pkgver=0.1.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc='A desktop music player for local files and Navidrome (Tauri GUI for Coda)'
 arch=('x86_64' 'aarch64')
