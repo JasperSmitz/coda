@@ -1217,6 +1217,28 @@
   );
 }
 
+/* With swatches (as the mood cards): the cover's first swatch, strong,
+   from the top right behind the peeking cover, gone 96px down (the text
+   starts ~107px down: 176px, less the padding and the two lines); its
+   second (or the first again) under the text from the bottom left, at
+   most `--swatch-under-text` (text ≥7:1, text-2 ≥4.5:1 over any swatch:
+   core's `swatches_under_text_keep_the_contrast`), over glass on the
+   base. */
+.genre-tile.has-swatches {
+  background:
+    radial-gradient(
+      150% 96px at 100% 0%,
+      color-mix(in srgb, var(--genre-swatch-1) var(--swatch-strong), transparent),
+      transparent
+    ),
+    radial-gradient(
+      100% 90% at 0% 100%,
+      color-mix(in srgb, var(--genre-swatch-2) var(--swatch-under-text), transparent),
+      transparent 75%
+    ),
+    var(--surface-1);
+}
+
 .genre-tile:hover,
 .genre-tile:focus-visible {
   transform: translateY(-3px);
@@ -1592,9 +1614,26 @@
   --carousel-meta-h: 200px;
 }
 
+/* The heading, left-aligned on the content's edge (as "Moods for
+   today"), the carousel's ‹ › buttons at the right end of its row (the
+   v3 mockup's `.home-head`). */
 .home-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
   padding: 28px 0 4px;
-  text-align: center;
+}
+
+.home-heading {
+  min-width: 0;
+}
+
+.carousel-steps {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  padding-bottom: 6px;
 }
 
 /* Where you left off: its room is kept while it loads. Far neighbours
@@ -1694,11 +1733,8 @@
 }
 
 .carousel-step {
-  position: absolute;
-  top: calc(var(--carousel-pad) + var(--carousel-size) / 2 - 18px);
-  z-index: 20;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   background: var(--glass);
   border: 1px solid var(--border);
@@ -1707,16 +1743,7 @@
 }
 
 .carousel-step:disabled {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.carousel-step.prev {
-  left: 4px;
-}
-
-.carousel-step.next {
-  right: 4px;
+  opacity: 0.4;
 }
 
 .carousel-skeleton {
@@ -1730,15 +1757,17 @@
 }
 
 /* Under the cover: title, artist, the quiet line, the dots, the actions,
-   over the page's glow (worst: an all-white cover, about #3a393d,
-   app.css `.page-glow::after`) and the end of the focused cover's glow
-   (`.carousel-track::before`: the accent at 45% under a 28px-sigma
-   blur whose edge is 2px above the cover's bottom). With a white accent,
-   sRGB compositing: at the title's top (30px below the cover, glow
-   ~6%, about #454448) text 8.8:1; at the artist line (~0.3%) text-2
-   5.0:1; at the quiet line (none) text-2 5.0:1, the dots' text-3 3.2:1.
-   A yellow cover and accent (#3a3a04 under it): text 9.1, text-2 5.1,
-   text-3 3.3. So the artist and the quiet line are text-2, never text-3. */
+   over the page's glow (worst: an all-white cover under its computed
+   wash, 0.73 at the wash's lightest, about #3d3c40, app.css `.page-glow`;
+   it is darker here, below the wash's middle) and the end of the focused
+   cover's glow (`.carousel-track::before`: the accent at 45% under a
+   28px-sigma blur whose edge is 2px above the cover's bottom). With a
+   white accent, sRGB compositing: at the title's top (30px below the
+   cover, glow ~6%, about #49484b) text 8.3:1; at the artist line (~0.3%)
+   text-2 4.7:1; at the quiet line (none) text-2 4.8:1, the dots' text-3
+   3.0:1. A yellow cover (wash 0.72, #3f3e02) and accent: text 8.8, text-2
+   4.8, text-3 3.1. So the artist and the quiet line are text-2, never
+   text-3. */
 .carousel-meta {
   display: flex;
   flex-direction: column;
@@ -1821,13 +1850,27 @@
   gap: 20px;
 }
 
-/* A card: its albums' tints as a wash (sRGB gradient, so no point is
-   lighter than its lightest tint), a hairline; the base where a tint is
-   not known yet. Tints are OKLCH L 0.20 with chroma ≤ 0.05 (core
-   `cover::palette`); the lightest of every hue (a green at full tint
-   chroma, about #001c0b) gives text 16.3:1, text-2 7.8:1, text-3 5.0:1
-   (the base: 17.4, 8.3, 5.3). The Play button is its first album's
-   accent with its accent text (≥3:1 on its tint by construction). */
+/* A card, coloured by its albums' covers (as the v3 mockup): two of
+   their swatches (`--mood-swatch-1`, `-2`: vivid colours, OKLCH L
+   0.55–0.70, core `cover::palette`) as radial light over a glass ground
+   (`--surface-1` over the base), a hairline.
+   - The first, strong (`--swatch-strong`), from the top left, behind the
+     fanned covers only: it is gone 190px down, above the text (which
+     starts 202px down: the padding, the fan, its margin; in the narrow
+     layout, 330px from the left, short of the text at 352px).
+   - The second, under the text, from the bottom right, at most
+     `--swatch-under-text` (24%): over any swatch at that alpha text keeps
+     ≥7:1, text-2 ≥4.5:1, text-3 ≥3:1 (core's
+     `swatches_under_text_keep_the_contrast`, at the worst point: the
+     lightest swatch, every hue, sRGB compositing).
+   Without swatches (greyscale covers, or not known yet): the albums'
+   tints as a wash (sRGB gradient, so no point is lighter than its
+   lightest tint); the base where a tint is not known yet. Tints are
+   OKLCH L 0.20 with chroma ≤ 0.05; the lightest of every hue (a green at
+   full tint chroma, about #001c0b) gives text 16.3:1, text-2 7.8:1,
+   text-3 5.0:1 (the base: 17.4, 8.3, 5.3). The Play button is its first
+   album's accent with its accent text (≥3:1 on its tint and on the base
+   by construction, so also on these grounds, darker than text-3). */
 .mood-card {
   position: relative;
   display: flex;
@@ -1853,6 +1896,21 @@
     var(--mood-tint-2) 55%,
     var(--mood-tint-3) 100%
   );
+}
+
+.mood-card.has-swatches::before {
+  background:
+    radial-gradient(
+      130% 190px at 15% 0%,
+      color-mix(in srgb, var(--mood-swatch-1) var(--swatch-strong), transparent),
+      transparent
+    ),
+    radial-gradient(
+      90% 80% at 100% 100%,
+      color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text), transparent),
+      transparent 70%
+    ),
+    var(--surface-1);
 }
 
 .mood-card.skeleton-card {
@@ -2008,5 +2066,21 @@
     flex: none;
     width: 300px;
     margin-bottom: 0;
+  }
+
+  /* The strong light behind the fan, on the left (short of the text). */
+  .mood-card.has-swatches::before {
+    background:
+      radial-gradient(
+        330px 130% at 0% 0%,
+        color-mix(in srgb, var(--mood-swatch-1) var(--swatch-strong), transparent),
+        transparent
+      ),
+      radial-gradient(
+        90% 80% at 100% 100%,
+        color-mix(in srgb, var(--mood-swatch-2) var(--swatch-under-text), transparent),
+        transparent 70%
+      ),
+      var(--surface-1);
   }
 }

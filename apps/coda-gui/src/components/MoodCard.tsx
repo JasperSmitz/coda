@@ -1,12 +1,14 @@
 // A mood for today (DESIGN.md "Home"): three albums of one genre as a
-// card, tinted with their covers' colours (the three tints, N3 palettes),
+// card, coloured by their covers (`moodSwatches`: two of their swatches,
+// the vivid colours, in radial gradients over glass; until known, or for
+// greyscale covers, the three tints as a wash),
 // the covers fanned (they spread a little on hover; transforms only), the
 // eyebrow, the genre in display type, the album titles, the facts and a
 // round Play button in the first album's accent. Play starts a quick mix
 // of the three albums; a click on a cover opens that album.
 
 import type { CSSProperties } from "react";
-import { moodEyebrow, moodFacts } from "../lib/home";
+import { moodEyebrow, moodFacts, moodSwatches } from "../lib/home";
 import type { Mood, MoodAlbum, SourceKind } from "../lib/types";
 import { accentStyle, usePalettes } from "../state/palettes";
 import { useAccent, musicAccentOn } from "../state/accent";
@@ -37,19 +39,29 @@ export function MoodCard({
     const url = mood.albums[i]?.coverUrl;
     return (url && palettes.get(url)?.tint) || null;
   };
-  // The card's wash: each album's tint (the base where one is unknown).
-  const tints = {
-    "--mood-tint-1": tint(0) ?? "var(--bg)",
-    "--mood-tint-2": tint(1) ?? tint(0) ?? "var(--bg)",
-    "--mood-tint-3": tint(2) ?? tint(1) ?? tint(0) ?? "var(--bg)",
-  } as CSSProperties;
+  const swatches = moodSwatches(
+    mood.albums.map((a) => (a.coverUrl ? (palettes.get(a.coverUrl)?.swatches ?? []) : [])),
+  );
+  // The card's colours: two swatches; without any, each album's tint
+  // (the base where one is unknown).
+  const colours: Record<string, string> = swatches
+    ? { "--mood-swatch-1": swatches[0], "--mood-swatch-2": swatches[1] }
+    : {
+        "--mood-tint-1": tint(0) ?? "var(--bg)",
+        "--mood-tint-2": tint(1) ?? tint(0) ?? "var(--bg)",
+        "--mood-tint-3": tint(2) ?? tint(1) ?? tint(0) ?? "var(--bg)",
+      };
   const first = mood.albums[0]?.coverUrl;
   const firstPalette = first ? (palettes.get(first) ?? null) : null;
   const accent = music && firstPalette?.vivid ? firstPalette : null;
   const eyebrow = moodEyebrow(mood, source);
   const facts = moodFacts(mood, now);
   return (
-    <article className="mood-card" style={tints} aria-label={`${mood.genre} mood`}>
+    <article
+      className={`mood-card ${swatches ? "has-swatches" : ""}`}
+      style={colours as CSSProperties}
+      aria-label={`${mood.genre} mood`}
+    >
       <div className="mood-fan" data-count={mood.albums.length}>
         {mood.albums.map((album, i) => (
           <button

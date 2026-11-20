@@ -2,15 +2,17 @@
 
 /* macOS: the window has no visible title bar, so the webview reaches the
    top edge, and the native close/minimise/zoom buttons sit inset in the
-   top bar's row, vertically centred on its pill (`BUTTONS` in
-   `titlebar.rs` positions them for `--topbar-h`: keep the two in step);
+   top bar's row, vertically centred on its pill (41px down: `BUTTONS` in
+   `titlebar.rs` positions them for `--topbar-top` and the pill's 50px:
+   keep the two in step);
    the brand starts right of them (`--window-buttons-w`). The top bar
    drags the window (`dragRegion`). `--titlebar-h` is the band kept clear
-   for them where there is no top bar (Now Playing, onboarding): the top
-   bar's height, as the buttons are centred at its middle. In full
-   screen macOS hides the buttons, so no room is kept. */
+   for them where there is no top bar (Now Playing, onboarding): they are
+   centred 41px down and ~14px tall, so 56px clears them (close to the
+   52px Now Playing had before the bar grew; 2.0 R1). In full screen
+   macOS hides the buttons, so no room is kept. */
 :root.is-macos:not(.is-fullscreen) {
-  --titlebar-h: var(--topbar-h);
+  --titlebar-h: 56px;
   --window-buttons-w: 70px;
 }
 
@@ -133,7 +135,11 @@
 /* ----- top bar ----- */
 
 /* Floats over the page, with no background of its own: a soft fade of
-   the base colour under it, so the page reads as passing beneath. */
+   the base colour under it, so the page reads as passing beneath. Its row
+   (the brand, the pill, Preferences, centred on the pill's 50px) starts
+   `--topbar-top` below the window's top edge: in macOS full screen a
+   pointer at the very top reveals the menu bar, and the pill keeps clear
+   of it. */
 .topbar {
   position: absolute;
   top: 0;
@@ -145,9 +151,10 @@
   height: var(--topbar-h);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-rows: 50px;
   align-items: center;
   gap: 16px;
-  padding: 0 16px 0 calc(20px + var(--window-buttons-w));
+  padding: var(--topbar-top) 18px 0 calc(22px + var(--window-buttons-w));
 }
 
 /* The fade reaches over the scrollbar's strip too (no pointer events:
@@ -168,7 +175,7 @@
 .topbar-brand {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
   color: var(--text);
 }
@@ -181,7 +188,7 @@
 .topbar-wordmark {
   font-family: var(--font-display);
   font-variation-settings: var(--display-axes);
-  font-size: 19px;
+  font-size: 23px;
   font-weight: var(--display-weight);
   letter-spacing: 0;
 }
@@ -190,7 +197,7 @@
   position: relative;
   display: flex;
   gap: 2px;
-  padding: 3px;
+  padding: 4px;
   border-radius: var(--radius-pill);
   background: var(--glass);
   border: 1px solid var(--border);
@@ -203,8 +210,8 @@
    (transform and width only; the buttons never move). */
 .topnav-mark {
   position: absolute;
-  top: 3px;
-  bottom: 3px;
+  top: 4px;
+  bottom: 4px;
   left: 0;
   border-radius: var(--radius-pill);
   background: var(--surface-3);
@@ -222,11 +229,12 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 15px;
+  gap: 8px;
+  height: 40px;
+  padding: 0 20px;
   border-radius: var(--radius-pill);
   color: var(--text-2);
+  font-size: 15px;
   font-weight: 600;
   transition:
     color var(--motion-fast),
@@ -244,8 +252,8 @@
 }
 
 .topbar-prefs {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   background: var(--glass);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
@@ -265,7 +273,7 @@
   }
 
   .topnav-item {
-    padding: 0 12px;
+    padding: 0 14px;
   }
 }
 
@@ -344,22 +352,48 @@
   transition: --tint var(--motion-tint) var(--ease-in-out);
 }
 
-/* Crossfading covers (components/PageGlow): each its own layer. */
+/* Crossfading covers (components/PageGlow): each layer its own
+   compositing layer, opaque (the base or its tint under the cover) and
+   carrying its own wash (`--layer-tint`, `--layer-wash`,
+   `--layer-wash-mid`, set inline from its cover's palette), so a layer's
+   cover and wash fade as one. Hidden until the component fades it in
+   (a Web Animation of its opacity, from 0 even for a cached image). */
 .glow-layer {
   position: absolute;
-  object-fit: cover;
   opacity: 0;
-  transition: opacity var(--motion-glow) var(--ease-in-out);
   will-change: opacity;
   pointer-events: none;
   user-select: none;
 }
 
-/* The page's glow: the subject's cover, very blurred, behind the header
-   and the top of the page, under a radial darkening of the page's tint,
-   faded out by ~600px. It sits at the top of the page's scrolling content
+.glow-layer .glow-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.glow-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+/* The page's glow: the subject's cover, very blurred and saturated (as
+   the v3 mockup: `--page-glow-opacity`, `--page-glow-filter`), behind the
+   header and the top of the page, under a radial wash of its tint, faded
+   out by ~600px. It sits at the top of the page's scrolling content
    (`.main.page`), so it scrolls away with the header. Behind the page's
-   content (`.main` isolates). */
+   content (`.main` isolates).
+
+   The wash is lightest in the middle, at the alpha the backend computed
+   for this cover (`pageWash`, core `cover::palette::wash_alpha` with
+   `PAGE_GLOW`): the least at which, over the cover's brightest blurred
+   area composited in sRGB as the webview does, text keeps ≥7:1, text-2
+   ≥4.5:1 and text-3 ≥3:1 (and so the accents ≥3:1), with a floor of 0.25.
+   Dark vivid covers stay near the floor; an all-white cover gets 0.73
+   (core's tests), a bright yellow one 0.72. Towards the edges it darkens
+   (`--layer-wash-mid`, then the base at the corners), only darker. */
 .page-glow {
   position: absolute;
   inset: 0 0 auto 0;
@@ -373,30 +407,21 @@
 
 .page-glow .glow-layer {
   inset: -120px -10% 0;
-  width: 120%;
-  height: calc(100% + 120px);
-  filter: blur(100px) saturate(1.4);
+  background: var(--bg);
 }
 
-.page-glow .glow-layer.is-shown {
-  opacity: 0.45;
+.page-glow .glow-image {
+  object-fit: cover;
+  opacity: var(--page-glow-opacity);
+  filter: var(--page-glow-filter);
 }
 
-.page-glow::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  /* At least 65% tint where it is lightest. The worst case, an all-white
-     cover (the glow at 0.45 over the base, then 65% of the greyscale tint,
-     about #3a393d): text 10.5:1, text-2 5.0:1, text-3 3.2:1, the house
-     accent 5.7:1. A bright yellow cover (#ffff00, tint #171700, about
-     #3a3a04): text 10.7, text-2 5.1, text-3 3.3, house accent 5.8, its
-     own accent #d2d331 7.3. sRGB compositing, as the webview blends. */
+.page-glow .glow-layer::after {
   background: radial-gradient(
-    120% 90% at 35% 0%,
-    color-mix(in srgb, var(--tint) 65%, transparent) 0%,
-    color-mix(in srgb, var(--tint) 80%, transparent) 60%,
-    var(--tint) 100%
+    120% 85% at 50% 35%,
+    var(--layer-wash) 0%,
+    var(--layer-wash-mid) 55%,
+    var(--bg) 100%
   );
 }
 
@@ -754,40 +779,41 @@
   -webkit-backdrop-filter: var(--glass-blur);
 }
 
-/* Crossfading covers (components/PageGlow) under a wash of the tint, at
-   86% (DESIGN.md "Contrast"). The worst case, an all-white cover (opaque
-   under the wash, so what is under the player does not count) with its
-   greyscale tint (OKLCH L 0.20, C 0.01: #1a1416–#14161b by its cast):
-   about #3a3537–#35373b; text ≥10.9:1, text-2 ≥5.2:1, text-3 ≥3.3:1,
-   the house accent ≥5.9:1. A bright yellow cover (#ffff00, tint
-   #181800): about #383800; text 11.0, text-2 5.3, text-3 3.4, house
-   accent 6.0, its own accent #d2d331 7.6. Nothing playing: the base's
-   wash over the glass over white, about #17151a (text-3 5.0). sRGB
-   compositing, as the webview blends. */
+/* The playing cover (components/PageGlow), stretched across the whole
+   strip (`object-fit: fill`, with a bleed of the blur's radius on every
+   side), so every region of it shows its colour, blurred and saturated
+   (`--player-glow-opacity`, `--player-glow-filter`), under a wash of its
+   tint at the alpha the backend computed for this cover (`playerWash`,
+   core `cover::palette::wash_alpha` with `PLAYER`): over the cover's
+   brightest blurred area, text ≥7:1, text-2 ≥4.5:1, text-3 and the
+   accents ≥3:1 (sRGB compositing, as the webview blends), floor 0.35. An
+   all-white cover gets 0.84, a bright yellow one 0.83, a dark vivid one
+   0.35–0.5 (core's tests). The cover is opaque, so what is under the
+   player does not count; near the bleed's edges the blur lets the
+   layer's tint through (only darker). Nothing playing: the base's wash
+   over the glass, about #17151a over white (text-3 5.0:1). */
 .player-backdrop {
   position: absolute;
   inset: 0;
   z-index: -1;
   overflow: hidden;
   pointer-events: none;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
 }
 
 .player-backdrop .glow-layer {
-  inset: -200% -10%;
-  width: 120%;
-  height: 500%;
-  filter: blur(48px) saturate(1.4);
+  inset: -30px;
+  background: var(--layer-tint);
 }
 
-.player-backdrop .glow-layer.is-shown {
-  opacity: 1;
+.player-backdrop .glow-image {
+  object-fit: fill;
+  opacity: var(--player-glow-opacity);
+  filter: var(--player-glow-filter);
 }
 
-.player-backdrop::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: color-mix(in srgb, var(--tint) 86%, transparent);
+.player-backdrop .glow-layer::after {
+  background: var(--layer-wash);
 }
 
 .player-track {

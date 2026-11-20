@@ -2,7 +2,8 @@
 // navigation (Home, Search, Library) in a pill whose active entry is
 // marked by one indicator that glides between entries, and Preferences.
 // It floats over the page. On macOS it is the window's drag region and the
-// native window buttons sit in its row (`titlebar.rs`, `--topbar-h`).
+// native window buttons sit in its row, centred on the pill
+// (`titlebar.rs`, `--topbar-top`).
 
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { dragRegion } from "../lib/platform";
@@ -10,9 +11,9 @@ import { nav, useActiveRoot, type Root } from "../state/nav";
 import { CodaSignIcon, HomeIcon, LibraryIcon, SearchIcon, SlidersIcon } from "./icons";
 
 const ENTRIES: { root: Root; label: string; icon: ReactNode; shortcut?: string }[] = [
-  { root: "home", label: "Home", icon: <HomeIcon size={16} /> },
-  { root: "search", label: "Search", icon: <SearchIcon size={16} />, shortcut: "/" },
-  { root: "library", label: "Library", icon: <LibraryIcon size={16} /> },
+  { root: "home", label: "Home", icon: <HomeIcon size={18} /> },
+  { root: "search", label: "Search", icon: <SearchIcon size={18} />, shortcut: "/" },
+  { root: "library", label: "Library", icon: <LibraryIcon size={18} /> },
 ];
 
 /** The indicator's place under the active entry (`null`: none active). */
@@ -57,7 +58,7 @@ export function TopBar() {
   return (
     <header className="topbar" {...dragRegion}>
       <div className="topbar-brand" aria-hidden="true">
-        <CodaSignIcon size={18} className="topbar-sign" />
+        <CodaSignIcon size={22} className="topbar-sign" />
         <span className="topbar-wordmark">coda</span>
       </div>
       <nav className="topnav" aria-label="Main">
@@ -94,7 +95,7 @@ export function TopBar() {
           title="Preferences"
           onClick={() => nav.selectRoot("prefs")}
         >
-          <SlidersIcon size={18} />
+          <SlidersIcon size={20} />
         </button>
       </div>
     </header>

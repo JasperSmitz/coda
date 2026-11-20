@@ -133,8 +133,8 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** `url`'s palette: `undefined` while unknown, `null` without one. */
-function usePaletteState(url: string | null): Palette | null | undefined {
+/** `url`'s palette: `undefined` while unknown, `null` without one (or without a URL). */
+export function usePaletteState(url: string | null): Palette | null | undefined {
   useEffect(() => {
     if (!url) return;
     retain(url);

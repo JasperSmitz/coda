@@ -18,7 +18,7 @@ import { Meter, spreadBands } from "../lib/visualizer";
 
 const REDUCED_INTERVAL_MS = 250;
 /** How long `--viz` is re-read after a change: its blend (`--motion-accent`) and a margin. */
-const BLEND_READ_MS = 2000;
+const BLEND_READ_MS = 1000;
 
 interface Props {
   active: boolean;

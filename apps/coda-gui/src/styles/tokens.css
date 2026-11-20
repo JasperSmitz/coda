@@ -137,6 +137,23 @@
 
   /* The page's glow (components/PageGlow): fades out down the page. */
   --page-glow-mask: linear-gradient(to bottom, #000000 0%, #000000a6 45%, transparent 100%);
+  /* How the page's glow and the player draw their cover, under a wash of
+     its tint whose alpha the backend computes per cover (`pageWash`,
+     `playerWash`) for these values: core's `cover::palette::PAGE_GLOW`
+     and `PLAYER` (src-tauri/src/palette.rs tests keep them in step). Only
+     a blur and a saturation: anything else changing the colours would
+     need core's maths changed too. */
+  --page-glow-opacity: 0.62;
+  --page-glow-filter: blur(110px) saturate(1.5);
+  --player-glow-opacity: 1;
+  --player-glow-filter: blur(30px) saturate(1.7);
+  /* Swatches (a cover's vivid colours, `Palette.swatches`) in gradients
+     over a card (`--surface-1` over the base): at most
+     `--swatch-under-text` where text is drawn on them (core's
+     `SWATCH_UNDER_TEXT`, tested: every text level keeps its contrast over
+     any swatch), `--swatch-strong` where none is (above the text). */
+  --swatch-under-text: 24%;
+  --swatch-strong: 50%;
   /* "From the music" in Preferences: the curated accents in a ring. */
   --music-swatch: conic-gradient(from 210deg, #ff7d8e, #f0a83a, #e9e3d2, #7fd8c4, #8ea9ff, #c99cff, #ff7d8e);
 
@@ -185,9 +202,12 @@
 
   /* ----- layout ----- */
 
-  /* The top bar's height (the macOS window buttons are centred in it:
-     `titlebar.rs`, app.css). */
-  --topbar-h: 52px;
+  /* The top bar: its height, and the room above its navigation pill
+     (50px tall, so its centre is 41px down: the macOS window buttons are
+     centred on it, `titlebar.rs`, app.css). The pill keeps clear of the
+     window's top edge, where macOS full screen reveals the menu bar. */
+  --topbar-h: 68px;
+  --topbar-top: 16px;
   /* The floating player (app.css): its height, its distance from the
      window's bottom edge, its width, and the room a scrolling page keeps
      free below its last row so nothing ends under it. */
@@ -241,13 +261,13 @@
   /* Glides (DESIGN.md "Motion"): Home's carousel, the navigation's
      indicator, page changes and cover morphs. */
   --ease: cubic-bezier(0.22, 0.7, 0.18, 1);
-  --motion-carousel: 900ms;
+  --motion-carousel: 500ms;
   --press-scale: 0.96;
   /* Music colours blending (DESIGN.md "Colour"): accents and glows, tints,
      and the covers' crossfade behind the page and the player. */
-  --motion-accent: 1.6s;
-  --motion-tint: 2s;
-  --motion-glow: 1.8s;
+  --motion-accent: 600ms;
+  --motion-tint: 700ms;
+  --motion-glow: 600ms;
 }
 
 /* No backdrop blur (some WebKitGTK builds): floating glass becomes

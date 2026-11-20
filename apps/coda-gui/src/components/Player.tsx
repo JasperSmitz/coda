@@ -5,7 +5,8 @@
 // previous / play-pause / next over the timeline (repeat after the total
 // time); right a small visualizer, the volume, Queue and Full screen (Now
 // Playing in full screen, `f`). Its background is the playing cover,
-// enlarged and blurred under a wash of its tint (`CoverGlow`), and it
+// stretched across the strip and blurred under a wash of its tint as
+// much as that cover needs (`CoverGlow`), and it
 // takes that cover's colours (a colour scope). Narrow windows drop the
 // visualizer and the volume (app.css; the visualizer is then not
 // rendered, so no readings flow for it), then the timeline and
@@ -57,8 +58,8 @@ export function Player({ snapshot, queueOpen, onToggleQueue, onOpenNowPlaying, o
   const { playing, status } = snapshot;
   const unavailable = status === "unavailable" || snapshot.phase !== "ready";
   const isPlaying = status === "playing" || status === "loading";
-  // The playing cover's colours, and the cover itself, enlarged and
-  // blurred under a wash of its tint, as the background.
+  // The playing cover's colours, and the cover itself, stretched across
+  // the strip and blurred under a wash of its tint, as the background.
   const ref = useRef<HTMLElement>(null);
   const coverUrl = playing?.coverUrl ?? null;
   useColourScope(ref, coverUrl);
@@ -70,7 +71,7 @@ export function Player({ snapshot, queueOpen, onToggleQueue, onOpenNowPlaying, o
 
   return (
     <footer className="player" ref={ref}>
-      <CoverGlow url={coverUrl} className="player-backdrop" />
+      <CoverGlow url={coverUrl} className="player-backdrop" surface="player" />
       <div className="player-track">
         {playing ? (
           <>

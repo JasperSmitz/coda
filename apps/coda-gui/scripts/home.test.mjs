@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   moodEyebrow,
   moodFacts,
+  moodSwatches,
   partOfDay,
   quietLine,
   relativeTime,
@@ -96,4 +97,17 @@ test("a mood's facts and eyebrow", () => {
   assert.equal(moodEyebrow(mood([]), "local"), "46 albums in your library");
   assert.equal(moodEyebrow(mood([], 1), "navidrome"), "1 album on your server");
   assert.equal(moodEyebrow(mood([], null), "local"), null);
+});
+
+test("a mood card's two colours come from its albums' swatches", () => {
+  assert.equal(moodSwatches([[], [], []]), null);
+  assert.equal(moodSwatches([]), null);
+  // The first album's first, then the next album's first.
+  assert.deepEqual(moodSwatches([["#a"], ["#b"], ["#c"]]), ["#a", "#b"]);
+  // A greyscale first album: the next album leads.
+  assert.deepEqual(moodSwatches([[], ["#b", "#b2"], ["#c"]]), ["#b", "#c"]);
+  // The same first colour everywhere: the first album's second.
+  assert.deepEqual(moodSwatches([["#a", "#a2"], ["#a"], []]), ["#a", "#a2"]);
+  // Only one colour: twice.
+  assert.deepEqual(moodSwatches([["#a"], [], []]), ["#a", "#a"]);
 });

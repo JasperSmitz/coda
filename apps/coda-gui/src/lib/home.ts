@@ -196,3 +196,18 @@ export function moodEyebrow(mood: Mood, source: "local" | "navidrome"): string |
 export function moodMixName(mood: Mood): string {
   return `${mood.genre} mood`;
 }
+
+/**
+ * A mood card's two colours from its albums' swatches (each album's, the
+ * largest first): the first album's first swatch (or the next album's),
+ * then the first other colour among the other albums' first swatches and
+ * then every album's others; the first again when there is no other.
+ * `null` when no album has any (greyscale covers, palettes not known yet).
+ */
+export function moodSwatches(albums: string[][]): [string, string] | null {
+  const first = albums.find((s) => s.length > 0)?.[0];
+  if (!first) return null;
+  const candidates = [...albums.map((s) => s[0]), ...albums.flatMap((s) => s.slice(1))];
+  const second = candidates.find((c) => c !== undefined && c !== first) ?? first;
+  return [first, second];
+}

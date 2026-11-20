@@ -93,6 +93,50 @@ mod tests {
         assert_eq!(SWATCHES[0].color, HOUSE_ACCENT.to_string());
     }
 
+    /// The text levels, the card surface and the swatch alpha the washes
+    /// and swatches are computed for (core `cover::palette`).
+    #[test]
+    fn tokens_css_matches_the_contrast_inputs() {
+        use coda_core::cover::palette::{CARD_SURFACE, SWATCH_UNDER_TEXT, TEXT, TEXT_2, TEXT_3};
+        let css = include_str!("../../src/styles/tokens.css");
+        assert_eq!(token(css, "text"), TEXT.to_string());
+        assert_eq!(token(css, "text-2"), TEXT_2.to_string());
+        assert_eq!(token(css, "text-3"), TEXT_3.to_string());
+        assert_eq!(token(css, "surface-1"), CARD_SURFACE.to_string());
+        assert_eq!(
+            token(css, "swatch-under-text"),
+            format!("{}%", (SWATCH_UNDER_TEXT * 100.0).round())
+        );
+    }
+
+    /// How the CSS draws the covers under the washes: the opacity and the
+    /// filter core's `Surface`s assume.
+    #[test]
+    fn tokens_css_matches_the_wash_surfaces() {
+        use coda_core::cover::palette::{PAGE_GLOW, PLAYER, Surface};
+        let css = include_str!("../../src/styles/tokens.css");
+        let check = |name: &str, surface: Surface| {
+            let opacity: f64 = token(css, &format!("{name}-glow-opacity")).parse().unwrap();
+            assert_eq!(opacity, surface.opacity, "{name}");
+            let filter = token(css, &format!("{name}-glow-filter"));
+            let saturate = filter
+                .split_once("saturate(")
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(value, _)| value.parse::<f64>().unwrap())
+                .unwrap_or_else(|| panic!("{name}: saturate() in {filter}"));
+            assert_eq!(saturate, surface.saturate, "{name}");
+            // Only a blur besides: nothing else changes the colours.
+            let rest = filter.replace(&format!("saturate({saturate})"), "");
+            let rest = rest.trim();
+            assert!(
+                rest.starts_with("blur(") && rest.ends_with(')') && rest.matches('(').count() == 1,
+                "{name}: {filter}"
+            );
+        };
+        check("page", PAGE_GLOW);
+        check("player", PLAYER);
+    }
+
     #[test]
     fn swatches_are_valid_and_read_on_the_base() {
         for swatch in SWATCHES {

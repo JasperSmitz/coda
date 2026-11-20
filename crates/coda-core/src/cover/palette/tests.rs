@@ -236,3 +236,238 @@ fn the_same_cover_gives_the_same_palette() {
         assert_eq!(palette(&cover), first);
     }
 }
+
+// ----- washes -----
+
+/// `surface` drawing a solid `color` cover, washed with `tint` at `alpha`
+/// (sRGB compositing, as the webview does).
+fn washed(color: [u8; 3], tint: Rgba, surface: &Surface, alpha: f64) -> Rgba {
+    let saturated = saturate(unit(hex(color)), surface.saturate);
+    let under = unit(surface.under);
+    let tint = unit(tint);
+    from_unit(std::array::from_fn(|i| {
+        let glow = surface.opacity * saturated[i] + (1.0 - surface.opacity) * under[i];
+        alpha * tint[i] + (1.0 - alpha) * glow
+    }))
+}
+
+fn reads(background: Rgba) -> bool {
+    TEXT_LEVELS
+        .iter()
+        .all(|&(text, min)| contrast(text, background) >= min)
+}
+
+/// The text levels keep their contrast at the wash, and the wash is the
+/// least that does (or the floor).
+fn assert_wash(name: &str, color: [u8; 3]) -> (f64, f64) {
+    let p = palette(&solid(color));
+    for (surface, alpha) in [(PAGE_GLOW, p.page_wash), (PLAYER, p.player_wash)] {
+        assert!(
+            (surface.floor..=1.0).contains(&alpha),
+            "{name}: {alpha} within the floor"
+        );
+        let bg = washed(color, p.tint, &surface, alpha);
+        assert!(reads(bg), "{name}: wash {alpha} gives {bg}");
+        for (text, min) in TEXT_LEVELS {
+            assert!(contrast(text, bg) >= min, "{name}: {text} on {bg}");
+        }
+        // The house accent reads too (≥ 3:1).
+        assert!(contrast(Rgba::rgb(0xf0, 0xa8, 0x3a), bg) >= 3.0, "{name}");
+        if alpha > surface.floor + 1e-9 {
+            let less = washed(color, p.tint, &surface, alpha - 0.01);
+            assert!(!reads(less), "{name}: {alpha} is not the least");
+        }
+    }
+    (p.page_wash, p.player_wash)
+}
+
+#[test]
+fn washes_are_what_each_cover_needs() {
+    let (white_page, white_player) = assert_wash("white", [0xff, 0xff, 0xff]);
+    let (yellow_page, yellow_player) = assert_wash("yellow", [0xff, 0xff, 0x00]);
+    let (black_page, black_player) = assert_wash("black", [0x00, 0x00, 0x00]);
+    let (red_page, red_player) = assert_wash("dark red", [0x8b, 0x10, 0x20]);
+    let (blue_page, blue_player) = assert_wash("deep blue", [0x1a, 0x23, 0x7e]);
+    // Bright covers get a heavy wash; black and dark vivid ones the floor
+    // or close to it, so they stay colourful.
+    assert!(
+        white_page > 0.6 && white_player > 0.6,
+        "{white_page} {white_player}"
+    );
+    assert!(
+        yellow_page > 0.6 && yellow_player > 0.6,
+        "{yellow_page} {yellow_player}"
+    );
+    assert_eq!(black_page, PAGE_GLOW.floor);
+    assert_eq!(black_player, PLAYER.floor);
+    for (name, page, player) in [
+        ("red", red_page, red_player),
+        ("blue", blue_page, blue_player),
+    ] {
+        assert!(page <= PAGE_GLOW.floor + 0.1, "{name}: page {page}");
+        assert!(player <= PLAYER.floor + 0.15, "{name}: player {player}");
+    }
+}
+
+#[test]
+fn the_brightest_area_sets_the_wash() {
+    // A dark cover with a white quarter: washed as a white cover (the
+    // quarter is many times the blur's σ).
+    let cover = image(64, 64, |x, y| {
+        if x < 32 && y < 32 {
+            [0xff, 0xff, 0xff]
+        } else {
+            [0x20, 0x10, 0x30]
+        }
+    });
+    let p = palette(&cover);
+    let white = palette(&solid([0xff, 0xff, 0xff]));
+    assert!(
+        p.page_wash >= white.page_wash - 0.05,
+        "{} vs {}",
+        p.page_wash,
+        white.page_wash
+    );
+    // A white speck a fraction of the page blur's σ wide is blurred away.
+    let speck = image(64, 64, |x, y| {
+        if (30..32).contains(&x) && (30..32).contains(&y) {
+            [0xff, 0xff, 0xff]
+        } else {
+            [0x20, 0x10, 0x30]
+        }
+    });
+    assert!(
+        palette(&speck).page_wash < 0.4,
+        "{}",
+        palette(&speck).page_wash
+    );
+}
+
+// ----- swatches -----
+
+#[test]
+fn greyscale_covers_have_no_swatches() {
+    assert!(palette(&solid([0x80, 0x80, 0x80])).swatches.is_empty());
+    assert!(palette(&solid([0xff, 0xff, 0xff])).swatches.is_empty());
+}
+
+#[test]
+fn swatches_are_the_hues_by_area_vivid_and_distinct() {
+    let blue = [0x30, 0x60, 0xa0];
+    let red = [0xd0, 0x30, 0x30];
+    let green = [0x30, 0xa0, 0x40];
+    // Half blue, a third red, a sixth green.
+    let cover = image(60, 60, |x, _| match x {
+        0..30 => blue,
+        30..50 => red,
+        _ => green,
+    });
+    let p = palette(&cover);
+    assert_eq!(p.swatches.len(), 3, "{:?}", p.swatches);
+    for (swatch, color) in p.swatches.iter().zip([blue, red, green]) {
+        assert!(
+            hue_gap(*swatch, hex(color)) < 10.0,
+            "{swatch} for {:?}",
+            color
+        );
+        let [l, c, _] = swatch.oklch();
+        assert!(
+            (SWATCH_L.0 - 0.01..=SWATCH_L.1 + 0.01).contains(&l),
+            "{swatch}: L {l}"
+        );
+        assert!(c >= 0.1, "{swatch}: vivid, C {c}");
+        assert_eq!(swatch.a, 255);
+    }
+    // One hue spread over neighbouring bins gives one swatch.
+    let orange = image(64, 64, |x, _| [0xff, 0x70 + x as u8, 0x10]);
+    let p = palette(&orange);
+    assert_eq!(p.swatches.len(), 1, "{:?}", p.swatches);
+    // Never more than four.
+    let rainbow = image(64, 64, |x, _| {
+        let h = f64::from(x) / 64.0 * 360.0;
+        let c = Rgba::from_oklch_in_gamut(0.65, 0.2, h.to_radians());
+        [c.r, c.g, c.b]
+    });
+    let p = palette(&rainbow);
+    assert_eq!(p.swatches.len(), MAX_SWATCHES);
+    for (i, a) in p.swatches.iter().enumerate() {
+        for b in &p.swatches[i + 1..] {
+            assert!(hue_gap(*a, *b) >= SWATCH_MIN_GAP - 1.0, "{a} {b}");
+        }
+    }
+}
+
+/// Every swatch (the lightest the band allows, every hue, as much chroma
+/// as sRGB has) at [`SWATCH_UNDER_TEXT`] over a card keeps the text levels'
+/// contrast; a little more would not.
+#[test]
+fn swatches_under_text_keep_the_contrast() {
+    let card = unit(CARD_SURFACE);
+    let white = f64::from(CARD_SURFACE.a) / 255.0;
+    let ground: [f64; 3] = std::array::from_fn(|i| white * card[i] + (1.0 - white) * unit(BASE)[i]);
+    let over = |alpha: f64, hue: u32| {
+        let swatch = unit(Rgba::from_oklch_in_gamut(
+            SWATCH_L.1,
+            SWATCH_MAX_C,
+            f64::from(hue).to_radians(),
+        ));
+        from_unit(std::array::from_fn(|i| {
+            alpha * swatch[i] + (1.0 - alpha) * ground[i]
+        }))
+    };
+    for hue in 0..360 {
+        let bg = over(SWATCH_UNDER_TEXT, hue);
+        assert!(reads(bg), "hue {hue}: {bg}");
+    }
+    assert!(!(0..360).all(|hue| reads(over(SWATCH_UNDER_TEXT + 0.02, hue))));
+}
+
+/// erf, Abramowitz and Stegun 7.1.26 (|error| < 1.5e-7).
+fn erf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    y.copysign(x)
+}
+
+/// A dark cover with a small white square (5/32 of its side): at the
+/// square's centre a continuous Gaussian of the surface's σ keeps
+/// `erf(side / (2√2 σ))` per axis of the white; text keeps its contrast
+/// there at the computed wash (the review's case: a box average over a
+/// wide window would have washed it too little).
+#[test]
+fn a_small_white_square_keeps_the_text_readable() {
+    let dark = [0x18, 0x10, 0x28];
+    let cover = image(32, 32, |x, y| {
+        if (13..18).contains(&x) && (13..18).contains(&y) {
+            [0xff, 0xff, 0xff]
+        } else {
+            dark
+        }
+    });
+    let p = palette(&cover);
+    let side = 5.0 / 32.0;
+    for (name, surface, alpha) in [
+        ("page", PAGE_GLOW, p.page_wash),
+        ("player", PLAYER, p.player_wash),
+    ] {
+        let share = |sigma: f64| erf(side / (2.0 * std::f64::consts::SQRT_2 * sigma));
+        let white = share(surface.sigma.0) * share(surface.sigma.1);
+        let peak: [f64; 3] = std::array::from_fn(|i| white + (1.0 - white) * unit(hex(dark))[i]);
+        let saturated = saturate(peak, surface.saturate);
+        let under = unit(surface.under);
+        let tint = unit(p.tint);
+        let bg = from_unit(std::array::from_fn(|i| {
+            let glow = surface.opacity * saturated[i] + (1.0 - surface.opacity) * under[i];
+            alpha * tint[i] + (1.0 - alpha) * glow
+        }));
+        assert!(
+            contrast(TEXT_2, bg) >= 4.5,
+            "{name}: text-2 on {bg} at {alpha} (white {white:.2})"
+        );
+        assert!(reads(bg), "{name}: {bg} at {alpha}");
+    }
+}

@@ -558,4 +558,10 @@ export interface Palette {
   glow: string;
   /** `false`: a greyscale cover (the house accent is used). */
   vivid: boolean;
+  /** Up to four vivid colours of the cover, the largest first (`#rrggbb`); none when greyscale. */
+  swatches: string[];
+  /** The tint's alpha over this cover in the page's glow (0–1; core `cover::palette::PAGE_GLOW`). */
+  pageWash: number;
+  /** The tint's alpha over this cover in the player (0–1; core `cover::palette::PLAYER`). */
+  playerWash: number;
 }

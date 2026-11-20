@@ -34,6 +34,7 @@ import type { HomeItem, Mood, MoodAlbum, SourceKind, Track } from "../lib/types"
 import { nav, type Entry } from "../state/nav";
 import { useOpenNowPlaying } from "../state/nowPlaying";
 import { usePageSubject } from "../state/pageSubject";
+import { usePalettes, usePaletteState } from "../state/palettes";
 import { useAppState } from "../state/store";
 import { useCanPlay } from "./common";
 
@@ -189,6 +190,25 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
   const focus = found >= 0 ? found : 0;
   const focused = items[focus] ?? null;
   usePageSubject(entry, focused?.coverUrl ?? null);
+  // Every carousel cover's palette, ahead: the page's glow and colours
+  // start blending as soon as the focus moves (a glow layer waits for its
+  // palette). The focused cover's first, in a batch of its own; the
+  // others once it is known (or after a moment, should it not come).
+  const focusedUrl = focused?.coverUrl ?? null;
+  const focusedPalette = usePaletteState(focusedUrl);
+  const [othersDue, setOthersDue] = useState(false);
+  useEffect(() => {
+    if (othersDue || items.length === 0) return;
+    if (focusedPalette !== undefined) {
+      setOthersDue(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setOthersDue(true), 1000);
+    return () => window.clearTimeout(timer);
+  }, [othersDue, focusedPalette, items.length]);
+  usePalettes(
+    othersDue ? items.map((i) => i.coverUrl).filter((u): u is string => u !== null && u !== focusedUrl) : [],
+  );
 
   const moveFocus = useCallback(
     (index: number) => {
@@ -210,12 +230,17 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
   const openAlbum = (album: MoodAlbum) =>
     nav.push({ kind: "album", source, id: album.id, name: album.name });
 
+  const heading = (
+    <div className="home-heading">
+      <div className="eyebrow">{partOfDay(now)}</div>
+      <h1 className="list-title">Where you left off</h1>
+    </div>
+  );
+  const carousel = history.state === "ready" && !fresh;
   return (
     <section className="view home">
-      <header className="home-header">
-        <div className="eyebrow">{partOfDay(now)}</div>
-        <h1 className="list-title">Where you left off</h1>
-      </header>
+      {/* The carousel draws the heading itself, with its ‹ › buttons. */}
+      {!carousel && <header className="home-header">{heading}</header>}
       <div className="home-left">
         {history.state === "error" ? (
           <p className="home-quiet secondary">Could not load your history: {history.error.message}</p>
@@ -252,6 +277,7 @@ export function HomeView({ entry, source }: { entry: Entry; source: SourceKind }
           </div>
         ) : (
           <HomeCarousel
+            heading={heading}
             items={items}
             focus={focus}
             onFocus={moveFocus}

@@ -120,6 +120,10 @@ export const nav = {
   top(): Entry {
     return model.topEntry(staged.state);
   },
+  /** The top bar's active entry, as the navigation is now. */
+  activeRoot(): Root {
+    return model.activeRoot(staged.state);
+  },
   /** The source whose stacks are shown. */
   source(): SourceKind {
     return staged.state.source;

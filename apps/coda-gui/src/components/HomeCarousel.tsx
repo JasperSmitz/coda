@@ -6,11 +6,12 @@
 // then never seek; anywhere else they seek as usual. A click on a cover
 // or the ‹ › buttons gives the (new) focused cover the keyboard focus
 // (macOS buttons take none on a click by themselves), so the arrows go
-// on from there. A horizontal swipe (wheel `deltaX`, throttled) moves it
-// too; a click on the focused cover opens it. One Tab stop: the focused
-// cover.
+// on from there. A click on the focused cover opens it. One Tab stop: the
+// focused cover. It draws Home's heading (given) with the ‹ › buttons at
+// the right end of its row. A horizontal swipe does not move it: it
+// switches between Home, Search and Library (hooks/useRootSwipe.ts).
 
-import { useRef, type KeyboardEvent, type WheelEvent } from "react";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 import { useFadeOnChange } from "../hooks/useFadeOnChange";
 import { usePendingFocus } from "../hooks/usePendingFocus";
 import { quietLine, slot } from "../lib/home";
@@ -19,13 +20,6 @@ import type { HomeItem } from "../lib/types";
 import { Cover } from "./Cover";
 import { BackIcon, ForwardIcon, PlayIcon } from "./icons";
 import { NameLink } from "./NameLink";
-
-/** A swipe moves one place at most this often. */
-const SWIPE_MS = 450;
-/** Horizontal wheel travel that makes a swipe. */
-const SWIPE_PX = 40;
-/** Wheel travel older than this (no wheel event since) is forgotten. */
-const SWIPE_IDLE_MS = 180;
 
 const OPEN_LABEL: Record<HomeItem["kind"], string> = {
   album: "Open album",
@@ -40,6 +34,7 @@ export function itemKey(item: HomeItem): string {
 }
 
 export function HomeCarousel({
+  heading,
   items,
   focus,
   onFocus,
@@ -51,6 +46,8 @@ export function HomeCarousel({
   onNowPlaying,
   onArtist,
 }: {
+  /** Home's heading (the eyebrow and the title), left of the ‹ › buttons. */
+  heading: ReactNode;
   items: HomeItem[];
   focus: number;
   /** Move the carousel's focus to `index`. */
@@ -66,7 +63,6 @@ export function HomeCarousel({
 }) {
   const track = useRef<HTMLDivElement>(null);
   const meta = useRef<HTMLDivElement>(null);
-  const wheel = useRef({ dx: 0, last: 0, seen: 0 });
   const focusCover = usePendingFocus(track);
   const item = items[focus];
   const key = item ? itemKey(item) : null;
@@ -108,25 +104,35 @@ export function HomeCarousel({
     move(to, true);
   };
 
-  const onWheel = (e: WheelEvent) => {
-    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
-    const state = wheel.current;
-    const t = e.timeStamp;
-    // A pause in the travel: a new gesture starts from nothing.
-    if (t - state.seen > SWIPE_IDLE_MS) state.dx = 0;
-    state.seen = t;
-    if (t - state.last < SWIPE_MS) return;
-    state.dx += e.deltaX;
-    if (Math.abs(state.dx) < SWIPE_PX) return;
-    move(focus + Math.sign(state.dx), false);
-    state.dx = 0;
-    state.last = t;
-  };
-
   const isPlaying = key !== null && key === playing;
   const openLabel = item ? OPEN_LABEL[item.kind] : "";
   return (
-    <div className="carousel" onWheel={onWheel}>
+    <div className="carousel">
+      <header className="home-header">
+        {heading}
+        <div className="carousel-steps">
+          <button
+            className="icon-button carousel-step"
+            tabIndex={-1}
+            aria-label="Previous"
+            title="Previous"
+            disabled={focus <= 0}
+            onClick={() => move(focus - 1, true)}
+          >
+            <BackIcon size={18} />
+          </button>
+          <button
+            className="icon-button carousel-step"
+            tabIndex={-1}
+            aria-label="Next"
+            title="Next"
+            disabled={focus >= items.length - 1}
+            onClick={() => move(focus + 1, true)}
+          >
+            <ForwardIcon size={18} />
+          </button>
+        </div>
+      </header>
       <div
         ref={track}
         className="carousel-track"
@@ -173,24 +179,6 @@ export function HomeCarousel({
             </button>
           );
         })}
-        <button
-          className="icon-button carousel-step prev"
-          tabIndex={-1}
-          aria-label="Previous"
-          disabled={focus <= 0}
-          onClick={() => move(focus - 1, true)}
-        >
-          <BackIcon size={18} />
-        </button>
-        <button
-          className="icon-button carousel-step next"
-          tabIndex={-1}
-          aria-label="Next"
-          disabled={focus >= items.length - 1}
-          onClick={() => move(focus + 1, true)}
-        >
-          <ForwardIcon size={18} />
-        </button>
       </div>
       <div className="carousel-meta" ref={meta}>
         {item && (

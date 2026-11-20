@@ -33,8 +33,8 @@ pub const PALETTE_LOADS: usize = 2;
 /// The glow's opacity: the accent, translucent.
 const GLOW_ALPHA: f64 = 0.45;
 
-/// A cover's colours for the webview, hex strings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A cover's colours for the webview, hex strings, and its washes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaletteDto {
     /// A deep dark of the dominant hue (`#rrggbb`).
@@ -47,6 +47,13 @@ pub struct PaletteDto {
     pub glow: String,
     /// `false`: a greyscale cover; show the house accent.
     pub vivid: bool,
+    /// Up to four vivid colours of the cover, the largest first
+    /// (`#rrggbb`); none for a greyscale cover.
+    pub swatches: Vec<String>,
+    /// The tint's alpha over the cover in the page's glow (0–1).
+    pub page_wash: f64,
+    /// The tint's alpha over the cover in the player (0–1).
+    pub player_wash: f64,
 }
 
 impl From<Palette> for PaletteDto {
@@ -57,6 +64,9 @@ impl From<Palette> for PaletteDto {
             accent_text: p.accent_text.to_string(),
             glow: p.accent.with_alpha(GLOW_ALPHA).to_string(),
             vivid: p.vivid,
+            swatches: p.swatches.iter().map(ToString::to_string).collect(),
+            page_wash: p.page_wash,
+            player_wash: p.player_wash,
         }
     }
 }
@@ -139,7 +149,7 @@ impl PaletteCache {
 }
 
 /// What `palette_for_url` found.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PaletteAnswer {
     Palette(PaletteDto),
     /// Definitive: an unknown URL or a cover without art.
@@ -242,6 +252,9 @@ mod tests {
             accent_text: "#000000".into(),
             glow: "#00000073".into(),
             vivid: true,
+            swatches: Vec::new(),
+            page_wash: 0.25,
+            player_wash: 0.35,
         }
     }
 
@@ -264,12 +277,23 @@ mod tests {
     #[test]
     fn the_dto_is_hex_with_a_translucent_glow() {
         let p = palette(&coda_core::cover::CoverImage::new(1, 1, vec![200, 30, 30]).unwrap());
-        let dto = PaletteDto::from(p);
+        let dto = PaletteDto::from(p.clone());
         assert_eq!(dto.accent, p.accent.to_string());
         assert_eq!(dto.glow, format!("{}73", dto.accent));
         assert!(dto.vivid);
+        assert_eq!(dto.swatches.len(), 1);
+        assert_eq!(dto.page_wash, p.page_wash);
         let json = serde_json::to_value(&dto).unwrap();
-        for key in ["tint", "accent", "accentText", "glow", "vivid"] {
+        for key in [
+            "tint",
+            "accent",
+            "accentText",
+            "glow",
+            "vivid",
+            "swatches",
+            "pageWash",
+            "playerWash",
+        ] {
             assert!(json.get(key).is_some(), "{key}");
         }
     }

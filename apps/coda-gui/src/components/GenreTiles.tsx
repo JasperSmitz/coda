@@ -1,6 +1,6 @@
 // Genres as Covers (DESIGN.md "Library"): tiles in a responsive grid,
-// each tinted with its first album's cover's colours (its N3 palette's
-// tint; the house glass until known), the album count, the name in
+// each coloured by its first album's cover (its swatches as light; a
+// greyscale cover's tint; the house glass until known), the album count, the name in
 // display type and that cover peeking, tilted, from the top corner.
 // Local genres name their first album's cover; a Navidrome genre's is
 // looked up (its first page of albums, cached like the genre page's, one
@@ -133,15 +133,24 @@ const GenreTile = memo(function GenreTile({
   const seen = useSeen(ref);
   const cover = useGenreCover(source, genre, near);
   const palette = usePalette(seen ? cover : null);
-  // Tints are dark by construction (core `cover::palette`): the text's
-  // contrast over them is in browse.css `.genre-tile`.
-  const style = palette ? ({ "--genre-tint": palette.tint } as CSSProperties) : undefined;
+  // Swatches (the cover's vivid colours) as light, else its tint (dark by
+  // construction, core `cover::palette`): the text's contrast over them
+  // is in browse.css `.genre-tile`.
+  const swatches = palette?.swatches ?? [];
+  const style = palette
+    ? ({
+        "--genre-tint": palette.tint,
+        "--genre-swatch-1": swatches[0],
+        "--genre-swatch-2": swatches[1] ?? swatches[0],
+      } as CSSProperties)
+    : undefined;
+  const look = swatches.length > 0 ? "has-swatches" : palette ? "is-tinted" : "";
   const count = genre.albumCount;
   return (
     <div role="listitem" className="genre-tile-item">
       <button
         ref={ref}
-        className={`genre-tile ${palette ? "is-tinted" : ""}`}
+        className={`genre-tile ${look}`}
         data-index={index}
         style={style}
         title={genre.name}

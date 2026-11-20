@@ -12,6 +12,7 @@ import { TopBar } from "./components/TopBar";
 import { useBrowseKeys } from "./hooks/useBrowseKeys";
 import { PageScroller } from "./hooks/useLayout";
 import { useFullscreen } from "./hooks/useFullscreen";
+import { useRootSwipe } from "./hooks/useRootSwipe";
 import { clearLyricsCache } from "./hooks/useLyrics";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { clearBrowseCache } from "./lib/browse";
@@ -178,6 +179,9 @@ export default function App() {
   const onboarding = started && snapshot.problems.some((p) => p.kind === "noConfig");
   // Leaving Now Playing (any route) leaves a full screen it entered.
   const fullscreen = useFullscreen(immersive && !onboarding);
+  // A sideways two-finger swipe switches Home, Search and Library (not
+  // in Now Playing or onboarding).
+  useRootSwipe(snapshot !== null && !immersive && !onboarding);
   const { enter: enterFullscreen, leavesOnClose } = fullscreen;
   // Opening and closing Now Playing with a track playing morphs the
   // player's cover into Now Playing's and back (a View Transition; the
