@@ -1,17 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- Coda App icon source: the musical coda sign in the accent amber on a
-       dark rounded square (macOS grid: 824px tile, 100px margin).
-       Regenerate the set with `pnpm tauri icon src-tauri/icons/source/icon.svg`. -->
+  <!-- Coda App icon source ("Neo-Coda", misprint bleed): the coda sign, tilted,
+       its lines running off the tile, over violet, rose and amber copies printed
+       slightly off register, on the dim tinted base (macOS grid: 824px tile,
+       100px margin). Regenerate the set with `pnpm tauri icon src-tauri/icons/source/icon.svg`. -->
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#22242a"/>
-      <stop offset="1" stop-color="#0f1012"/>
+    <clipPath id="tile"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+    <radialGradient id="base" cx="0.5" cy="0.42" r="0.7">
+      <stop offset="0" stop-color="#241c2c"/>
+      <stop offset="1" stop-color="#0c0b10"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.4"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0"/>
     </linearGradient>
+    <g id="sign">
+      <ellipse cx="512" cy="512" rx="168" ry="204" stroke-width="54"/>
+      <line x1="512" y1="-100" x2="512" y2="1124" stroke-width="34"/>
+      <line x1="-100" y1="512" x2="1124" y2="512" stroke-width="34"/>
+    </g>
   </defs>
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <g fill="none" stroke="#f0a83a" stroke-linecap="round">
-    <ellipse cx="512" cy="512" rx="170" ry="205" stroke-width="56"/>
-    <line x1="512" y1="235" x2="512" y2="789" stroke-width="40"/>
-    <line x1="268" y1="512" x2="756" y2="512" stroke-width="40"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#base)"/>
+  <g clip-path="url(#tile)" fill="none" stroke-linecap="round" style="isolation:isolate">
+    <g transform="rotate(-14 512 512)">
+      <g style="mix-blend-mode:screen" opacity="0.95">
+        <use href="#sign" transform="translate(26 22)" stroke="#7a5cff"/>
+        <use href="#sign" transform="translate(-22 14)" stroke="#f05a7e"/>
+        <use href="#sign" transform="translate(8 -22)" stroke="#ffc45a"/>
+      </g>
+      <use href="#sign" stroke="#fff4e6"/>
+    </g>
   </g>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="url(#rim)" stroke-width="3"/>
 </svg>
